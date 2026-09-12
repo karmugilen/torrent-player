@@ -15,7 +15,7 @@ class NodeHost(private val context: Context) {
     fun start(ctlPort: Int = DEFAULT_CTL_PORT) {
         if (!started.compareAndSet(false, true)) return
         val maxPeers = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getInt("maxPeers", 40)
+            .getInt("maxPeers", 55)
             .coerceIn(8, 80)
         Thread({
             try {

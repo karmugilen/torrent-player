@@ -33,16 +33,14 @@ const MAX_PEERS_MIN = 8
 const MAX_PEERS_MAX = 80
 function clampPeers (n) {
   const v = Number(n)
-  if (!Number.isFinite(v)) return 40
+  if (!Number.isFinite(v)) return 55
   return Math.max(MAX_PEERS_MIN, Math.min(MAX_PEERS_MAX, Math.round(v)))
 }
-const maxPeers = clampPeers(process.env.WEBTOR_MAX_PEERS || 40)
+const maxPeers = clampPeers(process.env.WEBTOR_MAX_PEERS || 55)
 
 const client = new WebTorrent({
   utp: false,
   tracker: { wrtc: false },
-  natUpnp: false,
-  natPmp: false,
   maxConns: maxPeers
 })
 
@@ -274,7 +272,10 @@ function handleTorrent (id, res) {
     sendJson(res, 404, { error: 'torrent not found' })
     return
   }
-  sendJson(res, 200, { ...torrentView(rec.id, rec.torrent), error: rec.error, configured: rec.configured, selected: rec.selected })
+  const view = torrentView(rec.id, rec.torrent)
+  if (rec.prepared) view.done = rec.configured && rec.selected.length > 0 &&
+    rec.selected.every(i => view.files[i]?.progress === 1)
+  sendJson(res, 200, { ...view, error: rec.error, configured: rec.configured, selected: rec.selected })
 }
 
 async function handleConfigure (req, res) {
@@ -290,6 +291,11 @@ async function handleConfigure (req, res) {
   if (!Array.isArray(body.descriptors) || body.descriptors.some((fd, i) => selected.includes(i) !== (fd !== null))) {
     return sendJson(res, 400, { error: 'Selected files do not match storage' })
   }
+  // Selections may have been garbage-collected after RAM prefetch completed.
+  // Rebuild them after verification instead of trusting rec.selected.
+  for (const i of rec.selected) rec.torrent.files[i]?.deselect()
+  rec.selected = []
+  rec.prefetchPaused = false
   rec.documentStore.attach(body.descriptors)
   await flushStore(rec.documentStore)
   rec.configured = true

@@ -8,9 +8,9 @@ Copy this file (or the repo) to the next agent. Work from `master` on GitHub, no
 - Application id: `webtor.app` (do not change; that would be a different install)
 - Files on disk: `Downloads/Webtor/` (keep this path; renaming it orphans existing files)
 - GitHub: https://github.com/karmugilen/torrent-player
-- Latest release: **v1.2.1** — https://github.com/karmugilen/torrent-player/releases/tag/v1.2.1
-- HEAD: `adadd78` on `origin/master`
-- versionName `1.2.1` / versionCode `4` in `android/app/build.gradle.kts`
+- Latest release: **v1.2.2** — https://github.com/karmugilen/torrent-player/releases/tag/v1.2.2
+- Release source: `v1.2.2` on `origin/master`
+- versionName `1.2.2` / versionCode `5` in `android/app/build.gradle.kts`
 - APK ~18 MB (was ~53 MB). Keep size wins.
 
 Use only with torrents the user has the right to download. Sintel is the CC fixture.
@@ -59,7 +59,7 @@ Release signing uses the **debug** keystore (`signingConfig = debug`). Bump **bo
 2. **Add** → Prepare screen, same engine id. Do not re-add.
 3. **Back / close sheet** (uncommitted) → `DELETE` torrent `destroyStore: true`, drop prefetch cache. No files in Downloads.
 4. **Download** → Kotlin opens MediaStore FDs → `POST /configure` with descriptors + selected indexes → DocumentStore attach + flush cache → rescan → continue same swarm.
-5. **Play** → `GET /play` HTTP stream; launch default player package if set, else system chooser.
+5. **Play** → completed file content URI, otherwise `POST /play` HTTP stream; launch default player package if set, else system chooser.
 6. Content files must not be created under Downloads until the user taps Download. Prefetch is RAM only (`DocumentStore` cache, pause select when full).
 
 Control API (engine/main.js): `/add` `/torrent/:id` `/play` `/pause` `/resume` `/remove` `/configure` `/select` `/metadata` `/settings` `/stats`.
@@ -79,32 +79,40 @@ Control API (engine/main.js): `/add` `/torrent/:id` `/play` `/pause` `/resume` `
 - Vector play-mark icon, v1.2.1
 - Size cut: strip libnode, prune engine assets, R8 + shrinkResources, drop `material-icons-extended`
 
-## Open work (last unfinished request)
+## Fixes in 1.2.2 / versionCode 5
 
-**Peer connecting status / retry.** User: connecting-to-peer used to show, then vanished somewhere in the flow; also retrying.
+This release includes the fixes below; do not repeat the old peer-status-only task.
 
-Likely bug in `android/app/src/main/java/webtor/app/Formatters.kt` `prefetchStatus`:
+- Reset previous peer tuning once to WebTorrent's default 55; restore default NAT
+  discovery. Keep uTP/WebRTC disabled because this Android runtime lacks them.
+  DHT/tracker discovery and retry timing remain WebTorrent defaults.
+- Keep draft peer status visible after metadata arrives with zero peers.
+- Report file completion from verified `file.done`, working around the installed
+  version's exact-piece-boundary progress undercount. Torrent completion in the
+  control API is derived from selected file completion.
+- Rebuild selections after attaching storage/rescanning; preserve an explicitly
+  empty selection in the Prepare UI.
+- Completed Play uses the saved content URI before any engine restore/resume.
+  Automatic foreground-service teardown no longer invokes user Stop.
+- Tap a library torrent to open its selected files. Multi-file library action is
+  Files; each file row has Play targeting that exact index. Complete files play
+  locally; partial files stream through the engine.
+- Remove closes the engine store first, then deletes file records and empty
+  ancestors strictly below Downloads/Webtor. Persist relative paths for retries;
+  old records obtain paths from MediaStore before deletion. Never recursively
+  delete folders or remove unrelated contents.
+- Disk scans/file-access checks run on IO. Poll less frequently, avoid duplicate
+  draft polling, throttle foreground updates, and animate progress indicators.
 
-```
-ready && downloaded > 0 → "X already downloading · N peers"
-peers > 0 → "Connecting · N peers"
-ready → null          // hides the line after metadata, before bytes
-else → "Finding peers…"
-```
-
-Used by AddSheet and PrepareScreen. After metadata is ready with 0 bytes the connecting line goes blank.
-
-Wanted:
-
-- Finding metadata → `Finding peers…` (+ thin bar on Add)
-- `numPeers > 0` → `Connecting · N peers` even after ready
-- Bytes in → already downloading line
-- 0 peers: keep showing finding/retrying, do not blank; optional reannounce/DHT retry without destroying the torrent
-- Back/close still clears prefetch; Download still continues the same engine id
-
-Verify with `cd engine && npm test` (22 tests) and `:app:testDebugUnitTest`. Add a unit test that `prefetchStatus` is never null while a draft exists. If APK changes, bump to **1.2.2 / versionCode 5**, `assembleRelease`, `gh release create v1.2.2`.
-
-An agent was started on this and **cancelled** — it did not land a commit.
+Validation:
+- Engine: 24 tests, including three video files exceeding the 48 MiB cache,
+  byte comparisons, disk restore, and exact-boundary completion.
+- Android: 11 core tests and 15 app tests passed; release assembly and vital lint passed.
+- Phone 00121649A004784: generated two-video fixture downloaded byte-for-byte,
+  first-tap local playback passed, playback after app restart kept engine torrent
+  count at zero, and Delete files removed both nested and group directories.
+- Phone: per-file screen showed both clips; episode 2 Play launched its own content URI, verified against the MediaStore display name.
+- Upgrade with `adb install -r`; do not uninstall or clear user data for these fixes.
 
 ## Conventions
 

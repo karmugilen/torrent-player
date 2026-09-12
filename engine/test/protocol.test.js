@@ -66,3 +66,9 @@ test('torrentView maps files', () => {
   assert.equal(view.files[0].index, 0)
   assert.equal(fileView(view.files[0], 0).name, 'a.mp4')
 })
+
+test('completed files report full progress even at an exact piece boundary', () => {
+  assert.equal(fileView({ length: 16384, done: true, progress: 0 }, 0).progress, 1)
+  assert.equal(fileView({ length: 0, done: true, progress: 0 }, 0).progress, 1)
+  assert.ok(fileView({ length: 16384, done: false, progress: 1 }, 0).progress < 1)
+})

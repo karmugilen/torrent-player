@@ -20,6 +20,7 @@ import webtor.core.TorrentStatus
 data class SavedFile(
     val index: Int, val name: String, val path: String, val length: Long,
     val uri: String? = null, val progress: Double = 0.0,
+    val relativePath: String? = null,
 )
 
 data class DownloadEntry(
@@ -170,6 +171,8 @@ class DownloadStorage(private val context: Context) {
             return entry.files.map { file ->
                 if (file.index !in entry.selected) return@map file
                 val parts = file.path.split('/').filter { it.isNotEmpty() }.map(::safe).ifEmpty { listOf(safe(file.name)) }
+                val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/Webtor/$group/" +
+                    parts.dropLast(1).joinToString("/")
                 val uri = if (tree != null) {
                     var parent = directories.getValue("")
                     var key = ""
@@ -187,14 +190,13 @@ class DownloadStorage(private val context: Context) {
                     val values = ContentValues().apply {
                         put(MediaStore.MediaColumns.DISPLAY_NAME, parts.last())
                         put(MediaStore.MediaColumns.MIME_TYPE, mime(file.name))
-                        put(MediaStore.MediaColumns.RELATIVE_PATH,
-                            "${Environment.DIRECTORY_DOWNLOADS}/Webtor/$group/" + parts.dropLast(1).joinToString("/"))
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                     }
                     resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                         ?: error("Cannot create file in Downloads")
                 }
                 created += uri
-                file.copy(uri = uri.toString())
+                file.copy(uri = uri.toString(), relativePath = if (tree == null) relativePath else null)
             }
         } catch (t: Throwable) {
             created.asReversed().forEach { runCatching { deleteUri(it) } }
@@ -220,8 +222,29 @@ class DownloadStorage(private val context: Context) {
     }
 
     fun deleteFiles(files: List<SavedFile>) {
+        // Query before deleting so downloads saved by older versions are covered too.
+        val paths = files.mapNotNull { file ->
+            file.relativePath ?: file.uri?.let { value ->
+                val uri = Uri.parse(value)
+                if (Build.VERSION.SDK_INT < 29 || uri.authority != MediaStore.AUTHORITY) null
+                else resolver.query(uri, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
+            }
+        }
         val failed = files.filter { it.uri != null }.filter { f -> runCatching { deleteUri(Uri.parse(f.uri)) }.isFailure }
         check(failed.isEmpty()) { "Could not delete ${failed.size} file(s). Check folder access and retry." }
+        val root = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Webtor")
+        val directories = paths.flatMap { relative ->
+            downloadDirectories(root, relative)
+        }.distinct().sortedByDescending { it.path.length }
+        for (directory in directories) {
+            // rmdir only: never recursively erase a folder or another app's content.
+            if (directory.exists() && directory.list()?.isEmpty() == true) {
+                check(directory.delete() || !directory.exists()) {
+                    "Files were deleted, but the empty download folder could not be removed: ${directory.name}"
+                }
+            }
+        }
     }
 
     private fun deleteUri(uri: Uri) {
@@ -248,7 +271,8 @@ class DownloadStorage(private val context: Context) {
                 .put("paused", e.paused).put("addedAt", e.addedAt).put("selected", JSONArray(e.selected.toList()))
                 .put("files", JSONArray().apply {
                     e.files.forEach { f -> put(JSONObject().put("index", f.index).put("name", f.name)
-                        .put("path", f.path).put("length", f.length).put("uri", f.uri).put("progress", f.progress)) }
+                        .put("path", f.path).put("length", f.length).put("uri", f.uri).put("progress", f.progress)
+                        .put("relativePath", f.relativePath)) }
                 }))
         }
         return array.toString()
@@ -263,7 +287,8 @@ class DownloadStorage(private val context: Context) {
             (0 until files.length()).map { n -> files.getJSONObject(n).let { f ->
                 SavedFile(f.getInt("index"), f.getString("name"), f.getString("path"), f.getLong("length"),
                     if (f.isNull("uri")) null else f.getString("uri"),
-                    f.optDouble("progress", 0.0).let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 })
+                    f.optDouble("progress", 0.0).let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 },
+                    if (f.isNull("relativePath")) null else f.getString("relativePath"))
             } },
             (0 until selected.length()).map { selected.getInt(it) }.toSet(),
             e.optBoolean("paused"),
@@ -279,4 +304,15 @@ class DownloadStorage(private val context: Context) {
         .trim().take(120).let { if (it.isBlank() || it == "." || it == "..") "download" else it }
     private fun mime(name: String) = android.webkit.MimeTypeMap.getSingleton()
         .getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
+}
+
+// Only return ancestors within the app's download root; never the shared root itself.
+internal fun downloadDirectories(root: File, relativePath: String): List<File> {
+    val parts = relativePath.trim('/').split('/')
+    if (parts.size < 3 || parts.take(2) != listOf("Download", "Webtor") ||
+        parts.any { it == "." || it == ".." || it.contains('\\') }) return emptyList()
+    val canonicalRoot = root.canonicalFile
+    val leaf = File(root, parts.drop(2).joinToString("/")).canonicalFile
+    if (!leaf.path.startsWith(canonicalRoot.path + File.separator)) return emptyList()
+    return generateSequence(leaf) { it.parentFile }.takeWhile { it != canonicalRoot }.toList()
 }

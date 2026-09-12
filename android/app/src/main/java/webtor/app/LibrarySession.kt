@@ -38,6 +38,8 @@ class LibrarySession(private val app: Application) {
     private var lastPersistAt = 0L
     private var debounceJob: Job? = null
     private var prefetchJob: Job? = null
+    private var storageStatsJob: Job? = null
+    private var lastServiceUpdate = 0L
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -47,6 +49,10 @@ class LibrarySession(private val app: Application) {
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
+        // Reset previous custom connection tuning once; subsequent user changes persist.
+        if (!settings.getBoolean("peerDefaultsV2", false)) {
+            settings.edit().putInt("maxPeers", 55).putBoolean("peerDefaultsV2", true).apply()
+        }
         refreshStorageStats()
         scope.launch {
             val loaded = withContext(io) { storage.load() }.map { it.copy(engineId = null) }
@@ -58,7 +64,7 @@ class LibrarySession(private val app: Application) {
                 it.copy(
                     library = loaded,
                     loadWarning = storage.loadWarning,
-                    maxPeers = settings.getInt("maxPeers", 40).coerceIn(8, 80),
+                    maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 80),
                     restoring = loaded.isNotEmpty(),
                     statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                     players = players,
@@ -395,10 +401,16 @@ class LibrarySession(private val app: Application) {
         }
     }
 
-    fun play(entry: DownloadEntry) {
+    fun play(entry: DownloadEntry, fileIndex: Int? = null) {
         scope.launch {
             try {
                 var current = _ui.value.library.find { it.key == entry.key } ?: entry
+                val targetIndex = fileIndex ?: pickPlayIndex(current)
+                check(targetIndex in current.selected) { "This file was not selected for download." }
+                completedPlayFile(current, targetIndex)?.let { file ->
+                    _events.emit(UiEvent.OpenContent(file.uri!!, mimeFor(file.name), file.name))
+                    return@launch
+                }
                 if (current.files.none { it.index in current.selected && it.uri != null }) {
                     error("Start this download before playing.")
                 }
@@ -412,7 +424,7 @@ class LibrarySession(private val app: Application) {
                     withContext(io) { client.resume(id) }
                     patch(current.key) { it.copy(paused = false) }
                 }
-                val info = withContext(io) { client.play(id, pickPlayIndex(current)) }
+                val info = withContext(io) { client.play(id, targetIndex) }
                 _events.emit(UiEvent.PlayStream(info))
                 syncService()
             } catch (t: Throwable) {
@@ -425,14 +437,15 @@ class LibrarySession(private val app: Application) {
     }
 
     fun open(entry: DownloadEntry) {
-        val done = entry.files
-            .filter { it.index in entry.selected && it.uri != null && it.progress >= 1.0 }
-            .maxByOrNull { it.length }
-        if (done?.uri != null) {
-            _events.tryEmit(UiEvent.OpenContent(done.uri!!, mimeFor(done.name), done.name))
-        } else {
-            play(entry)
-        }
+        if (entry.selected.size > 1) showFiles(entry) else play(entry)
+    }
+
+    fun showFiles(entry: DownloadEntry) {
+        _ui.update { it.copy(screen = Screen.Files, openTorrentKey = entry.key, error = null) }
+    }
+
+    fun closeFiles() {
+        _ui.update { it.copy(screen = Screen.Library, openTorrentKey = null, error = null) }
     }
 
     fun retry(entry: DownloadEntry) {
@@ -470,8 +483,9 @@ class LibrarySession(private val app: Application) {
                 return@launch
             }
             try {
+                entry.engineId?.let { id -> withContext(io) { client.remove(id, false) } }
+                patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
                 withContext(io) { storage.deleteFiles(entry.files) }
-                entry.engineId?.let { id -> runCatching { withContext(io) { client.remove(id, false) } } }
                 _ui.update { it.copy(library = it.library.filter { e -> e.key != req.key }, deleteRequest = null) }
                 persist()
                 refreshStorageStats()
@@ -492,8 +506,9 @@ class LibrarySession(private val app: Application) {
         scope.launch {
             val next = _ui.value.library.map { entry ->
                 try {
+                    entry.engineId?.let { id -> withContext(io) { client.remove(id, false) } }
+                    patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
                     withContext(io) { storage.deleteFiles(entry.files) }
-                    entry.engineId?.let { id -> runCatching { withContext(io) { client.remove(id, false) } } }
                     entry.copy(
                         files = entry.files.map { it.copy(uri = null, progress = 0.0) },
                         engineId = null,
@@ -583,15 +598,19 @@ class LibrarySession(private val app: Application) {
     }
 
     fun refreshStorageStats() {
-        val library = _ui.value.library
-        val managed = storage.managedBytes(library)
-        _ui.update {
-            it.copy(
-                freeBytes = storage.freeBytes,
-                managedBytes = managed,
-                cacheBytes = storage.cacheBytes,
-                legacyBytes = storage.legacyBytes,
-            )
+        if (storageStatsJob?.isActive == true) return
+        storageStatsJob = scope.launch {
+            val stats = withContext(io) {
+                Triple(storage.freeBytes, storage.cacheBytes, storage.legacyBytes)
+            }
+            _ui.update {
+                it.copy(
+                    freeBytes = stats.first,
+                    managedBytes = storage.managedBytes(it.library),
+                    cacheBytes = stats.second,
+                    legacyBytes = stats.third,
+                )
+            }
         }
     }
 
@@ -688,7 +707,7 @@ class LibrarySession(private val app: Application) {
                 if (selected != null) runCatching { withContext(io) { client.select(id, selected) } }
                 return t
             }
-            delay(200)
+            delay(500)
         }
         val peers = last?.numPeers ?: 0
         error(
@@ -719,7 +738,7 @@ class LibrarySession(private val app: Application) {
             val draft = state.prepare ?: return@update state
             if (draft.engineId != t.id) return@update state
             val selected = when {
-                draft.selected.isNotEmpty() -> draft.selected
+                draft.torrent?.ready == true -> draft.selected
                 t.files.isNotEmpty() -> defaultVideoSelection(t.files)
                 else -> emptySet()
             }
@@ -742,8 +761,10 @@ class LibrarySession(private val app: Application) {
             patch(current.key) { it.copy(error = "This download has no torrent metadata to restore.") }
             return
         }
-        val missing = current.files.filter { it.index in current.selected && it.uri != null }
-            .filter { !storage.fileAccessible(it) }
+        val missing = withContext(io) {
+            current.files.filter { it.index in current.selected && it.uri != null }
+                .filter { !storage.fileAccessible(it) }
+        }
         if (missing.isNotEmpty()) {
             patch(current.key) {
                 it.copy(
@@ -785,8 +806,8 @@ class LibrarySession(private val app: Application) {
                 snapshot.prepare != null
             delay(
                 when {
-                    snapshot.prepare != null && snapshot.prepare.torrent?.ready != true -> 200
-                    active -> 300
+                    snapshot.prepare != null && snapshot.prepare.torrent?.ready != true -> 500
+                    active -> 750
                     else -> 1500
                 },
             )
@@ -794,7 +815,7 @@ class LibrarySession(private val app: Application) {
             if (!state.engineReady) continue
             val ids = buildList {
                 state.library.forEach { e -> e.engineId?.let(::add) }
-                state.prepare?.engineId?.let(::add)
+                if (prefetchJob?.isActive != true) state.prepare?.engineId?.let(::add)
             }.distinct()
             var changed = false
             var completed = false
@@ -891,6 +912,7 @@ class LibrarySession(private val app: Application) {
         val live = _ui.value.library.filter { it.engineId != null && !it.complete }
         if (live.isEmpty()) {
             PlayService.stop(app)
+            lastServiceUpdate = 0L
             return
         }
         val downloading = live.filter { !it.paused }
@@ -903,7 +925,11 @@ class LibrarySession(private val app: Application) {
         } else {
             "${formatBytes(got)} / ${formatBytes(total)}  ·  ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
         }
-        PlayService.start(app, title, progress, downloading.isEmpty(), text)
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastServiceUpdate >= 1000) {
+            PlayService.start(app, title, progress, downloading.isEmpty(), text)
+            lastServiceUpdate = now
+        }
     }
 
     private suspend fun waitForEngine() {

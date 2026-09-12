@@ -31,7 +31,7 @@ export function fileView (file, index) {
     name: file.name,
     path: file.path,
     length: file.length,
-    progress: file.progress ?? 0,
+    progress: file.done || file.length === 0 ? 1 : Math.min(file.progress ?? 0, 0.999999),
     type: file.type || 'application/octet-stream'
   }
 }
@@ -46,7 +46,7 @@ export function torrentView (id, torrent) {
     name: torrent.name || null,
     magnetURI: torrent.magnetURI || null,
     ready: Boolean(torrent.ready),
-    done: Boolean(torrent.done),
+    done: files.length > 0 && files.every(f => f.progress === 1),
     paused: Boolean(torrent.paused),
     progress: torrent.progress ?? 0,
     downloadSpeed: torrent.downloadSpeed ?? 0,

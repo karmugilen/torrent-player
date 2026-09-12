@@ -111,4 +111,58 @@ class DownloadEntryTest {
         val stamped = e.copy(addedAt = 1234L)
         assertEquals(1234L, stamped.addedAt)
     }
+
+    @Test
+    fun completedPlaybackUsesSelectedVideoWithoutEngine() {
+        val e = entry(listOf(
+            file(0, 100, 1.0, "movie.mp4").copy(uri = "content://media/1"),
+            file(1, 200, 1.0, "notes.txt").copy(uri = "content://media/2"),
+        ), setOf(0, 1))
+        assertEquals(0, completedPlayFile(e)?.index)
+        assertEquals(null, completedPlayFile(e.copy(files = e.files.map { it.copy(progress = 0.5) })))
+    }
+
+    @Test
+    fun cleanupStaysInsideDownloadGroup() {
+        val root = java.io.File("/tmp/Download/Webtor")
+        assertEquals(listOf(java.io.File(root, "group/nested"), java.io.File(root, "group")),
+            downloadDirectories(root, "Download/Webtor/group/nested/"))
+        assertTrue(downloadDirectories(root, "Download/Webtor/").isEmpty())
+        assertTrue(downloadDirectories(root, "Download/Webtor/../other").isEmpty())
+        assertTrue(downloadDirectories(root, "Download/Other/group").isEmpty())
+    }
+
+    @Test
+    fun draftAlwaysShowsPeerStatus() {
+        val t = webtor.core.TorrentStatus("id", null, null, null, true, false, false,
+            0.0, 0, 0, 0, 100, 0, 0, emptyList())
+        val draft = PrepareDraft("id", "magnet:x", t, emptySet())
+        assertEquals("Finding peers…", prefetchStatus(draft))
+        assertEquals("Finding peers…", prefetchStatus(draft.copy(torrent = null)))
+        assertEquals("Connecting · 2 peers", prefetchStatus(draft.copy(torrent = t.copy(numPeers = 2))))
+        assertTrue(prefetchStatus(draft.copy(torrent = t.copy(downloaded = 10)))!!.contains("already downloading"))
+        assertEquals(null, prefetchStatus(null))
+    }
+
+    @Test
+    fun everyVideoIsSelectedByDefault() {
+        val files = listOf("a.mp4", "b.mkv", "readme.txt").mapIndexed { i, name ->
+            webtor.core.TorrentFile(i, name, name, 100, 0.0, "application/octet-stream")
+        }
+        assertEquals(setOf(0, 1), defaultVideoSelection(files))
+        assertEquals(55, UiState().maxPeers)
+    }
+
+    @Test
+    fun explicitPlaybackChoosesRequestedEpisode() {
+        val e = entry(listOf(
+            file(0, 200, 1.0, "episode-1.mp4").copy(uri = "content://media/1"),
+            file(1, 100, 1.0, "episode-2.mp4").copy(uri = "content://media/2"),
+            file(2, 100, 1.0, "unselected.mp4").copy(uri = "content://media/3"),
+        ), setOf(0, 1))
+        assertEquals("content://media/2", completedPlayFile(e, 1)?.uri)
+        assertEquals("content://media/1", completedPlayFile(e, 0)?.uri)
+        assertEquals(null, completedPlayFile(e, 2))
+        assertEquals(null, completedPlayFile(e, 99))
+    }
 }

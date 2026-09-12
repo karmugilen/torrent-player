@@ -148,14 +148,19 @@ async function startPreparedMagnet (t, seedSource) {
       resolve(torrent)
     })
   })
-  const destPath = path.join(tmp, 'dest.dat')
-  const destFd = openSync(destPath, 'w+')
-  ftruncateSync(destFd, seeded.length)
-  t.after(() => { try { closeSync(destFd) } catch {} })
+  const destPaths = seeded.files.map((_, i) => path.join(tmp, 'dest-' + i + '.dat'))
+  const destFds = destPaths.map((dest, i) => {
+    const fd = openSync(dest, 'w+')
+    ftruncateSync(fd, seeded.files[i].length)
+    t.after(() => { try { closeSync(fd) } catch {} })
+    return fd
+  })
+  const [destPath] = destPaths
+  const [destFd] = destFds
   const { child, info, stderr } = await startEngine({
     WEBTOR_PATH: downloadDir,
     WEBTOR_SKIP_VERIFY: '0'
-  }, [destFd])
+  }, destFds)
   t.after(async () => {
     if (!child.killed) {
       try { await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}) } catch {}
@@ -171,7 +176,7 @@ async function startPreparedMagnet (t, seedSource) {
   assert.equal(added.status, 200, JSON.stringify(added.json) + ' stderr=' + stderr())
   const id = added.json.id
   const status = await pollTorrent(info.ctlPort, id, s => s.ready, { label: 'metadata ready' })
-  return { tmp, downloadDir, destPath, destFd, child, info, stderr, id, status, magnet, seeded }
+  return { tmp, downloadDir, destPath, destFd, destPaths, child, info, stderr, id, status, magnet, seeded }
 }
 
 function configureFile (port, id, fileCount, inheritedFd = 3, selected = [0]) {
@@ -338,7 +343,7 @@ test('prepare does not write content until configure', { timeout: 20000 }, async
   const cfg = await configureFile(info.ctlPort, id, fileCount)
   assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
 
-  await pollTorrent(info.ctlPort, id, s => s.done || s.downloaded > 0, { label: 'download started' })
+  await pollTorrent(info.ctlPort, id, s => s.files.every(f => f.progress === 1), { label: 'download complete' })
   const got = await fs.readFile(destPath)
   assert.ok(got.length >= 7, 'dest file is empty')
   assert.deepEqual(got.subarray(0, 7), bytes.subarray(0, 7))
@@ -403,7 +408,7 @@ test('remove destroyStore:false keeps destination file', { timeout: 20000 }, asy
   const { destPath, info, stderr, id, status } = await startPreparedMagnet(t, fixtureDat)
   const cfg = await configureFile(info.ctlPort, id, status.files.length)
   assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
-  await pollTorrent(info.ctlPort, id, s => s.done || s.downloaded > 0, { label: 'bytes on disk' })
+  await pollTorrent(info.ctlPort, id, s => s.files.every(f => f.progress === 1), { label: 'bytes on disk' })
   const before = await fs.readFile(destPath)
   assert.ok(before.length >= 7, 'dest file is empty')
   assert.deepEqual(before.subarray(0, 7), bytes.subarray(0, 7))
@@ -432,4 +437,47 @@ test('POST /settings clamps maxPeers', async t => {
   const set = await jsonRequest(info.ctlPort, 'POST', '/settings', { maxPeers: 200 })
   assert.equal(set.status, 200)
   assert.equal(set.json.maxPeers, 80)
+})
+
+test('all videos finish across the prefetch cap and restore from disk', { timeout: 60000 }, async t => {
+  const source = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-videos-'))
+  t.after(() => fs.rm(source, { recursive: true, force: true }))
+  // Exceed the 48 MiB RAM cache; include aligned and shared file boundaries.
+  const contents = [
+    ['01.mp4', Buffer.alloc(20 * 1024 * 1024, 11)],
+    ['02.mkv', Buffer.alloc(20 * 1024 * 1024, 29)],
+    ['03.webm', Buffer.alloc(20 * 1024 * 1024 + 137, 47)],
+    ['readme.txt', Buffer.from('fixture notes')]
+  ]
+  for (const [name, bytes] of contents) await fs.writeFile(path.join(source, name), bytes)
+  const { info, id, status, destPaths, seeded, magnet } = await startPreparedMagnet(t, source)
+  const selected = status.files.filter(f => /\.(mp4|mkv|webm)$/.test(f.name)).map(f => f.index)
+  assert.equal(selected.length, 3)
+  await pollTorrent(info.ctlPort, id, s => s.downloaded >= 48 * 1024 * 1024, { tries: 300, label: 'RAM cap' })
+  const descriptors = status.files.map((f, i) => selected.includes(i) ? i + 3 : null)
+  const configure = await jsonRequest(info.ctlPort, 'POST', '/configure', { id, selected, descriptors })
+  assert.equal(configure.status, 200, JSON.stringify(configure.json))
+  const done = await pollTorrent(info.ctlPort, id,
+    s => selected.every(i => s.files[i].progress === 1), { tries: 300, label: 'all videos complete' })
+  assert.deepEqual(done.selected, selected)
+  for (const i of selected) {
+    const expected = contents.find(([name]) => name === status.files[i].name)[1]
+    assert.deepEqual(await fs.readFile(destPaths[i]), expected)
+  }
+  const metadata = await jsonRequest(info.ctlPort, 'GET', '/metadata/' + id)
+  await jsonRequest(info.ctlPort, 'POST', '/remove', { id, destroyStore: false })
+  seeded.pause()
+  for (const wire of [...seeded.wires]) wire.destroy()
+  const restored = await jsonRequest(info.ctlPort, 'POST', '/add', {
+    torrentId: magnet, torrentData: metadata.json.torrentData, prepare: true, announce: []
+  })
+  const restoredId = restored.json.id
+  await pollTorrent(info.ctlPort, restoredId, s => s.ready)
+  const configured = await jsonRequest(info.ctlPort, 'POST', '/configure', { id: restoredId, selected, descriptors })
+  assert.equal(configured.status, 200, JSON.stringify(configured.json))
+  // The final piece crosses into the unselected readme. Resume can fetch that
+  // boundary piece; fully stored, piece-aligned videos must verify offline.
+  const restoredStatus = await jsonRequest(info.ctlPort, 'GET', '/torrent/' + restoredId)
+  assert.equal(restoredStatus.json.files[selected[0]].progress, 1)
+  assert.equal(restoredStatus.json.files[selected[1]].progress, 1)
 })

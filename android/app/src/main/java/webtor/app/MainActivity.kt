@@ -69,6 +69,16 @@ class MainActivity : ComponentActivity() {
                             onCleanup = session::cleanupCache,
                             onClearAll = session::requestClearAll,
                         )
+                        Screen.Files -> {
+                            val entry = state.library.find { it.key == state.openTorrentKey }
+                            if (entry == null) LibraryLayer(state)
+                            else TorrentFilesScreen(
+                                entry = entry,
+                                error = state.error,
+                                onBack = session::closeFiles,
+                                onPlay = { index -> session.play(entry, index) },
+                            )
+                        }
                         Screen.Library -> LibraryLayer(state)
                     }
                     if (state.addSheetOpen) {
@@ -117,7 +127,8 @@ class MainActivity : ComponentActivity() {
             onSettings = session::openSettings,
             onPause = session::pause,
             onResume = session::resume,
-            onPlay = session::play,
+            onPlay = session::open,
+            onOpen = session::showFiles,
             onDelete = session::requestDelete,
             onRetry = session::retry,
             onMessageShown = session::consumeMessage,

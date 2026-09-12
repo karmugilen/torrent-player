@@ -90,7 +90,6 @@ fun prefetchStatus(draft: PrepareDraft?): String? {
         t?.ready == true && got > 0 ->
             "${formatBytes(got)} already downloading · ${formatPeers(peers)}"
         peers > 0 -> "Connecting · ${formatPeers(peers)}"
-        t?.ready == true -> null
         else -> "Finding peers…"
     }
 }
@@ -117,3 +116,7 @@ fun readableError(message: String?): String {
         else -> msg
     }
 }
+
+// Use the same target for local playback and streaming.
+fun completedPlayFile(entry: DownloadEntry, fileIndex: Int? = pickPlayIndex(entry)): SavedFile? =
+    entry.files.find { it.index in entry.selected && it.index == fileIndex && it.uri != null && (it.length == 0L || it.progress >= 1.0) }

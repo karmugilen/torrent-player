@@ -42,6 +42,11 @@ class PlayService : Service() {
         return START_STICKY
     }
 
+    override fun onDestroy() {
+        running.set(false)
+        super.onDestroy()
+    }
+
     private fun notification(): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
@@ -113,7 +118,7 @@ class PlayService : Service() {
 
         fun stop(ctx: Context) {
             if (!running.getAndSet(false)) return
-            ctx.startService(Intent(ctx, PlayService::class.java).setAction(ACTION_STOP))
+            ctx.stopService(Intent(ctx, PlayService::class.java))
         }
     }
 }

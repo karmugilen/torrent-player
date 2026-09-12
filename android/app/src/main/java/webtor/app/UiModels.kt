@@ -3,7 +3,7 @@ package webtor.app
 import webtor.core.PlayInfo
 import webtor.core.TorrentStatus
 
-enum class Screen { Library, Prepare, Settings }
+enum class Screen { Library, Prepare, Settings, Files }
 
 data class PrepareDraft(
     val engineId: String,
@@ -22,6 +22,7 @@ data class DeleteRequest(
 
 data class UiState(
     val screen: Screen = Screen.Library,
+    val openTorrentKey: String? = null,
     val engineReady: Boolean = false,
     val statusLine: String = "Starting…",
     val library: List<DownloadEntry> = emptyList(),
@@ -38,7 +39,7 @@ data class UiState(
     val legacyBytes: Long = 0,
     val clearAllConfirm: Boolean = false,
     val restoring: Boolean = false,
-    val maxPeers: Int = 40,
+    val maxPeers: Int = 55,
     val playerPackage: String = "",
     val playerActivity: String = "",
     val players: List<PlayerApp> = emptyList(),

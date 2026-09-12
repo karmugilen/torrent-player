@@ -1,5 +1,9 @@
 package webtor.app
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.getValue
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,6 +44,7 @@ fun LibraryScreen(
     onPause: (DownloadEntry) -> Unit,
     onResume: (DownloadEntry) -> Unit,
     onPlay: (DownloadEntry) -> Unit,
+    onOpen: (DownloadEntry) -> Unit,
     onDelete: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     onMessageShown: () -> Unit,
@@ -122,6 +127,7 @@ fun LibraryScreen(
                     onPause = { onPause(entry) },
                     onResume = { onResume(entry) },
                     onPlay = { onPlay(entry) },
+                    onOpen = { onOpen(entry) },
                     onDelete = { onDelete(entry) },
                     onRetry = { onRetry(entry) },
                 )
@@ -136,11 +142,13 @@ private fun TorrentRow(
     onPause: () -> Unit,
     onResume: () -> Unit,
     onPlay: () -> Unit,
+    onOpen: () -> Unit,
     onDelete: () -> Unit,
     onRetry: () -> Unit,
 ) {
     val status = entry.status
-    Column(Modifier.fillMaxWidth().padding(vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    val progress by animateFloatAsState(entry.progress, tween(500), label = "downloadProgress")
+    Column(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
             entry.title,
             style = MaterialTheme.typography.titleMedium,
@@ -169,7 +177,7 @@ private fun TorrentRow(
             )
         }
         LinearProgressIndicator(
-            progress = { entry.progress.coerceIn(0f, 1f) },
+            progress = { progress.coerceIn(0f, 1f) },
             modifier = Modifier.fillMaxWidth().height(2.dp),
             color = MaterialTheme.colorScheme.primary,
             trackColor = MaterialTheme.colorScheme.outline,
@@ -179,11 +187,12 @@ private fun TorrentRow(
         }
         Row {
             when {
+                entry.complete -> Unit
                 entry.error != null -> TextButton(onClick = onRetry) { Text("Retry") }
                 entry.paused || entry.engineId == null -> TextButton(onClick = onResume) { Text("Resume") }
                 else -> TextButton(onClick = onPause) { Text("Pause") }
             }
-            TextButton(onClick = onPlay) { Text("Play") }
+            TextButton(onClick = onPlay) { Text(if (entry.selected.size > 1) "Files" else "Play") }
             TextButton(onClick = onDelete) { Text("Remove") }
         }
     }
