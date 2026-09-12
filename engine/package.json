@@ -1,0 +1,21 @@
+{
+  "name": "webtor-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Loopback WebTorrent daemon — webtorrent-cli play path without the CLI",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node main.js",
+    "fixture": "node scripts/make-fixture.mjs",
+    "postinstall": "node scripts/patch-webtorrent.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "create-torrent": "^6.0.17",
+    "parse-torrent": "^11.0.16",
+    "webtorrent": "2.2.1"
+  }
+}

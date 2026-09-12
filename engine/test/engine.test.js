@@ -1,0 +1,435 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import fs from 'node:fs/promises'
+import { openSync, ftruncateSync, closeSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import http from 'node:http'
+
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+const mainJs = path.join(root, 'main.js')
+const fixtureDat = path.join(root, 'fixtures', 'tiny.dat')
+const fixtureTorrent = path.join(root, 'fixtures', 'tiny.torrent')
+
+function jsonRequest (port, method, urlPath, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? '' : JSON.stringify(body)
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: urlPath,
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        let json = null
+        try { json = raw ? JSON.parse(raw) : null } catch { json = { raw } }
+        resolve({ status: res.statusCode, json, raw, headers: res.headers })
+      })
+    })
+    req.on('error', reject)
+    req.end(payload)
+  })
+}
+
+function rangeGet (url, range) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url)
+    const req = http.request({
+      host: u.hostname,
+      port: u.port,
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: range ? { Range: range } : {}
+    }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        body: Buffer.concat(chunks),
+        headers: res.headers
+      }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+async function startEngine (env, extraFds = []) {
+  const child = spawn(process.execPath, [mainJs], {
+    cwd: root,
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe', ...extraFds]
+  })
+  let stderr = ''
+  child.stderr.on('data', d => { stderr += d.toString() })
+  const line = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('engine start timeout. stderr=' + stderr))
+    }, 20000)
+    const onExit = (code) => {
+      clearTimeout(timer)
+      reject(new Error('engine exited ' + code + ' stderr=' + stderr))
+    }
+    child.once('exit', onExit)
+    child.stdout.on('data', chunk => {
+      const text = chunk.toString()
+      const match = text.split('\n').find(l => l.includes('"event":"listening"'))
+      if (match) {
+        clearTimeout(timer)
+        child.removeListener('exit', onExit)
+        resolve(match)
+      }
+    })
+  })
+  const info = JSON.parse(line)
+  return { child, info, stderr: () => stderr }
+}
+
+function sleep (ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function pollTorrent (port, id, pred, { tries = 80, ms = 100, label = 'poll' } = {}) {
+  let last = null
+  for (let i = 0; i < tries; i++) {
+    last = await jsonRequest(port, 'GET', `/torrent/${id}`)
+    if (last.status === 200 && last.json && pred(last.json)) return last.json
+    await sleep(ms)
+  }
+  throw new Error(`${label} timeout status=${last?.status} body=${JSON.stringify(last?.json)}`)
+}
+
+async function listFilesRecursive (dir) {
+  const out = []
+  async function walk (current) {
+    let entries
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) await walk(full)
+      else out.push(full)
+    }
+  }
+  await walk(dir)
+  return out
+}
+
+async function startPreparedMagnet (t, seedSource) {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-life-'))
+  t.after(async () => { await fs.rm(tmp, { recursive: true, force: true }) })
+  const downloadDir = path.join(tmp, 'download')
+  await fs.mkdir(downloadDir)
+  const seedPath = Buffer.isBuffer(seedSource)
+    ? path.join(tmp, 'seed.dat')
+    : seedSource
+  if (Buffer.isBuffer(seedSource)) await fs.writeFile(seedPath, seedSource)
+  const { default: WebTorrent } = await import('webtorrent')
+  const seed = new WebTorrent({ dht: false, tracker: false, utp: false, lsd: false, natUpnp: false, natPmp: false })
+  t.after(() => new Promise(resolve => seed.destroy(resolve)))
+  const seeded = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('seed timeout')), 15000)
+    seed.seed(seedPath, { announce: [] }, torrent => {
+      clearTimeout(timer)
+      resolve(torrent)
+    })
+  })
+  const destPath = path.join(tmp, 'dest.dat')
+  const destFd = openSync(destPath, 'w+')
+  ftruncateSync(destFd, seeded.length)
+  t.after(() => { try { closeSync(destFd) } catch {} })
+  const { child, info, stderr } = await startEngine({
+    WEBTOR_PATH: downloadDir,
+    WEBTOR_SKIP_VERIFY: '0'
+  }, [destFd])
+  t.after(async () => {
+    if (!child.killed) {
+      try { await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}) } catch {}
+      child.kill('SIGKILL')
+    }
+  })
+  const magnet = `magnet:?xt=urn:btih:${seeded.infoHash}&x.pe=127.0.0.1:${seed.torrentPort}`
+  const added = await jsonRequest(info.ctlPort, 'POST', '/add', {
+    torrentId: magnet,
+    prepare: true,
+    announce: []
+  })
+  assert.equal(added.status, 200, JSON.stringify(added.json) + ' stderr=' + stderr())
+  const id = added.json.id
+  const status = await pollTorrent(info.ctlPort, id, s => s.ready, { label: 'metadata ready' })
+  return { tmp, downloadDir, destPath, destFd, child, info, stderr, id, status, magnet, seeded }
+}
+
+function configureFile (port, id, fileCount, inheritedFd = 3, selected = [0]) {
+  const descriptors = Array.from({ length: fileCount }, (_, i) => selected.includes(i) ? inheritedFd : null)
+  return jsonRequest(port, 'POST', '/configure', { id, selected, descriptors })
+}
+
+async function waitForDestPrefix (destPath, prefix, { tries = 80, ms = 100, label = 'dest prefix' } = {}) {
+  let got = Buffer.alloc(0)
+  for (let i = 0; i < tries; i++) {
+    got = await fs.readFile(destPath)
+    if (got.length >= prefix.length && got.subarray(0, prefix.length).equals(prefix)) return got
+    await sleep(ms)
+  }
+  throw new Error(`${label} timeout first bytes=${got.subarray(0, prefix.length).toString('hex')}`)
+}
+
+test('stats, 400, 404, add+play range, shutdown', async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-'))
+  const dl = path.join(tmp, 'dl')
+  await fs.mkdir(dl)
+  const bytes = await fs.readFile(fixtureDat)
+  await fs.copyFile(fixtureDat, path.join(dl, 'tiny.dat'))
+  const torrentPath = fixtureTorrent
+
+  const { child, info, stderr } = await startEngine({
+    WEBTOR_CTL_PORT: '0',
+    WEBTOR_STREAM_PORT: '0',
+    WEBTOR_PATH: dl,
+    WEBTOR_SKIP_VERIFY: '1'
+  })
+  t.after(async () => {
+    if (!child.killed) {
+      try { await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}) } catch {}
+      child.kill('SIGKILL')
+    }
+    await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  const step = async (name, fn) => {
+    try {
+      return await fn()
+    } catch (err) {
+      err.message = name + ': ' + err.message + ' stderr=' + stderr()
+      throw err
+    }
+  }
+
+  const stats = await step('stats', () => jsonRequest(info.ctlPort, 'GET', '/stats'))
+  assert.equal(stats.status, 200)
+  assert.equal(typeof stats.json.ctlPort, 'number')
+  assert.equal(typeof stats.json.streamPort, 'number')
+
+  const badJson = await step('add-empty', () => jsonRequest(info.ctlPort, 'POST', '/add', {}))
+  assert.equal(badJson.status, 400)
+
+  const missing = await step('missing', () => jsonRequest(info.ctlPort, 'GET', '/torrent/nope'))
+  assert.equal(missing.status, 404)
+
+  const added = await step('add', () => jsonRequest(info.ctlPort, 'POST', '/add', { torrentId: torrentPath }))
+  assert.equal(added.status, 200, JSON.stringify(added.json))
+  assert.ok(added.json.id)
+
+  let ready = false
+  for (let i = 0; i < 50; i++) {
+    const st = await step('poll-' + i, () => jsonRequest(info.ctlPort, 'GET', `/torrent/${added.json.id}`))
+    if (st.json && st.json.ready) {
+      ready = true
+      assert.ok(st.json.files.length >= 1)
+      break
+    }
+    await new Promise(r => setTimeout(r, 100))
+  }
+  assert.equal(ready, true)
+
+  const play = await step('play', () => jsonRequest(info.ctlPort, 'POST', '/play', { id: added.json.id }))
+  assert.equal(play.status, 200, JSON.stringify(play.json))
+  assert.match(play.json.streamUrl, /^http:\/\/127\.0\.0\.1:\d+\//)
+
+  const ranged = await step('range', () => rangeGet(play.json.streamUrl, 'bytes=0-6'))
+  assert.ok(ranged.status === 206 || ranged.status === 200, 'range status ' + ranged.status)
+  assert.equal(ranged.body.subarray(0, 7).toString(), bytes.subarray(0, 7).toString())
+
+  const halt = await step('shutdown', () => jsonRequest(info.ctlPort, 'POST', '/shutdown', {}))
+  assert.equal(halt.status, 200)
+  await Promise.race([
+    once(child, 'exit'),
+    new Promise(r => setTimeout(r, 3000))
+  ])
+})
+
+test('magnet downloads metadata and bytes from a TCP peer, then streams ranges', { timeout: 20000 }, async t => {
+  const { default: WebTorrent } = await import('webtorrent')
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-peer-'))
+  const seed = new WebTorrent({ dht: false, tracker: false, utp: false, lsd: false, natUpnp: false, natPmp: false })
+  t.after(async () => {
+    await new Promise(resolve => seed.destroy(resolve))
+    await fs.rm(tmp, { recursive: true, force: true })
+  })
+  const torrent = await new Promise(resolve => seed.seed(fixtureDat, { announce: [] }, resolve))
+  const { child, info } = await startEngine({ WEBTOR_PATH: path.join(tmp, 'download'), WEBTOR_SKIP_VERIFY: '0' })
+  t.after(() => child.kill('SIGKILL'))
+  const magnet = `magnet:?xt=urn:btih:${torrent.infoHash}&x.pe=127.0.0.1:${seed.torrentPort}`
+  const added = await jsonRequest(info.ctlPort, 'POST', '/add', { torrentId: magnet, announce: [] })
+  assert.equal(added.status, 200)
+  const play = await jsonRequest(info.ctlPort, 'POST', '/play', { id: added.json.id })
+  assert.equal(play.status, 200, JSON.stringify(play.json))
+  const result = await rangeGet(play.json.streamUrl, 'bytes=0-6')
+  assert.equal(result.status, 206)
+  assert.deepEqual(result.body, (await fs.readFile(fixtureDat)).subarray(0, 7))
+  const status = await jsonRequest(info.ctlPort, 'GET', `/torrent/${added.json.id}`)
+  assert.ok(status.json.downloaded > 0)
+  const duplicate = await jsonRequest(info.ctlPort, 'POST', '/add', { torrentId: magnet })
+  assert.equal(duplicate.json.id, added.json.id)
+  const invalid = await jsonRequest(info.ctlPort, 'POST', '/add', { torrentId: 'not a torrent' })
+  assert.equal(invalid.status, 400)
+})
+
+test('prepare prefetches from peers without writing destination files', { timeout: 20000 }, async t => {
+  const bytes = await fs.readFile(fixtureDat)
+  const { downloadDir, destPath, info, stderr, id, status } = await startPreparedMagnet(t, fixtureDat)
+  const pre = await pollTorrent(info.ctlPort, id, s => s.downloaded > 0 || s.progress > 0, { label: 'prefetch started' })
+  assert.equal(pre.configured, false)
+  assert.ok(pre.selected?.length >= 1)
+  const destBefore = await fs.readFile(destPath)
+  assert.deepEqual(destBefore.subarray(0, 7), Buffer.alloc(7), 'destination received content before configure')
+  const written = []
+  for (const file of await listFilesRecursive(downloadDir)) {
+    const st = await fs.stat(file)
+    if (st.size > 0 || path.basename(file) === 'tiny.dat') written.push(file)
+  }
+  assert.deepEqual(written, [], 'prefetch wrote torrent content under ' + downloadDir)
+
+  const selected = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [0] })
+  assert.equal(selected.status, 200, JSON.stringify(selected.json) + ' stderr=' + stderr())
+  const badSelect = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [99] })
+  assert.equal(badSelect.status, 400)
+
+  const cfg = await configureFile(info.ctlPort, id, status.files.length)
+  assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
+  const got = await waitForDestPrefix(destPath, bytes.subarray(0, 7), { label: 'configure continues prefetch' })
+  assert.deepEqual(got.subarray(0, 7), bytes.subarray(0, 7))
+  const afterSelect = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [0] })
+  assert.equal(afterSelect.status, 409)
+})
+
+test('prepare does not write content until configure', { timeout: 20000 }, async t => {
+  const bytes = await fs.readFile(fixtureDat)
+  const { downloadDir, destPath, info, stderr, id, status } = await startPreparedMagnet(t, fixtureDat)
+  const fileCount = status.files.length
+  assert.ok(fileCount >= 1)
+  assert.equal(status.configured, false)
+
+  const written = []
+  for (const file of await listFilesRecursive(downloadDir)) {
+    const st = await fs.stat(file)
+    if (st.size > 0 || path.basename(file) === 'tiny.dat') written.push(file)
+  }
+  assert.deepEqual(written, [], 'prepare wrote torrent content under ' + downloadDir)
+
+  const playBefore = await jsonRequest(info.ctlPort, 'POST', '/play', { id })
+  assert.equal(playBefore.status, 409, JSON.stringify(playBefore.json) + ' stderr=' + stderr())
+
+  const cfg = await configureFile(info.ctlPort, id, fileCount)
+  assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
+
+  await pollTorrent(info.ctlPort, id, s => s.done || s.downloaded > 0, { label: 'download started' })
+  const got = await fs.readFile(destPath)
+  assert.ok(got.length >= 7, 'dest file is empty')
+  assert.deepEqual(got.subarray(0, 7), bytes.subarray(0, 7))
+  if (got.length >= bytes.length) assert.deepEqual(got.subarray(0, bytes.length), bytes)
+
+  const meta = await jsonRequest(info.ctlPort, 'GET', `/metadata/${id}`)
+  assert.equal(meta.status, 200, JSON.stringify(meta.json))
+  assert.equal(typeof meta.json.torrentData, 'string')
+  assert.ok(Buffer.from(meta.json.torrentData, 'base64').length > 0)
+
+  const after = await jsonRequest(info.ctlPort, 'GET', `/torrent/${id}`)
+  assert.equal(after.json.configured, true)
+  assert.equal(after.json.paused, false)
+  const play = await jsonRequest(info.ctlPort, 'POST', '/play', { id })
+  assert.equal(play.status, 200, JSON.stringify(play.json) + ' stderr=' + stderr())
+  assert.match(play.json.streamUrl, /^http:\/\/127\.0\.0\.1:\d+\//)
+})
+
+test('pause stops peer transfers; resume continues', { timeout: 20000 }, async t => {
+  const payload = Buffer.alloc(256 * 1024)
+  for (let i = 0; i < payload.length; i++) payload[i] = (i + 1) % 256
+  const prefix = payload.subarray(0, 7)
+  const { destPath, info, stderr, id, status } = await startPreparedMagnet(t, payload)
+  const cfg = await configureFile(info.ctlPort, id, status.files.length)
+  assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
+
+  // Pause as soon as the dest file has any content (or immediately if already done).
+  await waitForDestPrefix(destPath, prefix, { label: 'download started' })
+  const paused = await jsonRequest(info.ctlPort, 'POST', '/pause', { id })
+  assert.equal(paused.status, 200, JSON.stringify(paused.json))
+  const atPause = await pollTorrent(info.ctlPort, id, s => s.paused === true && s.downloadSpeed === 0, {
+    tries: 50,
+    ms: 100,
+    label: 'paused speed 0'
+  })
+  const downloaded = atPause.downloaded
+  await sleep(500)
+  const still = await jsonRequest(info.ctlPort, 'GET', `/torrent/${id}`)
+  assert.equal(still.json.paused, true)
+  const slack = 32 * 1024
+  assert.ok(
+    still.json.downloaded <= downloaded + slack,
+    `downloaded kept climbing ${downloaded} -> ${still.json.downloaded}`
+  )
+
+  const resumed = await jsonRequest(info.ctlPort, 'POST', '/resume', { id })
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.json))
+  const afterResume = await pollTorrent(info.ctlPort, id, s => s.paused === false, { label: 'resumed' })
+  assert.equal(afterResume.paused, false)
+  await pollTorrent(
+    info.ctlPort,
+    id,
+    s => s.done || s.downloaded > downloaded || s.progress === 1,
+    { label: 'resume progress' }
+  )
+  const got = await waitForDestPrefix(destPath, prefix, { label: 'resume dest' })
+  assert.deepEqual(got.subarray(0, 7), prefix)
+})
+
+test('remove destroyStore:false keeps destination file', { timeout: 20000 }, async t => {
+  const bytes = await fs.readFile(fixtureDat)
+  const { destPath, info, stderr, id, status } = await startPreparedMagnet(t, fixtureDat)
+  const cfg = await configureFile(info.ctlPort, id, status.files.length)
+  assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
+  await pollTorrent(info.ctlPort, id, s => s.done || s.downloaded > 0, { label: 'bytes on disk' })
+  const before = await fs.readFile(destPath)
+  assert.ok(before.length >= 7, 'dest file is empty')
+  assert.deepEqual(before.subarray(0, 7), bytes.subarray(0, 7))
+
+  const removed = await jsonRequest(info.ctlPort, 'POST', '/remove', { id, destroyStore: false })
+  assert.equal(removed.status, 200, JSON.stringify(removed.json) + ' stderr=' + stderr())
+  const st = await fs.stat(destPath)
+  assert.ok(st.size > 0)
+  const kept = await fs.readFile(destPath)
+  assert.deepEqual(kept.subarray(0, 7), bytes.subarray(0, 7))
+  const missing = await jsonRequest(info.ctlPort, 'GET', `/torrent/${id}`)
+  assert.equal(missing.status, 404)
+})
+
+test('POST /settings clamps maxPeers', async t => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-set-'))
+  const { child, info } = await startEngine({ WEBTOR_PATH: tmp, WEBTOR_MAX_PEERS: '12' })
+  t.after(async () => {
+    try { await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}) } catch {}
+    child.kill('SIGKILL')
+    await fs.rm(tmp, { recursive: true, force: true })
+  })
+  const got = await jsonRequest(info.ctlPort, 'GET', '/settings')
+  assert.equal(got.status, 200)
+  assert.equal(got.json.maxPeers, 12)
+  const set = await jsonRequest(info.ctlPort, 'POST', '/settings', { maxPeers: 200 })
+  assert.equal(set.status, 200)
+  assert.equal(set.json.maxPeers, 80)
+})

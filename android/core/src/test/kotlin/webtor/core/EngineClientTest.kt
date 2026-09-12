@@ -1,0 +1,183 @@
+package webtor.core
+
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONObject
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+
+class EngineClientTest {
+    private lateinit var server: MockWebServer
+    private lateinit var client: EngineClient
+
+    @BeforeEach
+    fun setUp() {
+        server = MockWebServer()
+        server.start()
+        client = EngineClient(server.url("/").toString().trimEnd('/'))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        server.shutdown()
+    }
+
+    @Test
+    fun statsParsesPorts() {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"downloadSpeed":1,"uploadSpeed":2,"progress":0.5,"ratio":1.2,
+                    "torrents":1,"ctlPort":18080,"streamPort":8000,"path":"/tmp"}"""
+            )
+        )
+        val s = client.stats()
+        assertEquals(18080, s.ctlPort)
+        assertEquals(8000, s.streamPort)
+        assertEquals(1L, s.downloadSpeed)
+    }
+
+    @Test
+    fun addAndPlay() {
+        server.enqueue(MockResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
+        val added = client.add("magnet:?xt=urn:btih:dead")
+        assertEquals("abc", added.id)
+
+        server.enqueue(
+            MockResponse().setBody(
+                """{"id":"abc","fileIndex":0,"name":"a.mp4","length":12,
+                    "streamUrl":"http://127.0.0.1:8000/webtorrent/dead/a.mp4"}"""
+            )
+        )
+        val play = client.play("abc")
+        assertTrue(play.streamUrl.startsWith("http://127.0.0.1:"))
+        assertEquals("/add", server.takeRequest().path)
+        assertEquals("/play", server.takeRequest().path)
+    }
+
+    @Test
+    fun notFoundThrows() {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"torrent not found"}"""))
+        val ex = assertThrows<EngineException> { client.torrent("nope") }
+        assertTrue(ex.message!!.contains("404"))
+    }
+
+    @Test
+    fun torrentParsesStatusFields() {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"id":"abc","infoHash":"dead","name":"n","ready":true,"done":false,
+                    "paused":true,"progress":0.25,"downloadSpeed":10,"uploadSpeed":2,
+                    "numPeers":3,"length":100,"downloaded":25,"uploaded":4,
+                    "timeRemaining":90000,"configured":true,"selected":[0,2],
+                    "files":[{"index":0,"name":"a.mp4","path":"a.mp4","length":50,"progress":0.5,"type":"video/mp4"}],
+                    "error":"slow"}"""
+            )
+        )
+        val t = client.torrent("abc")
+        assertEquals(90000L, t.timeRemaining)
+        assertTrue(t.configured)
+        assertEquals(listOf(0, 2), t.selected)
+        assertTrue(t.paused)
+        assertEquals("slow", t.error)
+        assertEquals("/torrent/abc", server.takeRequest().path)
+    }
+
+    @Test
+    fun torrentDefaultsMissingFields() {
+        server.enqueue(MockResponse().setBody("""{"id":"abc"}"""))
+        val t = client.torrent("abc")
+        assertNull(t.timeRemaining)
+        assertFalse(t.configured)
+        assertEquals(emptyList<Int>(), t.selected)
+        assertFalse(t.paused)
+        assertNull(t.error)
+    }
+
+    @Test
+    fun addPrepareSendsFlag() {
+        server.enqueue(MockResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
+        client.add("magnet:?xt=urn:btih:dead", prepare = true)
+        val req = server.takeRequest()
+        assertEquals("/add", req.path)
+        val body = JSONObject(req.body.readUtf8())
+        assertEquals("magnet:?xt=urn:btih:dead", body.getString("torrentId"))
+        assertTrue(body.getBoolean("prepare"))
+    }
+
+    @Test
+    fun selectSendsIndexes() {
+        server.enqueue(MockResponse().setBody("""{"ok":true,"selected":[0,2]}"""))
+        client.select("abc", setOf(0, 2))
+        val req = server.takeRequest()
+        assertEquals("/select", req.path)
+        val body = JSONObject(req.body.readUtf8())
+        assertEquals("abc", body.getString("id"))
+        val selected = mutableSetOf<Int>()
+        val selectedArr = body.getJSONArray("selected")
+        for (i in 0 until selectedArr.length()) selected.add(selectedArr.getInt(i))
+        assertEquals(setOf(0, 2), selected)
+    }
+
+    @Test
+    fun configureSendsDescriptorsAndSelected() {
+        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        client.configure("abc", listOf(7, null, 9), setOf(0, 2))
+        val req = server.takeRequest()
+        assertEquals("/configure", req.path)
+        val body = JSONObject(req.body.readUtf8())
+        assertEquals("abc", body.getString("id"))
+        val descriptors = body.getJSONArray("descriptors")
+        assertEquals(7, descriptors.getInt(0))
+        assertTrue(descriptors.isNull(1))
+        assertEquals(9, descriptors.getInt(2))
+        val selected = mutableSetOf<Int>()
+        val selectedArr = body.getJSONArray("selected")
+        for (i in 0 until selectedArr.length()) selected.add(selectedArr.getInt(i))
+        assertEquals(setOf(0, 2), selected)
+    }
+
+    @Test
+    fun pauseResumeRemoveHitPaths() {
+        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        client.pause("abc")
+        val pause = server.takeRequest()
+        assertEquals("/pause", pause.path)
+        assertEquals("abc", JSONObject(pause.body.readUtf8()).getString("id"))
+
+        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        client.resume("abc")
+        val resume = server.takeRequest()
+        assertEquals("/resume", resume.path)
+        assertEquals("abc", JSONObject(resume.body.readUtf8()).getString("id"))
+
+        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        client.remove("abc", destroyStore = false)
+        val remove = server.takeRequest()
+        assertEquals("/remove", remove.path)
+        val body = JSONObject(remove.body.readUtf8())
+        assertEquals("abc", body.getString("id"))
+        assertFalse(body.getBoolean("destroyStore"))
+    }
+
+    @Test
+    fun metadataReturnsTorrentData() {
+        server.enqueue(MockResponse().setBody("""{"torrentData":"d8:announce"}"""))
+        assertEquals("d8:announce", client.metadata("abc"))
+        assertEquals("/metadata/abc", server.takeRequest().path)
+    }
+
+    @Test
+    fun setMaxPeersHitsSettings() {
+        server.enqueue(MockResponse().setBody("""{"maxPeers":24}"""))
+        assertEquals(24, client.setMaxPeers(24))
+        val req = server.takeRequest()
+        assertEquals("/settings", req.path)
+        assertEquals(24, JSONObject(req.body.readUtf8()).getInt("maxPeers"))
+    }
+}
