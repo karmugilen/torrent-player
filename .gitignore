@@ -23,3 +23,4 @@ local.properties
 android/SDK.env
 *.jks
 *.keystore
+android/app/icon/full1024.png
