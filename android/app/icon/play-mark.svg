@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <defs>
+    <linearGradient id="gold" x1="22" y1="24" x2="86" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F6E3A6"/>
+      <stop offset="0.45" stop-color="#E2B84A"/>
+      <stop offset="1" stop-color="#B07A18"/>
+    </linearGradient>
+    <linearGradient id="facet" x1="40" y1="36" x2="70" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF6D2" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#C49222" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+  <!-- Play gem. Kept inside the 66% adaptive safe zone. -->
+  <g transform="translate(2 1)">
+    <path d="M34 28 L34 80 L82 54 Z" fill="url(#gold)" stroke="#1A140C" stroke-width="3.2" stroke-linejoin="round"/>
+    <path d="M38 36 L38 72 L72 54 Z" fill="url(#facet)" stroke="#1A140C" stroke-width="1.4" stroke-linejoin="round"/>
+    <path d="M38 36 L72 54 L50 40 Z" fill="#FFF8DE" fill-opacity="0.55"/>
+    <!-- two small shards, close to the mark so they survive circular crop -->
+    <path d="M78 30 L84 33 L78 40 Z" fill="#E8C45A" stroke="#1A140C" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M28 70 L33 68 L32 76 Z" fill="#D4A63A" stroke="#1A140C" stroke-width="1.5" stroke-linejoin="round"/>
+  </g>
+</svg>
