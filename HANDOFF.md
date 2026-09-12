@@ -8,10 +8,10 @@ Copy this file (or the repo) to the next agent. Work from `master` on GitHub, no
 - Application id: `webtor.app` (do not change; that would be a different install)
 - Files on disk: `Downloads/Webtor/` (keep this path; renaming it orphans existing files)
 - GitHub: https://github.com/karmugilen/torrent-player
-- Latest release: **v1.2.2** — https://github.com/karmugilen/torrent-player/releases/tag/v1.2.2
-- Release source: `v1.2.2` on `origin/master`
-- versionName `1.2.2` / versionCode `5` in `android/app/build.gradle.kts`
-- APK ~18 MB (was ~53 MB). Keep size wins.
+- Latest release: **v1.2.3** — https://github.com/karmugilen/torrent-player/releases/tag/v1.2.3
+- Release source: `v1.2.3` on `origin/master`
+- versionName `1.2.3` / versionCode `6` in `android/app/build.gradle.kts`
+- APK ~20 MB (native uTP + WebRTC addons). Keep size wins.
 
 Use only with torrents the user has the right to download. Sintel is the CC fixture.
 
@@ -19,7 +19,7 @@ Use only with torrents the user has the right to download. Sintel is the CC fixt
 
 Android torrent client: paste magnet → connect peers immediately (prefetch) → pick files → write to MediaStore `Downloads/Webtor` → play in an external player (VLC/mpv/etc) via local HTTP stream while still downloading.
 
-Engine is Node 18 (nodejs-mobile) running `webtorrent@2.2.1` with no native uTP/WebRTC. Kotlin talks to it on `127.0.0.1`.
+Engine is Node 18 (nodejs-mobile) running `webtorrent@2.2.1` with native uTP (`utp-native`) and WebRTC (`node-datachannel` + `webrtc-polyfill`). Kotlin talks to it on `127.0.0.1`.
 
 ## Layout
 
@@ -31,6 +31,8 @@ android/app/            Compose UI (webtor.app)
 android/core/           EngineClient HTTP client
 scripts/sync-engine.sh  Prune + copy engine into APK assets
 scripts/vendor-node.sh  Unpack nodejs-mobile, strip libnode.so
+scripts/build-native-addons.sh  Cross-compile libutp_native.so and libnode_datachannel.so
+scripts/native-addons/CMakeLists.txt  Android NDK build for those addons
 android/app/icon/play-mark.svg  Launcher glyph source
 ```
 
@@ -42,6 +44,7 @@ Gitignored (regenerated on build): `engine/node_modules`, `android/app/src/main/
 cd engine && npm ci --omit=optional && npm test
 source android/SDK.env
 ./scripts/vendor-node.sh          # once per machine; needs vendor zip
+./scripts/build-native-addons.sh  # once per machine after vendor-node; FORCE_NATIVE_ADDONS=1 to rebuild
 cd android && ./gradlew :core:test :app:testDebugUnitTest :app:assembleRelease
 adb uninstall webtor.app || true  # needed if launcher caches icons
 adb install -r app/build/outputs/apk/release/app-release.apk
@@ -51,7 +54,7 @@ Phone used in this project: `adb devices` → TetrisIND A015 (`00121649A004784`)
 
 Release signing uses the **debug** keystore (`signingConfig = debug`). Bump **both** `versionCode` and `versionName` before a GitHub release. Tag `vX.Y.Z` and attach `torrent-player-X.Y.Z.apk`.
 
-`sync-engine.sh` strips maps/docs/tests, `webtorrent/dist`, `xml2js.bc.js`, `prebuilds`, `*.bare`. Do not put those back unless a test proves they are required.
+`sync-engine.sh` strips maps/docs/tests, `webtorrent/dist`, `xml2js.bc.js`, `prebuilds`, `*.bare`, host `*.node` binaries, and C++ sources. Android loads `libutp_native.so` and `libnode_datachannel.so` from `jniLibs` via `WEBTOR_NATIVE_LIBDIR`. Do not stub `webrtc-polyfill` / `node-datachannel`.
 
 ## Architecture (do not fight this)
 
@@ -83,9 +86,9 @@ Control API (engine/main.js): `/add` `/torrent/:id` `/play` `/pause` `/resume` `
 
 This release includes the fixes below; do not repeat the old peer-status-only task.
 
-- Reset previous peer tuning once to WebTorrent's default 55; restore default NAT
-  discovery. Keep uTP/WebRTC disabled because this Android runtime lacks them.
-  DHT/tracker discovery and retry timing remain WebTorrent defaults.
+- Reset previous peer tuning once to WebTorrent's default 55. DHT/tracker/PEX
+  discovery and retry timing remain WebTorrent defaults. v1.2.3 enables native
+  uTP and WebRTC (data channels) plus default UDP/WSS trackers.
 - Keep draft peer status visible after metadata arrives with zero peers.
 - Report file completion from verified `file.done`, working around the installed
   version's exact-piece-boundary progress undercount. Torrent completion in the

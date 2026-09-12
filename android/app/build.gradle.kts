@@ -21,6 +21,7 @@ val syncEngine by tasks.registering(Exec::class) {
         engineDir.resolve("package.json"),
         engineDir.resolve("package-lock.json"),
         engineDir.resolve("scripts/patch-webtorrent.mjs"),
+        engineDir.resolve("scripts/patch-native-addons.mjs"),
         repoRoot.resolve("scripts/sync-engine.sh"),
     )
     outputs.file(file("src/main/assets/nodejs-project/main.js"))
@@ -45,8 +46,8 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.2.2"
+        versionCode = 6
+        versionName = "1.2.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")
@@ -101,6 +102,27 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
         }
     }
+}
+
+val buildNativeAddons by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Cross-compile utp-native and node-datachannel for Android arm64"
+    workingDir(repoRoot)
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+    commandLine("bash", repoRoot.resolve("scripts/build-native-addons.sh").absolutePath)
+    inputs.files(
+        repoRoot.resolve("scripts/build-native-addons.sh"),
+        repoRoot.resolve("scripts/native-addons/CMakeLists.txt"),
+    )
+    outputs.files(
+        file("src/main/jniLibs/arm64-v8a/libutp_native.so"),
+        file("src/main/jniLibs/arm64-v8a/libnode_datachannel.so"),
+    )
+}
+
+tasks.named("preBuild") {
+    dependsOn(buildNativeAddons)
 }
 
 dependencies {

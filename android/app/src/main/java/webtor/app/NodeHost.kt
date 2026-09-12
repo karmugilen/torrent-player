@@ -29,6 +29,7 @@ class NodeHost(private val context: Context) {
                         "WEBTOR_STREAM_PORT=0",
                         "WEBTOR_PATH=${downloadDir().absolutePath}",
                         "WEBTOR_MAX_PEERS=$maxPeers",
+                        "WEBTOR_NATIVE_LIBDIR=${context.applicationInfo.nativeLibraryDir}",
                         "HOME=${context.filesDir.absolutePath}",
                         "TMPDIR=$tmp",
                         "NODE_PATH=$project/node_modules",

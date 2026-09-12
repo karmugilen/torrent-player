@@ -11,33 +11,18 @@ if [ ! -d "$SRC/node_modules/webtorrent" ]; then
   exit 1
 fi
 node "$SRC/scripts/patch-webtorrent.mjs"
+node "$SRC/scripts/patch-native-addons.mjs"
 cp -a "$SRC/node_modules" "$DEST/node_modules"
 # assets cannot contain files named like this on some packagers
 find "$DEST" -name '.bin' -type d -prune -exec rm -rf {} +
-# Desktop npm may install x86_64 node-datachannel. Android Node 18 cannot load it.
-# v1 has no WebRTC peers — stub the polyfill and drop the native addon.
-rm -rf "$DEST/node_modules/node-datachannel"
-mkdir -p "$DEST/node_modules/node-datachannel/dist/esm/lib" \
-         "$DEST/node_modules/webrtc-polyfill"
-cat > "$DEST/node_modules/node-datachannel/package.json" << 'EOF'
-{ "name": "node-datachannel", "version": "0.0.0-stub", "type": "module" }
-EOF
-cat > "$DEST/node_modules/node-datachannel/dist/esm/lib/node-datachannel.mjs" << 'EOF'
-export default {}
-export const initLogger = () => {}
-EOF
-cat > "$DEST/node_modules/webrtc-polyfill/index.js" << 'EOF'
-export class RTCPeerConnection {}
-export class RTCSessionDescription {}
-export class RTCIceCandidate {}
-export class RTCIceTransport {}
-export class RTCDataChannel {}
-export class RTCSctpTransport {}
-export class RTCDtlsTransport {}
-export class RTCCertificate {}
-export default {}
-EOF
+# Desktop npm may install host .node binaries. Android loads the jniLibs copies.
 find "$DEST" -name '*.node' -delete
+rm -rf "$DEST/node_modules/utp-native/deps" \
+       "$DEST/node_modules/node-datachannel/src" \
+       "$DEST/node_modules/node-datachannel/build"
+rm -f "$DEST/node_modules/utp-native/binding.cc" \
+      "$DEST/node_modules/utp-native/binding.c" \
+      "$DEST/node_modules/node-datachannel/CMakeLists.txt"
 # Drop docs, types, maps, tests, and browser bundles. Runtime JS stays.
 find "$DEST" -type f \( \
   -name '*.md' -o -name '*.markdown' -o -name '*.map' -o -name '*.ts' \
@@ -59,4 +44,4 @@ if ! grep -q "parts\[0\] === 'configure'" "$DEST/main.js" || ! grep -q "parts\[0
   exit 1
 fi
 ( cd "$SRC" && sha256sum main.js protocol.js document-store.js ) > "$DEST/bundle.rev"
-echo "synced engine -> $DEST (native addons stripped)"
+echo "synced engine -> $DEST (host .node binaries stripped; Android jniLibs provide uTP/WebRTC)"

@@ -4,7 +4,7 @@ Android torrent downloader: magnet → pick files → `Downloads/Webtor` → you
 
 Paste a magnet and it starts finding peers immediately. Pick files, tap Download, play through VLC, mpv, or another installed player while the file is still coming in.
 
-Engine is `webtorrent@2.2.1` (no native uTP/WebRTC addons) on nodejs-mobile Node 18.20.4. The app talks to it on `127.0.0.1`.
+Engine is `webtorrent@2.2.1` on nodejs-mobile Node 18.20.4 with native uTP and WebRTC data channels. The app talks to it on `127.0.0.1`.
 
 Use this only with torrents you have the right to download. Sintel is the CC test fixture.
 
@@ -22,6 +22,7 @@ adb install -r torrent-player.apk
 cd engine && npm ci --omit=optional
 source android/SDK.env
 ./scripts/vendor-node.sh
+./scripts/build-native-addons.sh
 cd android && ./gradlew :app:assembleRelease
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
@@ -34,4 +35,4 @@ Paste a magnet or open a `.torrent` file, review files, then download. Files go 
 
 Pause stops peers and keeps the files. Delete asks whether to keep or erase them. Play uses your default player if you set one in Settings.
 
-Bare magnets use DHT plus the public tracker from [OpenTrackr](https://www.opentrackr.org/). A magnet with no reachable seeds cannot download metadata or play.
+Bare magnets use DHT, UDP trackers (OpenTrackr and others), and WebTorrent WebSocket trackers. Peers connect over TCP, uTP, and WebRTC. A magnet with no reachable seeds cannot download metadata or play.

@@ -37,10 +37,25 @@ function clampPeers (n) {
   return Math.max(MAX_PEERS_MIN, Math.min(MAX_PEERS_MAX, Math.round(v)))
 }
 const maxPeers = clampPeers(process.env.WEBTOR_MAX_PEERS || 55)
+const DEFAULT_ANNOUNCE = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.webtorrent.dev'
+]
+
+let wrtc = false
+try {
+  wrtc = await import('webrtc-polyfill')
+} catch (err) {
+  console.error(JSON.stringify({ event: 'webrtc-unavailable', message: err?.message || String(err) }))
+}
 
 const client = new WebTorrent({
-  utp: false,
-  tracker: { wrtc: false },
+  utp: true,
+  tracker: { wrtc },
+  natUpnp: false,
+  natPmp: false,
   maxConns: maxPeers
 })
 
@@ -120,10 +135,9 @@ async function handleAdd (req, res) {
       return
     }
   }
-  // Bare magnets otherwise depend entirely on DHT for metadata discovery.
-  const announce = Array.isArray(body.announce) ? body.announce
-    : torrentId.startsWith('magnet:') && !parsed?.announce?.length
-      ? ['udp://tracker.opentrackr.org:1337/announce'] : undefined
+  const announce = Array.isArray(body.announce)
+    ? body.announce
+    : [...new Set([...(parsed?.announce || []), ...DEFAULT_ANNOUNCE])]
   const id = crypto.randomUUID()
   const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, selected: [], documentStore: null, prefetchPaused: false }
   const torrent = client.add(addId, {
@@ -146,6 +160,7 @@ async function handleAdd (req, res) {
   })
   record.torrent = torrent
   records.set(id, record)
+  torrent.on('warning', err => { record.warning = err.message || String(err) })
   torrent.once('error', err => {
     record.error = err.message || String(err)
     console.error(JSON.stringify({ event: 'torrent-error', id, message: err.message || String(err) }))
@@ -260,6 +275,18 @@ function handleStats (res) {
     progress: client.progress,
     ratio: client.ratio,
     torrents: client.torrents.length,
+    utp: Boolean(client.utp),
+    webrtc: Boolean(wrtc && wrtc.RTCPeerConnection),
+    discovery: [...records.values()].map(rec => ({
+      id: rec.id,
+      ready: rec.torrent.ready,
+      peers: rec.torrent.numPeers,
+      queued: rec.torrent.numQueued,
+      warning: rec.warning || null,
+      error: rec.error,
+      trackers: rec.torrent.announce,
+      dhtNodes: client.dht?.nodes?.count() ?? 0
+    })),
     ctlPort: typeof ctl === 'object' && ctl ? ctl.port : CTL_PORT,
     streamPort: typeof addr === 'object' && addr ? addr.port : STREAM_PORT,
     path: DOWNLOAD_PATH
@@ -418,6 +445,8 @@ const ready = {
   event: 'listening',
   ctlPort: ctlAddr.port,
   streamPort: streamAddr.port,
-  path: DOWNLOAD_PATH
+  path: DOWNLOAD_PATH,
+  utp: Boolean(client.utp),
+  webrtc: Boolean(wrtc && wrtc.RTCPeerConnection)
 }
 console.log(JSON.stringify(ready))
