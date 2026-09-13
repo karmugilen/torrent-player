@@ -21,7 +21,7 @@ class PlayService : Service() {
             ACTION_STOP, ACTION_DISMISS -> {
                 val app = application as? WebtorApp
                 if (app != null) {
-                    app.session.stopFromNotification {
+                    app.session.stopAllAndExit {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                         running.set(false)
@@ -43,22 +43,21 @@ class PlayService : Service() {
         if (intent?.hasExtra(EXTRA_MULTIPLE) == true) isMultiple = intent.getBooleanExtra(EXTRA_MULTIPLE, false)
         running.set(true)
         val notification = notification()
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIF_ID, notification)
-        }
-        if (paused) {
-            if (Build.VERSION.SDK_INT >= 24) {
-                stopForeground(STOP_FOREGROUND_DETACH)
+        val foreground = runCatching {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             } else {
-                @Suppress("DEPRECATION")
-                stopForeground(false)
+                startForeground(NOTIF_ID, notification)
             }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.notify(NOTIF_ID, notification)
+            true
+        }.getOrDefault(false)
+        if (paused || !foreground) {
+            if (foreground) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+            }
+            getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification)
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -145,12 +144,14 @@ class PlayService : Service() {
                 .putExtra(EXTRA_PAUSED, paused)
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_MULTIPLE, multiple)
-            if (running.get()) {
-                ctx.startService(i)
-            } else if (Build.VERSION.SDK_INT >= 26) {
-                ctx.startForegroundService(i)
-            } else {
-                ctx.startService(i)
+            try {
+                if (running.get()) {
+                    ctx.startService(i)
+                } else {
+                    ctx.startForegroundService(i)
+                }
+            } catch (_: RuntimeException) {
+                running.set(false)
             }
         }
 

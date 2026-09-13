@@ -14,7 +14,7 @@ const mainJs = path.join(root, 'main.js')
 const fixtureDat = path.join(root, 'fixtures', 'tiny.dat')
 const fixtureTorrent = path.join(root, 'fixtures', 'tiny.torrent')
 
-function jsonRequest (port, method, urlPath, body) {
+function jsonRequest (port, method, urlPath, body, headers = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? '' : JSON.stringify(body)
     const req = http.request({
@@ -24,7 +24,8 @@ function jsonRequest (port, method, urlPath, body) {
       method,
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload)
+        'Content-Length': Buffer.byteLength(payload),
+        ...headers
       }
     }, res => {
       const chunks = []
@@ -512,4 +513,64 @@ test('GET /pieces/:id returns telemetry and handles not found', async t => {
   assert.equal(typeof b0.selected, 'number')
   assert.equal(typeof b0.verified, 'number')
   assert.equal(typeof b0.receiving, 'number')
+})
+
+test('control API rejects browser access and malformed request objects', async t => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-api-'))
+  const { child, info } = await startEngine({ WEBTOR_PATH: tmp })
+  t.after(async () => {
+    try { await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}) } catch {}
+    child.kill('SIGKILL')
+    await fs.rm(tmp, { recursive: true, force: true })
+  })
+  for (const headers of [{ Origin: 'https://example.com' }, { Host: 'example.com' }, { 'Sec-Fetch-Site': 'cross-site' }]) {
+    const response = await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}, headers)
+    assert.equal(response.status, 403)
+  }
+  for (const endpoint of ['add', 'configure', 'select', 'pause', 'resume', 'play', 'remove', 'settings']) {
+    for (const body of [null, [], 'invalid']) {
+      const response = await jsonRequest(info.ctlPort, 'POST', '/' + endpoint, body)
+      assert.equal(response.status, 400, endpoint + ': ' + JSON.stringify(response.json))
+    }
+  }
+  assert.equal((await jsonRequest(info.ctlPort, 'GET', '/metadata/missing')).status, 404)
+  assert.equal((await jsonRequest(info.ctlPort, 'GET', '/stats')).status, 200)
+})
+
+test('failed configuration preserves selection and a corrected retry succeeds', { timeout: 20000 }, async t => {
+  const { info, id, status } = await startPreparedMagnet(t, fixtureDat)
+  const before = await jsonRequest(info.ctlPort, 'GET', '/torrent/' + id)
+  for (const descriptors of [[], [1], [999999]]) {
+    const invalid = await jsonRequest(info.ctlPort, 'POST', '/configure', { id, selected: [0], descriptors })
+    assert.equal(invalid.status, 400, JSON.stringify(invalid.json))
+    const after = await jsonRequest(info.ctlPort, 'GET', '/torrent/' + id)
+    assert.deepEqual(after.json.selected, before.json.selected)
+    assert.equal(after.json.configured, false)
+  }
+  const responses = await Promise.all([
+    configureFile(info.ctlPort, id, status.files.length),
+    configureFile(info.ctlPort, id, status.files.length)
+  ])
+  assert.deepEqual(responses.map(r => r.status).sort(), [200, 409])
+  for (const fileIndex of [-1, 999, '0']) {
+    const play = await jsonRequest(info.ctlPort, 'POST', '/play', { id, fileIndex })
+    assert.equal(play.status, 404)
+  }
+  await pollTorrent(info.ctlPort, id, s => s.done, { label: 'retry download complete' })
+})
+
+test('default playback chooses a selected file', { timeout: 20000 }, async t => {
+  const source = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-play-selection-'))
+  t.after(() => fs.rm(source, { recursive: true, force: true }))
+  await fs.writeFile(path.join(source, 'large.mp4'), Buffer.alloc(32 * 1024, 23))
+  await fs.writeFile(path.join(source, 'small.mp4'), Buffer.alloc(16 * 1024, 61))
+  const { info, id, status } = await startPreparedMagnet(t, source)
+  const selected = status.files.find(f => f.name === 'small.mp4').index
+  const descriptors = status.files.map((_, i) => i === selected ? i + 3 : null)
+  const configured = await jsonRequest(info.ctlPort, 'POST', '/configure', { id, selected: [selected], descriptors })
+  assert.equal(configured.status, 200, JSON.stringify(configured.json))
+  const play = await jsonRequest(info.ctlPort, 'POST', '/play', { id })
+  assert.equal(play.status, 200, JSON.stringify(play.json))
+  assert.equal(play.json.name, 'small.mp4')
+  assert.equal(play.json.fileIndex, selected)
 })

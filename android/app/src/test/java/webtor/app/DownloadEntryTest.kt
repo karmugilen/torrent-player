@@ -154,6 +154,131 @@ class DownloadEntryTest {
     }
 
     @Test
+    fun busyLifecycleStatesDisableControls() {
+        val base = entry(listOf(file(0, 100, 0.4)), setOf(0))
+        val downloading = base.copy(engineId = "e1", lifecycleState = EntryLifecycleState.DOWNLOADING)
+        assertFalse(downloading.controlsBusy())
+        assertEquals("Downloading", downloading.stateLabel())
+        assertEquals("Pausing…", downloading.copy(lifecycleState = EntryLifecycleState.PAUSING).stateLabel())
+        assertTrue(downloading.copy(lifecycleState = EntryLifecycleState.PAUSING).controlsBusy())
+        assertTrue(base.copy(isDeleting = true, lifecycleState = EntryLifecycleState.DELETING).controlsBusy())
+        assertEquals("Paused", base.copy(paused = true, engineId = null, lifecycleState = EntryLifecycleState.STOPPED).stateLabel())
+        assertEquals("Complete", base.copy(files = listOf(file(0, 100, 1.0)), lifecycleState = EntryLifecycleState.COMPLETED).stateLabel())
+    }
+
+    @Test
+    fun canPlayWhenASelectedFileHasAUri() {
+        val downloading = entry(listOf(file(0, 100, 0.4, "movie.mp4").copy(uri = "content://media/1")), setOf(0))
+            .copy(engineId = "e1", lifecycleState = EntryLifecycleState.DOWNLOADING)
+        assertTrue(downloading.canPlay())
+        assertFalse(downloading.copy(files = listOf(file(0, 100, 0.4, "movie.mp4"))).canPlay())
+        assertFalse(downloading.copy(isDeleting = true, lifecycleState = EntryLifecycleState.DELETING).canPlay())
+        assertFalse(downloading.copy(lifecycleState = EntryLifecycleState.PAUSING).canPlay())
+    }
+
+    @Test
+    fun selectedVideoCountIgnoresNonVideoAndUnselected() {
+        val e = entry(listOf(
+            file(0, 100, 1.0, "e1.mkv"),
+            file(1, 100, 1.0, "e2.mkv"),
+            file(2, 10, 1.0, "notes.txt"),
+            file(3, 100, 1.0, "e3.mkv"),
+        ), setOf(0, 1, 2))
+        assertEquals(2, e.selectedVideoCount())
+        assertEquals(1, entry(listOf(file(0, 100, 1.0, "movie.mp4")), setOf(0)).selectedVideoCount())
+        assertEquals(0, entry(listOf(file(0, 100, 1.0, "track.flac")), setOf(0)).selectedVideoCount())
+    }
+
+    @Test
+    fun previewRatiosUseDownloadedSpanForInProgressAnd205080WhenComplete() {
+        assertEquals(listOf(0.20, 0.50, 0.80), previewRatios(0.4, true))
+        assertEquals(listOf(0.20, 0.50, 0.80), previewRatios(1.0, false))
+        assertEquals(listOf(0.05, 0.25, 0.45), previewRatios(0.5, false))
+        val screenshot = previewRatios(0.026, false)
+        assertEquals(listOf(0.10 * 0.026, 0.50 * 0.026, 0.90 * 0.026), screenshot)
+        screenshot.forEach { assertTrue("ratio $it must stay inside downloaded span", it <= 0.026) }
+        assertEquals(listOf(0.10, 0.50, 0.90).map { it * 0.02 }, previewRatios(0.0, false))
+    }
+
+    @Test
+    fun previewSlotRatiosNudgeLaterInsideDownloadedSpan() {
+        fun assertRatios(expected: List<Double>, actual: List<Double>) {
+            assertEquals(expected.size, actual.size)
+            expected.zip(actual).forEach { (e, a) -> assertEquals(e, a, 1e-9) }
+        }
+        assertRatios(listOf(0.20, 0.22, 0.25), previewSlotRatios(0.20, 0.4, true))
+        assertRatios(listOf(0.80, 0.82, 0.85), previewSlotRatios(0.80, 1.0, true))
+        assertRatios(listOf(0.05, 0.07, 0.10), previewSlotRatios(0.05, 0.5, false))
+        val last = previewSlotRatios(0.45, 0.5, false)
+        assertRatios(listOf(0.45, 0.47, 0.50), last)
+        last.forEach { assertTrue("nudge $it must stay ≤ progress", it <= 0.5) }
+        val tight = previewSlotRatios(0.10 * 0.026, 0.026, false)
+        assertEquals(3, tight.size)
+        assertEquals(0.10 * 0.026, tight.first(), 1e-9)
+        assertTrue(tight.last() <= 0.026 + 1e-12)
+        assertRatios(listOf(0.018, 0.02), previewSlotRatios(0.018, 0.0, false))
+        assertFalse("time 0 is not a displayed slot", previewRatios(0.5, false).contains(0.0))
+    }
+
+    @Test
+    fun tooDarkLumaRejectsBlackTitleCards() {
+        fun argb(r: Int, g: Int, b: Int) = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        fun sample(r: Int, g: Int, b: Int) = IntArray(256) { argb(r, g, b) }
+        assertTrue(tooDarkLuma(IntArray(0)))
+        assertTrue(tooDarkLuma(sample(0, 0, 0)))
+        assertTrue(tooDarkLuma(sample(17, 17, 17)))
+        assertFalse(tooDarkLuma(sample(18, 18, 18)))
+        assertFalse(tooDarkLuma(sample(255, 255, 255)))
+        val mostlyBlack = IntArray(256) { i -> if (i == 0) argb(255, 255, 255) else argb(0, 0, 0) }
+        assertTrue(tooDarkLuma(mostlyBlack))
+    }
+
+    @Test
+    fun previewUpdateBucketStepsWithProgressThenLocksWhenComplete() {
+        assertEquals(0, previewUpdateBucket(0.0, false))
+        assertEquals(1, previewUpdateBucket(0.05, false))
+        assertEquals(4, previewUpdateBucket(0.20, false))
+        assertEquals(20, previewUpdateBucket(0.4, true))
+        assertEquals(20, previewUpdateBucket(1.0, false))
+    }
+
+    @Test
+    fun firstPreviewVideoPicksLowestIndexNotMostDownloaded() {
+        val pack = entry(listOf(
+            file(0, 100, 0.1, "e1.mkv").copy(uri = "content://media/1"),
+            file(1, 100, 0.9, "e2.mkv").copy(uri = "content://media/2"),
+            file(2, 100, 1.0, "e3.mkv").copy(uri = "content://media/3"),
+        ), setOf(0, 1, 2))
+        assertEquals(0, firstPreviewVideo(pack)?.index)
+        val laterFirst = entry(listOf(
+            file(0, 100, 1.0, "skipped.mkv"),
+            file(2, 100, 0.1, "e1.mkv").copy(uri = "content://media/2"),
+            file(5, 100, 0.95, "e2.mkv").copy(uri = "content://media/5"),
+        ), setOf(2, 5))
+        assertEquals(2, firstPreviewVideo(laterFirst)?.index)
+        assertEquals(null, firstPreviewVideo(entry(listOf(file(0, 100, 1.0, "track.flac")), setOf(0))))
+    }
+
+    @Test
+    fun restoreAllSkipsPausedCompleteAndDeleting() {
+        val base = entry(listOf(file(0, 100, 0.4)), setOf(0))
+        assertTrue(shouldSkipStartupRestore(base.copy(paused = true, lifecycleState = EntryLifecycleState.STOPPED)))
+        assertTrue(shouldSkipStartupRestore(base.copy(files = listOf(file(0, 100, 1.0)), lifecycleState = EntryLifecycleState.COMPLETED)))
+        assertTrue(shouldSkipStartupRestore(base.copy(isDeleting = true, lifecycleState = EntryLifecycleState.DELETING)))
+        assertFalse(shouldSkipStartupRestore(base.copy(paused = false, engineId = null, lifecycleState = EntryLifecycleState.STOPPED)))
+        assertFalse(shouldSkipStartupRestore(base.copy(paused = false, engineId = "e1", lifecycleState = EntryLifecycleState.DOWNLOADING)))
+    }
+
+    @Test
+    fun restoreAppliesOnlyForMatchingCommandGeneration() {
+        assertTrue(restoreStillApplies(2, 2, isDeleting = false, shutdownInProgress = false))
+        assertFalse(restoreStillApplies(3, 2, isDeleting = false, shutdownInProgress = false))
+        assertFalse(restoreStillApplies(2, 2, isDeleting = true, shutdownInProgress = false))
+        assertFalse(restoreStillApplies(2, 2, isDeleting = false, shutdownInProgress = true))
+        assertTrue(restoreStillApplies(5, 5, isDeleting = false, shutdownInProgress = false))
+    }
+
+    @Test
     fun explicitPlaybackChoosesRequestedEpisode() {
         val e = entry(listOf(
             file(0, 200, 1.0, "episode-1.mp4").copy(uri = "content://media/1"),

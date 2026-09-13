@@ -24,7 +24,7 @@ val syncEngine by tasks.registering(Exec::class) {
         engineDir.resolve("scripts/patch-native-addons.mjs"),
         repoRoot.resolve("scripts/sync-engine.sh"),
     )
-    outputs.file(file("src/main/assets/nodejs-project/main.js"))
+    outputs.dir(file("src/main/assets/nodejs-project"))
 }
 
 tasks.named("preBuild") {
@@ -46,8 +46,8 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 11
+        versionName = "1.3.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")
@@ -65,6 +65,18 @@ android {
         }
     }
 
+    val releaseStore = providers.environmentVariable("WEBTOR_KEYSTORE").orNull
+    signingConfigs {
+        if (!releaseStore.isNullOrBlank()) {
+            create("production") {
+                storeFile = file(releaseStore)
+                storePassword = providers.environmentVariable("WEBTOR_STORE_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("WEBTOR_KEY_ALIAS").orNull
+                keyPassword = providers.environmentVariable("WEBTOR_KEY_PASSWORD").orNull
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -73,7 +85,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.getByName("debug")
+            // Publishing must never silently use the public development certificate.
+            signingConfig = when {
+                !releaseStore.isNullOrBlank() -> signingConfigs.getByName("production")
+                providers.gradleProperty("webtor.localSigning").orNull == "true" -> signingConfigs.getByName("debug")
+                else -> null
+            }
         }
         debug {
             isMinifyEnabled = false
@@ -136,6 +153,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")

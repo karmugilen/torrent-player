@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
 import {
   pickFile,
   streamUrl,
@@ -8,7 +9,8 @@ import {
   parsePath,
   defaultSelectedIndexes,
   computePieceBuckets,
-  pieceTelemetry
+  pieceTelemetry,
+  readJson
 } from '../protocol.js'
 
 test('pickFile uses explicit index', () => {
@@ -38,6 +40,21 @@ test('pickFile falls back to largest file', () => {
 test('pickFile empty is null', () => {
   assert.equal(pickFile([]), null)
   assert.equal(pickFile(null), null)
+})
+
+test('an invalid explicit file index never silently plays another file', () => {
+  const files = [{ name: 'movie.mp4', length: 100 }]
+  for (const index of [-1, 1, 0.5, '0', null]) assert.equal(pickFile(files, index), null)
+})
+
+test('request JSON must be a bounded object', async () => {
+  const request = text => Readable.from([Buffer.from(text)])
+  assert.deepEqual(await readJson(request('{"id":"ok"}')), { id: 'ok' })
+  assert.deepEqual(await readJson(request('')), {})
+  for (const value of ['null', '[]', 'true', '1', '"string"', '{']) {
+    await assert.rejects(readJson(request(value)), { statusCode: 400 })
+  }
+  await assert.rejects(readJson(request('{"data":"oversized"}'), 8), { statusCode: 413 })
 })
 
 test('defaultSelectedIndexes prefers videos', () => {
@@ -248,3 +265,5 @@ test('pieceTelemetry freezes receiving state when paused', () => {
   assert.equal(tel.buckets[0].receiving, 0)
   assert.equal(tel.buckets[1].receiving, 0)
 })
+
+

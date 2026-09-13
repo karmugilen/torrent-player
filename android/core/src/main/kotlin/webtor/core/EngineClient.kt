@@ -192,7 +192,7 @@ class EngineClient(
                 val err = json?.optString("error").orEmpty().ifEmpty { text }
                 throw EngineException("HTTP ${resp.code}: $err", statusCode = resp.code)
             }
-            return json ?: JSONObject()
+            return json ?: throw EngineException("The download engine returned an invalid response.")
         }
     }
 
@@ -241,7 +241,7 @@ class EngineClient(
                         name = f.optString("name"),
                         path = f.optString("path"),
                         length = f.optLong("length"),
-                        progress = f.optDouble("progress"),
+                        progress = f.progress(),
                         type = f.optString("type"),
                     )
                 )
@@ -261,7 +261,7 @@ class EngineClient(
                 ready = json.optBoolean("ready"),
                 done = json.optBoolean("done"),
                 paused = json.optBoolean("paused"),
-                progress = json.optDouble("progress"),
+                progress = json.progress(),
                 downloadSpeed = json.optLong("downloadSpeed"),
                 uploadSpeed = json.optLong("uploadSpeed"),
                 numPeers = json.optInt("numPeers"),
@@ -279,6 +279,9 @@ class EngineClient(
 }
 
 private fun JSONObject.nullableString(key: String): String? = if (isNull(key)) null else optString(key).ifEmpty { null }
+
+private fun JSONObject.progress(): Double = optDouble("progress", 0.0)
+    .let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
 
 private fun JSONObject.finiteLong(key: String): Long? {
     if (!has(key) || isNull(key)) return null

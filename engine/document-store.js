@@ -17,6 +17,8 @@ export default class DocumentStore {
     this.pending = new Set()
     this.cache = new Map()
     this.cacheBytes = 0
+    this.flushing = null
+    this.closing = null
     this.maxCacheBytes = Number(maxCacheBytes) > 0 ? Number(maxCacheBytes) : DEFAULT_PREFETCH_BYTES
     this.onCacheFull = typeof onCacheFull === 'function' ? onCacheFull : null
     if (typeof onStore === 'function') onStore(this)
@@ -60,11 +62,14 @@ export default class DocumentStore {
 
   async flushCache () {
     if (!this.attached || this.cache.size === 0) return
-    for (const [index, buf] of this.cache) {
-      await this.transfer(buf, index * this.chunkLength, true)
-    }
-    this.cache.clear()
-    this.cacheBytes = 0
+    if (this.flushing) return this.flushing
+    this.flushing = (async () => {
+      for (const [index, buf] of this.cache) {
+        await this.transfer(buf, index * this.chunkLength, true)
+        this.dropCache(index)
+      }
+    })()
+    try { await this.flushing } finally { this.flushing = null }
   }
 
   flush (cb = () => {}) {
@@ -105,7 +110,7 @@ export default class DocumentStore {
   put (index, buffer, cb = () => {}) {
     this.run(async () => {
       const expected = Math.min(this.chunkLength, this.length - index * this.chunkLength)
-      if (index < 0 || expected <= 0 || buffer.length !== expected) throw new Error('Invalid piece length')
+      if (!Number.isSafeInteger(index) || index < 0 || expected <= 0 || !(buffer instanceof Uint8Array) || buffer.length !== expected) throw new Error('Invalid piece length')
       if (this.attached) {
         await this.flushCache()
         await this.transfer(buffer, index * this.chunkLength, true)
@@ -120,10 +125,12 @@ export default class DocumentStore {
     if (typeof opts === 'function') { cb = opts; opts = {} }
     opts ||= {}
     this.run(async () => {
-      const offset = opts.offset || 0
+      const offset = opts.offset ?? 0
       const size = Math.min(this.chunkLength, this.length - index * this.chunkLength)
       const length = opts.length ?? size - offset
-      if (index < 0 || offset < 0 || length < 0 || offset + length > size) throw new Error('Invalid piece range')
+      if (!Number.isSafeInteger(index) || index < 0 || size <= 0 ||
+          !Number.isSafeInteger(offset) || !Number.isSafeInteger(length) ||
+          offset < 0 || length < 0 || offset + length > size) throw new Error('Invalid piece range')
       if (this.attached) await this.flushCache()
       const cached = this.cache.get(index)
       if (cached) return cached.subarray(offset, offset + length)
@@ -133,13 +140,19 @@ export default class DocumentStore {
 
   close (cb = () => {}) {
     this.closed = true
-    this.cache.clear()
-    this.cacheBytes = 0
-    Promise.allSettled([...this.pending]).then(() => {
-      for (const file of this.files) {
-        if (file.fd !== null) { fs.closeSync(file.fd); file.fd = null }
+    this.closing ||= (async () => {
+      await Promise.allSettled([...this.pending])
+      try {
+        await this.flushCache()
+      } finally {
+        this.cache.clear()
+        this.cacheBytes = 0
+        for (const file of this.files) {
+          if (file.fd !== null) { fs.closeSync(file.fd); file.fd = null }
+        }
       }
-    }).then(() => cb(null), cb)
+    })()
+    this.closing.then(() => cb(null), cb)
   }
 
   // Android owns document deletion and its explicit user confirmation.

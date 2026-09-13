@@ -10,13 +10,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -34,6 +34,7 @@ class LibrarySession(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val io = Dispatchers.IO
     private val mutex = Mutex()
+    private val persistenceMutex = Mutex()
     private val started = AtomicBoolean(false)
     private val isShuttingDown = AtomicBoolean(false)
     private var serviceSuppressed = false
@@ -44,15 +45,51 @@ class LibrarySession(private val app: Application) {
     private var debounceJob: Job? = null
     private var prefetchJob: Job? = null
     private var storageStatsJob: Job? = null
+    private var pollJob: Job? = null
     private var lastServiceUpdate = 0L
     private var draftGeneration = 0L
     private var commitInProgress = false
+    @Volatile private var shutdownComplete = false
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    private val _events = MutableSharedFlow<UiEvent>(extraBufferCapacity = 24)
-    val events: SharedFlow<UiEvent> = _events.asSharedFlow()
+    private val _events = Channel<UiEvent>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
+
+    fun onForeground() {
+        reopenAfterShutdown()
+        refreshPlayers()
+    }
+
+    private fun shutdownInProgress(): Boolean = isShuttingDown.get() && !shutdownComplete
+
+    private fun restartPollIfNeeded() {
+        if (pollJob?.isActive == true) return
+        pollJob?.cancel()
+        pollJob = scope.launch { pollLoop() }
+    }
+
+    private fun reopenAfterShutdown(): Boolean {
+        if (isShuttingDown.get()) {
+            if (!shutdownComplete) return false
+            isShuttingDown.set(false)
+            shutdownComplete = false
+        }
+        restartPollIfNeeded()
+        return true
+    }
+
+    private fun beginUserWork(): Boolean {
+        if (!reopenAfterShutdown()) return false
+        serviceSuppressed = false
+        settings.edit().putBoolean("serviceSuppressed", false).apply()
+        return true
+    }
+
+    private fun CoroutineScope.launchCommand(block: suspend () -> Unit) = launch {
+        mutex.withLock { block() }
+    }
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -63,7 +100,9 @@ class LibrarySession(private val app: Application) {
         }
         refreshStorageStats()
         scope.launch {
-            val loaded = withContext(io) { storage.load() }.map { it.copy(engineId = null) }
+            val loaded = withContext(io) { storage.load() }.map {
+                it.copy(engineId = null, paused = it.paused || serviceSuppressed)
+            }
             val players = queryVideoPlayers(app.packageManager, app.packageName)
             val savedPlayer = settings.getString("playerPackage", "") ?: ""
             val savedActivity = settings.getString("playerActivity", "") ?: ""
@@ -94,11 +133,13 @@ class LibrarySession(private val app: Application) {
             persist()
             syncService()
         }
-        scope.launch { pollLoop() }
+        pollJob = scope.launch { pollLoop() }
     }
 
     fun setMagnet(value: String) {
+        if (commitInProgress || !reopenAfterShutdown()) return
         draftGeneration++
+        prefetchJob?.cancel()
         _ui.update { it.copy(magnetDraft = value, error = null) }
         debounceJob?.cancel()
         debounceJob = scope.launch {
@@ -113,8 +154,12 @@ class LibrarySession(private val app: Application) {
             prefetchJob = scope.launch { addTorrent(src, commit = false) }
         }
     }
-    fun openAddSheet() = _ui.update { it.copy(addSheetOpen = true, error = null) }
+    fun openAddSheet() {
+        if (!beginUserWork()) return
+        _ui.update { it.copy(addSheetOpen = true, error = null) }
+    }
     fun closeAddSheet() {
+        if (commitInProgress) return
         draftGeneration++
         debounceJob?.cancel()
         _ui.update { it.copy(addSheetOpen = false, error = null) }
@@ -188,9 +233,10 @@ class LibrarySession(private val app: Application) {
     fun dismissDelete() = _ui.update { it.copy(deleteRequest = null) }
     fun requestClearAll() = _ui.update { it.copy(clearAllConfirm = true) }
     fun dismissClearAll() = _ui.update { it.copy(clearAllConfirm = false) }
-    fun pickTorrent() { _events.tryEmit(UiEvent.PickTorrent) }
+    fun pickTorrent() { _events.trySend(UiEvent.PickTorrent) }
 
     fun addCurrent() {
+        if (!beginUserWork()) return
         debounceJob?.cancel()
         val id = _ui.value.magnetDraft.trim()
         if (id.isEmpty()) {
@@ -215,6 +261,7 @@ class LibrarySession(private val app: Application) {
     }
 
     fun add(torrentId: String) {
+        if (commitInProgress || !beginUserWork()) return
         val id = torrentId.trim()
         if (id.isEmpty()) {
             _ui.update { it.copy(error = "Paste a magnet or torrent URL.") }
@@ -222,17 +269,34 @@ class LibrarySession(private val app: Application) {
         }
         debounceJob?.cancel()
         prefetchJob?.cancel()
+        draftGeneration++
+        _ui.update { it.copy(addSheetOpen = true, magnetDraft = id, error = null) }
         prefetchJob = scope.launch { addTorrent(id, commit = false) }
     }
 
     fun openTorrent(uri: Uri) {
-        scope.launch {
+        if (commitInProgress || !beginUserWork()) return
+        debounceJob?.cancel()
+        prefetchJob?.cancel()
+        val generation = ++draftGeneration
+        _ui.update { it.copy(addSheetOpen = true, magnetDraft = "", error = null) }
+        prefetchJob = scope.launch {
             try {
                 val file = withContext(io) {
                     val dest = File.createTempFile("import-", ".torrent", app.cacheDir)
                     try {
                         app.contentResolver.openInputStream(uri)?.use { input ->
-                            dest.outputStream().use { input.copyTo(it) }
+                            dest.outputStream().use { output ->
+                                val buffer = ByteArray(8192)
+                                var total = 0L
+                                while (true) {
+                                    val count = input.read(buffer)
+                                    if (count == -1) break
+                                    total += count
+                                    check(total <= 8 * 1024 * 1024) { "Torrent files must be smaller than 8 MB." }
+                                    output.write(buffer, 0, count)
+                                }
+                            }
                         } ?: error("Cannot open torrent file")
                         dest
                     } catch (t: Throwable) {
@@ -241,25 +305,26 @@ class LibrarySession(private val app: Application) {
                     }
                 }
                 try {
-                    addTorrent(file.absolutePath, commit = false)
+                    if (generation == draftGeneration) addTorrent(file.absolutePath, commit = false)
                 } finally {
                     file.delete()
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t), addSheetOpen = false) }
+                _ui.update { it.copy(error = readableError(t), addSheetOpen = true) }
             }
         }
     }
 
     fun cancelPrepare() {
+        if (commitInProgress) return
         draftGeneration++
         debounceJob?.cancel()
         prefetchJob?.cancel()
+        val id = _ui.value.prepare?.engineId
+        _ui.update { it.copy(prepare = null, screen = Screen.Library, error = null) }
         scope.launch {
             mutex.withLock {
-                val id = _ui.value.prepare?.engineId
-                _ui.update { it.copy(prepare = null, screen = Screen.Library, error = null) }
                 if (id != null && _ui.value.library.none { it.engineId == id }) {
                     runCatching { withContext(io) { client.remove(id, true) } }
                 }
@@ -296,8 +361,7 @@ class LibrarySession(private val app: Application) {
     fun startDownload() {
         scope.launch {
             mutex.withLock {
-                if (commitInProgress) return@withLock
-                commitInProgress = true
+                if (commitInProgress || !beginUserWork()) return@withLock
                 val draft = _ui.value.prepare ?: return@withLock
                 val torrent = draft.torrent
                 if (torrent?.ready != true) {
@@ -308,20 +372,25 @@ class LibrarySession(private val app: Application) {
                     setPrepareError("Select at least one file to download.")
                     return@withLock
                 }
+                if (_ui.value.library.any { it.key.equals(torrent.infoHash, true) || it.engineId == draft.engineId }) {
+                    setPrepareError("This torrent is already in your library.")
+                    return@withLock
+                }
                 if (Build.VERSION.SDK_INT < 29) {
                     setPrepareError("Torrent Player needs Android 10 or newer to save into Downloads.")
                     return@withLock
                 }
                 val needed = torrent.files.filter { it.index in draft.selected }.sumOf { it.length }
-                val free = storage.freeBytes
+                val free = withContext(io) { storage.freeBytes }
                 if (needed > free) {
                     setPrepareError(
                         "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available.",
                     )
                     return@withLock
                 }
+                commitInProgress = true
                 _ui.update { it.copy(prepare = draft.copy(busy = true, error = null)) }
-                _events.tryEmit(UiEvent.RequestNotifications)
+                _events.trySend(UiEvent.RequestNotifications)
                 try {
                     val metadata = withContext(io) { client.metadata(draft.engineId) }
                     val key = torrent.infoHash ?: draft.engineId
@@ -350,6 +419,8 @@ class LibrarySession(private val app: Application) {
                         throw t
                     }
                     val entry = skeleton.copy(files = created)
+                    serviceSuppressed = false
+                    settings.edit().putBoolean("serviceSuppressed", false).apply()
                     _ui.update {
                         it.copy(
                             library = listOf(entry) + it.library.filter { e -> e.key != key },
@@ -373,10 +444,11 @@ class LibrarySession(private val app: Application) {
     }
 
     fun pause(entry: DownloadEntry) {
-        scope.launch {
-            if (isShuttingDown.get()) return@launch
-            val current = _ui.value.library.find { it.key == entry.key } ?: return@launch
-            val id = current.engineId ?: return@launch
+        scope.launchCommand {
+            if (isShuttingDown.get()) return@launchCommand
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
+            if (current.isDeleting) return@launchCommand
+            val id = current.engineId ?: return@launchCommand
             val prevLifecycle = current.lifecycleState
             val prevPaused = current.paused
             val nextGen = current.generation + 1
@@ -410,22 +482,21 @@ class LibrarySession(private val app: Application) {
     }
 
     fun resume(entry: DownloadEntry) {
-        scope.launch {
-            if (isShuttingDown.get()) return@launch
-            serviceSuppressed = false
-            settings.edit().putBoolean("serviceSuppressed", false).apply()
+        scope.launchCommand {
+            if (!beginUserWork()) return@launchCommand
 
-            val current = _ui.value.library.find { it.key == entry.key } ?: entry
-            if (current.isDeleting || current.complete) return@launch
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
+            if (current.isDeleting || current.complete) return@launchCommand
 
             val prevLifecycle = current.lifecycleState
             val prevPaused = current.paused
             val nextGen = current.generation + 1
+            val restoring = current.engineId == null
 
             patch(current.key) {
                 it.copy(
                     generation = nextGen,
-                    lifecycleState = EntryLifecycleState.DOWNLOADING,
+                    lifecycleState = if (restoring) EntryLifecycleState.PREPARING else EntryLifecycleState.DOWNLOADING,
                     error = null,
                 )
             }
@@ -439,24 +510,34 @@ class LibrarySession(private val app: Application) {
                         } else it
                     }
                 } else {
-                    restoreEntry(current, startPaused = false)
+                    restoreEntry(current, startPaused = false, commandGeneration = nextGen)
                 }
                 persist()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 patch(current.key) {
-                    if (it.generation == nextGen) {
+                    if (it.generation != nextGen) it
+                    else if (restoring) {
+                        it.copy(
+                            paused = true,
+                            engineId = null,
+                            status = null,
+                            lifecycleState = EntryLifecycleState.STOPPED,
+                            error = readableError(t),
+                        )
+                    } else {
                         it.copy(paused = prevPaused, lifecycleState = prevLifecycle, error = readableError(t))
-                    } else it
+                    }
                 }
             }
         }
     }
 
     fun stop(entry: DownloadEntry) {
-        scope.launch {
-            val current = _ui.value.library.find { it.key == entry.key } ?: return@launch
+        scope.launchCommand {
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
+            if (current.isDeleting || isShuttingDown.get()) return@launchCommand
             val id = current.engineId
             val nextGen = current.generation + 1
 
@@ -470,7 +551,15 @@ class LibrarySession(private val app: Application) {
 
             if (id != null) {
                 recentlyInvalidatedIds.add(id)
-                runCatching { withContext(io) { client.remove(id, false) } }
+                try {
+                    withContext(io) { client.remove(id, false) }
+                } catch (t: Exception) {
+                    recentlyInvalidatedIds.remove(id)
+                    if (t is CancellationException) throw t
+                    patch(current.key) { it.copy(lifecycleState = current.lifecycleState, error = readableError(t)) }
+                    syncService()
+                    return@launchCommand
+                }
             }
 
             patch(current.key) {
@@ -489,30 +578,37 @@ class LibrarySession(private val app: Application) {
     }
 
     fun play(entry: DownloadEntry, fileIndex: Int? = null) {
-        scope.launch {
+        scope.launchCommand {
+            if (!beginUserWork()) return@launchCommand
             try {
-                var current = _ui.value.library.find { it.key == entry.key } ?: entry
+                var current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
+                if (current.isDeleting) return@launchCommand
                 val targetIndex = fileIndex ?: pickPlayIndex(current)
                 check(targetIndex in current.selected) { "This file was not selected for download." }
                 completedPlayFile(current, targetIndex)?.let { file ->
-                    _events.emit(UiEvent.OpenContent(file.uri!!, mimeFor(file.name), file.name))
-                    return@launch
+                    _events.send(UiEvent.OpenContent(file.uri!!, mimeFor(file.name), file.name))
+                    return@launchCommand
                 }
                 if (current.files.none { it.index in current.selected && it.uri != null }) {
                     error("Start this download before playing.")
                 }
                 if (current.engineId == null) {
-                    restoreEntry(current, startPaused = false)
+                    val nextGen = current.generation + 1
+                    patch(current.key) {
+                        it.copy(generation = nextGen, lifecycleState = EntryLifecycleState.PREPARING, error = null)
+                    }
+                    restoreEntry(current, startPaused = false, commandGeneration = nextGen)
                     current = _ui.value.library.find { it.key == entry.key } ?: current
                 }
-                val id = current.engineId ?: error("Could not start this torrent.")
+                val id = current.engineId ?: error(current.error ?: "Could not start this torrent.")
                 val status = withContext(io) { client.torrent(id) }
                 if (status.paused || current.paused) {
                     withContext(io) { client.resume(id) }
                     patch(current.key) { it.copy(paused = false) }
                 }
                 val info = withContext(io) { client.play(id, targetIndex) }
-                _events.emit(UiEvent.PlayStream(info))
+                persist()
+                _events.send(UiEvent.PlayStream(info))
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
@@ -536,21 +632,27 @@ class LibrarySession(private val app: Application) {
     }
 
     fun retry(entry: DownloadEntry) {
-        scope.launch {
-            patch(entry.key) { it.copy(error = null) }
+        scope.launchCommand {
+            if (!beginUserWork()) return@launchCommand
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
+            if (current.isDeleting) return@launchCommand
+            val nextGen = current.generation + 1
+            patch(current.key) {
+                it.copy(generation = nextGen, error = null, lifecycleState = EntryLifecycleState.PREPARING)
+            }
             try {
-                val current = _ui.value.library.find { it.key == entry.key } ?: entry
-                restoreEntry(current, startPaused = current.paused)
+                restoreEntry(current, startPaused = current.paused, commandGeneration = nextGen)
                 persist()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                patch(entry.key) { it.copy(error = readableError(t)) }
+                failRestore(current.key, nextGen, readableError(t))
             }
         }
     }
 
     fun deleteKeep() {
+        if (isShuttingDown.get()) return
         val req = _ui.value.deleteRequest ?: return
         val target = _ui.value.library.find { it.key == req.key } ?: run {
             _ui.update { it.copy(deleteRequest = null) }
@@ -574,21 +676,24 @@ class LibrarySession(private val app: Application) {
         }
         syncService()
 
-        scope.launch {
+        scope.launchCommand {
             try {
                 val id = target.engineId
                 if (id != null) {
                     recentlyInvalidatedIds.add(id)
-                    runCatching { withContext(io) { client.remove(id, false) } }
+                    withContext(io) { client.remove(id, false) }
                 }
                 _ui.update { state ->
-                    state.copy(library = state.library.filter { it.key != target.key })
+                    state.copy(library = state.library.filter { it.key != target.key },
+                        screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
+                        openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
                 persist()
                 refreshStorageStats()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
+                target.engineId?.let { recentlyInvalidatedIds.remove(it) }
                 patch(target.key) {
                     it.copy(
                         isDeleting = false,
@@ -602,6 +707,7 @@ class LibrarySession(private val app: Application) {
     }
 
     fun deleteErase() {
+        if (isShuttingDown.get()) return
         val req = _ui.value.deleteRequest ?: return
         val target = _ui.value.library.find { it.key == req.key } ?: run {
             _ui.update { it.copy(deleteRequest = null) }
@@ -625,30 +731,35 @@ class LibrarySession(private val app: Application) {
         }
         syncService()
 
-        scope.launch {
+        scope.launchCommand {
+            var engineRemoved = target.engineId == null
             try {
                 val id = target.engineId
                 if (id != null) {
                     recentlyInvalidatedIds.add(id)
-                    runCatching { withContext(io) { client.remove(id, false) } }
+                    withContext(io) { client.remove(id, false) }
+                    engineRemoved = true
                 }
                 withContext(io) { storage.deleteFiles(target.files) }
                 _ui.update { state ->
-                    state.copy(library = state.library.filter { it.key != target.key })
+                    state.copy(library = state.library.filter { it.key != target.key },
+                        screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
+                        openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
                 persist()
                 refreshStorageStats()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
+                if (!engineRemoved) target.engineId?.let { recentlyInvalidatedIds.remove(it) }
                 patch(target.key) {
                     it.copy(
                         isDeleting = false,
                         lifecycleState = EntryLifecycleState.ERROR,
-                        engineId = null,
-                        paused = true,
-                        status = null,
-                        error = "Could not delete the downloaded files. Check folder access or delete them from your file manager, then retry.",
+                        engineId = if (engineRemoved) null else target.engineId,
+                        paused = if (engineRemoved) true else target.paused,
+                        status = if (engineRemoved) null else target.status,
+                        error = readableError(t),
                     )
                 }
                 persist()
@@ -703,12 +814,12 @@ class LibrarySession(private val app: Application) {
     }
 
     fun pauseFromNotification() {
-        scope.launch {
-            if (isShuttingDown.get()) return@launch
+        scope.launchCommand {
+            if (isShuttingDown.get()) return@launchCommand
             val targets = _ui.value.library.filter {
                 it.engineId != null && !it.paused && !it.complete && !it.isDeleting
             }
-            if (targets.isEmpty()) return@launch
+            if (targets.isEmpty()) return@launchCommand
 
             val genMap = targets.associate { it.key to (it.generation + 1) }
 
@@ -760,31 +871,37 @@ class LibrarySession(private val app: Application) {
     }
 
     fun resumeFromNotification() {
-        scope.launch {
-            if (isShuttingDown.get()) return@launch
-            serviceSuppressed = false
-            settings.edit().putBoolean("serviceSuppressed", false).apply()
+        scope.launchCommand {
+            if (!beginUserWork()) return@launchCommand
 
             val targets = _ui.value.library.filter { it.paused && !it.complete && !it.isDeleting }
             for (entry in targets) {
-                val nextGen = entry.generation + 1
-                patch(entry.key) {
-                    it.copy(generation = nextGen, lifecycleState = EntryLifecycleState.DOWNLOADING, error = null)
+                val live = _ui.value.library.find { it.key == entry.key } ?: continue
+                if (live.isDeleting || live.complete) continue
+                val nextGen = live.generation + 1
+                val restoring = live.engineId == null
+                patch(live.key) {
+                    it.copy(
+                        generation = nextGen,
+                        lifecycleState = if (restoring) EntryLifecycleState.PREPARING else EntryLifecycleState.DOWNLOADING,
+                        error = null,
+                    )
                 }
                 try {
-                    if (entry.engineId != null) {
-                        withContext(io) { client.resume(entry.engineId) }
-                        patch(entry.key) {
+                    if (live.engineId != null) {
+                        withContext(io) { client.resume(live.engineId) }
+                        patch(live.key) {
                             if (it.generation == nextGen) {
                                 it.copy(paused = false, lifecycleState = EntryLifecycleState.DOWNLOADING, error = null)
                             } else it
                         }
                     } else {
-                        restoreEntry(entry, startPaused = false)
+                        restoreEntry(live, startPaused = false, commandGeneration = nextGen)
                     }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
-                    patch(entry.key) {
+                    if (restoring) failRestore(live.key, nextGen, readableError(t))
+                    else patch(live.key) {
                         if (it.generation == nextGen) {
                             it.copy(paused = true, lifecycleState = EntryLifecycleState.PAUSED, error = readableError(t))
                         } else it
@@ -796,16 +913,12 @@ class LibrarySession(private val app: Application) {
         }
     }
 
-    fun stopFromNotification(onComplete: (() -> Unit)? = null) {
-        stopAll(onComplete)
-    }
-
     fun stopAll(onFinished: (() -> Unit)? = null) {
         serviceSuppressed = true
         settings.edit().putBoolean("serviceSuppressed", true).apply()
         scope.launch {
             mutex.withLock {
-                val targets = _ui.value.library.filter { it.engineId != null && !it.complete && !it.isDeleting }
+                val targets = _ui.value.library.filter { it.engineId != null && !it.isDeleting }
                 val genMap = targets.associate { it.key to (it.generation + 1) }
                 _ui.update { state ->
                     state.copy(
@@ -821,26 +934,41 @@ class LibrarySession(private val app: Application) {
                         },
                     )
                 }
+                val stopped = mutableSetOf<String>()
                 for (target in targets) {
                     val id = target.engineId ?: continue
                     recentlyInvalidatedIds.add(id)
-                    runCatching { withContext(io) { client.remove(id, false) } }
+                    try {
+                        withContext(io) { client.remove(id, false) }
+                        stopped += target.key
+                    } catch (t: Exception) {
+                        if (t is CancellationException) throw t
+                        recentlyInvalidatedIds.remove(id)
+                        patch(target.key) { it.copy(lifecycleState = target.lifecycleState, error = readableError(t)) }
+                    }
                 }
                 _ui.update { state ->
                     state.copy(
                         library = state.library.map { entry ->
-                            if (genMap.containsKey(entry.key)) {
+                            if (entry.key in stopped) {
                                 entry.copy(
                                     engineId = null,
                                     paused = true,
                                     status = null,
-                                    lifecycleState = EntryLifecycleState.STOPPED,
+                                    lifecycleState = if (entry.complete) EntryLifecycleState.COMPLETED else EntryLifecycleState.STOPPED,
                                 )
                             } else entry
                         },
                     )
                 }
                 persist()
+                if (stopped.size != targets.size) {
+                    serviceSuppressed = false
+                    settings.edit().putBoolean("serviceSuppressed", false).apply()
+                    _ui.update { it.copy(error = "Some downloads could not be stopped. Please retry.") }
+                    syncService()
+                    return@withLock
+                }
                 PlayService.stop(app)
                 onFinished?.invoke()
             }
@@ -855,14 +983,21 @@ class LibrarySession(private val app: Application) {
         debounceJob?.cancel()
         prefetchJob?.cancel()
         storageStatsJob?.cancel()
+        pollJob?.cancel()
 
         scope.launch {
             mutex.withLock {
+                var failed = false
                 val prepId = _ui.value.prepare?.engineId
                 _ui.update { it.copy(prepare = null, addSheetOpen = false) }
                 if (prepId != null) {
                     recentlyInvalidatedIds.add(prepId)
-                    runCatching { withContext(io) { client.remove(prepId, true) } }
+                    try {
+                        withContext(io) { client.remove(prepId, true) }
+                    } catch (t: Exception) {
+                        if (t is CancellationException) throw t
+                        failed = true
+                    }
                 }
 
                 val allLive = _ui.value.library.filter { it.engineId != null }
@@ -883,16 +1018,25 @@ class LibrarySession(private val app: Application) {
 
                 // Stop all torrent network activity and seeding by removing active torrents from engine
                 // WITHOUT calling client.shutdown() or /shutdown endpoint
+                val stopped = mutableSetOf<String>()
                 for (entry in allLive) {
                     val id = entry.engineId ?: continue
                     recentlyInvalidatedIds.add(id)
-                    runCatching { withContext(io) { client.remove(id, false) } }
+                    try {
+                        withContext(io) { client.remove(id, false) }
+                        stopped += entry.key
+                    } catch (t: Exception) {
+                        if (t is CancellationException) throw t
+                        failed = true
+                        recentlyInvalidatedIds.remove(id)
+                        patch(entry.key) { it.copy(lifecycleState = entry.lifecycleState, error = readableError(t)) }
+                    }
                 }
 
                 _ui.update { state ->
                     state.copy(
                         library = state.library.map { entry ->
-                            if (genMap.containsKey(entry.key)) {
+                            if (entry.key in stopped) {
                                 entry.copy(
                                     engineId = null,
                                     paused = true,
@@ -904,8 +1048,19 @@ class LibrarySession(private val app: Application) {
                     )
                 }
                 persist()
+                if (failed) {
+                    isShuttingDown.set(false)
+                    serviceSuppressed = false
+                    settings.edit().putBoolean("serviceSuppressed", false).apply()
+                    _ui.update { it.copy(error = "Some transfers could not be stopped. Retry Shutdown.") }
+                    pollJob?.cancel()
+                    pollJob = scope.launch { pollLoop() }
+                    syncService()
+                    return@withLock
+                }
                 PlayService.stop(app)
-                _events.emit(UiEvent.ExitApp)
+                shutdownComplete = true
+                (app as? WebtorApp)?.currentActivity()?.finish()
                 onFinished?.invoke()
             }
         }
@@ -929,8 +1084,11 @@ class LibrarySession(private val app: Application) {
     }
 
     private suspend fun addTorrent(torrentId: String, torrentData: String? = null, commit: Boolean = true) {
+        val generation = draftGeneration
+        var createdId: String? = null
         try {
             val addedId = mutex.withLock {
+                if (isShuttingDown.get() || generation != draftGeneration) return
                 val prev = _ui.value.prepare
                 if (prev != null && prev.source == torrentId && torrentData == null) {
                     if (commit) {
@@ -951,14 +1109,7 @@ class LibrarySession(private val app: Application) {
                 }
                 val hash = infoHashFromMagnet(torrentId)
                 if (hash != null && _ui.value.library.any { it.key.equals(hash, true) }) {
-                    _ui.update {
-                        it.copy(
-                            addSheetOpen = false,
-                            screen = Screen.Library,
-                            message = "Already in your library.",
-                            error = null,
-                        )
-                    }
+                    _ui.update { it.copy(addSheetOpen = true, error = null) }
                     return
                 }
                 if (!_ui.value.engineReady) waitForEngine()
@@ -971,7 +1122,17 @@ class LibrarySession(private val app: Application) {
                     }
                     return
                 }
-                val added = withContext(io) { client.add(torrentId, prepare = true, torrentData = torrentData) }
+                // Capture the returned ID even when cancellation arrives during blocking HTTP.
+                val added = withContext(io + NonCancellable) {
+                    client.add(torrentId, prepare = true, torrentData = torrentData).also { createdId = it.id }
+                }
+                if (generation != draftGeneration || isShuttingDown.get()) throw CancellationException("Draft replaced")
+                if (_ui.value.library.any { it.engineId == added.id || it.key.equals(added.infoHash, true) }) {
+                    withContext(io + NonCancellable) { runCatching { client.remove(added.id, true) } }
+                    createdId = null
+                    _ui.update { it.copy(prepare = null, addSheetOpen = true, error = null) }
+                    return
+                }
                 _ui.update {
                     it.copy(
                         prepare = newDraft(added.id, torrentId, null, committed = commit),
@@ -985,7 +1146,15 @@ class LibrarySession(private val app: Application) {
             }
             waitReady(addedId)
         } catch (t: Throwable) {
-            if (t is CancellationException) throw t
+            if (t is CancellationException) {
+                createdId?.let { id ->
+                    if (_ui.value.library.none { it.engineId == id }) {
+                        withContext(io + NonCancellable) { runCatching { client.remove(id, true) } }
+                    }
+                }
+                throw t
+            }
+            if (generation != draftGeneration || isShuttingDown.get()) return
             val msg = readableError(t)
             _ui.update { state ->
                 if (state.prepare != null && (state.screen == Screen.Prepare || state.prepare.committed)) {
@@ -1015,10 +1184,12 @@ class LibrarySession(private val app: Application) {
             val t = withContext(io) { client.torrent(id) }
             last = t
             if (t.error != null) error(readableError(t.error))
-            applyPrepareStatus(t)
+            if (forPrepare) applyPrepareStatus(t)
             if (t.ready) {
-                val selected = _ui.value.prepare?.takeIf { it.engineId == id }?.selected
-                if (selected != null) runCatching { withContext(io) { client.select(id, selected) } }
+                if (forPrepare) {
+                    val selected = _ui.value.prepare?.takeIf { it.engineId == id }?.selected
+                    if (selected != null) runCatching { withContext(io) { client.select(id, selected) } }
+                }
                 return t
             }
             delay(500)
@@ -1062,17 +1233,40 @@ class LibrarySession(private val app: Application) {
 
     private suspend fun restoreAll(entries: List<DownloadEntry>) {
         for (entry in entries) {
-            if (entry.complete) continue
-            restoreEntry(entry, startPaused = entry.paused)
+            if (shouldSkipStartupRestore(entry)) continue
+            mutex.withLock { restoreEntry(entry, startPaused = false) }
         }
     }
 
-    private suspend fun restoreEntry(entry: DownloadEntry, startPaused: Boolean) {
-        val current = _ui.value.library.find { it.key == entry.key } ?: entry
+    private fun failRestore(key: String, commandGeneration: Long, message: String) {
+        patch(key) {
+            if (it.generation != commandGeneration || it.isDeleting) it
+            else it.copy(
+                engineId = null,
+                paused = true,
+                status = null,
+                lifecycleState = EntryLifecycleState.STOPPED,
+                error = message,
+            )
+        }
+    }
+
+    private suspend fun restoreEntry(entry: DownloadEntry, startPaused: Boolean, commandGeneration: Long? = null) {
+        val current = _ui.value.library.find { it.key == entry.key } ?: return
+        if (current.isDeleting) return
+        val expectedGen = commandGeneration ?: current.generation
+        if (commandGeneration != null && current.generation != commandGeneration) return
+        if (shutdownInProgress()) {
+            failRestore(current.key, expectedGen, "Transfers were stopped. Try Resume again.")
+            return
+        }
         val hasFiles = current.files.any { it.index in current.selected && it.uri != null }
-        if (!hasFiles) return
+        if (!hasFiles) {
+            failRestore(current.key, expectedGen, "This download has no saved files to restore.")
+            return
+        }
         if (current.metadata.isBlank() && current.source.isBlank()) {
-            patch(current.key) { it.copy(error = "This download has no torrent metadata to restore.") }
+            failRestore(current.key, expectedGen, "This download has no torrent metadata to restore.")
             return
         }
         val missing = withContext(io) {
@@ -1080,21 +1274,26 @@ class LibrarySession(private val app: Application) {
                 .filter { !storage.fileAccessible(it) }
         }
         if (missing.isNotEmpty()) {
-            patch(current.key) {
-                it.copy(
-                    error = "A downloaded file is missing or folder access was revoked. Re-grant folder access, then retry. You can also delete leftover files from your file manager.",
-                )
-            }
+            failRestore(
+                current.key,
+                expectedGen,
+                "A downloaded file is missing or folder access was revoked. Re-grant folder access, then retry. You can also delete leftover files from your file manager.",
+            )
             return
         }
+        if (!_ui.value.engineReady) waitForEngine()
         if (!_ui.value.engineReady) {
-            patch(current.key) { it.copy(error = "The download engine is not running. Close Torrent Player and open it again.") }
+            failRestore(current.key, expectedGen, "The download engine is not running. Close Torrent Player and open it again.")
             return
         }
+        var addedId: String? = null
         try {
             val torrentId = current.source.ifBlank { current.key }
             val data = current.metadata.takeIf { it.isNotBlank() }
-            val added = withContext(io) { client.add(torrentId, prepare = true, torrentData = data) }
+            val added = withContext(io + NonCancellable) {
+                client.add(torrentId, prepare = true, torrentData = data).also { addedId = it.id }
+            }
+            recentlyInvalidatedIds.remove(added.id)
             waitReady(added.id, timeoutMs = 30_000, forPrepare = false)
             val pfds = withContext(io) { storage.openFiles(current.files) }
             try {
@@ -1106,10 +1305,33 @@ class LibrarySession(private val app: Application) {
                 pfds.forEach { runCatching { it?.close() } }
             }
             if (startPaused) withContext(io) { client.pause(added.id) }
-            patch(current.key) { it.copy(engineId = added.id, paused = startPaused, error = null) }
+            val latest = _ui.value.library.find { it.key == current.key }
+            if (latest == null) {
+                withContext(io + NonCancellable) { client.remove(added.id, false) }
+                return
+            }
+            if (!restoreStillApplies(latest.generation, expectedGen, latest.isDeleting, shutdownInProgress())) {
+                withContext(io + NonCancellable) { client.remove(added.id, false) }
+                if (latest.isDeleting || latest.generation != expectedGen) return
+                failRestore(current.key, expectedGen, "Transfers were stopped. Try Resume again.")
+                return
+            }
+            patch(current.key) {
+                if (it.generation != expectedGen || it.isDeleting) it
+                else it.copy(
+                    engineId = added.id,
+                    paused = startPaused,
+                    error = null,
+                    lifecycleState = if (startPaused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING,
+                )
+            }
         } catch (t: Throwable) {
-            if (t is CancellationException) throw t
-            patch(current.key) { it.copy(error = readableError(t), engineId = null) }
+            addedId?.let { id -> withContext(io + NonCancellable) { runCatching { client.remove(id, false) } } }
+            if (t is CancellationException) {
+                failRestore(current.key, expectedGen, "Could not resume this download.")
+                throw t
+            }
+            failRestore(current.key, expectedGen, readableError(t))
         }
     }
 
@@ -1136,7 +1358,7 @@ class LibrarySession(private val app: Application) {
 
             val targets = state.library.mapNotNull { e ->
                 val id = e.engineId ?: return@mapNotNull null
-                if (e.isDeleting || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING) {
+                if (e.isDeleting || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING || e.lifecycleState == EntryLifecycleState.PAUSING) {
                     return@mapNotNull null
                 }
                 PollTarget(e.key, id, e.generation)
@@ -1167,7 +1389,7 @@ class LibrarySession(private val app: Application) {
                         current.lifecycleState == EntryLifecycleState.STOPPING ||
                         recentlyInvalidatedIds.contains(target.engineId)
 
-                    val is404 = e.message?.contains("404") == true || e.message?.contains("not found", ignoreCase = true) == true
+                    val is404 = e.statusCode == 404
 
                     if (is404 && isIntentional) {
                         // Silent expected lifecycle 404 suppression
@@ -1266,8 +1488,15 @@ class LibrarySession(private val app: Application) {
     }
 
     private suspend fun persist() {
-        val snapshot = _ui.value.library
-        withContext(io) { runCatching { storage.save(snapshot) } }
+        persistenceMutex.withLock {
+            val snapshot = _ui.value.library
+            try {
+                withContext(io) { storage.save(snapshot) }
+            } catch (t: Exception) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(loadWarning = "Could not save download changes. Free some storage before closing the app.") }
+            }
+        }
     }
 
     private fun syncService() {

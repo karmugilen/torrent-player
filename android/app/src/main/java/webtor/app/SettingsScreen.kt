@@ -40,6 +40,8 @@ fun SettingsScreen(
     onDarkTheme: (Boolean) -> Unit,
     onCleanup: () -> Unit,
     onClearAll: () -> Unit,
+    onStopAll: () -> Unit,
+    onStopAllAndExit: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
     Scaffold(
@@ -116,7 +118,7 @@ fun SettingsScreen(
             item {
                 Text("Downloads", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Files go to Downloads/Webtor. ${formatBytes(state.freeBytes)} free · ${formatBytes(state.managedBytes)} used.",
+                    "Files go to Downloads/Webtor. ${if (state.freeBytes >= 0) formatBytes(state.freeBytes) + " free" else "Free space unavailable"} · ${formatBytes(state.managedBytes)} used.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
@@ -143,6 +145,41 @@ fun SettingsScreen(
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
+            }
+            item {
+                Text("Leaving", style = MaterialTheme.typography.titleLarge)
+                Column(
+                    Modifier.padding(top = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Disconnect peers. Files stay. Resume later.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = onStopAll,
+                            enabled = state.library.any { it.engineId != null && !it.isDeleting },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp),
+                        ) { Text("Stop all downloads") }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Stop transfers and close the app.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = onStopAllAndExit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp),
+                        ) { Text("Shutdown") }
+                    }
+                }
             }
             item {
                 Text("Cleanup", style = MaterialTheme.typography.titleLarge)

@@ -2,9 +2,7 @@ export const VIDEO_EXT = /\.(mp4|m4v|mkv|webm|mov|avi)$/i
 
 export function pickFile (files, fileIndex) {
   if (!Array.isArray(files) || files.length === 0) return null
-  if (Number.isInteger(fileIndex) && fileIndex >= 0 && files[fileIndex]) {
-    return files[fileIndex]
-  }
+  if (fileIndex !== undefined) return Number.isInteger(fileIndex) && fileIndex >= 0 ? files[fileIndex] || null : null
   const videos = files.filter(f => VIDEO_EXT.test(f.name || f.path || ''))
   const pool = videos.length ? videos : files
   return pool.reduce((a, b) => (a.length >= b.length ? a : b))
@@ -59,12 +57,28 @@ export function torrentView (id, torrent) {
   }
 }
 
-export async function readJson (req) {
+export async function readJson (req, maxBytes = 16 * 1024 * 1024) {
   const chunks = []
-  for await (const chunk of req) chunks.push(chunk)
+  let bytes = 0
+  let tooLarge = false
+  for await (const chunk of req) {
+    bytes += chunk.length
+    if (bytes > maxBytes) {
+      tooLarge = true
+      chunks.length = 0
+    } else if (!tooLarge) chunks.push(chunk)
+  }
+  if (tooLarge) throw Object.assign(new Error('Request body too large'), { statusCode: 413 })
   const raw = Buffer.concat(chunks).toString('utf8').trim()
   if (!raw) return {}
-  return JSON.parse(raw)
+  let body
+  try { body = JSON.parse(raw) } catch {
+    throw Object.assign(new Error('invalid json'), { statusCode: 400 })
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw Object.assign(new Error('JSON object required'), { statusCode: 400 })
+  }
+  return body
 }
 
 export function sendJson (res, status, body) {

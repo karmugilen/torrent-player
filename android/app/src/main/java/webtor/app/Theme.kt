@@ -1,6 +1,8 @@
 package webtor.app
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -14,6 +16,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -23,7 +26,7 @@ private val LightInk = Color(0xFF2F3437)
 private val LightBone = Color(0xFFF7F6F3)
 private val LightPaper = Color(0xFFFBFBFA)
 private val LightLine = Color(0xFFEAEAEA)
-private val LightMute = Color(0xFF787774)
+private val LightMute = Color(0xFF676661)
 private val LightGreenBg = Color(0xFFEDF3EC)
 private val LightGreen = Color(0xFF346538)
 private val LightRedBg = Color(0xFFFDEBEC)
@@ -60,6 +63,7 @@ private val LightGaleColors = lightColorScheme(
     errorContainer = LightRedBg,
     onErrorContainer = LightRed,
     outline = LightLine,
+    outlineVariant = LightLine,
     primaryContainer = LightGreenBg,
     onPrimaryContainer = LightGreen,
     tertiary = LightYellow,
@@ -83,6 +87,7 @@ private val DarkGaleColors = darkColorScheme(
     errorContainer = NightRedBg,
     onErrorContainer = NightRed,
     outline = NightLine,
+    outlineVariant = NightLine,
     primaryContainer = NightGreenBg,
     onPrimaryContainer = NightGreen,
     tertiary = NightYellow,
@@ -97,73 +102,92 @@ private val GaleShapes = Shapes(
     large = RoundedCornerShape(12.dp),
 )
 
+private val AppFont = FontFamily(
+    Font(R.font.adwaita_sans_regular, FontWeight.Normal),
+    Font(R.font.adwaita_sans_semibold, FontWeight.Medium),
+    Font(R.font.adwaita_sans_semibold, FontWeight.SemiBold),
+    Font(R.font.adwaita_sans_semibold, FontWeight.Bold),
+)
+
 private val GaleTypography = Typography(
+    displayLarge = TextStyle(fontFamily = AppFont, fontSize = 57.sp, lineHeight = 64.sp),
+    displayMedium = TextStyle(fontFamily = AppFont, fontSize = 45.sp, lineHeight = 52.sp),
+    displaySmall = TextStyle(fontFamily = AppFont, fontSize = 36.sp, lineHeight = 44.sp),
     headlineLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
         fontSize = 32.sp,
         lineHeight = 36.sp,
         letterSpacing = (-0.6).sp,
     ),
     headlineMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
         fontSize = 26.sp,
         lineHeight = 30.sp,
         letterSpacing = (-0.4).sp,
     ),
     headlineSmall = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
         fontSize = 22.sp,
         lineHeight = 26.sp,
         letterSpacing = (-0.3).sp,
     ),
     titleLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
         fontSize = 20.sp,
         lineHeight = 24.sp,
         letterSpacing = (-0.2).sp,
     ),
     titleMedium = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
         fontSize = 16.sp,
         lineHeight = 22.sp,
         letterSpacing = (-0.2).sp,
     ),
     bodyLarge = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Normal,
         fontSize = 16.sp,
         lineHeight = 25.sp,
     ),
     bodyMedium = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Normal,
         fontSize = 14.sp,
         lineHeight = 22.sp,
     ),
     bodySmall = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Normal,
         fontSize = 12.sp,
         lineHeight = 18.sp,
     ),
     labelLarge = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
         fontSize = 14.sp,
         letterSpacing = 0.2.sp,
     ),
     labelSmall = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = AppFont,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        letterSpacing = 0.8.sp,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.1.sp,
     ),
+    titleSmall = TextStyle(fontFamily = AppFont, fontWeight = FontWeight.Medium, fontSize = 14.sp, lineHeight = 20.sp),
+    labelMedium = TextStyle(fontFamily = AppFont, fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 16.sp),
 )
+
+private tailrec fun Context.activity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.activity()
+    else -> null
+}
 
 @Composable
 fun GaleTheme(dark: Boolean = true, content: @Composable () -> Unit) {
@@ -171,7 +195,7 @@ fun GaleTheme(dark: Boolean = true, content: @Composable () -> Unit) {
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
+            val window = view.context.activity()?.window ?: return@SideEffect
             val bar = colors.background.toArgb()
             window.statusBarColor = bar
             window.navigationBarColor = bar

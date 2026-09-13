@@ -76,25 +76,31 @@ function findRecord (id) {
 }
 
 function waitReady (torrent, timeoutMs = 30000) {
+  if (torrent.destroyed) return Promise.reject(new Error('torrent stopped'))
   if (torrent.ready) return Promise.resolve()
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
-      torrent.off('ready', onReady)
-      torrent.off('error', onError)
+      cleanup()
       reject(new Error('torrent metadata timeout'))
     }, timeoutMs)
-    function onReady () {
+    function cleanup () {
       clearTimeout(t)
+      torrent.off('ready', onReady)
       torrent.off('error', onError)
+      torrent.off('close', onClose)
+    }
+    function onReady () {
+      cleanup()
       resolve()
     }
     function onError (err) {
-      clearTimeout(t)
-      torrent.off('ready', onReady)
+      cleanup()
       reject(err)
     }
+    function onClose () { onError(new Error('torrent stopped')) }
     torrent.once('ready', onReady)
     torrent.once('error', onError)
+    torrent.once('close', onClose)
   })
 }
 
@@ -102,14 +108,17 @@ async function handleAdd (req, res) {
   let body
   try {
     body = await readJson(req)
-  } catch {
-    sendJson(res, 400, { error: 'invalid json' })
+  } catch (err) {
+    sendJson(res, err.statusCode || 400, { error: err.message || 'invalid json' })
     return
   }
   const torrentId = body.torrentId
   if (!torrentId || typeof torrentId !== 'string') {
     sendJson(res, 400, { error: 'torrentId required' })
     return
+  }
+  if (body.torrentData !== undefined && typeof body.torrentData !== 'string') {
+    return sendJson(res, 400, { error: 'torrentData must be a base64 string' })
   }
   let addId = body.torrentData ? Buffer.from(body.torrentData, 'base64') : torrentId
   if (!body.torrentData && !torrentId.startsWith('magnet:') && !/^https?:\/\//.test(torrentId)) {
@@ -123,7 +132,7 @@ async function handleAdd (req, res) {
     }
   }
   let parsed
-  if (!/^https?:\/\//.test(torrentId)) {
+  if (body.torrentData || !/^https?:\/\//.test(torrentId)) {
     try {
       parsed = await parseTorrent(addId)
     } catch (err) {
@@ -139,6 +148,9 @@ async function handleAdd (req, res) {
   const announce = Array.isArray(body.announce)
     ? body.announce
     : [...new Set([...(parsed?.announce || []), ...DEFAULT_ANNOUNCE])]
+  if (announce.some(value => typeof value !== 'string')) {
+    return sendJson(res, 400, { error: 'Invalid tracker list' })
+  }
   const id = crypto.randomUUID()
   const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, selected: [], documentStore: null, prefetchPaused: false, generation: 1 }
   const torrent = client.add(addId, {
@@ -188,6 +200,7 @@ function applySelection (rec, selected) {
   rec.selected = next
   rec.prefetchPaused = false
   rec.generation = (rec.generation || 1) + 1
+  if (rec.documentStore?.cacheBytes >= rec.documentStore?.maxCacheBytes) pausePrefetch(rec)
 }
 
 function pausePrefetch (rec) {
@@ -205,8 +218,8 @@ async function handlePlay (req, res) {
   let body
   try {
     body = await readJson(req)
-  } catch {
-    sendJson(res, 400, { error: 'invalid json' })
+  } catch (err) {
+    sendJson(res, err.statusCode || 400, { error: err.message || 'invalid json' })
     return
   }
   const rec = findRecord(body.id)
@@ -221,8 +234,10 @@ async function handlePlay (req, res) {
     sendJson(res, 504, { error: err.message || 'not ready' })
     return
   }
-  const fileIndex = Number.isInteger(body.fileIndex) ? body.fileIndex : undefined
-  const file = pickFile(rec.torrent.files, fileIndex)
+  const fileIndex = body.fileIndex
+  const file = fileIndex === undefined && rec.prepared
+    ? pickFile(rec.selected.map(i => rec.torrent.files[i]).filter(Boolean))
+    : pickFile(rec.torrent.files, fileIndex)
   if (!file) {
     sendJson(res, 404, { error: 'no file' })
     return
@@ -248,8 +263,8 @@ async function handleRemove (req, res) {
   let body
   try {
     body = await readJson(req)
-  } catch {
-    sendJson(res, 400, { error: 'invalid json' })
+  } catch (err) {
+    sendJson(res, err.statusCode || 400, { error: err.message || 'invalid json' })
     return
   }
   const rec = findRecord(body.id)
@@ -312,25 +327,39 @@ async function handleConfigure (req, res) {
   const rec = findRecord(body.id)
   if (!rec || rec.error) return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
   await waitReady(rec.torrent)
-  if (!rec.prepared || rec.configured) return sendJson(res, 409, { error: 'Storage already configured' })
+  if (!rec.prepared || rec.configured || rec.configuring) return sendJson(res, 409, { error: 'Storage already configured' })
   const selected = body.selected
   if (!Array.isArray(selected) || !selected.length || selected.some(i => !Number.isInteger(i) || !rec.torrent.files[i])) {
     return sendJson(res, 400, { error: 'Select at least one file' })
   }
-  if (!Array.isArray(body.descriptors) || body.descriptors.some((fd, i) => selected.includes(i) !== (fd !== null))) {
+  if (!Array.isArray(body.descriptors) || body.descriptors.length !== rec.torrent.files.length ||
+      body.descriptors.some((fd, i) => selected.includes(i) !== (fd !== null) ||
+        (fd !== null && (!Number.isInteger(fd) || fd < 3)))) {
     return sendJson(res, 400, { error: 'Selected files do not match storage' })
   }
-  // Selections may have been garbage-collected after RAM prefetch completed.
-  // Rebuild them after verification instead of trusting rec.selected.
-  for (const i of rec.selected) rec.torrent.files[i]?.deselect()
-  rec.selected = []
-  rec.prefetchPaused = false
-  rec.documentStore.attach(body.descriptors)
-  await flushStore(rec.documentStore)
-  rec.configured = true
-  await new Promise((resolve, reject) => rec.torrent.rescanFiles(err => err ? reject(err) : resolve()))
-  applySelection(rec, selected)
-  sendJson(res, 200, { ok: true })
+  try {
+    rec.documentStore.attach(body.descriptors)
+  } catch (err) {
+    return sendJson(res, 400, { error: err.message || 'Cannot open download storage' })
+  }
+  rec.configuring = true
+  try {
+    // Selections may have been garbage-collected after RAM prefetch completed.
+    // Rebuild them after verification instead of trusting rec.selected.
+    for (const i of rec.selected) rec.torrent.files[i]?.deselect()
+    rec.selected = []
+    rec.prefetchPaused = false
+    await flushStore(rec.documentStore)
+    await new Promise((resolve, reject) => rec.torrent.rescanFiles(err => err ? reject(err) : resolve()))
+    rec.configured = true
+    applySelection(rec, selected)
+    sendJson(res, 200, { ok: true })
+  } catch (err) {
+    rec.error = err.message || 'Cannot initialize download storage'
+    throw err
+  } finally {
+    rec.configuring = false
+  }
 }
 
 async function handleSelect (req, res) {
@@ -338,7 +367,7 @@ async function handleSelect (req, res) {
   const rec = findRecord(body.id)
   if (!rec || rec.error) return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
   await waitReady(rec.torrent)
-  if (rec.configured) return sendJson(res, 409, { error: 'Storage already configured' })
+  if (rec.configured || rec.configuring) return sendJson(res, 409, { error: 'Storage already configured' })
   const selected = body.selected
   if (!Array.isArray(selected) || selected.some(i => !Number.isInteger(i) || !rec.torrent.files[i])) {
     return sendJson(res, 400, { error: 'Invalid file selection' })
@@ -351,13 +380,13 @@ async function handlePause (req, res, paused) {
   const { id } = await readJson(req)
   const rec = findRecord(id)
   if (!rec || rec.torrent.destroyed) return sendJson(res, 404, { error: 'torrent not found' })
-  if (paused) {
+  if (paused && !rec.torrent.paused) {
     rec.peerAddresses = Object.keys(rec.torrent._peers || {})
     rec.torrent.pause()
     // WebTorrent.pause only stops new connections. Disconnect existing wires
     // too, otherwise an active download keeps filling storage after Pause.
     for (const wire of [...rec.torrent.wires]) wire.destroy()
-  } else {
+  } else if (!paused && rec.torrent.paused) {
     rec.torrent.resume()
     for (const peer of rec.peerAddresses || []) rec.torrent.addPeer(peer)
     rec.torrent.discovery?.tracker?.update()
@@ -399,9 +428,15 @@ async function handleShutdown (res) {
 }
 
 const ctlServer = http.createServer(async (req, res) => {
-  const { parts, search } = parsePath(req.url || '/')
-  const method = req.method || 'GET'
   try {
+    // Reject browser requests and DNS rebinding to this local control API.
+    const expectedHost = `${CTL_HOST}:${ctlServer.address().port}`
+    if (req.headers.host !== expectedHost || req.headers.origin ||
+        (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'none')) {
+      return sendJson(res, 403, { error: 'Local app requests only' })
+    }
+    const { parts, search } = parsePath(req.url || '/')
+    const method = req.method || 'GET'
     if (method === 'GET' && parts.length === 1 && parts[0] === 'stats') {
       handleStats(res)
       return
@@ -416,7 +451,8 @@ const ctlServer = http.createServer(async (req, res) => {
     }
     if (method === 'GET' && parts[0] === 'metadata' && parts[1]) {
       const rec = findRecord(parts[1])
-      if (!rec?.torrent.ready) return sendJson(res, 409, { error: 'Metadata not ready' })
+      if (!rec) return sendJson(res, 404, { error: 'torrent not found' })
+      if (!rec.torrent.ready) return sendJson(res, 409, { error: 'Metadata not ready' })
       return sendJson(res, 200, { torrentData: Buffer.from(rec.torrent.torrentFile).toString('base64') })
     }
     if (method === 'GET' && parts.length === 1 && parts[0] === 'settings') {
@@ -450,7 +486,7 @@ const ctlServer = http.createServer(async (req, res) => {
     }
     sendJson(res, 404, { error: 'not found' })
   } catch (err) {
-    sendJson(res, 500, { error: err.message || String(err) })
+    sendJson(res, err.statusCode || 500, { error: err.message || String(err) })
   }
 })
 

@@ -67,19 +67,58 @@ fun pickPlayIndex(entry: DownloadEntry): Int? {
     return (videos.ifEmpty { files }).maxByOrNull { it.length }?.index
 }
 
+fun DownloadEntry.canPlay(): Boolean =
+    !isDeleting && !controlsBusy() && files.any { it.index in selected && !it.uri.isNullOrBlank() }
+
+fun DownloadEntry.selectedVideoCount(): Int =
+    files.count { it.index in selected && it.name.isVideoName() }
+
+/** First selected video by index (episode 1 of a pack), not the most-downloaded file. */
+fun firstPreviewVideo(entry: DownloadEntry): SavedFile? =
+    entry.files.filter { it.index in entry.selected && it.name.isVideoName() }.minByOrNull { it.index }
+
+/** Complete: 20/50/80 of full duration. In-progress: 10/50/90 of the downloaded span. */
+fun previewRatios(progress: Double, complete: Boolean): List<Double> {
+    if (complete || progress >= 1.0) return listOf(0.20, 0.50, 0.80)
+    val span = progress.coerceIn(0.02, 1.0)
+    return listOf(0.10, 0.50, 0.90).map { it * span }
+}
+
+/** Latest ratio a seek may use: full file when complete, otherwise the downloaded span. */
+fun previewMaxRatio(progress: Double, complete: Boolean): Double =
+    if (complete || progress >= 1.0) 1.0 else progress.coerceIn(0.02, 1.0)
+
+/** Target, then +2% / +5% of duration, clamped to the downloaded span. */
+fun previewSlotRatios(target: Double, progress: Double, complete: Boolean): List<Double> {
+    val maxRatio = previewMaxRatio(progress, complete)
+    return listOf(target, target + 0.02, target + 0.05)
+        .map { it.coerceIn(0.0, maxRatio) }
+        .distinct()
+}
+
+/** True when a 16×16 ARGB sample's average Rec.601 luma is below 18 (black title cards). */
+fun tooDarkLuma(pixels: IntArray): Boolean {
+    if (pixels.isEmpty()) return true
+    var sum = 0L
+    for (p in pixels) {
+        val r = (p ushr 16) and 0xFF
+        val g = (p ushr 8) and 0xFF
+        val b = p and 0xFF
+        sum += (r * 299L + g * 587L + b * 114L) / 1000L
+    }
+    return sum / pixels.size < 18
+}
+
+/** 5% steps (0..19) while downloading; 20 once complete. */
+fun previewUpdateBucket(progress: Double, complete: Boolean): Int =
+    if (complete || progress >= 1.0) 20 else (progress * 20).toInt().coerceIn(0, 19)
+
 fun infoHashFromMagnet(value: String): String? {
     val match = Regex("xt=urn:btih:([a-zA-Z0-9]+)", RegexOption.IGNORE_CASE).find(value) ?: return null
     return match.groupValues[1].lowercase()
 }
 
-fun looksLikeTorrentSource(value: String): Boolean {
-    val src = value.trim()
-    if (src.startsWith("magnet:", ignoreCase = true)) {
-        val hash = infoHashFromMagnet(src) ?: return false
-        return hash.length == 40 || hash.length == 32
-    }
-    return src.startsWith("http://", ignoreCase = true) || src.startsWith("https://", ignoreCase = true)
-}
+fun looksLikeTorrentSource(value: String): Boolean = supportedTorrentLink(value) != null
 
 fun prefetchStatus(draft: PrepareDraft?): String? {
     if (draft == null) return null

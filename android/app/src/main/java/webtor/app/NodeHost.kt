@@ -53,9 +53,12 @@ class NodeHost(private val context: Context) {
         if (bundledRev != null && File(dest, "main.js").isFile && installed.isFile && installed.readText() == bundledRev) {
             return
         }
-        dest.deleteRecursively()
-        dest.mkdirs()
+        check(!dest.exists() || dest.deleteRecursively()) { "Could not replace the previous engine bundle" }
+        check(dest.mkdirs() || dest.isDirectory) { "Could not create engine directory" }
         copyAssetDir("nodejs-project", dest)
+        // The revision is a completion marker, not an ordinary asset. A killed
+        // copy must be retried on next launch, including missing node_modules.
+        if (bundledRev != null) installed.writeText(bundledRev)
     }
 
     private fun copyAssetDir(assetPath: String, dest: File) {
@@ -70,6 +73,7 @@ class NodeHost(private val context: Context) {
         }
         dest.mkdirs()
         for (name in kids) {
+            if (assetPath == "nodejs-project" && name == "bundle.rev") continue
             copyAssetDir("$assetPath/$name", File(dest, name))
         }
     }

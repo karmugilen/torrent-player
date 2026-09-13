@@ -89,6 +89,18 @@ class EngineClientTest {
     }
 
     @Test
+    fun progressClampsAndRejectsNonFiniteValues() {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"id":"abc","progress":"NaN","files":[{"index":0,"name":"a.bin","path":"a.bin","length":10,"progress":2}]}"""
+            )
+        )
+        val t = client.torrent("abc")
+        assertEquals(0.0, t.progress)
+        assertEquals(1.0, t.files[0].progress)
+    }
+
+    @Test
     fun torrentDefaultsMissingFields() {
         server.enqueue(MockResponse().setBody("""{"id":"abc"}"""))
         val t = client.torrent("abc")
@@ -179,5 +191,44 @@ class EngineClientTest {
         val req = server.takeRequest()
         assertEquals("/settings", req.path)
         assertEquals(24, JSONObject(req.body.readUtf8()).getInt("maxPeers"))
+    }
+
+    @Test
+    fun piecesParsesBucketsAndHitsPath() {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"id":"abc","infoHash":"dead","generation":3,"timestamp":1700000000000,
+                    "totalPieces":4,"pieceLength":16384,"lastPieceLength":1024,"maxBuckets":256,
+                    "buckets":[
+                      {"start":0,"end":1,"total":2,"selected":2,"verified":1,"receiving":1},
+                      {"start":2,"end":3,"total":2,"selected":1,"verified":2,"receiving":0}
+                    ]}"""
+            )
+        )
+        val t = client.pieces("abc", 256)
+        assertEquals("abc", t.id)
+        assertEquals("dead", t.infoHash)
+        assertEquals(3L, t.generation)
+        assertEquals(1700000000000L, t.timestamp)
+        assertEquals(4, t.totalPieces)
+        assertEquals(16384L, t.pieceLength)
+        assertEquals(1024L, t.lastPieceLength)
+        assertEquals(256, t.maxBuckets)
+        assertEquals(2, t.buckets.size)
+        val first = t.buckets[0]
+        assertEquals(0, first.start)
+        assertEquals(1, first.end)
+        assertEquals(2, first.total)
+        assertEquals(2, first.selected)
+        assertEquals(1, first.verified)
+        assertEquals(1, first.receiving)
+        val second = t.buckets[1]
+        assertEquals(2, second.start)
+        assertEquals(3, second.end)
+        assertEquals(2, second.total)
+        assertEquals(1, second.selected)
+        assertEquals(2, second.verified)
+        assertEquals(0, second.receiving)
+        assertEquals("/pieces/abc?maxBuckets=256", server.takeRequest().path)
     }
 }

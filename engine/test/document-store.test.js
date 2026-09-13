@@ -100,3 +100,44 @@ test('close drains outstanding writes, closes duplicates and preserves caller de
   await assert.rejects(get(0), /closed/)
   await assert.rejects(put(0, Buffer.from('abcd')), /closed/)
 })
+
+test('concurrent reads share one cache flush', async t => {
+  const { store, fds, put, get } = fixture(t)
+  await put(0, Buffer.from('abcd'))
+  await put(1, Buffer.from('efg'))
+  store.attach(fds)
+  let writes = 0
+  const transfer = store.transfer.bind(store)
+  store.transfer = async (...args) => {
+    if (args[2]) writes++
+    return transfer(...args)
+  }
+  const pieces = await Promise.all([get(0), get(1), get(0)])
+  assert.deepEqual(pieces.map(b => b.toString()), ['abcd', 'efg', 'abcd'])
+  assert.equal(writes, 2, 'Each prefetched piece must be flushed only once')
+  assert.equal(store.cacheBytes, 0)
+})
+
+test('closing immediately after attach persists cached pieces and pending writes', async t => {
+  const { store, fds, paths, put } = fixture(t)
+  await put(0, Buffer.from('abcd'))
+  store.attach(fds)
+  const pending = put(1, Buffer.from('efg'))
+  await promisify(store.close.bind(store))()
+  await pending
+  assert.equal(fs.readFileSync(paths[0], 'utf8'), 'abc')
+  assert.equal(fs.readFileSync(paths[1], 'utf8'), 'defg')
+  assert.equal(store.cacheBytes, 0)
+})
+
+test('invalid piece indexes and fractional ranges cannot read or corrupt storage', async t => {
+  const { store, fds, put, get } = fixture(t)
+  store.attach(fds)
+  for (const index of [-1, 0.5, NaN, Infinity, 2, '0']) {
+    await assert.rejects(get(index, { length: 0 }), /range/)
+    await assert.rejects(put(index, Buffer.from('abcd')), /length/)
+  }
+  for (const range of [{ offset: 0.5 }, { offset: NaN }, { length: 1.5 }, { length: NaN }]) {
+    await assert.rejects(get(0, range), /range/)
+  }
+})

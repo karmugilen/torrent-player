@@ -2,14 +2,15 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/engine"
-DEST="$ROOT/android/app/src/main/assets/nodejs-project"
-rm -rf "$DEST"
-mkdir -p "$DEST"
-cp "$SRC/package.json" "$SRC/main.js" "$SRC/protocol.js" "$SRC/document-store.js" "$DEST/"
+FINAL_DEST="$ROOT/android/app/src/main/assets/nodejs-project"
 if [ ! -d "$SRC/node_modules/webtorrent" ]; then
   echo "engine/node_modules missing; run npm ci --omit=optional --omit=dev in engine/" >&2
   exit 1
 fi
+mkdir -p "$ROOT/android/app/src/main/assets"
+DEST="$(mktemp -d "$ROOT/android/app/src/main/assets/.nodejs-project.XXXXXXXX")"
+trap 'rm -rf -- "$DEST"' EXIT
+cp "$SRC/package.json" "$SRC/main.js" "$SRC/protocol.js" "$SRC/document-store.js" "$DEST/"
 node "$SRC/scripts/patch-webtorrent.mjs"
 node "$SRC/scripts/patch-native-addons.mjs"
 cp -a "$SRC/node_modules" "$DEST/node_modules"
@@ -27,7 +28,7 @@ rm -f "$DEST/node_modules/utp-native/binding.cc" \
 find "$DEST" -type f \( \
   -name '*.md' -o -name '*.markdown' -o -name '*.map' -o -name '*.ts' \
   -o -name '*.d.ts' -o -name '*.yml' -o -name '*.yaml' -o -name '*.bc.js' \
-  -o -name '.npmignore' -o -name '*.tsbuildinfo' -o -name 'LICENSE*' \
+  -o -name '.npmignore' -o -name '*.tsbuildinfo' \
   -o -name 'CHANGELOG*' -o -name 'AUTHORS*' -o -name 'Makefile' \
 \) -delete
 find "$DEST" -type d \( \
@@ -43,5 +44,10 @@ if ! grep -q "parts\[0\] === 'configure'" "$DEST/main.js" || ! grep -q "parts\[0
   echo "synced engine is missing /configure or /metadata; refusing to package a stale daemon" >&2
   exit 1
 fi
-( cd "$SRC" && sha256sum main.js protocol.js document-store.js ) > "$DEST/bundle.rev"
-echo "synced engine -> $DEST (host .node binaries stripped; Android jniLibs provide uTP/WebRTC)"
+# Dependency and patch changes must invalidate the device's installed bundle too.
+( cd "$SRC" && sha256sum main.js protocol.js document-store.js package.json package-lock.json scripts/patch-webtorrent.mjs scripts/patch-native-addons.mjs ) > "$DEST/bundle.rev"
+sha256sum "$ROOT/scripts/sync-engine.sh" | cut -d ' ' -f1 >> "$DEST/bundle.rev"
+rm -rf -- "$FINAL_DEST"
+mv -- "$DEST" "$FINAL_DEST"
+trap - EXIT
+echo "synced engine -> $FINAL_DEST (host .node binaries stripped; Android jniLibs provide uTP/WebRTC)"

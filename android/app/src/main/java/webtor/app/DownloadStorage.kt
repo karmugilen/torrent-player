@@ -49,7 +49,33 @@ data class DownloadEntry(
     val downloaded get() = files.filter { it.index in selected }.sumOf { (it.length * it.progress.coerceIn(0.0, 1.0)).toLong() }
     val progress get() = if (total == 0L) 1f else (downloaded.toDouble() / total).toFloat().coerceIn(0f, 1f)
     val complete get() = files.filter { it.index in selected }.all { it.length == 0L || it.progress >= 1.0 }
+
+    fun controlsBusy(): Boolean = isDeleting || lifecycleState == EntryLifecycleState.PREPARING ||
+        lifecycleState == EntryLifecycleState.PAUSING || lifecycleState == EntryLifecycleState.STOPPING ||
+        lifecycleState == EntryLifecycleState.DELETING
+
+    fun stateLabel(): String = when {
+        isDeleting || lifecycleState == EntryLifecycleState.DELETING -> "Removing…"
+        lifecycleState == EntryLifecycleState.PAUSING -> "Pausing…"
+        lifecycleState == EntryLifecycleState.STOPPING -> "Stopping…"
+        lifecycleState == EntryLifecycleState.PREPARING -> "Preparing…"
+        error != null || lifecycleState == EntryLifecycleState.ERROR -> "Needs attention"
+        complete || lifecycleState == EntryLifecycleState.COMPLETED -> "Complete"
+        paused || engineId == null || lifecycleState == EntryLifecycleState.PAUSED ||
+            lifecycleState == EntryLifecycleState.STOPPED -> "Paused"
+        else -> "Downloading"
+    }
 }
+
+fun shouldSkipStartupRestore(entry: DownloadEntry): Boolean =
+    entry.complete || entry.paused || entry.isDeleting
+
+fun restoreStillApplies(
+    liveGeneration: Long,
+    commandGeneration: Long,
+    isDeleting: Boolean,
+    shutdownInProgress: Boolean,
+): Boolean = !isDeleting && !shutdownInProgress && liveGeneration == commandGeneration
 
 class DownloadStorage(private val context: Context) {
     private val prefs = context.getSharedPreferences("downloads", Context.MODE_PRIVATE)
@@ -62,7 +88,9 @@ class DownloadStorage(private val context: Context) {
         set(value) { prefs.edit().putString("folderName", value).commit() }
     var loadWarning: String? = null
         private set
-    val freeBytes get() = StatFs(context.filesDir.absolutePath).availableBytes
+    val freeBytes get() = runCatching {
+        StatFs(Environment.getExternalStorageDirectory().absolutePath).availableBytes
+    }.getOrDefault(-1L)
     private val legacyDir get() = File(context.filesDir, "webtorrent")
     val legacyBytes get() = legacyDir.walkTopDown().filter { it.isFile }.sumOf {
         runCatching { Os.stat(it.absolutePath).st_blocks * 512L }.getOrDefault(it.length())
@@ -207,6 +235,7 @@ class DownloadStorage(private val context: Context) {
                         put(MediaStore.MediaColumns.MIME_TYPE, mime(file.name))
                         put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                     }
+                    if (Build.VERSION.SDK_INT < 29) error("Choose a folder on this Android version")
                     resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                         ?: error("Cannot create file in Downloads")
                 }
@@ -313,11 +342,13 @@ class DownloadStorage(private val context: Context) {
         val paused = e.optBoolean("paused", false)
         val lifecycleState = when {
             isDeleting -> EntryLifecycleState.ERROR
+            savedState == EntryLifecycleState.PAUSING -> EntryLifecycleState.PAUSED
+            savedState == EntryLifecycleState.STOPPING || savedState == EntryLifecycleState.PREPARING -> EntryLifecycleState.STOPPED
             savedState != null -> savedState
             paused -> EntryLifecycleState.PAUSED
             else -> EntryLifecycleState.STOPPED
         }
-        return DownloadEntry(
+        val entry = DownloadEntry(
             e.getString("key"), e.getString("title"), e.getString("source"), e.getString("metadata"),
             if (e.isNull("engineId")) null else e.getString("engineId"), e.getString("destination"),
             (0 until files.length()).map { n -> files.getJSONObject(n).let { f ->
@@ -327,7 +358,7 @@ class DownloadStorage(private val context: Context) {
                     if (f.isNull("relativePath")) null else f.getString("relativePath"))
             } },
             (0 until selected.length()).map { selected.getInt(it) }.toSet(),
-            paused,
+            paused || isDeleting || savedState == EntryLifecycleState.PAUSING || savedState == EntryLifecycleState.STOPPING,
             status = null,
             error = if (isDeleting) "Deletion was interrupted. Tap Remove to retry." else null,
             addedAt = e.optLong("addedAt", 0L),
@@ -335,6 +366,11 @@ class DownloadStorage(private val context: Context) {
             isDeleting = false,
             lifecycleState = lifecycleState,
         )
+        require(entry.key.isNotBlank()) { "Missing torrent identity" }
+        require(entry.files.isNotEmpty() && entry.files.map { it.index }.toSet().size == entry.files.size) { "Invalid torrent files" }
+        require(entry.files.withIndex().all { (index, file) -> file.index == index && file.length >= 0 }) { "Invalid file index or length" }
+        require(entry.selected.isNotEmpty() && entry.selected.all { it in entry.files.indices }) { "Invalid file selection" }
+        return entry
     }
 
     private fun importTorrents(): List<File> = context.cacheDir.listFiles().orEmpty().filter {

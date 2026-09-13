@@ -20,7 +20,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.flow.collectLatest
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import webtor.core.PlayInfo
 
 class MainActivity : ComponentActivity() {
@@ -68,6 +69,8 @@ class MainActivity : ComponentActivity() {
                             onDarkTheme = session::setDarkTheme,
                             onCleanup = session::cleanupCache,
                             onClearAll = session::requestClearAll,
+                            onStopAll = session::stopAll,
+                            onStopAllAndExit = { session.stopAllAndExit() },
                         )
                         Screen.Files -> {
                             val entry = state.library.find { it.key == state.openTorrentKey }
@@ -77,22 +80,26 @@ class MainActivity : ComponentActivity() {
                                 error = state.error,
                                 onBack = session::closeFiles,
                                 onPlay = { index -> session.play(entry, index) },
+                                onPause = { session.pause(entry) },
+                                onResume = { session.resume(entry) },
+                                onDelete = { session.requestDelete(entry) },
                             )
                         }
                         Screen.Library -> LibraryLayer(state)
                     }
                     if (state.addSheetOpen) {
                         val prefetch = state.prepare?.takeIf { it.source == state.magnetDraft.trim() }
+                        val existing = existingLibraryEntry(state)
                         AddSheet(
                             magnet = state.magnetDraft,
                             engineReady = state.engineReady,
                             error = state.error,
                             status = prefetchStatus(prefetch),
-                            connecting = prefetch != null && prefetch.torrent?.ready != true,
+                            connecting = prefetch != null && prefetch.torrent?.ready != true && existing == null,
                             onMagnet = session::setMagnet,
                             onAdd = session::addCurrent,
                             onOpenFile = {
-                                torrentPicker.launch(arrayOf("application/x-bittorrent", "*/*"))
+                                pickTorrentFile()
                             },
                             onDismiss = session::closeAddSheet,
                             draft = prefetch,
@@ -101,6 +108,13 @@ class MainActivity : ComponentActivity() {
                             onSelectAll = session::selectAllFiles,
                             onSelectNone = session::selectNoFiles,
                             onDownload = session::startDownload,
+                            existingEntry = existing,
+                            onOpenExisting = existing?.let {
+                                {
+                                    session.closeAddSheet()
+                                    session.showFiles(it)
+                                }
+                            },
                         )
                     }
                     state.deleteRequest?.let { req ->
@@ -120,7 +134,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             LaunchedEffect(Unit) {
-                session.events.collectLatest { event -> handleEvent(event) }
+                lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    session.events.collect { event -> handleEvent(event) }
+                }
             }
         }
     }
@@ -133,7 +149,7 @@ class MainActivity : ComponentActivity() {
             onSettings = session::openSettings,
             onPause = session::pause,
             onResume = session::resume,
-            onPlay = session::open,
+            onPlay = { session.play(it) },
             onOpen = session::showFiles,
             onDelete = session::requestDelete,
             onRetry = session::retry,
@@ -143,12 +159,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIncoming(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        (application as WebtorApp).setCurrentActivity(this)
+        session.onForeground()
+    }
+
+    override fun onStop() {
+        if (isFinishing) (application as WebtorApp).clearCurrentActivity(this)
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        (application as WebtorApp).clearCurrentActivity(this)
+        super.onDestroy()
     }
 
     private fun handleEvent(event: UiEvent) {
         when (event) {
-            UiEvent.PickTorrent -> torrentPicker.launch(arrayOf("application/x-bittorrent", "*/*"))
+            UiEvent.PickTorrent -> pickTorrentFile()
             UiEvent.RequestNotifications -> requestNotifications()
             is UiEvent.PlayStream -> openPlayer(event.info)
             is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
@@ -157,22 +190,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncoming(intent: Intent?) {
-        if (intent == null) return
-        val stream = if (Build.VERSION.SDK_INT >= 33) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        if (intent?.action !in setOf(Intent.ACTION_VIEW, Intent.ACTION_SEND)) return
+        try {
+            val stream = if (Build.VERSION.SDK_INT >= 33) {
+                intent?.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            }
+            val source = intent?.data ?: stream
+            if (source?.scheme == "content") {
+                session.openTorrent(source)
+                return
+            }
+            // Never let an exported activity import another app's chosen private file path.
+            val text = source?.toString() ?: intent?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            val supported = supportedTorrentLink(text)
+            if (supported != null) session.add(supported)
+            else session.showError("Open a magnet link, an HTTP(S) torrent URL, or share a .torrent file.")
+        } catch (_: RuntimeException) {
+            session.showError("Cannot read this shared item. Try opening it with the torrent file picker.")
         }
-        val fileUri = intent.data?.takeIf { it.scheme == "content" || it.scheme == "file" } ?: stream
-        if (fileUri != null && intent.action != Intent.ACTION_MAIN) {
-            val asText = fileUri.toString()
-            if (asText.startsWith("magnet:")) session.add(asText) else session.openTorrent(fileUri)
-            return
-        }
-        val uri = intent.data?.toString() ?: intent.getStringExtra(Intent.EXTRA_TEXT)
-        if (uri != null && (uri.startsWith("magnet:") || uri.endsWith(".torrent") || uri.startsWith("http"))) {
-            session.add(uri.trim())
+    }
+
+    private fun pickTorrentFile() {
+        try {
+            torrentPicker.launch(arrayOf("application/x-bittorrent", "*/*"))
+        } catch (_: ActivityNotFoundException) {
+            session.showError("No file picker is available on this device.")
+        } catch (_: SecurityException) {
+            session.showError("The file picker could not be opened. Try sharing the torrent from your Files app.")
         }
     }
 
@@ -203,8 +250,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun launchViewer(intent: Intent, name: String) {
-        val missing = "Install VLC, mpv, or another video player."
-        val chosen = session.preferredPlayer()
+        val isMedia = intent.type?.let { it.startsWith("video/") || it.startsWith("audio/") } == true
+        val missing = if (isMedia) "Install VLC, mpv, or another media player."
+            else "No installed app can open this file type. The file is saved in Downloads/Webtor."
+        val chosen = if (isMedia) session.preferredPlayer() else null
         try {
             if (chosen != null) {
                 val targeted = Intent(intent).setClassName(chosen.packageName, chosen.activity)
@@ -218,12 +267,22 @@ class MainActivity : ComponentActivity() {
                 return
             }
             if (chosen == null) {
-                startActivity(Intent.createChooser(intent, "Play $name"))
+                startActivity(Intent.createChooser(intent, "Open $name"))
             } else {
                 startActivity(intent)
             }
         } catch (_: ActivityNotFoundException) {
             session.showError(missing)
+        } catch (_: SecurityException) {
+            session.showError("The selected app could not access this file. Choose another app in Settings.")
         }
+    }
+}
+
+private fun existingLibraryEntry(state: UiState): DownloadEntry? {
+    val hash = infoHashFromMagnet(state.magnetDraft) ?: state.prepare?.torrent?.infoHash
+    return state.library.find { entry ->
+        (hash != null && entry.key.equals(hash, true)) ||
+            (state.prepare?.engineId != null && entry.engineId == state.prepare.engineId)
     }
 }
