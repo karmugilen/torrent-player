@@ -13,6 +13,7 @@ data class PrepareDraft(
     val error: String? = null,
     val busy: Boolean = false,
     val committed: Boolean = false,
+    val query: String = "",
 )
 
 data class DeleteRequest(
@@ -51,6 +52,7 @@ sealed class UiEvent {
     data object RequestNotifications : UiEvent()
     data class PlayStream(val info: PlayInfo) : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String) : UiEvent()
+    data object ExitApp : UiEvent()
 }
 
 fun UiState.visibleLibrary(): List<DownloadEntry> = library.sortedByDescending { it.addedAt }

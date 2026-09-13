@@ -1,5 +1,6 @@
 package webtor.app
 
+import androidx.compose.foundation.Image
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.getValue
@@ -30,6 +31,8 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,6 +52,8 @@ fun LibraryScreen(
     onRetry: (DownloadEntry) -> Unit,
     onMessageShown: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val thumbnailRepository = remember(context) { ThumbnailRepository(context) }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
@@ -124,6 +129,7 @@ fun LibraryScreen(
             items(visible, key = { it.key }) { entry ->
                 TorrentRow(
                     entry = entry,
+                    thumbnail = remember(entry.key, entry.complete, entry.files) { thumbnailRepository.thumbnail(entry) },
                     onPause = { onPause(entry) },
                     onResume = { onResume(entry) },
                     onPlay = { onPlay(entry) },
@@ -139,6 +145,7 @@ fun LibraryScreen(
 @Composable
 private fun TorrentRow(
     entry: DownloadEntry,
+    thumbnail: android.graphics.Bitmap?,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onPlay: () -> Unit,
@@ -149,6 +156,7 @@ private fun TorrentRow(
     val status = entry.status
     val progress by animateFloatAsState(entry.progress, tween(500), label = "downloadProgress")
     Column(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        thumbnail?.let { Image(it.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxWidth().height(180.dp)) }
         Text(
             entry.title,
             style = MaterialTheme.typography.titleMedium,
@@ -192,6 +200,7 @@ private fun TorrentRow(
                 entry.paused || entry.engineId == null -> TextButton(onClick = onResume) { Text("Resume") }
                 else -> TextButton(onClick = onPause) { Text("Pause") }
             }
+            TextButton(onClick = onOpen) { Text("Details") }
             TextButton(onClick = onPlay) { Text(if (entry.selected.size > 1) "Files" else "Play") }
             TextButton(onClick = onDelete) { Text("Remove") }
         }

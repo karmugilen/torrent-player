@@ -95,6 +95,12 @@ class MainActivity : ComponentActivity() {
                                 torrentPicker.launch(arrayOf("application/x-bittorrent", "*/*"))
                             },
                             onDismiss = session::closeAddSheet,
+                            draft = prefetch,
+                            freeBytes = state.freeBytes,
+                            onToggle = session::toggleFile,
+                            onSelectAll = session::selectAllFiles,
+                            onSelectNone = session::selectNoFiles,
+                            onDownload = session::startDownload,
                         )
                     }
                     state.deleteRequest?.let { req ->
@@ -146,6 +152,7 @@ class MainActivity : ComponentActivity() {
             UiEvent.RequestNotifications -> requestNotifications()
             is UiEvent.PlayStream -> openPlayer(event.info)
             is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
+            UiEvent.ExitApp -> finish()
         }
     }
 

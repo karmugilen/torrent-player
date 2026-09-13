@@ -113,6 +113,8 @@ fun readableError(message: String?): String {
             "No peers found. The torrent may have no seeds right now. Try again later."
         "timed out" in lower || "timeout" in lower || "504" in lower ->
             "Timed out waiting for torrent metadata. Check your connection or try again."
+        "404" in lower || "not found" in lower ->
+            "Download session was removed. Resume to restart."
         else -> msg
     }
 }

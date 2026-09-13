@@ -60,7 +60,31 @@ data class PlayInfo(
 
 data class AddResult(val id: String, val infoHash: String?)
 
-class EngineException(message: String) : RuntimeException(message)
+data class PieceBucket(
+    val start: Int,
+    val end: Int,
+    val total: Int,
+    val selected: Int,
+    val verified: Int,
+    val receiving: Int,
+)
+
+data class PieceTelemetry(
+    val id: String,
+    val infoHash: String?,
+    val generation: Long,
+    val timestamp: Long,
+    val totalPieces: Int,
+    val pieceLength: Long,
+    val lastPieceLength: Long,
+    val maxBuckets: Int,
+    val buckets: List<PieceBucket>,
+)
+
+class EngineException(
+    message: String,
+    val statusCode: Int = 0,
+) : RuntimeException(message)
 
 class EngineClient(
     private val baseUrl: String,
@@ -112,7 +136,17 @@ class EngineClient(
     }
 
     fun remove(id: String, destroyStore: Boolean = true) {
-        post("/remove", JSONObject().put("id", id).put("destroyStore", destroyStore))
+        try {
+            post("/remove", JSONObject().put("id", id).put("destroyStore", destroyStore))
+        } catch (e: EngineException) {
+            if (e.statusCode != 404) throw e
+        }
+    }
+
+    fun pieces(id: String, maxBuckets: Int? = null): PieceTelemetry {
+        val query = if (maxBuckets != null) "?maxBuckets=$maxBuckets" else ""
+        val json = get("/pieces/$id$query")
+        return parsePieces(json)
     }
 
     fun metadata(id: String): String = get("/metadata/$id").getString("torrentData")
@@ -156,7 +190,7 @@ class EngineClient(
             val json = runCatching { JSONObject(text) }.getOrNull()
             if (!resp.isSuccessful) {
                 val err = json?.optString("error").orEmpty().ifEmpty { text }
-                throw EngineException("HTTP ${resp.code}: $err")
+                throw EngineException("HTTP ${resp.code}: $err", statusCode = resp.code)
             }
             return json ?: JSONObject()
         }
@@ -164,6 +198,37 @@ class EngineClient(
 
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        fun parsePieces(json: JSONObject): PieceTelemetry {
+            val buckets = ArrayList<PieceBucket>()
+            val arr: JSONArray = json.optJSONArray("buckets") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val b = arr.getJSONObject(i)
+                val start = b.optInt("start")
+                val end = b.optInt("end", start)
+                buckets.add(
+                    PieceBucket(
+                        start = start,
+                        end = end,
+                        total = b.optInt("total", end - start + 1),
+                        selected = b.optInt("selected"),
+                        verified = b.optInt("verified"),
+                        receiving = b.optInt("receiving"),
+                    )
+                )
+            }
+            return PieceTelemetry(
+                id = json.getString("id"),
+                infoHash = json.nullableString("infoHash"),
+                generation = json.optLong("generation", 1L),
+                timestamp = json.optLong("timestamp"),
+                totalPieces = json.optInt("totalPieces"),
+                pieceLength = json.optLong("pieceLength"),
+                lastPieceLength = json.optLong("lastPieceLength"),
+                maxBuckets = json.optInt("maxBuckets", buckets.size),
+                buckets = buckets,
+            )
+        }
 
         fun parseTorrent(json: JSONObject): TorrentStatus {
             val files = ArrayList<TorrentFile>()

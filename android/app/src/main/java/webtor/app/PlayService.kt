@@ -18,11 +18,19 @@ class PlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> {
-                running.set(false)
-                (application as? WebtorApp)?.session?.stopFromNotification()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+            ACTION_STOP, ACTION_DISMISS -> {
+                val app = application as? WebtorApp
+                if (app != null) {
+                    app.session.stopFromNotification {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                        running.set(false)
+                    }
+                } else {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    running.set(false)
+                }
                 return START_NOT_STICKY
             }
             ACTION_PAUSE -> (application as? WebtorApp)?.session?.pauseFromNotification()
@@ -32,12 +40,23 @@ class PlayService : Service() {
         intent?.getStringExtra(EXTRA_TEXT)?.let { text = it }
         if (intent?.hasExtra(EXTRA_PROGRESS) == true) progress = intent.getIntExtra(EXTRA_PROGRESS, 0)
         if (intent?.hasExtra(EXTRA_PAUSED) == true) paused = intent.getBooleanExtra(EXTRA_PAUSED, false)
+        if (intent?.hasExtra(EXTRA_MULTIPLE) == true) isMultiple = intent.getBooleanExtra(EXTRA_MULTIPLE, false)
         running.set(true)
         val notification = notification()
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIF_ID, notification)
+        }
+        if (paused) {
+            if (Build.VERSION.SDK_INT >= 24) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(false)
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(NOTIF_ID, notification)
         }
         return START_STICKY
     }
@@ -67,20 +86,28 @@ class PlayService : Service() {
         val stop = PendingIntent.getService(
             this, 3, Intent(this, PlayService::class.java).setAction(ACTION_STOP), flags,
         )
+        val dismiss = PendingIntent.getService(
+            this, 4, Intent(this, PlayService::class.java).setAction(ACTION_DISMISS), flags,
+        )
+        val pauseLabel = if (isMultiple) "Pause all" else "Pause"
+        val resumeLabel = if (isMultiple) "Resume all" else "Resume"
+        val stopLabel = if (isMultiple) "Stop all" else "Stop"
+
         val builder = NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentIntent(open)
-            .setOngoing(true)
+            .setDeleteIntent(dismiss)
+            .setOngoing(!paused)
             .setOnlyAlertOnce(true)
-            .setProgress(100, progress.coerceIn(0, 100), paused && progress == 0)
+            .setProgress(100, progress.coerceIn(0, 100), false)
             .addAction(
                 if (paused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
-                if (paused) "Resume" else "Pause",
+                if (paused) resumeLabel else pauseLabel,
                 if (paused) resume else pause,
             )
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, stopLabel, stop)
         return builder.build()
     }
 
@@ -88,25 +115,36 @@ class PlayService : Service() {
     private var text: String = "Downloading"
     private var progress: Int = 0
     private var paused: Boolean = false
+    private var isMultiple: Boolean = false
 
     companion object {
         const val ACTION_STOP = "webtor.app.STOP"
+        const val ACTION_DISMISS = "webtor.app.DISMISS"
         const val ACTION_PAUSE = "webtor.app.PAUSE"
         const val ACTION_RESUME = "webtor.app.RESUME"
         const val EXTRA_TITLE = "title"
         const val EXTRA_TEXT = "text"
         const val EXTRA_PROGRESS = "progress"
         const val EXTRA_PAUSED = "paused"
+        const val EXTRA_MULTIPLE = "multiple"
         private const val CHANNEL = "webtor-downloads"
         private const val NOTIF_ID = 42
         private val running = AtomicBoolean(false)
 
-        fun start(ctx: Context, title: String, progress: Int = 0, paused: Boolean = false, text: String = "Downloading") {
+        fun start(
+            ctx: Context,
+            title: String,
+            progress: Int = 0,
+            paused: Boolean = false,
+            text: String = "Downloading",
+            multiple: Boolean = false,
+        ) {
             val i = Intent(ctx, PlayService::class.java)
                 .putExtra(EXTRA_TITLE, title)
                 .putExtra(EXTRA_PROGRESS, progress)
                 .putExtra(EXTRA_PAUSED, paused)
                 .putExtra(EXTRA_TEXT, text)
+                .putExtra(EXTRA_MULTIPLE, multiple)
             if (running.get()) {
                 ctx.startService(i)
             } else if (Build.VERSION.SDK_INT >= 26) {

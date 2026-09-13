@@ -23,12 +23,27 @@ data class SavedFile(
     val relativePath: String? = null,
 )
 
+enum class EntryLifecycleState {
+    PREPARING,
+    DOWNLOADING,
+    PAUSING,
+    PAUSED,
+    STOPPING,
+    STOPPED,
+    COMPLETED,
+    DELETING,
+    ERROR;
+}
+
 data class DownloadEntry(
     val key: String, val title: String, val source: String, val metadata: String,
     val engineId: String?, val destination: String, val files: List<SavedFile>,
     val selected: Set<Int>, val paused: Boolean = false,
     val status: TorrentStatus? = null, val error: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
+    val generation: Long = 0L,
+    val isDeleting: Boolean = false,
+    val lifecycleState: EntryLifecycleState = if (paused) EntryLifecycleState.PAUSED else if (engineId != null) EntryLifecycleState.DOWNLOADING else EntryLifecycleState.STOPPED,
 ) {
     val total get() = files.filter { it.index in selected }.sumOf { it.length }
     val downloaded get() = files.filter { it.index in selected }.sumOf { (it.length * it.progress.coerceIn(0.0, 1.0)).toLong() }
@@ -231,7 +246,10 @@ class DownloadStorage(private val context: Context) {
                     ?.use { if (it.moveToFirst()) it.getString(0) else null }
             }
         }
-        val failed = files.filter { it.uri != null }.filter { f -> runCatching { deleteUri(Uri.parse(f.uri)) }.isFailure }
+        val targetUris = files.mapNotNull { it.uri }.distinct()
+        val failed = targetUris.filter { uriString ->
+            runCatching { deleteUri(Uri.parse(uriString)) }.isFailure
+        }
         check(failed.isEmpty()) { "Could not delete ${failed.size} file(s). Check folder access and retry." }
         val root = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Webtor")
         val directories = paths.flatMap { relative ->
@@ -240,24 +258,28 @@ class DownloadStorage(private val context: Context) {
         for (directory in directories) {
             // rmdir only: never recursively erase a folder or another app's content.
             if (directory.exists() && directory.list()?.isEmpty() == true) {
-                check(directory.delete() || !directory.exists()) {
-                    "Files were deleted, but the empty download folder could not be removed: ${directory.name}"
-                }
+                directory.delete()
             }
         }
     }
 
     private fun deleteUri(uri: Uri) {
         if (DocumentsContract.isDocumentUri(context, uri)) {
-            try { check(DocumentsContract.deleteDocument(resolver, uri)) { "Delete failed" } }
-            catch (_: java.io.FileNotFoundException) { /* Already removed in Files. */ }
+            try {
+                check(DocumentsContract.deleteDocument(resolver, uri)) { "Delete failed" }
+            } catch (_: java.io.FileNotFoundException) {
+                /* Already removed in Files. */
+            } catch (_: IllegalArgumentException) {
+                /* Document does not exist. */
+            }
         } else {
             check(uri.scheme == "content" && uri.authority == MediaStore.AUTHORITY) { "Unrecognized download location" }
             val deleted = resolver.delete(uri, null, null)
             if (deleted == 0) {
                 // A zero count can mean either an already missing file or a refused deletion.
-                val stillExists = resolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
-                    ?.use { it.moveToFirst() } ?: error("Could not verify deletion")
+                val stillExists = runCatching {
+                    resolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)?.use { it.moveToFirst() }
+                }.getOrNull() == true
                 check(!stillExists) { "Provider refused to delete file" }
             }
         }
@@ -268,7 +290,11 @@ class DownloadStorage(private val context: Context) {
         entries.forEach { e ->
             array.put(JSONObject().put("key", e.key).put("title", e.title).put("source", e.source)
                 .put("metadata", e.metadata).put("engineId", e.engineId).put("destination", e.destination)
-                .put("paused", e.paused).put("addedAt", e.addedAt).put("selected", JSONArray(e.selected.toList()))
+                .put("paused", e.paused).put("addedAt", e.addedAt)
+                .put("generation", e.generation)
+                .put("isDeleting", e.isDeleting)
+                .put("lifecycleState", e.lifecycleState.name)
+                .put("selected", JSONArray(e.selected.toList()))
                 .put("files", JSONArray().apply {
                     e.files.forEach { f -> put(JSONObject().put("index", f.index).put("name", f.name)
                         .put("path", f.path).put("length", f.length).put("uri", f.uri).put("progress", f.progress)
@@ -281,6 +307,16 @@ class DownloadStorage(private val context: Context) {
     private fun parseEntry(e: JSONObject): DownloadEntry {
         val files = e.getJSONArray("files")
         val selected = e.getJSONArray("selected")
+        val stateName = e.optString("lifecycleState", "")
+        val savedState = EntryLifecycleState.entries.find { it.name == stateName }
+        val isDeleting = e.optBoolean("isDeleting", false)
+        val paused = e.optBoolean("paused", false)
+        val lifecycleState = when {
+            isDeleting -> EntryLifecycleState.ERROR
+            savedState != null -> savedState
+            paused -> EntryLifecycleState.PAUSED
+            else -> EntryLifecycleState.STOPPED
+        }
         return DownloadEntry(
             e.getString("key"), e.getString("title"), e.getString("source"), e.getString("metadata"),
             if (e.isNull("engineId")) null else e.getString("engineId"), e.getString("destination"),
@@ -291,8 +327,13 @@ class DownloadStorage(private val context: Context) {
                     if (f.isNull("relativePath")) null else f.getString("relativePath"))
             } },
             (0 until selected.length()).map { selected.getInt(it) }.toSet(),
-            e.optBoolean("paused"),
+            paused,
+            status = null,
+            error = if (isDeleting) "Deletion was interrupted. Tap Remove to retry." else null,
             addedAt = e.optLong("addedAt", 0L),
+            generation = e.optLong("generation", 0L),
+            isDeleting = false,
+            lifecycleState = lifecycleState,
         )
     }
 

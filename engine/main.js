@@ -19,7 +19,8 @@ import {
   readJson,
   sendJson,
   parsePath,
-  defaultSelectedIndexes
+  defaultSelectedIndexes,
+  pieceTelemetry
 } from './protocol.js'
 
 const CTL_HOST = '127.0.0.1'
@@ -139,7 +140,7 @@ async function handleAdd (req, res) {
     ? body.announce
     : [...new Set([...(parsed?.announce || []), ...DEFAULT_ANNOUNCE])]
   const id = crypto.randomUUID()
-  const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, selected: [], documentStore: null, prefetchPaused: false }
+  const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, selected: [], documentStore: null, prefetchPaused: false, generation: 1 }
   const torrent = client.add(addId, {
     ...(record.prepared
       ? {
@@ -186,6 +187,7 @@ function applySelection (rec, selected) {
   })
   rec.selected = next
   rec.prefetchPaused = false
+  rec.generation = (rec.generation || 1) + 1
 }
 
 function pausePrefetch (rec) {
@@ -360,7 +362,27 @@ async function handlePause (req, res, paused) {
     for (const peer of rec.peerAddresses || []) rec.torrent.addPeer(peer)
     rec.torrent.discovery?.tracker?.update()
   }
+  rec.generation = (rec.generation || 1) + 1
   sendJson(res, 200, { ok: true })
+}
+
+function handlePieces (id, search, res) {
+  const rec = findRecord(id)
+  if (!rec) {
+    sendJson(res, 404, { error: 'torrent not found' })
+    return
+  }
+  if (rec.error) {
+    sendJson(res, 500, { error: rec.error })
+    return
+  }
+  if (!rec.torrent?.ready || !rec.torrent?.pieces) {
+    sendJson(res, 409, { error: 'Metadata not ready' })
+    return
+  }
+  const maxBuckets = search?.get('maxBuckets')
+  const telemetry = pieceTelemetry(rec, { maxBuckets })
+  sendJson(res, 200, telemetry)
 }
 
 async function handleShutdown (res) {
@@ -377,7 +399,7 @@ async function handleShutdown (res) {
 }
 
 const ctlServer = http.createServer(async (req, res) => {
-  const { parts } = parsePath(req.url || '/')
+  const { parts, search } = parsePath(req.url || '/')
   const method = req.method || 'GET'
   try {
     if (method === 'GET' && parts.length === 1 && parts[0] === 'stats') {
@@ -386,6 +408,10 @@ const ctlServer = http.createServer(async (req, res) => {
     }
     if (method === 'GET' && parts[0] === 'torrent' && parts[1]) {
       handleTorrent(parts[1], res)
+      return
+    }
+    if (method === 'GET' && parts[0] === 'pieces' && parts[1]) {
+      handlePieces(parts[1], search, res)
       return
     }
     if (method === 'GET' && parts[0] === 'metadata' && parts[1]) {

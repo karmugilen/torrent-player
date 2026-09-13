@@ -35,11 +35,18 @@ class LibrarySession(private val app: Application) {
     private val io = Dispatchers.IO
     private val mutex = Mutex()
     private val started = AtomicBoolean(false)
+    private val isShuttingDown = AtomicBoolean(false)
+    private var serviceSuppressed = false
+    private val recentlyInvalidatedIds = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
     private var lastPersistAt = 0L
     private var debounceJob: Job? = null
     private var prefetchJob: Job? = null
     private var storageStatsJob: Job? = null
     private var lastServiceUpdate = 0L
+    private var draftGeneration = 0L
+    private var commitInProgress = false
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -49,6 +56,7 @@ class LibrarySession(private val app: Application) {
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
+        serviceSuppressed = settings.getBoolean("serviceSuppressed", false)
         // Reset previous custom connection tuning once; subsequent user changes persist.
         if (!settings.getBoolean("peerDefaultsV2", false)) {
             settings.edit().putInt("maxPeers", 55).putBoolean("peerDefaultsV2", true).apply()
@@ -90,6 +98,7 @@ class LibrarySession(private val app: Application) {
     }
 
     fun setMagnet(value: String) {
+        draftGeneration++
         _ui.update { it.copy(magnetDraft = value, error = null) }
         debounceJob?.cancel()
         debounceJob = scope.launch {
@@ -106,6 +115,7 @@ class LibrarySession(private val app: Application) {
     }
     fun openAddSheet() = _ui.update { it.copy(addSheetOpen = true, error = null) }
     fun closeAddSheet() {
+        draftGeneration++
         debounceJob?.cancel()
         _ui.update { it.copy(addSheetOpen = false, error = null) }
         dropUncommittedPrefetch()
@@ -191,11 +201,9 @@ class LibrarySession(private val app: Application) {
         if (prep != null && prep.source == id) {
             _ui.update {
                 it.copy(
-                    prepare = prep.copy(committed = true, error = null),
-                    screen = Screen.Prepare,
-                    addSheetOpen = false,
+                    prepare = prep.copy(committed = false, error = null),
+                    addSheetOpen = true,
                     error = null,
-                    magnetDraft = "",
                 )
             }
             if (prep.torrent?.ready != true && prefetchJob?.isActive != true) {
@@ -214,7 +222,7 @@ class LibrarySession(private val app: Application) {
         }
         debounceJob?.cancel()
         prefetchJob?.cancel()
-        prefetchJob = scope.launch { addTorrent(id, commit = true) }
+        prefetchJob = scope.launch { addTorrent(id, commit = false) }
     }
 
     fun openTorrent(uri: Uri) {
@@ -233,7 +241,7 @@ class LibrarySession(private val app: Application) {
                     }
                 }
                 try {
-                    addTorrent(file.absolutePath)
+                    addTorrent(file.absolutePath, commit = false)
                 } finally {
                     file.delete()
                 }
@@ -245,6 +253,7 @@ class LibrarySession(private val app: Application) {
     }
 
     fun cancelPrepare() {
+        draftGeneration++
         debounceJob?.cancel()
         prefetchJob?.cancel()
         scope.launch {
@@ -287,6 +296,8 @@ class LibrarySession(private val app: Application) {
     fun startDownload() {
         scope.launch {
             mutex.withLock {
+                if (commitInProgress) return@withLock
+                commitInProgress = true
                 val draft = _ui.value.prepare ?: return@withLock
                 val torrent = draft.torrent
                 if (torrent?.ready != true) {
@@ -354,6 +365,8 @@ class LibrarySession(private val app: Application) {
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
                     setPrepareError(readableError(t))
+                } finally {
+                    commitInProgress = false
                 }
             }
         }
@@ -361,25 +374,70 @@ class LibrarySession(private val app: Application) {
 
     fun pause(entry: DownloadEntry) {
         scope.launch {
-            val id = entry.engineId ?: return@launch
+            if (isShuttingDown.get()) return@launch
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launch
+            val id = current.engineId ?: return@launch
+            val prevLifecycle = current.lifecycleState
+            val prevPaused = current.paused
+            val nextGen = current.generation + 1
+
+            patch(current.key) {
+                it.copy(
+                    generation = nextGen,
+                    lifecycleState = EntryLifecycleState.PAUSING,
+                    error = null,
+                )
+            }
+
             try {
                 withContext(io) { client.pause(id) }
-                patch(entry.key) { it.copy(paused = true, error = null) }
+                patch(current.key) {
+                    if (it.generation == nextGen) {
+                        it.copy(paused = true, lifecycleState = EntryLifecycleState.PAUSED, error = null)
+                    } else it
+                }
                 persist()
                 syncService()
             } catch (t: Throwable) {
-                patch(entry.key) { it.copy(error = readableError(t)) }
+                if (t is CancellationException) throw t
+                patch(current.key) {
+                    if (it.generation == nextGen) {
+                        it.copy(paused = prevPaused, lifecycleState = prevLifecycle, error = readableError(t))
+                    } else it
+                }
             }
         }
     }
 
     fun resume(entry: DownloadEntry) {
         scope.launch {
+            if (isShuttingDown.get()) return@launch
+            serviceSuppressed = false
+            settings.edit().putBoolean("serviceSuppressed", false).apply()
+
+            val current = _ui.value.library.find { it.key == entry.key } ?: entry
+            if (current.isDeleting || current.complete) return@launch
+
+            val prevLifecycle = current.lifecycleState
+            val prevPaused = current.paused
+            val nextGen = current.generation + 1
+
+            patch(current.key) {
+                it.copy(
+                    generation = nextGen,
+                    lifecycleState = EntryLifecycleState.DOWNLOADING,
+                    error = null,
+                )
+            }
+
             try {
-                val current = _ui.value.library.find { it.key == entry.key } ?: entry
                 if (current.engineId != null) {
                     withContext(io) { client.resume(current.engineId) }
-                    patch(current.key) { it.copy(paused = false, error = null) }
+                    patch(current.key) {
+                        if (it.generation == nextGen) {
+                            it.copy(paused = false, lifecycleState = EntryLifecycleState.DOWNLOADING, error = null)
+                        } else it
+                    }
                 } else {
                     restoreEntry(current, startPaused = false)
                 }
@@ -387,15 +445,44 @@ class LibrarySession(private val app: Application) {
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                patch(entry.key) { it.copy(error = readableError(t)) }
+                patch(current.key) {
+                    if (it.generation == nextGen) {
+                        it.copy(paused = prevPaused, lifecycleState = prevLifecycle, error = readableError(t))
+                    } else it
+                }
             }
         }
     }
 
     fun stop(entry: DownloadEntry) {
         scope.launch {
-            entry.engineId?.let { id -> runCatching { withContext(io) { client.remove(id, false) } } }
-            patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launch
+            val id = current.engineId
+            val nextGen = current.generation + 1
+
+            patch(current.key) {
+                it.copy(
+                    generation = nextGen,
+                    lifecycleState = EntryLifecycleState.STOPPING,
+                    error = null,
+                )
+            }
+
+            if (id != null) {
+                recentlyInvalidatedIds.add(id)
+                runCatching { withContext(io) { client.remove(id, false) } }
+            }
+
+            patch(current.key) {
+                if (it.generation == nextGen) {
+                    it.copy(
+                        engineId = null,
+                        paused = true,
+                        status = null,
+                        lifecycleState = if (it.complete) EntryLifecycleState.COMPLETED else EntryLifecycleState.STOPPED,
+                    )
+                } else it
+            }
             persist()
             syncService()
         }
@@ -465,39 +552,107 @@ class LibrarySession(private val app: Application) {
 
     fun deleteKeep() {
         val req = _ui.value.deleteRequest ?: return
+        val target = _ui.value.library.find { it.key == req.key } ?: run {
+            _ui.update { it.copy(deleteRequest = null) }
+            return
+        }
+        val nextGen = target.generation + 1
+        // Immediately dismiss dialog and render Removing... state synchronously
+        _ui.update { state ->
+            state.copy(
+                deleteRequest = null,
+                library = state.library.map {
+                    if (it.key == req.key) {
+                        it.copy(
+                            isDeleting = true,
+                            lifecycleState = EntryLifecycleState.DELETING,
+                            generation = nextGen,
+                        )
+                    } else it
+                },
+            )
+        }
+        syncService()
+
         scope.launch {
-            val entry = _ui.value.library.find { it.key == req.key }
-            entry?.engineId?.let { id -> runCatching { withContext(io) { client.remove(id, false) } } }
-            _ui.update { it.copy(library = it.library.filter { e -> e.key != req.key }, deleteRequest = null) }
-            persist()
-            refreshStorageStats()
-            syncService()
+            try {
+                val id = target.engineId
+                if (id != null) {
+                    recentlyInvalidatedIds.add(id)
+                    runCatching { withContext(io) { client.remove(id, false) } }
+                }
+                _ui.update { state ->
+                    state.copy(library = state.library.filter { it.key != target.key })
+                }
+                persist()
+                refreshStorageStats()
+                syncService()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                patch(target.key) {
+                    it.copy(
+                        isDeleting = false,
+                        lifecycleState = EntryLifecycleState.ERROR,
+                        error = readableError(t),
+                    )
+                }
+                syncService()
+            }
         }
     }
 
     fun deleteErase() {
         val req = _ui.value.deleteRequest ?: return
+        val target = _ui.value.library.find { it.key == req.key } ?: run {
+            _ui.update { it.copy(deleteRequest = null) }
+            return
+        }
+        val nextGen = target.generation + 1
+        // Immediately dismiss dialog and render Removing... state synchronously
+        _ui.update { state ->
+            state.copy(
+                deleteRequest = null,
+                library = state.library.map {
+                    if (it.key == req.key) {
+                        it.copy(
+                            isDeleting = true,
+                            lifecycleState = EntryLifecycleState.DELETING,
+                            generation = nextGen,
+                        )
+                    } else it
+                },
+            )
+        }
+        syncService()
+
         scope.launch {
-            val entry = _ui.value.library.find { it.key == req.key } ?: run {
-                _ui.update { it.copy(deleteRequest = null) }
-                return@launch
-            }
             try {
-                entry.engineId?.let { id -> withContext(io) { client.remove(id, false) } }
-                patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
-                withContext(io) { storage.deleteFiles(entry.files) }
-                _ui.update { it.copy(library = it.library.filter { e -> e.key != req.key }, deleteRequest = null) }
+                val id = target.engineId
+                if (id != null) {
+                    recentlyInvalidatedIds.add(id)
+                    runCatching { withContext(io) { client.remove(id, false) } }
+                }
+                withContext(io) { storage.deleteFiles(target.files) }
+                _ui.update { state ->
+                    state.copy(library = state.library.filter { it.key != target.key })
+                }
                 persist()
                 refreshStorageStats()
                 syncService()
             } catch (t: Throwable) {
-                patch(entry.key) {
+                if (t is CancellationException) throw t
+                patch(target.key) {
                     it.copy(
+                        isDeleting = false,
+                        lifecycleState = EntryLifecycleState.ERROR,
+                        engineId = null,
+                        paused = true,
+                        status = null,
                         error = "Could not delete the downloaded files. Check folder access or delete them from your file manager, then retry.",
                     )
                 }
-                _ui.update { it.copy(deleteRequest = null) }
                 persist()
+                syncService()
             }
         }
     }
@@ -506,7 +661,10 @@ class LibrarySession(private val app: Application) {
         scope.launch {
             val next = _ui.value.library.map { entry ->
                 try {
-                    entry.engineId?.let { id -> withContext(io) { client.remove(id, false) } }
+                    entry.engineId?.let { id ->
+                        recentlyInvalidatedIds.add(id)
+                        withContext(io) { client.remove(id, false) }
+                    }
                     patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
                     withContext(io) { storage.deleteFiles(entry.files) }
                     entry.copy(
@@ -546,11 +704,55 @@ class LibrarySession(private val app: Application) {
 
     fun pauseFromNotification() {
         scope.launch {
-            val entries = _ui.value.library.filter { it.engineId != null && !it.paused && !it.complete }
-            for (entry in entries) {
-                val id = entry.engineId ?: continue
-                runCatching { withContext(io) { client.pause(id) } }
-                patch(entry.key) { it.copy(paused = true, error = null) }
+            if (isShuttingDown.get()) return@launch
+            val targets = _ui.value.library.filter {
+                it.engineId != null && !it.paused && !it.complete && !it.isDeleting
+            }
+            if (targets.isEmpty()) return@launch
+
+            val genMap = targets.associate { it.key to (it.generation + 1) }
+
+            _ui.update { state ->
+                state.copy(
+                    library = state.library.map { entry ->
+                        val nextGen = genMap[entry.key]
+                        if (nextGen != null) {
+                            entry.copy(
+                                generation = nextGen,
+                                lifecycleState = EntryLifecycleState.PAUSING,
+                                error = null,
+                            )
+                        } else entry
+                    },
+                )
+            }
+
+            var failedCount = 0
+            for (target in targets) {
+                val id = target.engineId ?: continue
+                val nextGen = genMap[target.key] ?: continue
+                try {
+                    withContext(io) { client.pause(id) }
+                    patch(target.key) {
+                        if (it.generation == nextGen) {
+                            it.copy(paused = true, lifecycleState = EntryLifecycleState.PAUSED, error = null)
+                        } else it
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    failedCount++
+                    patch(target.key) {
+                        if (it.generation == nextGen) {
+                            it.copy(paused = target.paused, lifecycleState = target.lifecycleState, error = readableError(t))
+                        } else it
+                    }
+                }
+            }
+
+            if (failedCount > 0) {
+                _ui.update {
+                    it.copy(error = "Could not pause $failedCount download(s). Check connection and retry.")
+                }
             }
             persist()
             syncService()
@@ -559,18 +761,34 @@ class LibrarySession(private val app: Application) {
 
     fun resumeFromNotification() {
         scope.launch {
-            val entries = _ui.value.library.filter { it.paused && !it.complete }
-            for (entry in entries) {
+            if (isShuttingDown.get()) return@launch
+            serviceSuppressed = false
+            settings.edit().putBoolean("serviceSuppressed", false).apply()
+
+            val targets = _ui.value.library.filter { it.paused && !it.complete && !it.isDeleting }
+            for (entry in targets) {
+                val nextGen = entry.generation + 1
+                patch(entry.key) {
+                    it.copy(generation = nextGen, lifecycleState = EntryLifecycleState.DOWNLOADING, error = null)
+                }
                 try {
                     if (entry.engineId != null) {
                         withContext(io) { client.resume(entry.engineId) }
-                        patch(entry.key) { it.copy(paused = false, error = null) }
+                        patch(entry.key) {
+                            if (it.generation == nextGen) {
+                                it.copy(paused = false, lifecycleState = EntryLifecycleState.DOWNLOADING, error = null)
+                            } else it
+                        }
                     } else {
                         restoreEntry(entry, startPaused = false)
                     }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
-                    patch(entry.key) { it.copy(error = readableError(t)) }
+                    patch(entry.key) {
+                        if (it.generation == nextGen) {
+                            it.copy(paused = true, lifecycleState = EntryLifecycleState.PAUSED, error = readableError(t))
+                        } else it
+                    }
                 }
             }
             persist()
@@ -578,22 +796,118 @@ class LibrarySession(private val app: Application) {
         }
     }
 
-    fun stopFromNotification() {
+    fun stopFromNotification(onComplete: (() -> Unit)? = null) {
+        stopAll(onComplete)
+    }
+
+    fun stopAll(onFinished: (() -> Unit)? = null) {
+        serviceSuppressed = true
+        settings.edit().putBoolean("serviceSuppressed", true).apply()
         scope.launch {
-            val entries = _ui.value.library.filter { it.engineId != null }
-            for (entry in entries) {
-                val id = entry.engineId ?: continue
-                runCatching { withContext(io) { client.remove(id, false) } }
+            mutex.withLock {
+                val targets = _ui.value.library.filter { it.engineId != null && !it.complete && !it.isDeleting }
+                val genMap = targets.associate { it.key to (it.generation + 1) }
+                _ui.update { state ->
+                    state.copy(
+                        library = state.library.map { entry ->
+                            val nextGen = genMap[entry.key]
+                            if (nextGen != null) {
+                                entry.copy(
+                                    generation = nextGen,
+                                    lifecycleState = EntryLifecycleState.STOPPING,
+                                    error = null,
+                                )
+                            } else entry
+                        },
+                    )
+                }
+                for (target in targets) {
+                    val id = target.engineId ?: continue
+                    recentlyInvalidatedIds.add(id)
+                    runCatching { withContext(io) { client.remove(id, false) } }
+                }
+                _ui.update { state ->
+                    state.copy(
+                        library = state.library.map { entry ->
+                            if (genMap.containsKey(entry.key)) {
+                                entry.copy(
+                                    engineId = null,
+                                    paused = true,
+                                    status = null,
+                                    lifecycleState = EntryLifecycleState.STOPPED,
+                                )
+                            } else entry
+                        },
+                    )
+                }
+                persist()
+                PlayService.stop(app)
+                onFinished?.invoke()
             }
-            _ui.update { state ->
-                state.copy(
-                    library = state.library.map { entry ->
-                        if (entry.engineId == null) entry
-                        else entry.copy(engineId = null, paused = true, status = null)
-                    },
-                )
+        }
+    }
+
+    fun stopAllAndExit(onFinished: (() -> Unit)? = null) {
+        if (isShuttingDown.getAndSet(true)) return
+        serviceSuppressed = true
+        settings.edit().putBoolean("serviceSuppressed", true).apply()
+
+        debounceJob?.cancel()
+        prefetchJob?.cancel()
+        storageStatsJob?.cancel()
+
+        scope.launch {
+            mutex.withLock {
+                val prepId = _ui.value.prepare?.engineId
+                _ui.update { it.copy(prepare = null, addSheetOpen = false) }
+                if (prepId != null) {
+                    recentlyInvalidatedIds.add(prepId)
+                    runCatching { withContext(io) { client.remove(prepId, true) } }
+                }
+
+                val allLive = _ui.value.library.filter { it.engineId != null }
+                val genMap = allLive.associate { it.key to (it.generation + 1) }
+                _ui.update { state ->
+                    state.copy(
+                        library = state.library.map { entry ->
+                            val nextGen = genMap[entry.key]
+                            if (nextGen != null) {
+                                entry.copy(
+                                    generation = nextGen,
+                                    lifecycleState = EntryLifecycleState.STOPPING,
+                                )
+                            } else entry
+                        },
+                    )
+                }
+
+                // Stop all torrent network activity and seeding by removing active torrents from engine
+                // WITHOUT calling client.shutdown() or /shutdown endpoint
+                for (entry in allLive) {
+                    val id = entry.engineId ?: continue
+                    recentlyInvalidatedIds.add(id)
+                    runCatching { withContext(io) { client.remove(id, false) } }
+                }
+
+                _ui.update { state ->
+                    state.copy(
+                        library = state.library.map { entry ->
+                            if (genMap.containsKey(entry.key)) {
+                                entry.copy(
+                                    engineId = null,
+                                    paused = true,
+                                    status = null,
+                                    lifecycleState = if (entry.complete) EntryLifecycleState.COMPLETED else EntryLifecycleState.STOPPED,
+                                )
+                            } else entry
+                        },
+                    )
+                }
+                persist()
+                PlayService.stop(app)
+                _events.emit(UiEvent.ExitApp)
+                onFinished?.invoke()
             }
-            persist()
         }
     }
 
@@ -799,11 +1113,16 @@ class LibrarySession(private val app: Application) {
         }
     }
 
+    private data class PollTarget(val key: String, val engineId: String, val generation: Long)
+
     private suspend fun pollLoop() {
         while (true) {
+            if (isShuttingDown.get()) break
             val snapshot = _ui.value
-            val active = snapshot.library.any { it.engineId != null && !it.complete && !it.paused } ||
-                snapshot.prepare != null
+            val active = snapshot.library.any {
+                it.engineId != null && !it.complete && !it.paused && !it.isDeleting &&
+                    it.lifecycleState != EntryLifecycleState.STOPPING && it.lifecycleState != EntryLifecycleState.DELETING
+            } || snapshot.prepare != null
             delay(
                 when {
                     snapshot.prepare != null && snapshot.prepare.torrent?.ready != true -> 500
@@ -811,27 +1130,58 @@ class LibrarySession(private val app: Application) {
                     else -> 1500
                 },
             )
+            if (isShuttingDown.get()) break
             val state = _ui.value
             if (!state.engineReady) continue
-            val ids = buildList {
-                state.library.forEach { e -> e.engineId?.let(::add) }
-                if (prefetchJob?.isActive != true) state.prepare?.engineId?.let(::add)
-            }.distinct()
+
+            val targets = state.library.mapNotNull { e ->
+                val id = e.engineId ?: return@mapNotNull null
+                if (e.isDeleting || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING) {
+                    return@mapNotNull null
+                }
+                PollTarget(e.key, id, e.generation)
+            }
+            val prepareTarget = if (prefetchJob?.isActive != true) state.prepare?.engineId else null
+
             var changed = false
             var completed = false
-            for (id in ids) {
+            for (target in targets) {
+                if (isShuttingDown.get()) break
                 try {
-                    val t = withContext(io) { client.torrent(id) }
-                    val before = _ui.value.library.find { it.engineId == id }
-                    applyStatus(t)
-                    applyPrepareStatus(t)
-                    val after = _ui.value.library.find { it.engineId == id }
-                    if (before != null && after != null && before.downloaded != after.downloaded) changed = true
-                    if (after?.complete == true && before?.complete != true) completed = true
+                    val t = withContext(io) { client.torrent(target.engineId) }
+                    val current = _ui.value.library.find { it.key == target.key }
+                    if (current != null && current.engineId == target.engineId && current.generation == target.generation && !current.isDeleting) {
+                        val beforeDownloaded = current.downloaded
+                        applyStatus(t, target.key, target.generation)
+                        val after = _ui.value.library.find { it.key == target.key }
+                        if (after != null && after.downloaded != beforeDownloaded) changed = true
+                        if (after?.complete == true && current.complete != true) completed = true
+                    }
                 } catch (e: EngineException) {
-                    if (!state.restoring) markMissingEngine(id, e)
+                    val current = _ui.value.library.find { it.key == target.key }
+                    val isIntentional = current == null ||
+                        current.engineId != target.engineId ||
+                        current.generation != target.generation ||
+                        current.isDeleting ||
+                        current.lifecycleState == EntryLifecycleState.DELETING ||
+                        current.lifecycleState == EntryLifecycleState.STOPPING ||
+                        recentlyInvalidatedIds.contains(target.engineId)
+
+                    val is404 = e.message?.contains("404") == true || e.message?.contains("not found", ignoreCase = true) == true
+
+                    if (is404 && isIntentional) {
+                        // Silent expected lifecycle 404 suppression
+                    } else if (!state.restoring && current != null && current.generation == target.generation && !current.isDeleting) {
+                        markMissingEngine(target.engineId, e)
+                    }
                 } catch (_: Throwable) {
                 }
+            }
+            if (prepareTarget != null && !isShuttingDown.get()) {
+                try {
+                    val t = withContext(io) { client.torrent(prepareTarget) }
+                    applyPrepareStatus(t)
+                } catch (_: Throwable) {}
             }
             val now = System.currentTimeMillis()
             if ((changed && now - lastPersistAt > 10_000) || completed) {
@@ -839,23 +1189,33 @@ class LibrarySession(private val app: Application) {
                 lastPersistAt = now
             }
             if (state.screen == Screen.Settings) refreshStorageStats()
-            syncService()
+            if (!serviceSuppressed && !isShuttingDown.get()) {
+                syncService()
+            }
         }
     }
 
-    private fun applyStatus(t: TorrentStatus) {
+    private fun applyStatus(t: TorrentStatus, key: String, generation: Long) {
         _ui.update { state ->
-            val idx = state.library.indexOfFirst { it.engineId == t.id }
+            val idx = state.library.indexOfFirst { it.key == key }
             if (idx < 0) return@update state
             val entry = state.library[idx]
+            if (entry.generation != generation || entry.isDeleting) return@update state
             val files = entry.files.map { f ->
                 val tf = t.files.find { it.index == f.index }
                 if (tf != null) f.copy(progress = tf.progress) else f
+            }
+            val lifecycleState = when {
+                t.error != null -> EntryLifecycleState.ERROR
+                entry.complete || files.filter { it.index in entry.selected }.all { it.length == 0L || it.progress >= 1.0 } -> EntryLifecycleState.COMPLETED
+                t.paused -> EntryLifecycleState.PAUSED
+                else -> EntryLifecycleState.DOWNLOADING
             }
             val next = entry.copy(
                 files = files,
                 status = t,
                 paused = t.paused,
+                lifecycleState = lifecycleState,
                 error = t.error?.let { readableError(it) },
                 title = t.name?.takeIf { it.isNotBlank() } ?: entry.title,
             )
@@ -864,15 +1224,17 @@ class LibrarySession(private val app: Application) {
     }
 
     private fun markMissingEngine(id: String, error: EngineException) {
+        if (recentlyInvalidatedIds.contains(id)) return
         val msg = readableError(error)
         _ui.update { state ->
             state.copy(
                 library = state.library.map { entry ->
-                    if (entry.engineId != id) entry
+                    if (entry.engineId != id || entry.isDeleting) entry
                     else entry.copy(
                         engineId = null,
                         paused = true,
                         status = null,
+                        lifecycleState = if (entry.complete) EntryLifecycleState.COMPLETED else EntryLifecycleState.ERROR,
                         error = if (entry.complete) null else msg,
                     )
                 },
@@ -909,7 +1271,14 @@ class LibrarySession(private val app: Application) {
     }
 
     private fun syncService() {
-        val live = _ui.value.library.filter { it.engineId != null && !it.complete }
+        if (serviceSuppressed || isShuttingDown.get()) {
+            PlayService.stop(app)
+            lastServiceUpdate = 0L
+            return
+        }
+        val live = _ui.value.library.filter {
+            it.engineId != null && !it.complete && !it.isDeleting && it.lifecycleState != EntryLifecycleState.DELETING
+        }
         if (live.isEmpty()) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
@@ -927,7 +1296,7 @@ class LibrarySession(private val app: Application) {
         }
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastServiceUpdate >= 1000) {
-            PlayService.start(app, title, progress, downloading.isEmpty(), text)
+            PlayService.start(app, title, progress, downloading.isEmpty(), text, multiple = live.size > 1)
             lastServiceUpdate = now
         }
     }

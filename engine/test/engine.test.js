@@ -267,7 +267,6 @@ test('stats, 400, 404, add+play range, shutdown', async (t) => {
     new Promise(r => setTimeout(r, 3000))
   ])
 })
-
 test('magnet downloads metadata and bytes from a TCP peer, then streams ranges', { timeout: 20000 }, async t => {
   const { default: WebTorrent } = await import('webtorrent')
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-peer-'))
@@ -480,4 +479,37 @@ test('all videos finish across the prefetch cap and restore from disk', { timeou
   const restoredStatus = await jsonRequest(info.ctlPort, 'GET', '/torrent/' + restoredId)
   assert.equal(restoredStatus.json.files[selected[0]].progress, 1)
   assert.equal(restoredStatus.json.files[selected[1]].progress, 1)
+})
+
+test('GET /pieces/:id returns telemetry and handles not found', async t => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-pieces-'))
+  const { child, info } = await startEngine({ WEBTOR_PATH: tmp })
+  t.after(async () => {
+    try { await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}) } catch {}
+    child.kill('SIGKILL')
+    await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  // 404 for missing torrent
+  const missing = await jsonRequest(info.ctlPort, 'GET', '/pieces/non-existent')
+  assert.equal(missing.status, 404)
+
+  // Add fixture torrent
+  const added = await jsonRequest(info.ctlPort, 'POST', '/add', { torrentId: fixtureTorrent })
+  assert.equal(added.status, 200)
+  const id = added.json.id
+  await pollTorrent(info.ctlPort, id, s => s.ready)
+
+  // Request telemetry
+  const piecesResp = await jsonRequest(info.ctlPort, 'GET', `/pieces/${id}?maxBuckets=10`)
+  assert.equal(piecesResp.status, 200)
+  assert.equal(piecesResp.json.id, id)
+  assert.ok(piecesResp.json.totalPieces > 0)
+  assert.ok(piecesResp.json.buckets.length > 0 && piecesResp.json.buckets.length <= 10)
+  const b0 = piecesResp.json.buckets[0]
+  assert.equal(typeof b0.start, 'number')
+  assert.equal(typeof b0.end, 'number')
+  assert.equal(typeof b0.selected, 'number')
+  assert.equal(typeof b0.verified, 'number')
+  assert.equal(typeof b0.receiving, 'number')
 })
