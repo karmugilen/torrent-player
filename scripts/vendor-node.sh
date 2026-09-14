@@ -7,8 +7,9 @@ JNI="$ROOT/android/app/src/main/jniLibs/arm64-v8a"
 INC="$ROOT/android/app/src/main/cpp/include"
 
 if [ ! -f "$ZIP" ]; then
-  echo "missing $ZIP" >&2
-  exit 1
+  mkdir -p "$(dirname "$ZIP")"
+  echo "Fetching nodejs-mobile v18.20.4 android archive..."
+  curl -fSL "https://github.com/nodejs-mobile/nodejs-mobile/releases/download/v18.20.4/nodejs-mobile-v18.20.4-android.zip" -o "$ZIP"
 fi
 
 rm -rf "$UNPACK"
