@@ -18,9 +18,9 @@ Builds:
     commit: 71c19ff4334eb160ebc7b4f2afe5b7cd0f4eac2b
     subdir: android
     gradle:
-      - assembleRelease
+      - yes
     prebuild:
-      - (cd ../engine && npm ci --omit=optional --omit=dev)
+      - npm --prefix ../engine ci --omit=optional --omit=dev
       - ../scripts/vendor-node.sh
       - ../scripts/build-native-addons.sh
     ndk: r26b
