@@ -208,8 +208,17 @@ class MainActivity : ComponentActivity() {
             // Never let an exported activity import another app's chosen private file path.
             val text = source?.toString() ?: intent?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
             val supported = supportedTorrentLink(text)
-            if (supported != null) session.add(supported)
-            else session.showError("Open a magnet link, an HTTP(S) torrent URL, or share a .torrent file.")
+            if (supported != null) {
+                val hash = infoHashFromMagnet(supported)
+                val existing = hash?.let { h -> session.ui.value.library.find { it.key.equals(h, true) } }
+                if (existing != null) {
+                    session.openDetails(existing.key)
+                } else {
+                    session.add(supported)
+                }
+            } else {
+                session.showError("Open a magnet link, an HTTP(S) torrent URL, or share a .torrent file.")
+            }
         } catch (_: RuntimeException) {
             session.showError("Cannot read this shared item. Try opening it with the torrent file picker.")
         }

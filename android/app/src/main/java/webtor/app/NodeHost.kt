@@ -23,7 +23,7 @@ class NodeHost(private val context: Context) {
                 val project = projectDir().absolutePath
                 val tmp = context.cacheDir.absolutePath
                 val code = startNodeWithArguments(
-                    arrayOf("node", "$project/main.js"),
+                    arrayOf("node", "--max-old-space-size=96", "--optimize-for-size", "$project/main.js"),
                     arrayOf(
                         "WEBTOR_CTL_PORT=$ctlPort",
                         "WEBTOR_STREAM_PORT=0",

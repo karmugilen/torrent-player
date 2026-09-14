@@ -28,9 +28,13 @@ rm -f "$DEST/node_modules/utp-native/binding.cc" \
 find "$DEST" -type f \( \
   -name '*.md' -o -name '*.markdown' -o -name '*.map' -o -name '*.ts' \
   -o -name '*.d.ts' -o -name '*.yml' -o -name '*.yaml' -o -name '*.bc.js' \
-  -o -name '.npmignore' -o -name '*.tsbuildinfo' \
-  -o -name 'CHANGELOG*' -o -name 'AUTHORS*' -o -name 'Makefile' \
+  -o -name '.*ignore' -o -name '.*rc' -o -name '*.editorconfig' \
+  -o -name '*.clang-format' -o -name '*.iml' -o -name '*.tsbuildinfo' \
+  -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
+  -o -name '*.gyp' -o -name '*.gypi' -o -name 'binding.gyp' \
+  -o -name 'CHANGELOG*' -o -name 'AUTHORS*' -o -name 'Makefile*' -o -name '.gitmodules' \
 \) -delete
+find "$DEST/node_modules" -type f -name '*LICENSE*' ! -name '*.js' ! -name '*.json' -delete
 find "$DEST" -type d \( \
   -name test -o -name tests -o -name docs -o -name example -o -name examples \
   -o -name spec -o -name .github \

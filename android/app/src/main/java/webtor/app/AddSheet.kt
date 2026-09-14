@@ -16,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
@@ -172,6 +173,7 @@ private fun SourceInput(
     magnet: String, engineReady: Boolean, connecting: Boolean, ready: Boolean, busy: Boolean, status: String?,
     onMagnet: (String) -> Unit, onAdd: () -> Unit, onOpenFile: () -> Unit, alreadyAdded: Boolean = false,
 ) {
+    val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     var pastedSourceToHide by remember { mutableStateOf<String?>(null) }
@@ -198,6 +200,26 @@ private fun SourceInput(
             },
             enabled = !busy, modifier = Modifier.fillMaxWidth(),
             label = { Text("Magnet link or torrent URL") }, placeholder = { Text("magnet:?xt=urn:btih:…") },
+            trailingIcon = {
+                if (magnet.isNotEmpty()) {
+                    IconButton(onClick = { onMagnet("") }, enabled = !busy) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear magnet link")
+                    }
+                } else {
+                    TextButton(
+                        onClick = {
+                            val clipText = clipboard.getText()?.text?.trim().orEmpty()
+                            if (clipText.isNotEmpty()) {
+                                val supported = supportedTorrentLink(clipText) ?: clipText
+                                onMagnet(supported)
+                            }
+                        },
+                        enabled = !busy,
+                    ) {
+                        Text("Paste", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            },
             minLines = if (ready) 1 else 2, maxLines = 3,
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Uri,

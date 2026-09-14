@@ -627,6 +627,13 @@ class LibrarySession(private val app: Application) {
         _ui.update { it.copy(screen = Screen.Files, openTorrentKey = entry.key, error = null) }
     }
 
+    fun openDetails(key: String) {
+        closeAddSheet()
+        _ui.update { it.copy(screen = Screen.Files, openTorrentKey = key, error = null) }
+    }
+
+    fun openDetails(entry: DownloadEntry) = openDetails(entry.key)
+
     fun closeFiles() {
         _ui.update { it.copy(screen = Screen.Library, openTorrentKey = null, error = null) }
     }
@@ -1406,7 +1413,7 @@ class LibrarySession(private val app: Application) {
                 when {
                     snapshot.prepare != null && snapshot.prepare.torrent?.ready != true -> 500
                     active -> 750
-                    else -> 1500
+                    else -> 8000
                 },
             )
             if (isShuttingDown.get()) break
