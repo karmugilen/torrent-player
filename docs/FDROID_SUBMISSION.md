@@ -2,6 +2,9 @@
 
 This document provides a comprehensive, step-by-step guide for submitting **Torrent Player** (`webtor.app`) to the official [F-Droid repository](https://gitlab.com/fdroid/fdroiddata).
 
+> [!NOTE]
+> **Active Submission**: Merge Request [**!48893**](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893) was submitted by `@karmugilrc` and is currently open on GitLab.
+
 ---
 
 ## 1. Overview of the F-Droid Inclusion Workflow
