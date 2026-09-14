@@ -19,12 +19,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import webtor.app.R
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -206,7 +208,7 @@ private fun SourceInput(
                         Icon(Icons.Default.Clear, contentDescription = "Clear magnet link")
                     }
                 } else {
-                    TextButton(
+                    IconButton(
                         onClick = {
                             val clipText = clipboard.getText()?.text?.trim().orEmpty()
                             if (clipText.isNotEmpty()) {
@@ -216,7 +218,10 @@ private fun SourceInput(
                         },
                         enabled = !busy,
                     ) {
-                        Text("Paste", style = MaterialTheme.typography.labelMedium)
+                        Icon(
+                            painter = painterResource(R.drawable.ic_content_paste),
+                            contentDescription = "Paste from clipboard",
+                        )
                     }
                 }
             },

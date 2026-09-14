@@ -1,6 +1,9 @@
 package webtor.app
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -23,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -388,16 +392,49 @@ fun VideoPreviewPager(
         return
     }
     val pager = rememberPagerState(pageCount = { ready.size })
-    HorizontalPager(
-        state = pager,
-        modifier = modifier.clip(shape),
-    ) { page ->
-        Image(
-            ready[page].asImageBitmap(),
-            contentDescription = "${entry.title}, preview ${page + 1} of ${ready.size}",
-            contentScale = ContentScale.Crop,
+    Box(modifier = modifier.clip(shape)) {
+        HorizontalPager(
+            state = pager,
             modifier = Modifier.fillMaxSize(),
-        )
+        ) { page ->
+            Image(
+                ready[page].asImageBitmap(),
+                contentDescription = "${entry.title}, preview ${page + 1} of ${ready.size}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        if (ready.size > 1) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = if (large) 8.dp else 4.dp)
+                    .background(
+                        color = Color.Black.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(100),
+                    )
+                    .padding(PaddingValues(horizontal = 6.dp, vertical = 3.dp)),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                repeat(ready.size) { index ->
+                    val isSelected = pager.currentPage == index
+                    val dotWidth by animateDpAsState(
+                        targetValue = if (isSelected) (if (large) 14.dp else 10.dp) else 4.dp,
+                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                        label = "dotWidth",
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(width = dotWidth, height = 4.dp)
+                            .background(
+                                color = if (isSelected) Color.White else Color.White.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(2.dp),
+                            ),
+                    )
+                }
+            }
+        }
     }
 }
 
