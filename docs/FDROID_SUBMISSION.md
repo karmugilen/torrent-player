@@ -10,6 +10,7 @@ The canonical recipe is [`webtor.app.yml`](../webtor.app.yml). Copy it to
 `metadata/webtor.app.yml` in fdroiddata. Descriptions, screenshots, icon and
 changelogs live in `fastlane/metadata/android/en-US/` in this upstream repository.
 
+The Gradle subdirectory is `android/app`, where the APK output is written.
 The recipe must reference the full commit SHA of the tested release. Version
 1.4.2's previous recipe was not buildable from a clean checkout: it required an
 untracked binary Node archive. Downloading that archive would also fail F-Droid's
@@ -78,3 +79,22 @@ Update the app version and changelog, test the source build, then push the
 release commit and tag. `UpdateCheckMode: Tags` and `AutoUpdateMode: Version`
 allow F-Droid to discover later tagged releases. Keep source revision pins and
 build instructions consistent when native dependencies change.
+
+## Validation on 2026-09-14
+
+The official build job [16483867794](https://gitlab.com/fdroid/fdroiddata/-/jobs/16483867794)
+for the old 1.4.2 recipe failed with `npm: command not found`; the other seven
+checks passed and the APK check was skipped. The revised recipe installs Node,
+npm and native build prerequisites explicitly.
+
+A clean checkout of `bb6845006bf1b78b567fefe5f9208d51a19cd57f` was compiled
+inside F-Droid's `buildserver-trixie` image, with NDK r26b and fdroidserver 2.4.2.
+The source scan and complete native/Gradle compilation passed. The final F-Droid
+output lookup initially failed because the old recipe used `subdir: android`.
+The recipe now uses `android/app`; output discovery and F-Droid's APK identity,
+version, release-mode and ABI checks passed against the generated APK. Its
+binary scan also passed. This is not a claim that the updated official pipeline
+has passed; that still requires a new pipeline for the updated MR commit.
+
+The unsigned 1.4.3/build 20 APK is 20,117,712 bytes with SHA-256:
+`475ff422490fceb25df83aacb3d70b6cca85eff19a3ba2683f99c41fb518fe6b`.
