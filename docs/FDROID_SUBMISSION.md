@@ -98,3 +98,23 @@ has passed; that still requires a new pipeline for the updated MR commit.
 
 The unsigned 1.4.3/build 20 APK is 20,117,712 bytes with SHA-256:
 `475ff422490fceb25df83aacb3d70b6cca85eff19a3ba2683f99c41fb518fe6b`.
+
+## Automatic pipeline status
+
+GitLab creates merge request pipelines automatically when the submission branch
+changes. CI and shared runners are enabled on the fork. Pipeline `2847963877`
+did not start any jobs because GitLab's API reports:
+`Identity verification is required in order to run CI jobs`.
+
+The account owner can complete **Verify identity** from the
+[fork pipeline page](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2847963877)
+to unblock their CI runs. This account action cannot be completed by changing
+the app or build recipe. F-Droid project members can run the pipeline using the
+parent project's resources; external contributors cannot trigger that run.
+See [GitLab's fork pipeline documentation](https://docs.gitlab.com/ci/pipelines/merge_request_pipelines/#use-with-forked-projects).
+
+A [rerun request was posted to linsui](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893#note_3831602426)
+with the corrected commit and local validation results. Maintainer review, a
+successful official build, and publication are still pending. Account
+verification is required for the fork's CI, not a prerequisite for a maintainer
+to run the official pipeline.
