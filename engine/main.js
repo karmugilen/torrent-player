@@ -359,6 +359,9 @@ async function handleConfigure (req, res) {
     await new Promise((resolve, reject) => rec.torrent.rescanFiles(err => err ? reject(err) : resolve()))
     rec.configured = true
     applySelection(rec, selected)
+    if (!rec.torrent.paused) {
+      activateTorrent(rec)
+    }
     sendJson(res, 200, { ok: true })
   } catch (err) {
     rec.error = err.message || 'Cannot initialize download storage'
@@ -366,6 +369,21 @@ async function handleConfigure (req, res) {
   } finally {
     rec.configuring = false
   }
+}
+
+function activateTorrent (rec) {
+  if (!rec?.torrent || rec.torrent.destroyed) return
+  if (rec.torrent.paused) {
+    rec.torrent.resume()
+  }
+  if (rec.torrent.done && !rec.selected.every(i => rec.torrent.files[i]?.progress === 1)) {
+    rec.torrent.done = false
+  }
+  const peers = new Set([...(rec.peerAddresses || []), ...Object.keys(rec.torrent._peers || {})])
+  for (const peer of peers) rec.torrent.addPeer(peer)
+  rec.torrent.discovery?.tracker?.update()
+  rec.torrent._drain?.()
+  rec.torrent._update?.()
 }
 
 async function handleSelect (req, res) {
@@ -386,16 +404,16 @@ async function handlePause (req, res, paused) {
   const { id } = await readJson(req)
   const rec = findRecord(id)
   if (!rec || rec.torrent.destroyed) return sendJson(res, 404, { error: 'torrent not found' })
-  if (paused && !rec.torrent.paused) {
-    rec.peerAddresses = Object.keys(rec.torrent._peers || {})
-    rec.torrent.pause()
-    // WebTorrent.pause only stops new connections. Disconnect existing wires
-    // too, otherwise an active download keeps filling storage after Pause.
-    for (const wire of [...rec.torrent.wires]) wire.destroy()
-  } else if (!paused && rec.torrent.paused) {
-    rec.torrent.resume()
-    for (const peer of rec.peerAddresses || []) rec.torrent.addPeer(peer)
-    rec.torrent.discovery?.tracker?.update()
+  if (paused) {
+    if (!rec.torrent.paused) {
+      rec.peerAddresses = Object.keys(rec.torrent._peers || {})
+      rec.torrent.pause()
+      // WebTorrent.pause only stops new connections. Disconnect existing wires
+      // too, otherwise an active download keeps filling storage after Pause.
+      for (const wire of [...rec.torrent.wires]) wire.destroy()
+    }
+  } else {
+    activateTorrent(rec)
   }
   rec.generation = (rec.generation || 1) + 1
   sendJson(res, 200, { ok: true })

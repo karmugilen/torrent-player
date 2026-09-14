@@ -1360,7 +1360,11 @@ class LibrarySession(private val app: Application) {
             } finally {
                 pfds.forEach { runCatching { it?.close() } }
             }
-            if (startPaused) withContext(io) { client.pause(added.id) }
+            if (startPaused) {
+                withContext(io) { client.pause(added.id) }
+            } else {
+                withContext(io) { client.resume(added.id) }
+            }
             val latest = _ui.value.library.find { it.key == current.key }
             if (latest == null) {
                 createdFiles?.let { runCatching { withContext(io) { storage.deleteFiles(it) } } }
@@ -1377,11 +1381,13 @@ class LibrarySession(private val app: Application) {
             if (!hasAnyUri) {
                 _events.trySend(UiEvent.RequestNotifications)
             }
+            val status = runCatching { withContext(io) { client.torrent(added.id) } }.getOrNull()
             patch(current.key) {
                 if (it.generation != expectedGen || it.isDeleting) it
                 else it.copy(
                     engineId = added.id,
                     files = effectiveFiles,
+                    status = status ?: it.status,
                     metadata = if (it.metadata.isNotBlank()) it.metadata else fetchedMetadata,
                     paused = startPaused,
                     error = null,

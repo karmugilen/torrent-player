@@ -98,7 +98,7 @@ fun TorrentFilesScreen(
                 },
                 actions = {
                     if (!busy && !entry.complete) {
-                        if (entry.paused || entry.engineId == null) {
+                        if (entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING)) {
                             TextButton(onClick = onResume) {
                                 Text("Resume")
                             }

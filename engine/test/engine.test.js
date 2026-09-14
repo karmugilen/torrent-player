@@ -408,6 +408,22 @@ test('pause stops peer transfers; resume continues', { timeout: 20000 }, async t
   assert.deepEqual(got.subarray(0, 7), prefix)
 })
 
+test('resume on unpaused torrent reactivates swarm transfer', { timeout: 20000 }, async t => {
+  const payload = Buffer.alloc(256 * 1024)
+  for (let i = 0; i < payload.length; i++) payload[i] = (i + 3) % 256
+  const prefix = payload.subarray(0, 7)
+  const { destPath, info, stderr, id, status } = await startPreparedMagnet(t, payload)
+  const cfg = await configureFile(info.ctlPort, id, status.files.length)
+  assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
+
+  const resumed = await jsonRequest(info.ctlPort, 'POST', '/resume', { id })
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.json))
+  const afterResume = await pollTorrent(info.ctlPort, id, s => s.paused === false, { label: 'resumed' })
+  assert.equal(afterResume.paused, false)
+  const got = await waitForDestPrefix(destPath, prefix, { label: 'resume unpaused dest' })
+  assert.deepEqual(got.subarray(0, 7), prefix)
+})
+
 test('remove destroyStore:false keeps destination file', { timeout: 20000 }, async t => {
   const bytes = await fs.readFile(fixtureDat)
   const { destPath, info, stderr, id, status } = await startPreparedMagnet(t, fixtureDat)

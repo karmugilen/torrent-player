@@ -328,7 +328,7 @@ private fun TorrentRow(
                         Text("Retry")
                     }
                     entry.complete -> Unit
-                    entry.paused || entry.engineId == null -> {
+                    entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING) -> {
                         val hasAnyUri = entry.files.any { it.index in entry.selected && !it.uri.isNullOrBlank() }
                         OutlinedButton(
                             onClick = onResume,

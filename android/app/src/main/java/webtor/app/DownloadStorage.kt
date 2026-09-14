@@ -61,7 +61,8 @@ data class DownloadEntry(
         lifecycleState == EntryLifecycleState.PREPARING -> "Preparing…"
         error != null || lifecycleState == EntryLifecycleState.ERROR -> "Needs attention"
         complete || lifecycleState == EntryLifecycleState.COMPLETED -> "Complete"
-        paused || engineId == null || lifecycleState == EntryLifecycleState.PAUSED ||
+        paused || (engineId == null && lifecycleState != EntryLifecycleState.DOWNLOADING) ||
+            lifecycleState == EntryLifecycleState.PAUSED ||
             lifecycleState == EntryLifecycleState.STOPPED -> "Paused"
         else -> "Downloading"
     }

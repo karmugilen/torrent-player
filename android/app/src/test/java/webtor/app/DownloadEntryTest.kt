@@ -280,4 +280,13 @@ class DownloadEntryTest {
         assertEquals(null, completedPlayFile(e, 2))
         assertEquals(null, completedPlayFile(e, 99))
     }
+
+    @Test
+    fun stateLabelPreservesDownloadingWhenEngineIdNull() {
+        val base = entry(listOf(file(0, 100, 0.4)), setOf(0))
+        assertEquals("Downloading", base.copy(paused = false, engineId = null, lifecycleState = EntryLifecycleState.DOWNLOADING).stateLabel())
+        assertEquals("Paused", base.copy(paused = true, engineId = null, lifecycleState = EntryLifecycleState.PAUSED).stateLabel())
+        assertEquals("Paused", base.copy(paused = true, engineId = "e1", lifecycleState = EntryLifecycleState.PAUSED).stateLabel())
+        assertEquals("Complete", base.copy(paused = false, files = listOf(file(0, 100, 1.0)), lifecycleState = EntryLifecycleState.COMPLETED).stateLabel())
+    }
 }
