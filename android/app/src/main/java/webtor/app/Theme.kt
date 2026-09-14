@@ -3,16 +3,20 @@ package webtor.app
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.os.Build
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -22,84 +26,67 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowInsetsControllerCompat
 
-private val LightInk = Color(0xFF2F3437)
-private val LightBone = Color(0xFFF7F6F3)
-private val LightPaper = Color(0xFFFBFBFA)
-private val LightLine = Color(0xFFEAEAEA)
-private val LightMute = Color(0xFF676661)
-private val LightGreenBg = Color(0xFFEDF3EC)
-private val LightGreen = Color(0xFF346538)
-private val LightRedBg = Color(0xFFFDEBEC)
-private val LightRed = Color(0xFF9F2F2D)
-private val LightYellowBg = Color(0xFFFBF3DB)
-private val LightYellow = Color(0xFF956400)
-private val LightCharcoal = Color(0xFF111111)
-
-private val Night = Color(0xFF161513)
-private val NightPaper = Color(0xFF1C1B19)
-private val NightInk = Color(0xFFF4F1EA)
-private val NightMute = Color(0xFF9A958C)
-private val NightLine = Color(0xFF2E2C29)
-private val NightGreenBg = Color(0xFF243028)
-private val NightGreen = Color(0xFFB7CDB4)
-private val NightRedBg = Color(0xFF3A2424)
-private val NightRed = Color(0xFFE0A8A6)
-private val NightYellowBg = Color(0xFF3A3220)
-private val NightYellow = Color(0xFFD4B56A)
-
-private val LightGaleColors = lightColorScheme(
-    primary = LightCharcoal,
-    onPrimary = LightPaper,
-    secondary = LightGreen,
-    onSecondary = LightGreenBg,
-    background = LightBone,
-    onBackground = LightInk,
-    surface = LightPaper,
-    onSurface = LightInk,
-    surfaceVariant = Color(0xFFF9F9F8),
-    onSurfaceVariant = LightMute,
-    error = LightRed,
-    onError = LightRedBg,
-    errorContainer = LightRedBg,
-    onErrorContainer = LightRed,
-    outline = LightLine,
-    outlineVariant = LightLine,
-    primaryContainer = LightGreenBg,
-    onPrimaryContainer = LightGreen,
-    tertiary = LightYellow,
-    tertiaryContainer = LightYellowBg,
-    onTertiaryContainer = LightYellow,
+// Fallback blue/teal Material 3 palette
+private val LightColors = lightColorScheme(
+    primary = Color(0xFF006684),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFBEE9FF),
+    onPrimaryContainer = Color(0xFF001F2A),
+    secondary = Color(0xFF4C616B),
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFCFE6F1),
+    onSecondaryContainer = Color(0xFF071E26),
+    tertiary = Color(0xFF5D5B7D),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFE3DFFF),
+    onTertiaryContainer = Color(0xFF191836),
+    background = Color(0xFFFBFDFE),
+    onBackground = Color(0xFF191C1D),
+    surface = Color(0xFFFBFDFE),
+    onSurface = Color(0xFF191C1D),
+    surfaceVariant = Color(0xFFDCE4E9),
+    onSurfaceVariant = Color(0xFF40484C),
+    outline = Color(0xFF70787D),
+    outlineVariant = Color(0xFFBFC8CC),
+    error = Color(0xFFBA1A1A),
+    onError = Color(0xFFFFFFFF),
+    errorContainer = Color(0xFFFFDAD6),
+    onErrorContainer = Color(0xFF410002),
 )
 
-private val DarkGaleColors = darkColorScheme(
-    primary = NightInk,
-    onPrimary = Night,
-    secondary = NightGreen,
-    onSecondary = NightGreenBg,
-    background = Night,
-    onBackground = NightInk,
-    surface = NightPaper,
-    onSurface = NightInk,
-    surfaceVariant = Color(0xFF22211E),
-    onSurfaceVariant = NightMute,
-    error = NightRed,
-    onError = NightRedBg,
-    errorContainer = NightRedBg,
-    onErrorContainer = NightRed,
-    outline = NightLine,
-    outlineVariant = NightLine,
-    primaryContainer = NightGreenBg,
-    onPrimaryContainer = NightGreen,
-    tertiary = NightYellow,
-    tertiaryContainer = NightYellowBg,
-    onTertiaryContainer = NightYellow,
+private val DarkColors = darkColorScheme(
+    primary = Color(0xFF6AD2FF),
+    onPrimary = Color(0xFF003546),
+    primaryContainer = Color(0xFF004D64),
+    onPrimaryContainer = Color(0xFFBEE9FF),
+    secondary = Color(0xFFB3CAD5),
+    onSecondary = Color(0xFF1E333C),
+    secondaryContainer = Color(0xFF354A53),
+    onSecondaryContainer = Color(0xFFCFE6F1),
+    tertiary = Color(0xFFC6C2EA),
+    onTertiary = Color(0xFF2E2D4D),
+    tertiaryContainer = Color(0xFF454364),
+    onTertiaryContainer = Color(0xFFE3DFFF),
+    background = Color(0xFF111415),
+    onBackground = Color(0xFFE1E3E5),
+    surface = Color(0xFF111415),
+    onSurface = Color(0xFFE1E3E5),
+    surfaceVariant = Color(0xFF40484C),
+    onSurfaceVariant = Color(0xFFC0C8CD),
+    outline = Color(0xFF8A9296),
+    outlineVariant = Color(0xFF40484C),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    errorContainer = Color(0xFF93000A),
+    onErrorContainer = Color(0xFFFFDAD6),
 )
 
 private val GaleShapes = Shapes(
     extraSmall = RoundedCornerShape(4.dp),
-    small = RoundedCornerShape(6.dp),
-    medium = RoundedCornerShape(8.dp),
-    large = RoundedCornerShape(12.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(28.dp),
 )
 
 private val AppFont = FontFamily(
@@ -190,8 +177,15 @@ private tailrec fun Context.activity(): Activity? = when (this) {
 }
 
 @Composable
-fun GaleTheme(dark: Boolean = true, content: @Composable () -> Unit) {
-    val colors = if (dark) DarkGaleColors else LightGaleColors
+fun GaleTheme(dark: Boolean = true, dynamicColor: Boolean = true, content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val colors = when {
+        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        }
+        dark -> DarkColors
+        else -> LightColors
+    }
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {

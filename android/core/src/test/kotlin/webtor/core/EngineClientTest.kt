@@ -61,25 +61,6 @@ class EngineClientTest {
     }
 
     @Test
-    fun watchUsesMemoryOnlyEndpoint() {
-        server.enqueue(
-            MockResponse().setBody(
-                """{"id":"abc","fileIndex":2,"name":"episode.mkv","length":900,
-                    "streamUrl":"http://127.0.0.1:8000/webtorrent/dead/episode.mkv",
-                    "watchMode":true,"memoryLimitBytes":104857600}"""
-            )
-        )
-        val info = client.watch("abc", 2)
-        assertTrue(info.watchMode)
-        assertEquals(104857600L, info.memoryLimitBytes)
-        val request = server.takeRequest()
-        assertEquals("/watch", request.path)
-        val body = JSONObject(request.body.readUtf8())
-        assertEquals("abc", body.getString("id"))
-        assertEquals(2, body.getInt("fileIndex"))
-    }
-
-    @Test
     fun notFoundThrows() {
         server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"torrent not found"}"""))
         val ex = assertThrows<EngineException> { client.torrent("nope") }

@@ -27,7 +27,6 @@ import webtor.core.PlayInfo
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
     private val session get() = vm.session
-    private var pendingWatchPlay: UiEvent.PlayStream? = null
 
     private val torrentPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(session::openTorrent)
@@ -35,12 +34,7 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) {
-        pendingWatchPlay?.let { event ->
-            pendingWatchPlay = null
-            launchPlayEvent(event)
-        }
-    }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,7 +54,6 @@ class MainActivity : ComponentActivity() {
                                     onSelectAll = session::selectAllFiles,
                                     onSelectNone = session::selectNoFiles,
                                     onStart = session::startDownload,
-                                    onWatchNow = session::watchNow,
                                     onCancel = session::cancelPrepare,
                                 )
                             } else {
@@ -94,7 +87,10 @@ class MainActivity : ComponentActivity() {
                         Screen.Library -> LibraryLayer(state)
                     }
                     if (state.addSheetOpen) {
-                        val prefetch = state.prepare?.takeIf { it.source == state.magnetDraft.trim() }
+                        val prefetch = state.prepare?.takeIf {
+                            it.source == state.magnetDraft.trim() ||
+                                (state.magnetDraft.isBlank() && it.source.startsWith("${cacheDir.absolutePath}/import-"))
+                        }
                         val existing = existingLibraryEntry(state)
                         AddSheet(
                             magnet = state.magnetDraft,
@@ -114,7 +110,6 @@ class MainActivity : ComponentActivity() {
                             onSelectAll = session::selectAllFiles,
                             onSelectNone = session::selectNoFiles,
                             onDownload = session::startDownload,
-                            onWatchNow = session::watchNow,
                             existingEntry = existing,
                             onOpenExisting = existing?.let {
                                 {
@@ -174,11 +169,9 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         (application as WebtorApp).setCurrentActivity(this)
         session.onForeground()
-        session.onTransientWatchHostStarted()
     }
 
     override fun onStop() {
-        if (!isChangingConfigurations) session.onTransientWatchHostStopped()
         if (isFinishing) (application as WebtorApp).clearCurrentActivity(this)
         super.onStop()
     }
@@ -192,7 +185,7 @@ class MainActivity : ComponentActivity() {
         when (event) {
             UiEvent.PickTorrent -> pickTorrentFile()
             UiEvent.RequestNotifications -> requestNotifications()
-            is UiEvent.PlayStream -> handlePlayEvent(event)
+            is UiEvent.PlayStream -> openPlayer(event.info)
             is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
             UiEvent.ExitApp -> finish()
         }
@@ -240,25 +233,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handlePlayEvent(event: UiEvent.PlayStream) {
-        val watchNeedsPermission = event.transientWatchId != null && Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        if (watchNeedsPermission) {
-            pendingWatchPlay = event
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            launchPlayEvent(event)
-        }
-    }
-
-    private fun launchPlayEvent(event: UiEvent.PlayStream) {
-        val launched = openPlayer(event.info)
-        event.transientWatchId?.let { session.completeWatchLaunch(it, launched) }
-    }
-
     private fun openPlayer(info: PlayInfo): Boolean {
         val view = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(Uri.parse(info.streamUrl), "video/*")
+            putExtra(Intent.EXTRA_TITLE, info.name)
+            putExtra("title", info.name)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return launchViewer(view)

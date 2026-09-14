@@ -47,10 +47,7 @@ data class UiState(
 sealed class UiEvent {
     data object PickTorrent : UiEvent()
     data object RequestNotifications : UiEvent()
-    data class PlayStream(
-        val info: PlayInfo,
-        val transientWatchId: String? = null,
-    ) : UiEvent()
+    data class PlayStream(val info: PlayInfo) : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String) : UiEvent()
     data object ExitApp : UiEvent()
 }

@@ -56,8 +56,6 @@ data class PlayInfo(
     val name: String,
     val length: Long,
     val streamUrl: String,
-    val watchMode: Boolean = false,
-    val memoryLimitBytes: Long? = null,
 )
 
 data class AddResult(val id: String, val infoHash: String?)
@@ -130,10 +128,6 @@ class EngineClient(
         return parsePlay(post("/play", body))
     }
 
-    fun watch(id: String, fileIndex: Int): PlayInfo {
-        return parsePlay(post("/watch", JSONObject().put("id", id).put("fileIndex", fileIndex)))
-    }
-
     fun remove(id: String, destroyStore: Boolean = true) {
         try {
             post("/remove", JSONObject().put("id", id).put("destroyStore", destroyStore))
@@ -204,12 +198,6 @@ class EngineClient(
             name = json.optString("name"),
             length = json.optLong("length"),
             streamUrl = json.getString("streamUrl"),
-            watchMode = json.optBoolean("watchMode"),
-            memoryLimitBytes = if (json.has("memoryLimitBytes") && !json.isNull("memoryLimitBytes")) {
-                json.optLong("memoryLimitBytes")
-            } else {
-                null
-            },
         )
 
         fun parsePieces(json: JSONObject): PieceTelemetry {

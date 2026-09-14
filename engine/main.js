@@ -27,13 +27,9 @@ const CTL_PORT = Number(process.env.WEBTOR_CTL_PORT || 0)
 const STREAM_PORT = Number(process.env.WEBTOR_STREAM_PORT || 0)
 const DOWNLOAD_PATH = process.env.WEBTOR_PATH || '/tmp/webtorrent'
 const SKIP_VERIFY = process.env.WEBTOR_SKIP_VERIFY === '1'
-const DEFAULT_WATCH_MEMORY_BYTES = 100 * 1024 * 1024
-const WATCH_MEMORY_BYTES = (() => {
-  const value = Number(process.env.WEBTOR_WATCH_MEMORY_BYTES || DEFAULT_WATCH_MEMORY_BYTES)
-  return Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_WATCH_MEMORY_BYTES
-})()
 
 const records = new Map()
+
 const MAX_PEERS_MIN = 8
 const MAX_PEERS_MAX = 80
 function clampPeers (n) {
@@ -74,7 +70,7 @@ const streamServer = streamInstance.server
 function findRecord (id) {
   if (records.has(id)) return records.get(id)
   for (const rec of records.values()) {
-    if (rec.torrent.infoHash === id) return rec
+    if (rec.torrent?.infoHash === id) return rec
   }
   return null
 }
@@ -156,7 +152,7 @@ async function handleAdd (req, res) {
     return sendJson(res, 400, { error: 'Invalid tracker list' })
   }
   const id = crypto.randomUUID()
-  const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, watching: false, selected: [], documentStore: null, prefetchPaused: false, generation: 1 }
+  const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, selected: [], documentStore: null, prefetchPaused: false, generation: 1 }
   const torrent = client.add(addId, {
     ...(record.prepared
       ? {
@@ -265,56 +261,6 @@ async function handlePlay (req, res) {
   })
 }
 
-async function handleWatch (req, res) {
-  const body = await readJson(req)
-  const rec = findRecord(body.id)
-  if (!rec || rec.error || rec.torrent?.destroyed) {
-    return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
-  }
-  await waitReady(rec.torrent)
-  if (!rec.prepared || rec.configured || rec.configuring) {
-    return sendJson(res, 409, { error: 'Watch now requires an unconfigured prepared torrent' })
-  }
-  const file = pickFile(rec.torrent.files, body.fileIndex)
-  if (!file) return sendJson(res, 404, { error: 'no file' })
-  const fileIndex = rec.torrent.files.indexOf(file)
-
-  if (!rec.watching) {
-    const store = rec.documentStore
-    if (!store) return sendJson(res, 409, { error: 'Memory storage is not ready' })
-    store.enableMemory(WATCH_MEMORY_BYTES, index => {
-      const torrent = rec.torrent
-      if (torrent.destroyed || !torrent.bitfield?.get(index)) return
-      // This is the inverse of WebTorrent's post-put verification. Without it,
-      // a backwards seek would believe an evicted piece was still available.
-      torrent._markUnverified(index)
-      rec.generation = (rec.generation || 1) + 1
-      torrent._updateSelections()
-    })
-    rec.watching = true
-    rec.selected = [fileIndex]
-    rec.prefetchPaused = false
-    rec.generation = (rec.generation || 1) + 1
-  } else if (!rec.selected.includes(fileIndex)) {
-    return sendJson(res, 409, { error: 'A different file is already being watched' })
-  }
-
-  if (rec.torrent.paused) return sendJson(res, 409, { error: 'Resume streaming before playing' })
-  // The HTTP file iterator selects only player-requested ranges. Calling
-  // file.select() here would eagerly fetch the entire video.
-  const addr = streamServer.address()
-  const port = typeof addr === 'object' && addr ? addr.port : STREAM_PORT
-  sendJson(res, 200, {
-    id: rec.id,
-    fileIndex,
-    name: file.name,
-    length: file.length,
-    streamUrl: streamUrl(port, file.streamURL),
-    watchMode: true,
-    memoryLimitBytes: WATCH_MEMORY_BYTES
-  })
-}
-
 async function handleRemove (req, res) {
   let body
   try {
@@ -379,11 +325,7 @@ function handleTorrent (id, res) {
     ...view,
     error: rec.error,
     configured: rec.configured,
-    selected: rec.selected,
-    watchMode: rec.watching,
-    memoryBytes: rec.watching ? (rec.documentStore?.cacheBytes || 0) : 0,
-    memoryLimitBytes: rec.watching ? WATCH_MEMORY_BYTES : 0,
-    memoryEvictions: rec.watching ? (rec.documentStore?.evictionCount || 0) : 0
+    selected: rec.selected
   })
 }
 
@@ -392,7 +334,7 @@ async function handleConfigure (req, res) {
   const rec = findRecord(body.id)
   if (!rec || rec.error) return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
   await waitReady(rec.torrent)
-  if (!rec.prepared || rec.configured || rec.configuring || rec.watching) return sendJson(res, 409, { error: 'Storage already configured' })
+  if (!rec.prepared || rec.configured || rec.configuring) return sendJson(res, 409, { error: 'Storage already configured' })
   const selected = body.selected
   if (!Array.isArray(selected) || !selected.length || selected.some(i => !Number.isInteger(i) || !rec.torrent.files[i])) {
     return sendJson(res, 400, { error: 'Select at least one file' })
@@ -431,7 +373,7 @@ async function handleSelect (req, res) {
   const rec = findRecord(body.id)
   if (!rec || rec.error) return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
   await waitReady(rec.torrent)
-  if (rec.configured || rec.configuring || rec.watching) return sendJson(res, 409, { error: 'Storage already configured' })
+  if (rec.configured || rec.configuring) return sendJson(res, 409, { error: 'Storage already configured' })
   const selected = body.selected
   if (!Array.isArray(selected) || selected.some(i => !Number.isInteger(i) || !rec.torrent.files[i])) {
     return sendJson(res, 400, { error: 'Invalid file selection' })
@@ -538,10 +480,6 @@ const ctlServer = http.createServer(async (req, res) => {
     }
     if (method === 'POST' && parts.length === 1 && parts[0] === 'play') {
       await handlePlay(req, res)
-      return
-    }
-    if (method === 'POST' && parts.length === 1 && parts[0] === 'watch') {
-      await handleWatch(req, res)
       return
     }
     if (method === 'POST' && parts.length === 1 && parts[0] === 'remove') {

@@ -123,7 +123,9 @@ class DownloadStorage(private val context: Context) {
         prefs.edit().remove("folder").putString("folderName", "Chosen folder").commit()
     }
 
-    fun managedBytes(entries: List<DownloadEntry>): Long = entries.sumOf { it.total }
+    fun managedBytes(entries: List<DownloadEntry>): Long = entries.sumOf { entry ->
+        entry.files.filter { it.index in entry.selected && !it.uri.isNullOrBlank() }.sumOf { it.length }
+    }
 
     fun downloadedBytes(entries: List<DownloadEntry>): Long = entries.sumOf { it.downloaded }
 
@@ -339,9 +341,13 @@ class DownloadStorage(private val context: Context) {
         val stateName = e.optString("lifecycleState", "")
         val savedState = EntryLifecycleState.entries.find { it.name == stateName }
         val isDeleting = e.optBoolean("isDeleting", false)
-        val paused = e.optBoolean("paused", false)
+        // Compatibility with the removed streaming mode: preserve its metadata
+        // as an ordinary paused record, without initiating a storage download.
+        val legacyStreamEntry = e.optBoolean("watchOnly", false)
+        val paused = e.optBoolean("paused", false) || legacyStreamEntry
         val lifecycleState = when {
             isDeleting -> EntryLifecycleState.ERROR
+            legacyStreamEntry -> EntryLifecycleState.STOPPED
             savedState == EntryLifecycleState.PAUSING -> EntryLifecycleState.PAUSED
             savedState == EntryLifecycleState.STOPPING || savedState == EntryLifecycleState.PREPARING -> EntryLifecycleState.STOPPED
             savedState != null -> savedState
@@ -350,7 +356,8 @@ class DownloadStorage(private val context: Context) {
         }
         val entry = DownloadEntry(
             e.getString("key"), e.getString("title"), e.getString("source"), e.getString("metadata"),
-            if (e.isNull("engineId")) null else e.getString("engineId"), e.getString("destination"),
+            if (legacyStreamEntry || e.isNull("engineId")) null else e.getString("engineId"),
+            if (legacyStreamEntry) "Downloads/Webtor" else e.getString("destination"),
             (0 until files.length()).map { n -> files.getJSONObject(n).let { f ->
                 SavedFile(f.getInt("index"), f.getString("name"), f.getString("path"), f.getLong("length"),
                     if (f.isNull("uri")) null else f.getString("uri"),

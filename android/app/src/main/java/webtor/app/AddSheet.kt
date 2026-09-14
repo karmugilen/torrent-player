@@ -5,8 +5,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -29,7 +33,7 @@ fun AddSheet(
     onOpenFile: () -> Unit, onDismiss: () -> Unit, draft: PrepareDraft? = null,
     freeBytes: Long = 0, onToggle: ((Int) -> Unit)? = null,
     onSelectAll: (() -> Unit)? = null, onSelectNone: (() -> Unit)? = null,
-    onDownload: (() -> Unit)? = null, onWatchNow: (() -> Unit)? = null,
+    onDownload: (() -> Unit)? = null,
     destination: String = "Downloads/Webtor",
     existingEntry: DownloadEntry? = null, onOpenExisting: (() -> Unit)? = null,
 ) {
@@ -48,65 +52,55 @@ fun AddSheet(
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedBytes
     val canDownload = ready && selection.isNotEmpty() && !busy && !insufficientSpace && existingEntry == null && onDownload != null
-    val canWatchNow = ready && !busy && existingEntry == null && onWatchNow != null &&
-        files.any { it.index in selection && (it.name.isVideoName() || it.path.isVideoName()) }
     Scaffold(
         modifier = Modifier.imePadding(),
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Add download", style = MaterialTheme.typography.titleLarge) },
-                actions = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") } },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                actions = {
+                    IconButton(onClick = onDismiss, enabled = !busy) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onBackground,
+                    actionIconContentColor = MaterialTheme.colorScheme.onBackground,
+                ),
             )
         },
         bottomBar = {
-            if (ready || existingEntry != null) Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 2.dp) {
+            if (ready || existingEntry != null) Surface(
+                color = MaterialTheme.colorScheme.background,
+                tonalElevation = 2.dp,
+            ) {
                 Column(
                     Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text("$destination · ${if (storageKnown) "${formatBytes(freeBytes)} free" else "Free space unavailable"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     when {
-                        existingEntry != null -> Text("This torrent is already in your downloads.", style = MaterialTheme.typography.bodyMedium)
-                        insufficientSpace -> Text("Not enough storage to download ${formatBytes(selectedBytes)}. Watch now still works without saving the video.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        existingEntry != null -> Text("This torrent is already in your library.", style = MaterialTheme.typography.bodyMedium)
+                        insufficientSpace -> Text("Not enough storage to download ${formatBytes(selectedBytes)}.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                         selection.isEmpty() -> Text("Select at least one file to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (existingEntry != null) {
                         Button(
                             onClick = { onOpenExisting?.invoke() },
                             enabled = !busy && onOpenExisting != null,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
-                            Text("Open existing download")
+                            Text("Open existing torrent")
                         }
                     } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        Button(
+                            onClick = { onDownload?.invoke() },
+                            enabled = canDownload,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
-                            OutlinedButton(
-                                onClick = { onWatchNow?.invoke() },
-                                enabled = canWatchNow,
-                                modifier = Modifier.weight(1f).heightIn(min = 52.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
-                            ) {
-                                Text("Watch now", maxLines = 1)
-                            }
-                            Button(
-                                onClick = { onDownload?.invoke() },
-                                enabled = canDownload,
-                                modifier = Modifier.weight(1f).heightIn(min = 52.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
-                            ) {
-                                Text("Download", maxLines = 1)
-                            }
+                            Text("Download", maxLines = 1)
                         }
-                        Text(
-                            "Watch now streams through a temporary 100 MB memory cache and does not save the video.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
                 }
             }
@@ -130,7 +124,7 @@ fun AddSheet(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(torrent?.name ?: "Choose files", style = MaterialTheme.typography.titleMedium)
                         Text("${selection.size} of ${files.size} files selected · ${formatBytes(selectedBytes)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("Only selected files are saved. Videos are selected by default when available.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Videos are selected by default when available.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = { onSelectAll?.invoke() }, enabled = !busy) { Text("Select all") }
                             TextButton(onClick = { onSelectNone?.invoke() }, enabled = !busy) { Text("Select none") }
@@ -139,7 +133,12 @@ fun AddSheet(
                         OutlinedTextField(
                             value = query, onValueChange = { query = it }, singleLine = true,
                             modifier = Modifier.fillMaxWidth(), label = { Text("Search files") },
-                            trailingIcon = if (query.isNotEmpty()) ({ TextButton(onClick = { query = "" }) { Text("Clear") } }) else null,
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = if (query.isNotEmpty()) ({
+                                IconButton(onClick = { query = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                                }
+                            }) else null,
                         )
                     }
                 }
@@ -148,7 +147,7 @@ fun AddSheet(
                     val selected = file.index in selection
                     Column {
                         Row(
-                            Modifier.fillMaxWidth().heightIn(min = 64.dp)
+                            Modifier.fillMaxWidth().heightIn(min = 56.dp)
                                 .toggleable(value = selected, enabled = !busy && onToggle != null, role = Role.Checkbox) { onToggle?.invoke(file.index) }
                                 .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,

@@ -14,7 +14,10 @@ android/app/src/main/jniLibs/
 android/app/src/main/cpp/include/
 vendor/nodejs-mobile/*.zip
 vendor/nodejs-mobile/unpacked/
-.herderHelp/run/
+.herderHelp/
+.gemini/
+.claude/
+.codex/
 *.apk
 *.log
 .idea/

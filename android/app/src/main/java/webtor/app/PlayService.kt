@@ -30,6 +30,12 @@ class PlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         applyExtras(intent)
         return when (intent?.action) {
+            ACTION_REFRESH -> {
+                showForeground(notification(commandInProgress = false))
+                val session = (application as? WebtorApp)?.session
+                if (session == null) stop(this) else session.refreshTransferNotification()
+                START_NOT_STICKY
+            }
             ACTION_STOP -> {
                 text = if (isMultiple) "Pausing downloads…" else "Pausing download…"
                 showForeground(notification(commandInProgress = true))
@@ -99,6 +105,7 @@ class PlayService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentIntent(open)
+            .setDeleteIntent(serviceAction(ACTION_REFRESH, REQUEST_REFRESH, flags))
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)
@@ -138,6 +145,7 @@ class PlayService : Service() {
 
     companion object {
         const val ACTION_STOP = "webtor.app.STOP"
+        private const val ACTION_REFRESH = "webtor.app.REFRESH_NOTIFICATION"
         const val EXTRA_TITLE = "title"
         const val EXTRA_TEXT = "text"
         const val EXTRA_PROGRESS = "progress"
@@ -147,6 +155,7 @@ class PlayService : Service() {
         private const val NOTIF_ID = 42
         private const val REQUEST_OPEN = 0
         private const val REQUEST_STOP = 3
+        private const val REQUEST_REFRESH = 4
 
         fun start(
             ctx: Context,
