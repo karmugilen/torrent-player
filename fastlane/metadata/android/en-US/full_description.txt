@@ -1,0 +1,21 @@
+<p><b>Torrent Player</b> is a lightweight, high-performance torrent downloader and streaming engine designed specifically for Android.</p>
+
+<p>Download torrents directly to your local storage or stream growing video files on-the-fly using your favorite external media players.</p>
+
+<p><b>Core Features:</b></p>
+<ul>
+  <li><b>Direct Local Storage:</b> Single-contract download directly to local public storage (<code>Downloads/Webtor</code>) for straightforward file management.</li>
+  <li><b>In-Progress Video Streaming:</b> Stream growing video files directly to external players such as VLC, Nova Video Player, MPV, or Just Player without waiting for downloads to finish.</li>
+  <li><b>Selective File Downloading:</b> Choose specific files to prioritize or download in multi-file swarms.</li>
+  <li><b>Bitfield Piece Visualizer:</b> Interactive real-time visualizer showing piece distribution and swarm availability.</li>
+  <li><b>Optimized Resource & Battery Usage:</b> Adaptive polling back-off and low memory footprint with an optimized 96MB V8 engine heap.</li>
+  <li><b>Modern Material 3 Interface:</b> Intuitive UI with dynamic colors, dark theme support, and animated video preview cards.</li>
+</ul>
+
+<p><b>Privacy & Freedom:</b></p>
+<ul>
+  <li>100% Free and Open Source Software (MIT License).</li>
+  <li>Zero trackers, zero analytics, zero telemetry.</li>
+  <li>Zero advertisements.</li>
+  <li>Direct peer-to-peer swarm connectivity (DHT, UDP trackers, TCP, uTP, and WebSockets).</li>
+</ul>

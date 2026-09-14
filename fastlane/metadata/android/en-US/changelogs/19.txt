@@ -1,0 +1,4 @@
+- Instant swarm reactivation on app restore and resume after force-stop.
+- Native media player streaming chooser for VLC, Nova, MPV, and Just Player.
+- Modern Material 3 UI with dynamic colors and animated preview cards.
+- Adaptive battery-friendly polling and memory optimization.
