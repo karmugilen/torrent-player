@@ -31,12 +31,9 @@ set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
 set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
 set(NO_TESTS ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-include(FetchContent)
-FetchContent_Declare(libdatachannel
-  GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-  GIT_TAG v0.24.2
-  GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(libdatachannel)
+# Sources and their dependencies are pinned by Git submodules. Configuration
+# and compilation must work without downloading anything.
+add_subdirectory("${REPO_ROOT}/vendor/libdatachannel" libdatachannel EXCLUDE_FROM_ALL)
 
 set(NDC "${MODULES}/node-datachannel/src/cpp")
 add_library(node_datachannel SHARED

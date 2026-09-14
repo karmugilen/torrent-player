@@ -1,0 +1,2 @@
+Build the Node runtime and native torrent transports from pinned source code for F-Droid.
+Make Android builds portable across developer machines and F-Droid builders.

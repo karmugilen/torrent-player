@@ -46,8 +46,8 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "1.4.2"
+        versionCode = 20
+        versionName = "1.4.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")
@@ -117,6 +117,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 }
@@ -131,7 +132,11 @@ val buildNativeAddons by tasks.registering(Exec::class) {
     inputs.files(
         repoRoot.resolve("scripts/build-native-addons.sh"),
         repoRoot.resolve("scripts/native-addons/CMakeLists.txt"),
+        engineDir.resolve("package-lock.json"),
+        file("src/main/jniLibs/arm64-v8a/libnode.so"),
     )
+    inputs.dir(repoRoot.resolve("vendor/libdatachannel"))
+    inputs.dir(file("src/main/cpp/include"))
     outputs.files(
         file("src/main/jniLibs/arm64-v8a/libutp_native.so"),
         file("src/main/jniLibs/arm64-v8a/libnode_datachannel.so"),

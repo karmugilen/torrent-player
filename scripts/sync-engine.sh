@@ -25,7 +25,7 @@ rm -f "$DEST/node_modules/utp-native/binding.cc" \
       "$DEST/node_modules/utp-native/binding.c" \
       "$DEST/node_modules/node-datachannel/CMakeLists.txt"
 # Drop docs, types, maps, tests, and browser bundles. Runtime JS stays.
-find "$DEST" -type f \( \
+find "$DEST" -type f ! -iname '*license*' ! -iname '*copying*' ! -iname 'notice*' \( \
   -name '*.md' -o -name '*.markdown' -o -name '*.map' -o -name '*.ts' \
   -o -name '*.d.ts' -o -name '*.yml' -o -name '*.yaml' -o -name '*.bc.js' \
   -o -name '.*ignore' -o -name '.*rc' -o -name '*.editorconfig' \
@@ -34,7 +34,7 @@ find "$DEST" -type f \( \
   -o -name '*.gyp' -o -name '*.gypi' -o -name 'binding.gyp' \
   -o -name 'CHANGELOG*' -o -name 'AUTHORS*' -o -name 'Makefile*' -o -name '.gitmodules' \
 \) -delete
-find "$DEST/node_modules" -type f -name '*LICENSE*' ! -name '*.js' ! -name '*.json' -delete
+# Preserve dependency license notices in the distributed assets.
 find "$DEST" -type d \( \
   -name test -o -name tests -o -name docs -o -name example -o -name examples \
   -o -name spec -o -name .github \

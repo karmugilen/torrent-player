@@ -12,8 +12,14 @@ android/local.properties
 android/app/src/main/assets/nodejs-project/
 android/app/src/main/jniLibs/
 android/app/src/main/cpp/include/
+android/app/src/main/assets/licenses/nodejs-mobile.txt
+android/app/src/main/assets/licenses/libdatachannel.txt
+android/app/src/main/assets/licenses/libjuice.txt
+android/app/src/main/assets/licenses/usrsctp.txt
+android/app/src/main/assets/licenses/plog.txt
 vendor/nodejs-mobile/*.zip
 vendor/nodejs-mobile/unpacked/
+vendor/nodejs-mobile/source/
 .herderHelp/
 .gemini/
 .claude/

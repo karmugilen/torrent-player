@@ -98,28 +98,39 @@ adb install -r torrent-player.apk
 ## Building from Source
 
 ### Prerequisites
-- Android SDK & NDK (configured in `android/SDK.env`)
+- Linux, Git, GCC/G++, Make, rsync, Python 3 and setuptools
+- Android SDK platform 34, build tools 34.0.0, NDK 26.1.10909125 and CMake 3.22.1
 - Node.js 18+ and `npm`
-- Java 17+
+- Java 17 or 21; set `JAVA_HOME` and `ANDROID_HOME` for your machine
 
 ### Build Steps
 
 ```bash
-# 1. Install engine dependencies
-cd engine && npm ci --omit=optional
-cd ..
+# 1. Fetch pinned native sources and install JavaScript dependencies
+git submodule update --init --recursive
+git clone --depth 1 --branch v18.20.4 \
+  https://github.com/nodejs-mobile/nodejs-mobile.git vendor/nodejs-mobile/source
+npm --prefix engine ci --omit=optional --omit=dev --ignore-scripts
 
-# 2. Source Android SDK environment and build native node addons
-source android/SDK.env
+# 2. Build the Node runtime and native addons from source (first build is slow)
+# vendor-node.sh verifies the exact source revision before compiling.
 ./scripts/vendor-node.sh
 ./scripts/build-native-addons.sh
 
-# 3. Assemble and install the release APK
-cd android && ./gradlew :app:assembleRelease
-adb install -r app/build/outputs/apk/release/app-release.apk
+# 3. Build an installable development APK
+cd android
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-> **Note:** `assembleRelease` produces an optimized APK minified with R8 resource shrinking. For iterative development, debug builds can be created using `./gradlew :app:assembleDebug`.
+`assembleRelease` produces an optimized, unsigned APK for F-Droid to sign.
+Upstream releases use the `WEBTOR_KEYSTORE`, `WEBTOR_STORE_PASSWORD`,
+`WEBTOR_KEY_ALIAS` and `WEBTOR_KEY_PASSWORD` environment variables for signing.
+Native compilation uses two parallel jobs by default; set `WEBTOR_BUILD_JOBS`
+to adjust it. Source builds do not download or reuse prebuilt Node libraries.
+
+F-Droid inclusion is tracked in [merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893).
+See [the submission notes](docs/FDROID_SUBMISSION.md) for the build recipe and validation status.
 
 ---
 
