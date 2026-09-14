@@ -1,22 +1,13 @@
 Categories:
-  - Internet
-  - Multimedia
+  - Download
+  - Online Media Player
 License: MIT
 AuthorName: karmugilen
 SourceCode: https://github.com/karmugilen/torrent-player
 IssueTracker: https://github.com/karmugilen/torrent-player/issues
 Changelog: https://github.com/karmugilen/torrent-player/releases
 
-Summary: Stream and download torrents directly on Android with external media players
-Description: |-
-  Torrent Player is a lightweight, privacy-focused torrent client and streaming engine for Android.
-  Features:
-  - Single-contract Download to local storage (Downloads/Webtor).
-  - Stream in-progress video files directly to VLC, Nova Video Player, MPV, or Just Player.
-  - Bitfield piece visualizer and selective file downloading.
-  - Low memory usage (96MB V8 heap cap) and battery-friendly adaptive polling.
-  - Modern Material 3 UI with dark mode and animated preview cards.
-  - 100% Free and Open Source with no tracking, analytics, or ads.
+AutoName: Torrent Player
 
 RepoType: git
 Repo: https://github.com/karmugilen/torrent-player.git
@@ -24,7 +15,7 @@ Repo: https://github.com/karmugilen/torrent-player.git
 Builds:
   - versionName: 1.4.2
     versionCode: 19
-    commit: v1.4.2
+    commit: 71c19ff4334eb160ebc7b4f2afe5b7cd0f4eac2b
     subdir: android
     gradle:
       - assembleRelease
@@ -34,7 +25,7 @@ Builds:
       - ../scripts/build-native-addons.sh
     ndk: r26b
 
-AutoUpdateMode: Version v%v
+AutoUpdateMode: Version
 UpdateCheckMode: Tags
 CurrentVersion: 1.4.2
 CurrentVersionCode: 19
