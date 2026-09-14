@@ -36,7 +36,6 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onMaxPeers: (Int) -> Unit,
     onMaxPeersCommit: () -> Unit,
-    onPlayer: (PlayerApp?) -> Unit,
     onDarkTheme: (Boolean) -> Unit,
     onCleanup: () -> Unit,
     onClearAll: () -> Unit,
@@ -84,36 +83,6 @@ fun SettingsScreen(
                     selected = !state.darkTheme,
                     onClick = { onDarkTheme(false) },
                 )
-            }
-            item {
-                Text("Player", style = MaterialTheme.typography.titleLarge)
-                Text(
-                    "Used when you tap Play. Always ask shows the system picker.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
-                )
-                ChoiceRow(
-                    label = "Always ask",
-                    selected = state.playerPackage.isEmpty(),
-                    onClick = { onPlayer(null) },
-                )
-                if (state.players.isEmpty()) {
-                    Text(
-                        "Install VLC, mpv, or another video player.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                } else {
-                    state.players.forEach { player ->
-                        ChoiceRow(
-                            label = player.label,
-                            selected = state.playerPackage == player.packageName,
-                            onClick = { onPlayer(player) },
-                        )
-                    }
-                }
             }
             item {
                 Text("Downloads", style = MaterialTheme.typography.titleLarge)

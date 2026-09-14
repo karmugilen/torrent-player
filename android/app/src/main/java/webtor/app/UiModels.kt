@@ -41,16 +41,16 @@ data class UiState(
     val clearAllConfirm: Boolean = false,
     val restoring: Boolean = false,
     val maxPeers: Int = 55,
-    val playerPackage: String = "",
-    val playerActivity: String = "",
-    val players: List<PlayerApp> = emptyList(),
     val darkTheme: Boolean = true,
 )
 
 sealed class UiEvent {
     data object PickTorrent : UiEvent()
     data object RequestNotifications : UiEvent()
-    data class PlayStream(val info: PlayInfo) : UiEvent()
+    data class PlayStream(
+        val info: PlayInfo,
+        val transientWatchId: String? = null,
+    ) : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String) : UiEvent()
     data object ExitApp : UiEvent()
 }

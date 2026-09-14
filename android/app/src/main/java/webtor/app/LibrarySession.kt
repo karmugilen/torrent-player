@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,6 +28,11 @@ import webtor.core.EngineClient
 import webtor.core.EngineException
 import webtor.core.TorrentStatus
 
+private data class TransientWatchSession(
+    val engineId: String,
+    val title: String,
+)
+
 class LibrarySession(private val app: Application) {
     private val client = EngineClient(NodeHost.DEFAULT_CTL_PORT)
     private val storage = DownloadStorage(app)
@@ -36,6 +42,7 @@ class LibrarySession(private val app: Application) {
     private val mutex = Mutex()
     private val persistenceMutex = Mutex()
     private val started = AtomicBoolean(false)
+    private val initialized = CompletableDeferred<Unit>()
     private val isShuttingDown = AtomicBoolean(false)
     private var serviceSuppressed = false
     private val recentlyInvalidatedIds = java.util.Collections.newSetFromMap(
@@ -49,6 +56,9 @@ class LibrarySession(private val app: Application) {
     private var lastServiceUpdate = 0L
     private var draftGeneration = 0L
     private var commitInProgress = false
+    private var pendingTransientWatchId: String? = null
+    private var activeTransientWatch: TransientWatchSession? = null
+    private var transientWatchHostStopped = false
     @Volatile private var shutdownComplete = false
 
     private val _ui = MutableStateFlow(UiState())
@@ -59,7 +69,6 @@ class LibrarySession(private val app: Application) {
 
     fun onForeground() {
         reopenAfterShutdown()
-        refreshPlayers()
     }
 
     private fun shutdownInProgress(): Boolean = isShuttingDown.get() && !shutdownComplete
@@ -88,6 +97,7 @@ class LibrarySession(private val app: Application) {
     }
 
     private fun CoroutineScope.launchCommand(block: suspend () -> Unit) = launch {
+        initialized.await()
         mutex.withLock { block() }
     }
 
@@ -100,38 +110,33 @@ class LibrarySession(private val app: Application) {
         }
         refreshStorageStats()
         scope.launch {
-            val loaded = withContext(io) { storage.load() }.map {
-                it.copy(engineId = null, paused = it.paused || serviceSuppressed)
-            }
-            val players = queryVideoPlayers(app.packageManager, app.packageName)
-            val savedPlayer = settings.getString("playerPackage", "") ?: ""
-            val savedActivity = settings.getString("playerActivity", "") ?: ""
-            val player = findPlayer(players, savedPlayer)
-            _ui.update {
-                it.copy(
-                    library = loaded,
-                    loadWarning = storage.loadWarning,
-                    maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 80),
-                    restoring = loaded.isNotEmpty(),
-                    statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
-                    players = players,
-                    playerPackage = player?.packageName ?: "",
-                    playerActivity = player?.activity ?: "",
-                    darkTheme = settings.getBoolean("darkTheme", true),
-                )
-            }
-            if (savedPlayer.isNotEmpty() && player == null) {
+            try {
+                val loaded = withContext(io) { storage.load() }.map {
+                    it.copy(engineId = null, paused = it.paused || serviceSuppressed)
+                }
+                _ui.update {
+                    it.copy(
+                        library = loaded,
+                        loadWarning = storage.loadWarning,
+                        maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 80),
+                        restoring = loaded.isNotEmpty(),
+                        statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
+                        darkTheme = settings.getBoolean("darkTheme", true),
+                    )
+                }
                 settings.edit().remove("playerPackage").remove("playerActivity").apply()
+                refreshStorageStats()
+                waitForEngine()
+                if (_ui.value.engineReady) {
+                    runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
+                    restoreAll(loaded)
+                }
+                _ui.update { it.copy(restoring = false, statusLine = if (it.engineReady) "Ready" else it.statusLine) }
+                persist()
+                syncService()
+            } finally {
+                initialized.complete(Unit)
             }
-            refreshStorageStats()
-            waitForEngine()
-            if (_ui.value.engineReady) {
-                runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
-                restoreAll(loaded)
-            }
-            _ui.update { it.copy(restoring = false, statusLine = if (it.engineReady) "Ready" else it.statusLine) }
-            persist()
-            syncService()
         }
         pollJob = scope.launch { pollLoop() }
     }
@@ -167,7 +172,6 @@ class LibrarySession(private val app: Application) {
     }
     fun openSettings() {
         refreshStorageStats()
-        refreshPlayers()
         _ui.update { it.copy(screen = Screen.Settings, error = null) }
     }
 
@@ -176,35 +180,6 @@ class LibrarySession(private val app: Application) {
         _ui.update { it.copy(darkTheme = dark) }
     }
 
-    fun setPlayer(app: PlayerApp?) {
-        settings.edit()
-            .putString("playerPackage", app?.packageName ?: "")
-            .putString("playerActivity", app?.activity ?: "")
-            .apply()
-        _ui.update {
-            it.copy(
-                playerPackage = app?.packageName ?: "",
-                playerActivity = app?.activity ?: "",
-            )
-        }
-    }
-
-    fun preferredPlayer(): PlayerApp? = findPlayer(_ui.value.players, _ui.value.playerPackage)
-
-    private fun refreshPlayers() {
-        val players = queryVideoPlayers(app.packageManager, app.packageName)
-        val current = findPlayer(players, _ui.value.playerPackage)
-        _ui.update {
-            it.copy(
-                players = players,
-                playerPackage = current?.packageName ?: "",
-                playerActivity = current?.activity ?: it.playerActivity,
-            )
-        }
-        if (_ui.value.playerPackage.isEmpty() && (settings.getString("playerPackage", "") ?: "").isNotEmpty()) {
-            settings.edit().remove("playerPackage").remove("playerActivity").apply()
-        }
-    }
     fun closeSettings() = _ui.update { it.copy(screen = Screen.Library, clearAllConfirm = false) }
     fun setMaxPeers(value: Int) {
         val n = value.coerceIn(8, 80)
@@ -358,7 +333,138 @@ class LibrarySession(private val app: Application) {
         syncPrepareSelection()
     }
 
-    fun startDownload() {
+    fun startDownload() = commitPreparedDownload()
+
+    fun watchNow() {
+        scope.launch {
+            var playEvent: UiEvent.PlayStream? = null
+            mutex.withLock {
+                if (commitInProgress || !beginUserWork()) return@withLock
+                val draft = _ui.value.prepare ?: return@withLock
+                val torrent = draft.torrent
+                if (torrent?.ready != true) {
+                    setPrepareError("Still fetching torrent info.")
+                    return@withLock
+                }
+                if (draft.selected.isEmpty()) {
+                    setPrepareError("Select at least one file to watch.")
+                    return@withLock
+                }
+                val watchIndex = torrent.files
+                    .filter { it.index in draft.selected && (it.name.isVideoName() || it.path.isVideoName()) }
+                    .maxByOrNull { it.length }
+                    ?.index
+                if (watchIndex == null) {
+                    setPrepareError("Select a video to watch.")
+                    return@withLock
+                }
+                if (_ui.value.library.any { it.key.equals(torrent.infoHash, true) || it.engineId == draft.engineId }) {
+                    setPrepareError("This torrent is already in your library.")
+                    return@withLock
+                }
+                commitInProgress = true
+                pendingTransientWatchId = draft.engineId
+                _ui.update { it.copy(prepare = draft.copy(busy = true, error = null)) }
+                try {
+                    // The engine owns a bounded, in-memory store for this session.
+                    // No DownloadStorage or MediaStore destination is created here.
+                    val info = withContext(io) { client.watch(draft.engineId, watchIndex) }
+                    playEvent = UiEvent.PlayStream(info, transientWatchId = draft.engineId)
+                } catch (t: Throwable) {
+                    pendingTransientWatchId = null
+                    commitInProgress = false
+                    _ui.update { state ->
+                        state.copy(
+                            addSheetOpen = state.addSheetOpen || state.screen != Screen.Prepare,
+                            prepare = state.prepare?.takeIf { it.engineId == draft.engineId }
+                                ?.copy(busy = false, error = readableError(t)),
+                        )
+                    }
+                    if (t is CancellationException) throw t
+                }
+            }
+            // Dispatch after releasing the session mutex. The Activity can then
+            // confirm the player launch and establish the foreground watch state
+            // before its own onStop callback runs.
+            playEvent?.let { event ->
+                if (_events.trySend(event).isFailure) {
+                    completeWatchLaunch(event.transientWatchId!!, launched = false)
+                }
+            }
+        }
+    }
+
+    /** Completes the hand-off only after Android actually accepted the player intent. */
+    fun completeWatchLaunch(engineId: String, launched: Boolean) {
+        scope.launch {
+            mutex.withLock {
+                if (pendingTransientWatchId != engineId) return@withLock
+                pendingTransientWatchId = null
+                commitInProgress = false
+                if (!launched) {
+                    _ui.update { state ->
+                        val draft = state.prepare?.takeIf { it.engineId == engineId }
+                        state.copy(
+                            addSheetOpen = state.addSheetOpen || state.screen != Screen.Prepare,
+                            prepare = draft?.copy(
+                                busy = false,
+                                error = draft.error ?: "The video player could not be opened. Try again.",
+                            ) ?: state.prepare,
+                        )
+                    }
+                    return@withLock
+                }
+
+                val draft = _ui.value.prepare?.takeIf { it.engineId == engineId }
+                val title = draft?.let { current ->
+                    current.torrent?.files
+                        ?.filter { file -> file.index in current.selected && (file.name.isVideoName() || file.path.isVideoName()) }
+                        ?.maxByOrNull { file -> file.length }
+                        ?.name
+                        ?: current.torrent?.name
+                } ?: "Torrent Player"
+                activeTransientWatch = TransientWatchSession(engineId, title)
+                transientWatchHostStopped = false
+                _ui.update {
+                    it.copy(
+                        prepare = null,
+                        addSheetOpen = false,
+                        screen = Screen.Library,
+                        magnetDraft = "",
+                        error = null,
+                    )
+                }
+                syncService(force = true)
+            }
+        }
+    }
+
+    fun onTransientWatchHostStopped() {
+        if (activeTransientWatch != null) transientWatchHostStopped = true
+    }
+
+    fun onTransientWatchHostStarted() {
+        if (!transientWatchHostStopped || activeTransientWatch == null) return
+        scope.launch {
+            mutex.withLock {
+                val watch = activeTransientWatch ?: return@withLock
+                if (!transientWatchHostStopped) return@withLock
+                try {
+                    withContext(io) { client.remove(watch.engineId, true) }
+                    if (activeTransientWatch?.engineId == watch.engineId) {
+                        activeTransientWatch = null
+                        transientWatchHostStopped = false
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    _ui.update { it.copy(error = "Could not close the temporary watch session: ${readableError(t)}") }
+                }
+                syncService(force = true)
+            }
+        }
+    }
+
+    private fun commitPreparedDownload() {
         scope.launch {
             mutex.withLock {
                 if (commitInProgress || !beginUserWork()) return@withLock
@@ -380,31 +486,40 @@ class LibrarySession(private val app: Application) {
                     setPrepareError("Torrent Player needs Android 10 or newer to save into Downloads.")
                     return@withLock
                 }
-                val needed = torrent.files.filter { it.index in draft.selected }.sumOf { it.length }
-                val free = withContext(io) { storage.freeBytes }
-                if (needed > free) {
-                    setPrepareError(
-                        "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available.",
-                    )
-                    return@withLock
-                }
                 commitInProgress = true
-                _ui.update { it.copy(prepare = draft.copy(busy = true, error = null)) }
+                val key = torrent.infoHash ?: draft.engineId
+                val provisional = DownloadEntry(
+                    key = key,
+                    title = torrent.name ?: key,
+                    source = torrent.magnetURI ?: draft.source,
+                    metadata = "",
+                    engineId = draft.engineId,
+                    destination = "Downloads/Webtor",
+                    files = torrent.files.map { SavedFile(it.index, it.name, it.path, it.length) },
+                    selected = draft.selected,
+                    paused = false,
+                    status = torrent,
+                    lifecycleState = EntryLifecycleState.PREPARING,
+                )
+                // Render the accepted download before any storage or engine I/O. The
+                // provisional entry is not persisted until configuration succeeds.
+                _ui.update {
+                    it.copy(
+                        library = listOf(provisional) + it.library,
+                        prepare = draft.copy(busy = true, error = null),
+                        addSheetOpen = false,
+                        screen = Screen.Library,
+                    )
+                }
                 _events.trySend(UiEvent.RequestNotifications)
                 try {
+                    val needed = torrent.files.filter { it.index in draft.selected }.sumOf { it.length }
+                    val free = withContext(io) { storage.freeBytes }
+                    check(needed <= free) {
+                        "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available."
+                    }
                     val metadata = withContext(io) { client.metadata(draft.engineId) }
-                    val key = torrent.infoHash ?: draft.engineId
-                    val skeleton = DownloadEntry(
-                        key = key,
-                        title = torrent.name ?: key,
-                        source = torrent.magnetURI ?: draft.source,
-                        metadata = metadata,
-                        engineId = draft.engineId,
-                        destination = "Downloads/Webtor",
-                        files = torrent.files.map { SavedFile(it.index, it.name, it.path, it.length) },
-                        selected = draft.selected,
-                        paused = false,
-                    )
+                    val skeleton = provisional.copy(metadata = metadata)
                     val created = withContext(io) { storage.createFiles(skeleton, null) }
                     try {
                         val pfds = withContext(io) { storage.openFiles(created) }
@@ -418,7 +533,10 @@ class LibrarySession(private val app: Application) {
                         runCatching { withContext(io) { storage.deleteFiles(created) } }
                         throw t
                     }
-                    val entry = skeleton.copy(files = created)
+                    val entry = skeleton.copy(
+                        files = created,
+                        lifecycleState = EntryLifecycleState.DOWNLOADING,
+                    )
                     serviceSuppressed = false
                     settings.edit().putBoolean("serviceSuppressed", false).apply()
                     _ui.update {
@@ -432,10 +550,16 @@ class LibrarySession(private val app: Application) {
                     }
                     persist()
                     refreshStorageStats()
-                    syncService()
+                    syncService(force = true)
                 } catch (t: Throwable) {
+                    _ui.update {
+                        it.copy(
+                            library = it.library.filterNot { entry -> entry.key == key },
+                            addSheetOpen = true,
+                            prepare = draft.copy(busy = false, error = readableError(t)),
+                        )
+                    }
                     if (t is CancellationException) throw t
-                    setPrepareError(readableError(t))
                 } finally {
                     commitInProgress = false
                 }
@@ -469,7 +593,7 @@ class LibrarySession(private val app: Application) {
                     } else it
                 }
                 persist()
-                syncService()
+                syncService(force = true)
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 patch(current.key) {
@@ -477,6 +601,7 @@ class LibrarySession(private val app: Application) {
                         it.copy(paused = prevPaused, lifecycleState = prevLifecycle, error = readableError(t))
                     } else it
                 }
+                syncService(force = true)
             }
         }
     }
@@ -557,7 +682,7 @@ class LibrarySession(private val app: Application) {
                     recentlyInvalidatedIds.remove(id)
                     if (t is CancellationException) throw t
                     patch(current.key) { it.copy(lifecycleState = current.lifecycleState, error = readableError(t)) }
-                    syncService()
+                    syncService(force = true)
                     return@launchCommand
                 }
             }
@@ -573,7 +698,7 @@ class LibrarySession(private val app: Application) {
                 } else it
             }
             persist()
-            syncService()
+            syncService(force = true)
         }
     }
 
@@ -816,10 +941,26 @@ class LibrarySession(private val app: Application) {
     fun pauseFromNotification() {
         scope.launchCommand {
             if (isShuttingDown.get()) return@launchCommand
+            val watch = activeTransientWatch
+            if (watch != null) {
+                try {
+                    withContext(io) { client.remove(watch.engineId, true) }
+                    if (activeTransientWatch?.engineId == watch.engineId) {
+                        activeTransientWatch = null
+                        transientWatchHostStopped = false
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    _ui.update { it.copy(error = "Could not stop the temporary watch session: ${readableError(t)}") }
+                }
+            }
             val targets = _ui.value.library.filter {
                 it.engineId != null && !it.paused && !it.complete && !it.isDeleting
             }
-            if (targets.isEmpty()) return@launchCommand
+            if (targets.isEmpty()) {
+                syncService(force = true)
+                return@launchCommand
+            }
 
             val genMap = targets.associate { it.key to (it.generation + 1) }
 
@@ -866,7 +1007,7 @@ class LibrarySession(private val app: Application) {
                 }
             }
             persist()
-            syncService()
+            syncService(force = true)
         }
     }
 
@@ -909,7 +1050,7 @@ class LibrarySession(private val app: Application) {
                 }
             }
             persist()
-            syncService()
+            syncService(force = true)
         }
     }
 
@@ -917,7 +1058,21 @@ class LibrarySession(private val app: Application) {
         serviceSuppressed = true
         settings.edit().putBoolean("serviceSuppressed", true).apply()
         scope.launch {
+            initialized.await()
             mutex.withLock {
+                var watchFailed = false
+                activeTransientWatch?.let { watch ->
+                    try {
+                        withContext(io) { client.remove(watch.engineId, true) }
+                        if (activeTransientWatch?.engineId == watch.engineId) {
+                            activeTransientWatch = null
+                            transientWatchHostStopped = false
+                        }
+                    } catch (t: Exception) {
+                        if (t is CancellationException) throw t
+                        watchFailed = true
+                    }
+                }
                 val targets = _ui.value.library.filter { it.engineId != null && !it.isDeleting }
                 val genMap = targets.associate { it.key to (it.generation + 1) }
                 _ui.update { state ->
@@ -962,11 +1117,11 @@ class LibrarySession(private val app: Application) {
                     )
                 }
                 persist()
-                if (stopped.size != targets.size) {
+                if (stopped.size != targets.size || watchFailed) {
                     serviceSuppressed = false
                     settings.edit().putBoolean("serviceSuppressed", false).apply()
-                    _ui.update { it.copy(error = "Some downloads could not be stopped. Please retry.") }
-                    syncService()
+                    _ui.update { it.copy(error = "Some transfers could not be stopped. Please retry.") }
+                    syncService(force = true)
                     return@withLock
                 }
                 PlayService.stop(app)
@@ -986,9 +1141,24 @@ class LibrarySession(private val app: Application) {
         pollJob?.cancel()
 
         scope.launch {
+            initialized.await()
             mutex.withLock {
                 var failed = false
+                activeTransientWatch?.let { watch ->
+                    try {
+                        withContext(io) { client.remove(watch.engineId, true) }
+                        if (activeTransientWatch?.engineId == watch.engineId) {
+                            activeTransientWatch = null
+                            transientWatchHostStopped = false
+                        }
+                    } catch (t: Exception) {
+                        if (t is CancellationException) throw t
+                        failed = true
+                    }
+                }
                 val prepId = _ui.value.prepare?.engineId
+                pendingTransientWatchId = null
+                commitInProgress = false
                 _ui.update { it.copy(prepare = null, addSheetOpen = false) }
                 if (prepId != null) {
                     recentlyInvalidatedIds.add(prepId)
@@ -1358,7 +1528,7 @@ class LibrarySession(private val app: Application) {
 
             val targets = state.library.mapNotNull { e ->
                 val id = e.engineId ?: return@mapNotNull null
-                if (e.isDeleting || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING || e.lifecycleState == EntryLifecycleState.PAUSING) {
+                if (e.isDeleting || e.lifecycleState == EntryLifecycleState.PREPARING || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING || e.lifecycleState == EntryLifecycleState.PAUSING) {
                     return@mapNotNull null
                 }
                 PollTarget(e.key, id, e.generation)
@@ -1499,33 +1669,52 @@ class LibrarySession(private val app: Application) {
         }
     }
 
-    private fun syncService() {
+    private fun syncService(force: Boolean = false) {
         if (serviceSuppressed || isShuttingDown.get()) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
             return
         }
+        val watch = activeTransientWatch
         val live = _ui.value.library.filter {
             it.engineId != null && !it.complete && !it.isDeleting && it.lifecycleState != EntryLifecycleState.DELETING
         }
-        if (live.isEmpty()) {
+        if (live.isEmpty() && watch == null) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
             return
         }
         val downloading = live.filter { !it.paused }
+        if (downloading.isEmpty() && watch == null) {
+            PlayService.stop(app)
+            lastServiceUpdate = 0L
+            return
+        }
         val total = live.sumOf { it.total }
         val got = live.sumOf { it.downloaded }
         val progress = if (total <= 0L) 0 else ((got.toDouble() / total) * 100).toInt().coerceIn(0, 100)
-        val title = if (live.size == 1) live.first().title else "${live.size} downloads"
-        val text = if (downloading.isEmpty()) {
-            "Paused"
+        val title = when {
+            watch != null && live.isNotEmpty() -> "${watch.title} + ${live.size} download${if (live.size == 1) "" else "s"}"
+            watch != null -> watch.title
+            live.size == 1 -> live.first().title
+            else -> "${live.size} downloads"
+        }
+        val text = if (watch != null) {
+            if (downloading.isEmpty()) "Watching from 100 MB memory"
+            else "Watching from 100 MB memory · ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
         } else {
             "${formatBytes(got)} / ${formatBytes(total)}  ·  ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
         }
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastServiceUpdate >= 1000) {
-            PlayService.start(app, title, progress, downloading.isEmpty(), text, multiple = live.size > 1)
+        if (force || now - lastServiceUpdate >= 1000) {
+            PlayService.start(
+                app,
+                title,
+                progress,
+                paused = false,
+                text = text,
+                multiple = live.size + (if (watch == null) 0 else 1) > 1,
+            )
             lastServiceUpdate = now
         }
     }

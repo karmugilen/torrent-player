@@ -6,15 +6,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -24,7 +29,8 @@ fun AddSheet(
     onOpenFile: () -> Unit, onDismiss: () -> Unit, draft: PrepareDraft? = null,
     freeBytes: Long = 0, onToggle: ((Int) -> Unit)? = null,
     onSelectAll: (() -> Unit)? = null, onSelectNone: (() -> Unit)? = null,
-    onDownload: (() -> Unit)? = null, destination: String = "Downloads/Webtor",
+    onDownload: (() -> Unit)? = null, onWatchNow: (() -> Unit)? = null,
+    destination: String = "Downloads/Webtor",
     existingEntry: DownloadEntry? = null, onOpenExisting: (() -> Unit)? = null,
 ) {
     val busy = draft?.busy == true
@@ -42,6 +48,8 @@ fun AddSheet(
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedBytes
     val canDownload = ready && selection.isNotEmpty() && !busy && !insufficientSpace && existingEntry == null && onDownload != null
+    val canWatchNow = ready && !busy && existingEntry == null && onWatchNow != null &&
+        files.any { it.index in selection && (it.name.isVideoName() || it.path.isVideoName()) }
     Scaffold(
         modifier = Modifier.imePadding(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -61,19 +69,44 @@ fun AddSheet(
                     Text("$destination · ${if (storageKnown) "${formatBytes(freeBytes)} free" else "Free space unavailable"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     when {
                         existingEntry != null -> Text("This torrent is already in your downloads.", style = MaterialTheme.typography.bodyMedium)
-                        insufficientSpace -> Text("Not enough storage for ${formatBytes(selectedBytes)}. Select fewer files or free up space.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        insufficientSpace -> Text("Not enough storage to download ${formatBytes(selectedBytes)}. Watch now still works without saving the video.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                         selection.isEmpty() -> Text("Select at least one file to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Button(
-                        onClick = { if (existingEntry != null) onOpenExisting?.invoke() else onDownload?.invoke() },
-                        enabled = if (existingEntry != null) !busy && onOpenExisting != null else canDownload,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    ) {
-                        Text(when {
-                            existingEntry != null -> "Open existing download"
-                            busy -> "Starting download…"
-                            else -> "Download selected · ${formatBytes(selectedBytes)}"
-                        })
+                    if (existingEntry != null) {
+                        Button(
+                            onClick = { onOpenExisting?.invoke() },
+                            enabled = !busy && onOpenExisting != null,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        ) {
+                            Text("Open existing download")
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = { onWatchNow?.invoke() },
+                                enabled = canWatchNow,
+                                modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
+                            ) {
+                                Text("Watch now", maxLines = 1)
+                            }
+                            Button(
+                                onClick = { onDownload?.invoke() },
+                                enabled = canDownload,
+                                modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
+                            ) {
+                                Text("Download", maxLines = 1)
+                            }
+                        }
+                        Text(
+                            "Watch now streams through a temporary 100 MB memory cache and does not save the video.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -140,13 +173,42 @@ private fun SourceInput(
     magnet: String, engineReady: Boolean, connecting: Boolean, ready: Boolean, busy: Boolean, status: String?,
     onMagnet: (String) -> Unit, onAdd: () -> Unit, onOpenFile: () -> Unit, alreadyAdded: Boolean = false,
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    var pastedSourceToHide by remember { mutableStateOf<String?>(null) }
+    fun hideInput() {
+        keyboard?.hide()
+        focusManager.clearFocus()
+    }
+    LaunchedEffect(pastedSourceToHide) {
+        val pasted = pastedSourceToHide ?: return@LaunchedEffect
+        // Let the IME finish its paste transaction before changing focus. Doing
+        // this synchronously can close the keyboard before Paste is committed.
+        delay(250)
+        if (magnet == pasted) hideInput()
+        pastedSourceToHide = null
+    }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (!ready && !alreadyAdded) Text("Paste a magnet link or torrent URL, or open a .torrent file from your device.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedTextField(
-            value = magnet, onValueChange = onMagnet, enabled = !busy, modifier = Modifier.fillMaxWidth(),
+            value = magnet,
+            onValueChange = { value ->
+                val fullLinkWasPasted = shouldHideKeyboardAfterPaste(magnet, value)
+                onMagnet(value)
+                if (fullLinkWasPasted) pastedSourceToHide = value
+            },
+            enabled = !busy, modifier = Modifier.fillMaxWidth(),
             label = { Text("Magnet link or torrent URL") }, placeholder = { Text("magnet:?xt=urn:btih:…") },
             minLines = if (ready) 1 else 2, maxLines = 3,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Uri,
+                imeAction = ImeAction.Done,
+                autoCorrectEnabled = false,
+            ),
+            keyboardActions = KeyboardActions(onDone = {
+                hideInput()
+                if (engineReady && looksLikeTorrentSource(magnet) && !connecting && !busy) onAdd()
+            }),
         )
         if (!engineReady) Text("Starting download engine…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (!alreadyAdded && (connecting || status != null && !ready)) Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

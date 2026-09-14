@@ -130,7 +130,7 @@ async function listFilesRecursive (dir) {
   return out
 }
 
-async function startPreparedMagnet (t, seedSource) {
+async function startPreparedMagnet (t, seedSource, engineEnv = {}) {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-life-'))
   t.after(async () => { await fs.rm(tmp, { recursive: true, force: true }) })
   const downloadDir = path.join(tmp, 'download')
@@ -160,7 +160,8 @@ async function startPreparedMagnet (t, seedSource) {
   const [destFd] = destFds
   const { child, info, stderr } = await startEngine({
     WEBTOR_PATH: downloadDir,
-    WEBTOR_SKIP_VERIFY: '0'
+    WEBTOR_SKIP_VERIFY: '0',
+    ...engineEnv
   }, destFds)
   t.after(async () => {
     if (!child.killed) {
@@ -295,12 +296,18 @@ test('magnet downloads metadata and bytes from a TCP peer, then streams ranges',
   assert.equal(invalid.status, 400)
 })
 
-test('prepare prefetches from peers without writing destination files', { timeout: 20000 }, async t => {
+test('prepare remains metadata-only until configure starts the download', { timeout: 20000 }, async t => {
   const bytes = await fs.readFile(fixtureDat)
   const { downloadDir, destPath, info, stderr, id, status } = await startPreparedMagnet(t, fixtureDat)
-  const pre = await pollTorrent(info.ctlPort, id, s => s.downloaded > 0 || s.progress > 0, { label: 'prefetch started' })
-  assert.equal(pre.configured, false)
-  assert.ok(pre.selected?.length >= 1)
+  const selected = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [0] })
+  assert.equal(selected.status, 200, JSON.stringify(selected.json) + ' stderr=' + stderr())
+  await sleep(500)
+  const pre = await jsonRequest(info.ctlPort, 'GET', `/torrent/${id}`)
+  assert.equal(pre.status, 200)
+  assert.equal(pre.json.configured, false)
+  assert.deepEqual(pre.json.selected, [0])
+  assert.equal(pre.json.downloaded, 0)
+  assert.ok(pre.json.files.every(file => file.progress === 0))
   const destBefore = await fs.readFile(destPath)
   assert.deepEqual(destBefore.subarray(0, 7), Buffer.alloc(7), 'destination received content before configure')
   const written = []
@@ -308,16 +315,14 @@ test('prepare prefetches from peers without writing destination files', { timeou
     const st = await fs.stat(file)
     if (st.size > 0 || path.basename(file) === 'tiny.dat') written.push(file)
   }
-  assert.deepEqual(written, [], 'prefetch wrote torrent content under ' + downloadDir)
+  assert.deepEqual(written, [], 'prepare wrote torrent content under ' + downloadDir)
 
-  const selected = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [0] })
-  assert.equal(selected.status, 200, JSON.stringify(selected.json) + ' stderr=' + stderr())
   const badSelect = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [99] })
   assert.equal(badSelect.status, 400)
 
   const cfg = await configureFile(info.ctlPort, id, status.files.length)
   assert.equal(cfg.status, 200, JSON.stringify(cfg.json) + ' stderr=' + stderr())
-  const got = await waitForDestPrefix(destPath, bytes.subarray(0, 7), { label: 'configure continues prefetch' })
+  const got = await waitForDestPrefix(destPath, bytes.subarray(0, 7), { label: 'configure starts download' })
   assert.deepEqual(got.subarray(0, 7), bytes.subarray(0, 7))
   const afterSelect = await jsonRequest(info.ctlPort, 'POST', '/select', { id, selected: [0] })
   assert.equal(afterSelect.status, 409)
@@ -360,6 +365,52 @@ test('prepare does not write content until configure', { timeout: 20000 }, async
   const play = await jsonRequest(info.ctlPort, 'POST', '/play', { id })
   assert.equal(play.status, 200, JSON.stringify(play.json) + ' stderr=' + stderr())
   assert.match(play.json.streamUrl, /^http:\/\/127\.0\.0\.1:\d+\//)
+})
+
+test('watch streams through bounded memory without configuring disk storage', { timeout: 30000 }, async t => {
+  const payload = Buffer.alloc(512 * 1024)
+  for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) % 256
+  const memoryLimit = 64 * 1024
+  const { downloadDir, destPath, info, stderr, id } = await startPreparedMagnet(t, payload, {
+    WEBTOR_WATCH_MEMORY_BYTES: String(memoryLimit)
+  })
+
+  const watch = await jsonRequest(info.ctlPort, 'POST', '/watch', { id, fileIndex: 0 })
+  assert.equal(watch.status, 200, JSON.stringify(watch.json) + ' stderr=' + stderr())
+  assert.equal(watch.json.watchMode, true)
+  assert.equal(watch.json.memoryLimitBytes, memoryLimit)
+
+  const firstEnd = memoryLimit - 1
+  const first = await rangeGet(watch.json.streamUrl, `bytes=0-${firstEnd}`)
+  assert.equal(first.status, 206)
+  assert.deepEqual(first.body, payload.subarray(0, memoryLimit))
+
+  const tailStart = payload.length - memoryLimit
+  const tail = await rangeGet(watch.json.streamUrl, `bytes=${tailStart}-${payload.length - 1}`)
+  assert.equal(tail.status, 206)
+  assert.deepEqual(tail.body, payload.subarray(tailStart))
+
+  const afterEviction = await pollTorrent(info.ctlPort, id, s => s.memoryEvictions > 0, {
+    label: 'watch cache eviction'
+  })
+  assert.equal(afterEviction.watchMode, true)
+  assert.ok(afterEviction.memoryBytes <= memoryLimit, `${afterEviction.memoryBytes} > ${memoryLimit}`)
+  assert.equal(afterEviction.configured, false)
+
+  // The first pieces were evicted by the tail seek and must be fetched again.
+  const firstAgain = await rangeGet(watch.json.streamUrl, `bytes=0-${firstEnd}`)
+  assert.equal(firstAgain.status, 206)
+  assert.deepEqual(firstAgain.body, payload.subarray(0, memoryLimit))
+
+  const destination = await fs.readFile(destPath)
+  assert.deepEqual(destination.subarray(0, 32), Buffer.alloc(32))
+  assert.deepEqual(await listFilesRecursive(downloadDir), [])
+  const configure = await jsonRequest(info.ctlPort, 'POST', '/configure', {
+    id,
+    selected: [0],
+    descriptors: [3]
+  })
+  assert.equal(configure.status, 409)
 })
 
 test('pause stops peer transfers; resume continues', { timeout: 20000 }, async t => {
@@ -439,10 +490,10 @@ test('POST /settings clamps maxPeers', async t => {
   assert.equal(set.json.maxPeers, 80)
 })
 
-test('all videos finish across the prefetch cap and restore from disk', { timeout: 60000 }, async t => {
+test('all selected videos finish and restore from disk', { timeout: 60000 }, async t => {
   const source = await fs.mkdtemp(path.join(os.tmpdir(), 'webtor-videos-'))
   t.after(() => fs.rm(source, { recursive: true, force: true }))
-  // Exceed the 48 MiB RAM cache; include aligned and shared file boundaries.
+  // Include aligned and shared file boundaries across multiple large files.
   const contents = [
     ['01.mp4', Buffer.alloc(20 * 1024 * 1024, 11)],
     ['02.mkv', Buffer.alloc(20 * 1024 * 1024, 29)],
@@ -453,7 +504,6 @@ test('all videos finish across the prefetch cap and restore from disk', { timeou
   const { info, id, status, destPaths, seeded, magnet } = await startPreparedMagnet(t, source)
   const selected = status.files.filter(f => /\.(mp4|mkv|webm)$/.test(f.name)).map(f => f.index)
   assert.equal(selected.length, 3)
-  await pollTorrent(info.ctlPort, id, s => s.downloaded >= 48 * 1024 * 1024, { tries: 300, label: 'RAM cap' })
   const descriptors = status.files.map((f, i) => selected.includes(i) ? i + 3 : null)
   const configure = await jsonRequest(info.ctlPort, 'POST', '/configure', { id, selected, descriptors })
   assert.equal(configure.status, 200, JSON.stringify(configure.json))
@@ -527,7 +577,7 @@ test('control API rejects browser access and malformed request objects', async t
     const response = await jsonRequest(info.ctlPort, 'POST', '/shutdown', {}, headers)
     assert.equal(response.status, 403)
   }
-  for (const endpoint of ['add', 'configure', 'select', 'pause', 'resume', 'play', 'remove', 'settings']) {
+  for (const endpoint of ['add', 'configure', 'select', 'pause', 'resume', 'play', 'watch', 'remove', 'settings']) {
     for (const body of [null, [], 'invalid']) {
       const response = await jsonRequest(info.ctlPort, 'POST', '/' + endpoint, body)
       assert.equal(response.status, 400, endpoint + ': ' + JSON.stringify(response.json))

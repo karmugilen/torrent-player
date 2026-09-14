@@ -20,6 +20,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,6 +41,7 @@ fun PrepareScreen(
     onSelectAll: () -> Unit,
     onSelectNone: () -> Unit,
     onStart: () -> Unit,
+    onWatchNow: () -> Unit,
     onCancel: () -> Unit,
 ) {
     BackHandler(onBack = onCancel)
@@ -47,6 +49,9 @@ fun PrepareScreen(
     val ready = torrent?.ready == true
     val selectedSize = torrent?.files?.filter { it.index in draft.selected }?.sumOf { it.length } ?: 0L
     val canStart = ready && !draft.busy && draft.selected.isNotEmpty()
+    val canWatchNow = canStart && torrent?.files.orEmpty().any {
+        it.index in draft.selected && (it.name.isVideoName() || it.path.isVideoName())
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -69,14 +74,29 @@ fun PrepareScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 draft.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                Button(
-                    onClick = onStart,
-                    enabled = canStart,
-                    elevation = ButtonDefaults.buttonElevation(0.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp),
-                ) { Text(if (draft.busy) "Starting…" else "Download") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = onWatchNow,
+                        enabled = canWatchNow,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
+                    ) { Text("Watch now", maxLines = 1) }
+                    Button(
+                        onClick = onStart,
+                        enabled = canStart,
+                        elevation = ButtonDefaults.buttonElevation(0.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
+                    ) { Text("Download", maxLines = 1) }
+                }
+                Text(
+                    "Watch now uses a temporary 100 MB memory cache and does not save the video.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         },
     ) { padding ->

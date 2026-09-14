@@ -19,7 +19,6 @@ import {
   readJson,
   sendJson,
   parsePath,
-  defaultSelectedIndexes,
   pieceTelemetry
 } from './protocol.js'
 
@@ -28,6 +27,11 @@ const CTL_PORT = Number(process.env.WEBTOR_CTL_PORT || 0)
 const STREAM_PORT = Number(process.env.WEBTOR_STREAM_PORT || 0)
 const DOWNLOAD_PATH = process.env.WEBTOR_PATH || '/tmp/webtorrent'
 const SKIP_VERIFY = process.env.WEBTOR_SKIP_VERIFY === '1'
+const DEFAULT_WATCH_MEMORY_BYTES = 100 * 1024 * 1024
+const WATCH_MEMORY_BYTES = (() => {
+  const value = Number(process.env.WEBTOR_WATCH_MEMORY_BYTES || DEFAULT_WATCH_MEMORY_BYTES)
+  return Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_WATCH_MEMORY_BYTES
+})()
 
 const records = new Map()
 const MAX_PEERS_MIN = 8
@@ -152,7 +156,7 @@ async function handleAdd (req, res) {
     return sendJson(res, 400, { error: 'Invalid tracker list' })
   }
   const id = crypto.randomUUID()
-  const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, selected: [], documentStore: null, prefetchPaused: false, generation: 1 }
+  const record = { id, torrent: null, error: null, prepared: body.prepare === true, configured: false, watching: false, selected: [], documentStore: null, prefetchPaused: false, generation: 1 }
   const torrent = client.add(addId, {
     ...(record.prepared
       ? {
@@ -178,25 +182,23 @@ async function handleAdd (req, res) {
     record.error = err.message || String(err)
     console.error(JSON.stringify({ event: 'torrent-error', id, message: err.message || String(err) }))
   })
-  const startPrefetch = () => {
-    if (record.prepared && !record.configured && !record.torrent.destroyed) {
-      applySelection(record, defaultSelectedIndexes(record.torrent.files))
-    }
-  }
-  if (torrent.ready) startPrefetch()
-  else torrent.once('ready', startPrefetch)
   sendJson(res, 200, { id, infoHash: torrent.infoHash || null })
 }
 
 function applySelection (rec, selected) {
   if (!rec?.torrent?.files) return
   const next = [...new Set(selected)].filter(i => Number.isInteger(i) && rec.torrent.files[i])
-  rec.torrent.files.forEach((file, i) => {
-    const want = next.includes(i)
-    const had = rec.prefetchPaused ? false : rec.selected.includes(i)
-    if (want && !had) file.select()
-    else if (!want && had) file.deselect()
-  })
+  // Prepared torrents fetch metadata only. Remember UI selection before
+  // configuration, but do not request payload pieces until Download is tapped
+  // and destination descriptors have been attached.
+  if (rec.configured) {
+    rec.torrent.files.forEach((file, i) => {
+      const want = next.includes(i)
+      const had = rec.prefetchPaused ? false : rec.selected.includes(i)
+      if (want && !had) file.select()
+      else if (!want && had) file.deselect()
+    })
+  }
   rec.selected = next
   rec.prefetchPaused = false
   rec.generation = (rec.generation || 1) + 1
@@ -234,6 +236,10 @@ async function handlePlay (req, res) {
     sendJson(res, 504, { error: err.message || 'not ready' })
     return
   }
+  if (rec.prepared && !rec.configured) {
+    sendJson(res, 409, { error: 'Choose a destination and start this file first' })
+    return
+  }
   const fileIndex = body.fileIndex
   const file = fileIndex === undefined && rec.prepared
     ? pickFile(rec.selected.map(i => rec.torrent.files[i]).filter(Boolean))
@@ -242,7 +248,7 @@ async function handlePlay (req, res) {
     sendJson(res, 404, { error: 'no file' })
     return
   }
-  if (rec.prepared && (!rec.configured || !rec.selected.includes(rec.torrent.files.indexOf(file)))) {
+  if (rec.prepared && !rec.selected.includes(rec.torrent.files.indexOf(file))) {
     sendJson(res, 409, { error: 'Choose a destination and start this file first' })
     return
   }
@@ -256,6 +262,56 @@ async function handlePlay (req, res) {
     name: file.name,
     length: file.length,
     streamUrl: streamUrl(port, file.streamURL)
+  })
+}
+
+async function handleWatch (req, res) {
+  const body = await readJson(req)
+  const rec = findRecord(body.id)
+  if (!rec || rec.error || rec.torrent?.destroyed) {
+    return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
+  }
+  await waitReady(rec.torrent)
+  if (!rec.prepared || rec.configured || rec.configuring) {
+    return sendJson(res, 409, { error: 'Watch now requires an unconfigured prepared torrent' })
+  }
+  const file = pickFile(rec.torrent.files, body.fileIndex)
+  if (!file) return sendJson(res, 404, { error: 'no file' })
+  const fileIndex = rec.torrent.files.indexOf(file)
+
+  if (!rec.watching) {
+    const store = rec.documentStore
+    if (!store) return sendJson(res, 409, { error: 'Memory storage is not ready' })
+    store.enableMemory(WATCH_MEMORY_BYTES, index => {
+      const torrent = rec.torrent
+      if (torrent.destroyed || !torrent.bitfield?.get(index)) return
+      // This is the inverse of WebTorrent's post-put verification. Without it,
+      // a backwards seek would believe an evicted piece was still available.
+      torrent._markUnverified(index)
+      rec.generation = (rec.generation || 1) + 1
+      torrent._updateSelections()
+    })
+    rec.watching = true
+    rec.selected = [fileIndex]
+    rec.prefetchPaused = false
+    rec.generation = (rec.generation || 1) + 1
+  } else if (!rec.selected.includes(fileIndex)) {
+    return sendJson(res, 409, { error: 'A different file is already being watched' })
+  }
+
+  if (rec.torrent.paused) return sendJson(res, 409, { error: 'Resume streaming before playing' })
+  // The HTTP file iterator selects only player-requested ranges. Calling
+  // file.select() here would eagerly fetch the entire video.
+  const addr = streamServer.address()
+  const port = typeof addr === 'object' && addr ? addr.port : STREAM_PORT
+  sendJson(res, 200, {
+    id: rec.id,
+    fileIndex,
+    name: file.name,
+    length: file.length,
+    streamUrl: streamUrl(port, file.streamURL),
+    watchMode: true,
+    memoryLimitBytes: WATCH_MEMORY_BYTES
   })
 }
 
@@ -319,7 +375,16 @@ function handleTorrent (id, res) {
   const view = torrentView(rec.id, rec.torrent)
   if (rec.prepared) view.done = rec.configured && rec.selected.length > 0 &&
     rec.selected.every(i => view.files[i]?.progress === 1)
-  sendJson(res, 200, { ...view, error: rec.error, configured: rec.configured, selected: rec.selected })
+  sendJson(res, 200, {
+    ...view,
+    error: rec.error,
+    configured: rec.configured,
+    selected: rec.selected,
+    watchMode: rec.watching,
+    memoryBytes: rec.watching ? (rec.documentStore?.cacheBytes || 0) : 0,
+    memoryLimitBytes: rec.watching ? WATCH_MEMORY_BYTES : 0,
+    memoryEvictions: rec.watching ? (rec.documentStore?.evictionCount || 0) : 0
+  })
 }
 
 async function handleConfigure (req, res) {
@@ -327,7 +392,7 @@ async function handleConfigure (req, res) {
   const rec = findRecord(body.id)
   if (!rec || rec.error) return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
   await waitReady(rec.torrent)
-  if (!rec.prepared || rec.configured || rec.configuring) return sendJson(res, 409, { error: 'Storage already configured' })
+  if (!rec.prepared || rec.configured || rec.configuring || rec.watching) return sendJson(res, 409, { error: 'Storage already configured' })
   const selected = body.selected
   if (!Array.isArray(selected) || !selected.length || selected.some(i => !Number.isInteger(i) || !rec.torrent.files[i])) {
     return sendJson(res, 400, { error: 'Select at least one file' })
@@ -344,8 +409,7 @@ async function handleConfigure (req, res) {
   }
   rec.configuring = true
   try {
-    // Selections may have been garbage-collected after RAM prefetch completed.
-    // Rebuild them after verification instead of trusting rec.selected.
+    // Rebuild selection after verifying any existing destination bytes.
     for (const i of rec.selected) rec.torrent.files[i]?.deselect()
     rec.selected = []
     rec.prefetchPaused = false
@@ -367,7 +431,7 @@ async function handleSelect (req, res) {
   const rec = findRecord(body.id)
   if (!rec || rec.error) return sendJson(res, 404, { error: rec?.error || 'torrent not found' })
   await waitReady(rec.torrent)
-  if (rec.configured || rec.configuring) return sendJson(res, 409, { error: 'Storage already configured' })
+  if (rec.configured || rec.configuring || rec.watching) return sendJson(res, 409, { error: 'Storage already configured' })
   const selected = body.selected
   if (!Array.isArray(selected) || selected.some(i => !Number.isInteger(i) || !rec.torrent.files[i])) {
     return sendJson(res, 400, { error: 'Invalid file selection' })
@@ -474,6 +538,10 @@ const ctlServer = http.createServer(async (req, res) => {
     }
     if (method === 'POST' && parts.length === 1 && parts[0] === 'play') {
       await handlePlay(req, res)
+      return
+    }
+    if (method === 'POST' && parts.length === 1 && parts[0] === 'watch') {
+      await handleWatch(req, res)
       return
     }
     if (method === 'POST' && parts.length === 1 && parts[0] === 'remove') {

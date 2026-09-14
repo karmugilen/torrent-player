@@ -83,16 +83,6 @@ class DownloadEntryTest {
     }
 
     @Test
-    fun findPlayerMatchesPackageAndTreatsBlankAsAsk() {
-        val vlc = PlayerApp("org.videolan.vlc", "org.videolan.vlc.gui.video.VideoPlayerActivity", "VLC")
-        val mpv = PlayerApp("is.xyz.mpv", "is.xyz.mpv.MPVActivity", "mpv")
-        val players = listOf(vlc, mpv)
-        assertEquals(vlc, findPlayer(players, "org.videolan.vlc"))
-        assertEquals(null, findPlayer(players, ""))
-        assertEquals(null, findPlayer(players, "com.missing.player"))
-    }
-
-    @Test
     fun looksLikeTorrentSourceAcceptsMagnetsAndHttp() {
         assertTrue(looksLikeTorrentSource("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"))
         assertTrue(looksLikeTorrentSource("MAGNET:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"))
@@ -137,10 +127,10 @@ class DownloadEntryTest {
         val t = webtor.core.TorrentStatus("id", null, null, null, true, false, false,
             0.0, 0, 0, 0, 100, 0, 0, emptyList())
         val draft = PrepareDraft("id", "magnet:x", t, emptySet())
-        assertEquals("Finding peers…", prefetchStatus(draft))
+        assertEquals("Files ready · 0 peers", prefetchStatus(draft))
         assertEquals("Finding peers…", prefetchStatus(draft.copy(torrent = null)))
-        assertEquals("Connecting · 2 peers", prefetchStatus(draft.copy(torrent = t.copy(numPeers = 2))))
-        assertTrue(prefetchStatus(draft.copy(torrent = t.copy(downloaded = 10)))!!.contains("already downloading"))
+        assertEquals("Files ready · 2 peers", prefetchStatus(draft.copy(torrent = t.copy(numPeers = 2))))
+        assertEquals("Files ready · 0 peers", prefetchStatus(draft.copy(torrent = t.copy(downloaded = 10))))
         assertEquals(null, prefetchStatus(null))
     }
 

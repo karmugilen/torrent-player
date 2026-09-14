@@ -124,10 +124,8 @@ fun prefetchStatus(draft: PrepareDraft?): String? {
     if (draft == null) return null
     val t = draft.torrent
     val peers = t?.numPeers ?: 0
-    val got = t?.downloaded ?: 0L
     return when {
-        t?.ready == true && got > 0 ->
-            "${formatBytes(got)} already downloading · ${formatPeers(peers)}"
+        t?.ready == true -> "Files ready · ${formatPeers(peers)}"
         peers > 0 -> "Connecting · ${formatPeers(peers)}"
         else -> "Finding peers…"
     }

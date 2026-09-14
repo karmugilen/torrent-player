@@ -56,6 +56,8 @@ data class PlayInfo(
     val name: String,
     val length: Long,
     val streamUrl: String,
+    val watchMode: Boolean = false,
+    val memoryLimitBytes: Long? = null,
 )
 
 data class AddResult(val id: String, val infoHash: String?)
@@ -125,14 +127,11 @@ class EngineClient(
     fun play(id: String, fileIndex: Int? = null): PlayInfo {
         val body = JSONObject().put("id", id)
         if (fileIndex != null) body.put("fileIndex", fileIndex)
-        val json = post("/play", body)
-        return PlayInfo(
-            id = json.getString("id"),
-            fileIndex = json.optInt("fileIndex"),
-            name = json.optString("name"),
-            length = json.optLong("length"),
-            streamUrl = json.getString("streamUrl"),
-        )
+        return parsePlay(post("/play", body))
+    }
+
+    fun watch(id: String, fileIndex: Int): PlayInfo {
+        return parsePlay(post("/watch", JSONObject().put("id", id).put("fileIndex", fileIndex)))
     }
 
     fun remove(id: String, destroyStore: Boolean = true) {
@@ -198,6 +197,20 @@ class EngineClient(
 
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        private fun parsePlay(json: JSONObject) = PlayInfo(
+            id = json.getString("id"),
+            fileIndex = json.optInt("fileIndex"),
+            name = json.optString("name"),
+            length = json.optLong("length"),
+            streamUrl = json.getString("streamUrl"),
+            watchMode = json.optBoolean("watchMode"),
+            memoryLimitBytes = if (json.has("memoryLimitBytes") && !json.isNull("memoryLimitBytes")) {
+                json.optLong("memoryLimitBytes")
+            } else {
+                null
+            },
+        )
 
         fun parsePieces(json: JSONObject): PieceTelemetry {
             val buckets = ArrayList<PieceBucket>()

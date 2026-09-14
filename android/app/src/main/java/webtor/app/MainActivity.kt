@@ -27,6 +27,7 @@ import webtor.core.PlayInfo
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
     private val session get() = vm.session
+    private var pendingWatchPlay: UiEvent.PlayStream? = null
 
     private val torrentPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(session::openTorrent)
@@ -34,7 +35,12 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { }
+    ) {
+        pendingWatchPlay?.let { event ->
+            pendingWatchPlay = null
+            launchPlayEvent(event)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +60,7 @@ class MainActivity : ComponentActivity() {
                                     onSelectAll = session::selectAllFiles,
                                     onSelectNone = session::selectNoFiles,
                                     onStart = session::startDownload,
+                                    onWatchNow = session::watchNow,
                                     onCancel = session::cancelPrepare,
                                 )
                             } else {
@@ -65,7 +72,6 @@ class MainActivity : ComponentActivity() {
                             onBack = session::closeSettings,
                             onMaxPeers = session::setMaxPeers,
                             onMaxPeersCommit = session::commitMaxPeers,
-                            onPlayer = session::setPlayer,
                             onDarkTheme = session::setDarkTheme,
                             onCleanup = session::cleanupCache,
                             onClearAll = session::requestClearAll,
@@ -108,6 +114,7 @@ class MainActivity : ComponentActivity() {
                             onSelectAll = session::selectAllFiles,
                             onSelectNone = session::selectNoFiles,
                             onDownload = session::startDownload,
+                            onWatchNow = session::watchNow,
                             existingEntry = existing,
                             onOpenExisting = existing?.let {
                                 {
@@ -167,9 +174,11 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         (application as WebtorApp).setCurrentActivity(this)
         session.onForeground()
+        session.onTransientWatchHostStarted()
     }
 
     override fun onStop() {
+        if (!isChangingConfigurations) session.onTransientWatchHostStopped()
         if (isFinishing) (application as WebtorApp).clearCurrentActivity(this)
         super.onStop()
     }
@@ -183,7 +192,7 @@ class MainActivity : ComponentActivity() {
         when (event) {
             UiEvent.PickTorrent -> pickTorrentFile()
             UiEvent.RequestNotifications -> requestNotifications()
-            is UiEvent.PlayStream -> openPlayer(event.info)
+            is UiEvent.PlayStream -> handlePlayEvent(event)
             is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
             UiEvent.ExitApp -> finish()
         }
@@ -231,12 +240,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openPlayer(info: PlayInfo) {
+    private fun handlePlayEvent(event: UiEvent.PlayStream) {
+        val watchNeedsPermission = event.transientWatchId != null && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        if (watchNeedsPermission) {
+            pendingWatchPlay = event
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            launchPlayEvent(event)
+        }
+    }
+
+    private fun launchPlayEvent(event: UiEvent.PlayStream) {
+        val launched = openPlayer(event.info)
+        event.transientWatchId?.let { session.completeWatchLaunch(it, launched) }
+    }
+
+    private fun openPlayer(info: PlayInfo): Boolean {
         val view = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(Uri.parse(info.streamUrl), "video/*")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        launchViewer(view, info.name)
+        return launchViewer(view)
     }
 
     private fun openContent(uriString: String, mime: String, name: String) {
@@ -246,36 +271,28 @@ class MainActivity : ComponentActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             clipData = ClipData.newRawUri(name, uri)
         }
-        launchViewer(view, name)
+        launchViewer(view)
     }
 
-    private fun launchViewer(intent: Intent, name: String) {
+    private fun launchViewer(intent: Intent): Boolean {
         val isMedia = intent.type?.let { it.startsWith("video/") || it.startsWith("audio/") } == true
         val missing = if (isMedia) "Install VLC, mpv, or another media player."
             else "No installed app can open this file type. The file is saved in Downloads/Webtor."
-        val chosen = if (isMedia) session.preferredPlayer() else null
         try {
-            if (chosen != null) {
-                val targeted = Intent(intent).setClassName(chosen.packageName, chosen.activity)
-                if (targeted.resolveActivity(packageManager) != null) {
-                    startActivity(targeted)
-                    return
-                }
-            }
             if (intent.resolveActivity(packageManager) == null) {
                 session.showError(missing)
-                return
+                return false
             }
-            if (chosen == null) {
-                startActivity(Intent.createChooser(intent, "Open $name"))
-            } else {
-                startActivity(intent)
-            }
+            // Launch the implicit intent directly so Android owns the choice and
+            // can offer its native Just once / Always player selection.
+            startActivity(intent)
+            return true
         } catch (_: ActivityNotFoundException) {
             session.showError(missing)
         } catch (_: SecurityException) {
-            session.showError("The selected app could not access this file. Choose another app in Settings.")
+            session.showError("The selected app could not access this file. Choose another app when Android asks.")
         }
+        return false
     }
 }
 

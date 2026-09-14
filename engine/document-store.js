@@ -14,18 +14,34 @@ export default class DocumentStore {
     this.files = files.map(f => ({ offset: f.offset, length: f.length, fd: null }))
     this.closed = false
     this.attached = false
+    this.memoryOnly = false
     this.pending = new Set()
     this.cache = new Map()
     this.cacheBytes = 0
+    this.evictionCount = 0
     this.flushing = null
     this.closing = null
     this.maxCacheBytes = Number(maxCacheBytes) > 0 ? Number(maxCacheBytes) : DEFAULT_PREFETCH_BYTES
     this.onCacheFull = typeof onCacheFull === 'function' ? onCacheFull : null
+    this.onEvict = null
     if (typeof onStore === 'function') onStore(this)
   }
 
+  // Watch mode deliberately never attaches file descriptors. Verified pieces
+  // live in this bounded LRU only; evicted pieces become downloadable again so
+  // a player can seek outside the current memory window.
+  enableMemory (maxCacheBytes, onEvict) {
+    if (this.closed || this.attached || this.memoryOnly) throw new Error('Storage already configured or closed')
+    const limit = Number(maxCacheBytes)
+    if (!Number.isSafeInteger(limit) || limit < this.chunkLength) throw new Error('Memory limit must hold at least one torrent piece')
+    this.maxCacheBytes = limit
+    this.memoryOnly = true
+    this.onCacheFull = null
+    this.onEvict = typeof onEvict === 'function' ? onEvict : null
+  }
+
   attach (descriptors) {
-    if (this.closed || this.attached || this.files.some(f => f.fd !== null)) throw new Error('Storage already attached or closed')
+    if (this.closed || this.attached || this.memoryOnly || this.files.some(f => f.fd !== null)) throw new Error('Storage already attached or closed')
     if (!Array.isArray(descriptors) || descriptors.length !== this.files.length) throw new Error('File descriptors do not match torrent')
     const opened = []
     try {
@@ -46,11 +62,26 @@ export default class DocumentStore {
 
   cachePut (index, buffer) {
     const prev = this.cache.get(index)
-    if (prev) this.cacheBytes -= prev.length
+    if (prev) {
+      this.cache.delete(index)
+      this.cacheBytes -= prev.length
+    }
     const copy = Buffer.from(buffer)
     this.cache.set(index, copy)
     this.cacheBytes += copy.length
-    if (this.cacheBytes >= this.maxCacheBytes) this.onCacheFull?.()
+    const evicted = []
+    if (this.memoryOnly) {
+      while (this.cacheBytes > this.maxCacheBytes && this.cache.size > 1) {
+        const oldest = this.cache.keys().next().value
+        if (oldest === undefined) break
+        this.dropCache(oldest)
+        evicted.push(oldest)
+        this.evictionCount++
+      }
+    } else if (this.cacheBytes >= this.maxCacheBytes) {
+      this.onCacheFull?.()
+    }
+    return evicted
   }
 
   dropCache (index) {
@@ -108,6 +139,7 @@ export default class DocumentStore {
   }
 
   put (index, buffer, cb = () => {}) {
+    let evicted = []
     this.run(async () => {
       const expected = Math.min(this.chunkLength, this.length - index * this.chunkLength)
       if (!Number.isSafeInteger(index) || index < 0 || expected <= 0 || !(buffer instanceof Uint8Array) || buffer.length !== expected) throw new Error('Invalid piece length')
@@ -117,8 +149,17 @@ export default class DocumentStore {
         this.dropCache(index)
         return
       }
-      this.cachePut(index, buffer)
-    }, cb)
+      evicted = this.cachePut(index, buffer)
+    }, (err, value) => {
+      // WebTorrent marks the newly written piece verified inside cb. Notify
+      // evictions afterwards so that callback cannot overwrite missing state.
+      cb(err, value)
+      if (!err) {
+        for (const evictedIndex of evicted) {
+          try { this.onEvict?.(evictedIndex) } catch {}
+        }
+      }
+    })
   }
 
   get (index, opts, cb) {
@@ -133,7 +174,14 @@ export default class DocumentStore {
           offset < 0 || length < 0 || offset + length > size) throw new Error('Invalid piece range')
       if (this.attached) await this.flushCache()
       const cached = this.cache.get(index)
-      if (cached) return cached.subarray(offset, offset + length)
+      if (cached) {
+        if (this.memoryOnly) {
+          // Map insertion order doubles as the LRU order.
+          this.cache.delete(index)
+          this.cache.set(index, cached)
+        }
+        return cached.subarray(offset, offset + length)
+      }
       return this.transfer(Buffer.alloc(length), index * this.chunkLength + offset, false)
     }, cb)
   }

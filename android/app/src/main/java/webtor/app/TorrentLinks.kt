@@ -18,3 +18,7 @@ internal fun supportedTorrentLink(value: String?): String? {
         else -> null
     }
 }
+
+/** Distinguish a full clipboard insertion from ordinary character-by-character typing. */
+internal fun shouldHideKeyboardAfterPaste(previous: String, next: String): Boolean =
+    next.length - previous.length >= 20 && looksLikeTorrentSource(next)

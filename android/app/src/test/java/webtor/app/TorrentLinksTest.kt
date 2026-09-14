@@ -1,7 +1,9 @@
 package webtor.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TorrentLinksTest {
@@ -24,5 +26,13 @@ class TorrentLinksTest {
             "magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
             supportedTorrentLink("magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"),
         )
+    }
+
+    @Test fun keyboardHidesOnlyAfterACompleteLinkIsPasted() {
+        val magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        assertTrue(shouldHideKeyboardAfterPaste("", magnet))
+        assertFalse(shouldHideKeyboardAfterPaste(magnet.dropLast(1), magnet))
+        assertFalse(shouldHideKeyboardAfterPaste(magnet, magnet))
+        assertFalse(shouldHideKeyboardAfterPaste("", "magnet:?xt=urn:btih:short"))
     }
 }
