@@ -46,6 +46,14 @@ More trackers cannot create seeds or guarantee a speed or peer-count increase.
 6. Keep tracker updates off the add/play paths. No new polling in Android, no
    connectivity-limit changes, and no aggressive reannounce or health-probe loop.
 
+## Device regression found and fixed
+
+The user's magnet included `tr=DHT` plus five UDP tracker URLs. With tracker
+networking enabled, the library panicked on that label with `unknown scheme`,
+returning `Engine 500: engine request failed`. A regression test reproduced the
+exact failure before the fix. Validate all supplied tracker tiers before adding
+a torrent, ignoring labels/unsupported endpoints and retaining valid tracker URLs.
+
 ## Verification and delivery
 
 - [x] Regression tests: parsing, bounds, cache corruption/restart, conditional

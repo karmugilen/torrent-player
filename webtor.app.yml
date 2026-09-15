@@ -15,7 +15,7 @@ Repo: https://github.com/karmugilen/torrent-player.git
 Builds:
   - versionName: 1.4.4
     versionCode: 21
-    commit: 883ee30271f949aa2fa68cccd10bfcf48f8117a8
+    commit: 7e0fdab536354db2bb44fd52773cdb5287773b7d
     timeout: 3600
     subdir: android/app
     sudo:

@@ -1,3 +1,4 @@
+Fix Engine 500 when a magnet includes discovery labels such as tr=DHT. Preserve valid supplied trackers.
 Refresh and cache a maintained public tracker list daily, with offline fallback and bounded retries.
 Preserve torrent-supplied trackers and WebRTC signaling; skip extra trackers for private torrents.
 Smaller native Go engine with direct JNI control, reliable pause/resume, and verified streaming and completed-file playback.

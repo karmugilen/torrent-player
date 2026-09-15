@@ -610,7 +610,7 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid torrent metadata"})
 			return
 		}
-		t, _, err = s.client.AddTorrentSpec(spec)
+		t, _, err = s.addTorrentSpec(spec)
 	} else if strings.HasPrefix(req.TorrentID, "magnet:") {
 		spec, errMag := torrent.TorrentSpecFromMagnetUri(req.TorrentID)
 		if errMag != nil {
@@ -624,7 +624,7 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, AddResponse{ID: existing.ID, InfoHash: &existing.InfoHash})
 			return
 		}
-		t, _, err = s.client.AddTorrentSpec(spec)
+		t, _, err = s.addTorrentSpec(spec)
 	} else if _, errStat := os.Stat(req.TorrentID); errStat == nil {
 		mi, errLoad := metainfo.LoadFromFile(req.TorrentID)
 		if errLoad != nil {
@@ -643,7 +643,7 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid torrent metadata"})
 			return
 		}
-		t, _, err = s.client.AddTorrentSpec(spec)
+		t, _, err = s.addTorrentSpec(spec)
 	} else {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported torrentId"})
 		return

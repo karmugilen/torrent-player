@@ -420,3 +420,42 @@ func TestManagedTrackersDoNotAccumulateAcrossRestore(t *testing.T) {
 		}
 	}
 }
+
+func TestAddMagnetIgnoresDHTLabelAndKeepsTrackerURLs(t *testing.T) {
+	s := testEngine(t, func(cfg *torrent.ClientConfig) {
+		cfg.DisableTrackers = false
+		cfg.DisableIPv6 = true
+	})
+	magnet := "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&tr=DHT&tr=udp%3A%2F%2F127.0.0.1%3A1337%2Fannounce"
+	body, _ := json.Marshal(AddRequest{TorrentID: magnet, Prepare: true})
+	for i := 0; i < 2; i++ {
+		code, response := s.DispatchControl("POST", "/add", string(body))
+		if code != 200 {
+			t.Fatalf("magnet containing DHT label: %d %s", code, response)
+		}
+	}
+	if len(s.records) != 1 || len(s.client.Torrents()) != 1 {
+		t.Fatal("retry duplicated torrent")
+	}
+	for _, rec := range s.records {
+		if !reflect.DeepEqual(rec.OriginalTrackers, [][]string{{"udp://127.0.0.1:1337/announce"}}) {
+			t.Fatalf("valid tracker not preserved: %v", rec.OriginalTrackers)
+		}
+	}
+}
+
+func TestSuppliedTrackerValidationPreservesPrivatePasskeysAndTiers(t *testing.T) {
+	input := [][]string{
+		{"DHT", "PEX", "", "ftp://tracker.example.org/announce", "https://user:pass@tracker.example.org/announce"},
+		{"https://private.example.org/token/announce?passkey=KeepThis", "udp://127.0.0.1:1337/announce"},
+		{"http://tracker.example.org:bad/announce", "udp://tracker.example.org/announce", "udp://tracker.example.org:65536/announce"},
+		{"wss://tracker.example.org/announce", "udp://127.0.0.1:1337/announce"},
+	}
+	want := [][]string{{"https://private.example.org/token/announce?passkey=KeepThis", "udp://127.0.0.1:1337/announce"}, {"wss://tracker.example.org/announce"}}
+	if got := cleanSuppliedTrackers(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tracker validation: %v", got)
+	}
+	if input[0][0] != "DHT" || len(input[3]) != 2 {
+		t.Fatal("modified caller's tracker list")
+	}
+}

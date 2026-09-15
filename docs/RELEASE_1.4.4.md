@@ -6,6 +6,10 @@ continue using the existing engine while the list refreshes.
 
 ## Changes
 
+- Validate trackers supplied by magnets and torrent files before adding them.
+  Ignore discovery labels such as `tr=DHT`, malformed URLs and unsupported
+  endpoints instead of triggering the library's `unknown scheme` panic. Preserve
+  supported tracker URLs, tiers and path/query passkeys; DHT remains enabled.
 - Daily HTTPS refresh of ngosang/trackerslist's `trackers_best.txt`, conditional
   requests, a 10-second timeout and a 64 KiB response limit.
 - Atomic app-private cache, URL validation, duplicate removal and retries starting

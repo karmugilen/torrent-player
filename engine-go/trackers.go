@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 )
 
@@ -385,4 +386,54 @@ func recordMetainfo(rec *TorrentRecord) metainfo.MetaInfo {
 		mi.AnnounceList = append(mi.AnnounceList, append([]string(nil), tier...))
 	}
 	return mi
+}
+
+// Some magnet producers put discovery labels such as tr=DHT alongside actual
+// tracker URLs. The library panics when constructing a client for an unsupported
+// scheme, so validate before AddTorrentSpec can partially register a torrent.
+// Supplied trackers may legitimately be on a LAN or contain a passkey in their
+// path/query; do not apply the public-list address restrictions to them.
+func cleanSuppliedTrackers(tiers [][]string) [][]string {
+	var result [][]string
+	seen := make(map[string]bool)
+	for _, tier := range tiers {
+		var kept []string
+		for _, raw := range tier {
+			u, err := url.Parse(strings.TrimSpace(raw))
+			if err != nil || u.Hostname() == "" || u.Opaque != "" || u.User != nil {
+				continue
+			}
+			u.Scheme = strings.ToLower(u.Scheme)
+			switch u.Scheme {
+			case "http", "https", "ws", "wss", "udp", "udp4", "udp6":
+			default:
+				continue
+			}
+			port := u.Port()
+			if port != "" {
+				n, err := strconv.Atoi(port)
+				if err != nil || n < 1 || n > 65535 {
+					continue
+				}
+			} else if strings.HasPrefix(u.Scheme, "udp") {
+				continue
+			}
+			u.Fragment = ""
+			tr := u.String()
+			key := u.Scheme + "://" + strings.ToLower(u.Host) + u.RequestURI()
+			if !seen[key] {
+				kept = append(kept, tr)
+				seen[key] = true
+			}
+		}
+		if len(kept) > 0 {
+			result = append(result, kept)
+		}
+	}
+	return result
+}
+
+func (s *EngineServer) addTorrentSpec(spec *torrent.TorrentSpec) (*torrent.Torrent, bool, error) {
+	spec.Trackers = cleanSuppliedTrackers(spec.Trackers)
+	return s.client.AddTorrentSpec(spec)
 }
