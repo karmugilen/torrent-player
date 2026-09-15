@@ -360,3 +360,63 @@ func TestTrackerDiscoveredPeerSurvivesRefresh(t *testing.T) {
 	}
 	t.Fatal("refresh dropped the existing peer connection")
 }
+
+func TestManagedTrackersDoNotAccumulateAcrossRestore(t *testing.T) {
+	s := testEngine(t)
+	mi := trackerMetadata(t, false)
+	var buf bytes.Buffer
+	if err := mi.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	data := base64.StdEncoding.EncodeToString(buf.Bytes())
+	for round := 0; round < 3; round++ {
+		body, _ := json.Marshal(AddRequest{Prepare: true, TorrentData: data})
+		code, result := s.DispatchControl("POST", "/add", string(body))
+		if code != 200 {
+			t.Fatalf("add: %s", result)
+		}
+		var added AddResponse
+		if err := json.Unmarshal(result, &added); err != nil {
+			t.Fatal(err)
+		}
+		rec := s.records[added.ID]
+		s.supplementTrackers(rec)
+		code, result = s.DispatchControl("GET", "/metadata/"+rec.ID, "")
+		if code != 200 {
+			t.Fatalf("metadata: %s", result)
+		}
+		var exported MetadataResponse
+		if err := json.Unmarshal(result, &exported); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := base64.StdEncoding.DecodeString(exported.TorrentData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := metainfo.Load(bytes.NewReader(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(decoded.UpvertedAnnounceList(), mi.UpvertedAnnounceList()) {
+			t.Fatal("persisted managed trackers as originals")
+		}
+		if decoded.HashInfoBytes() != mi.HashInfoBytes() {
+			t.Fatal("export changed infohash")
+		}
+		code, result = s.DispatchControl("GET", "/torrent/"+rec.ID, "")
+		var view TorrentView
+		if code != 200 || json.Unmarshal(result, &view) != nil || view.MagnetURI == nil {
+			t.Fatal("missing magnet")
+		}
+		magnet, err := metainfo.ParseMagnetUri(*view.MagnetURI)
+		if err != nil || !reflect.DeepEqual(magnet.Trackers, mi.AnnounceList[0]) {
+			t.Fatalf("persisted managed magnet trackers: %+v", magnet)
+		}
+		data = exported.TorrentData
+		body, _ = json.Marshal(map[string]string{"id": rec.ID})
+		code, result = s.DispatchControl("POST", "/remove", string(body))
+		if code != 200 {
+			t.Fatalf("remove: %s", result)
+		}
+	}
+}

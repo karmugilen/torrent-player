@@ -38,7 +38,8 @@ More trackers cannot create seeds or guarantee a speed or peer-count increase.
 4. Preserve every torrent's original tracker tiers. Supplement confirmed public
    torrents with at most 24 entries; add refreshed entries only while a torrent has room under that
    lifetime cap. New/restored torrents use the current pool. Existing announces
-   and peer connections stay intact; no forced resets. Private torrents get no additions.
+   and peer connections stay intact; no forced resets. Export only the original
+   tracker tiers when saving metadata/magnets, preventing accumulation on restore. Private torrents get no additions.
 5. Magnet privacy is unknown until metadata arrives. Use its supplied trackers,
    peer hints and existing DHT for metadata first, then attach public supplements.
    This intentionally avoids announcing an unknown private hash to extra trackers.

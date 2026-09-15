@@ -70,6 +70,7 @@ type TorrentRecord struct {
 	DownloadedPre        int64
 	Paused               bool
 	SupplementalTrackers int
+	OriginalTrackers     [][]string
 }
 
 type EngineServer struct {
@@ -671,6 +672,12 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 		Generation: 1,
 		Paused:     false,
 	}
+	// Keep managed supplements out of exported metadata and the persisted
+	// magnet, otherwise each restore would promote them to permanent originals.
+	mi := t.Metainfo()
+	for _, tier := range mi.UpvertedAnnounceList() {
+		rec.OriginalTrackers = append(rec.OriginalTrackers, append([]string(nil), tier...))
+	}
 
 	s.mu.Lock()
 	s.records[id] = rec
@@ -705,9 +712,12 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	ih := t.InfoHash()
 	var magnetURIStr string
 	if ready {
-		magnetURIStr = t.Metainfo().Magnet(&ih, t.Info()).String()
+		magnetURIStr = recordMetainfo(rec).Magnet(&ih, t.Info()).String()
 	} else {
 		mag := metainfo.Magnet{InfoHash: ih}
+		for _, tier := range rec.OriginalTrackers {
+			mag.Trackers = append(mag.Trackers, tier...)
+		}
 		magnetURIStr = mag.String()
 	}
 
@@ -1220,7 +1230,7 @@ func (s *EngineServer) handleMetadata(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	mi := t.Metainfo()
+	mi := recordMetainfo(rec)
 	var buf bytes.Buffer
 	if err := mi.Write(&buf); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

@@ -14,6 +14,8 @@ continue using the existing engine while the list refreshes.
 - Up to 20 downloaded tracker URLs plus four bundled WebSocket signaling URLs.
   Each torrent receives at most 24 supplemental trackers during its lifetime.
   Supplied tracker tiers remain intact; refreshing does not reset peer connections.
+  Exported metadata/magnets exclude managed supplements so restarts cannot
+  promote them into permanent trackers.
 - Supplements are added only after metadata confirms the torrent is public.
   Magnets use supplied trackers, peer hints and existing DHT for initial metadata.
   This change does not implement a separate private-swarm networking mode.

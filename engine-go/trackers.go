@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 const (
@@ -373,4 +375,14 @@ func (s *EngineServer) refreshTorrentTrackers() {
 	for _, rec := range records {
 		s.supplementTrackers(rec)
 	}
+}
+
+func recordMetainfo(rec *TorrentRecord) metainfo.MetaInfo {
+	mi := rec.Torrent.Metainfo()
+	mi.Announce = ""
+	mi.AnnounceList = nil
+	for _, tier := range rec.OriginalTrackers {
+		mi.AnnounceList = append(mi.AnnounceList, append([]string(nil), tier...))
+	}
+	return mi
 }
