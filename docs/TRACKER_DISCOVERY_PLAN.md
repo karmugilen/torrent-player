@@ -63,8 +63,9 @@ a torrent, ignoring labels/unsupported endpoints and retaining valid tracker URL
 - [x] Go test/race checks, existing playback/JNI tests, Android unit tests and
   optimized release APK; inspect APK identity/signature/native library.
 - [x] Bump to the next available release version; record checksums and test results.
-- [ ] Validate F-Droid metadata and source-build recipe with verified Go tooling and
-  dependency preparation. Update the existing MR with current evidence.
+- [x] Validate F-Droid metadata and source-build recipe with verified Go tooling and
+  dependency preparation. Clean source build and APK scan pass.
+- [ ] Update the existing MR with current evidence.
 - [ ] Commit, push and merge the tested release, publish the APK on GitHub, and
   report F-Droid's actual pipeline/review status without claiming acceptance.
 

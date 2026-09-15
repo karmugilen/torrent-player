@@ -30,7 +30,9 @@ Date: 2026-09-15
 - 13 Android core and 29 Android app unit tests, release lint and APK assembly.
 - Live production HTTPS list fetch: 20 valid cached entries, ETag recorded and
   next refresh scheduled 24 hours later. No torrent was added for that smoke test.
-- F-Droid 2.4.2 metadata lint and rewritemeta in the buildserver-trixie image.
+- F-Droid 2.4.2 metadata lint, rewritemeta, clean release source build, APK
+  identity checks and binary scan in the buildserver-trixie image, using
+  Debian Go 1.24.4 and NDK r26b at source commit `cb711809578404b46761ecb679591c34b34d9cdb`.
 
 ## Release follow-up
 

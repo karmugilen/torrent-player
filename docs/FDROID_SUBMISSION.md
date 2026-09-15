@@ -28,3 +28,18 @@ After testing and pushing the referenced upstream release commit, run:
 ```
 
 The script updates only the existing submission branch. F-Droid maintainers control review, builds, signing, and publication.
+
+## Release 1.4.4 validation (2026-09-15)
+
+- Release source: `cb711809578404b46761ecb679591c34b34d9cdb`, version 1.4.4 (21).
+- F-Droid 2.4.2 in `buildserver-trixie`, Debian Go 1.24.4 and NDK r26b:
+  metadata lint/rewritemeta, module verification, clean source scan, release
+  build, APK identity checks and APK binary scan all passed.
+- Command: `fdroid build -v --latest --test --scan-binary webtor.app`.
+- The first empty local workspace exposed F-Droid 2.4.2's SOURCE_DATE_EPOCH
+  lookup-before-clone error. Pre-cloning the repository resolved that tooling
+  issue; subsequent builds used F-Droid's normal checkout/clean/scanning flow.
+- The new recipe removes the previous Node/npm/srclib preparation and retains
+  full commit pinning. No binary/source scanner exemptions were added.
+- F-Droid review and publication remain controlled by maintainers. Check the
+  existing MR for the current upstream pipeline and review status.
