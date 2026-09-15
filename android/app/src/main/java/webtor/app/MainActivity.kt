@@ -22,7 +22,6 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
-import webtor.core.PlayInfo
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -185,7 +184,6 @@ class MainActivity : ComponentActivity() {
         when (event) {
             UiEvent.PickTorrent -> pickTorrentFile()
             UiEvent.RequestNotifications -> requestNotifications()
-            is UiEvent.PlayStream -> openPlayer(event.info)
             is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
             UiEvent.ExitApp -> finish()
         }
@@ -242,22 +240,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openPlayer(info: PlayInfo): Boolean {
-        val view = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(Uri.parse(info.streamUrl), "video/*")
-            putExtra(Intent.EXTRA_TITLE, info.name)
-            putExtra("title", info.name)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        return launchViewer(view)
-    }
-
     private fun openContent(uriString: String, mime: String, name: String) {
         val uri = Uri.parse(uriString)
         val view = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             clipData = ClipData.newRawUri(name, uri)
+            putExtra(Intent.EXTRA_TITLE, name)
+            putExtra("title", name)
         }
         launchViewer(view)
     }

@@ -17,13 +17,13 @@ Deliver two groups of improvements: reliable download controls, then a simpler a
 | Area | Observed code | Implication |
 | --- | --- | --- |
 | Notification | `PlayService.kt` already creates Pause/Resume and Stop actions, with `setOngoing(true)` and no dismissal handler. | Investigate action visibility and lifecycle; do not simply add a duplicate Stop button. |
-| Pause | `engine/main.js` pauses torrents and destroys existing peer wires. `LibrarySession.pauseFromNotification()` ignores failures and marks entries paused anyway. | Verify real transfer shutdown and reflect acknowledged results. |
+| Pause | The Go engine exposes acknowledged pause/resume operations. | Verify real transfer shutdown and reflect acknowledged results. |
 | Stop | The service stops immediately while session cleanup runs asynchronously. `syncService()` can still see active entries. | A service restart race is plausible; reproduce before claiming a confirmed cause. |
 | Delete / 404 | Removal happens before some UI state changes; the poll loop keeps snapshots of engine IDs. | An in-flight poll can target an intentionally removed torrent. This is a likely, unconfirmed cause of the flash. |
 | Add | `AddSheet.kt` collects input; `addCurrent()` navigates to `Screen.Prepare`. | Merge input, metadata progress, selection, and Download into one surface. |
 | Video details | `TorrentFilesScreen.kt` shows selected files and progress. A single selected file opens the player directly. | Add an explicit Details action and enrich the existing files screen. |
-| Telemetry | `engine/protocol.js` exposes speed, peers, progress, and ETA, but no piece map. | Real visualization needs engine telemetry, not an animated imitation. |
-| Runtime | `NodeHost.kt` starts embedded Node once and exposes no shutdown/restart method. | Define exit around stopping network work; validate runtime teardown before promising process shutdown. |
+| Telemetry | The Go engine exposes speed, peers, progress, ETA, and piece buckets. | Keep visualization based on real engine state. |
+| Runtime | `EngineHost.kt` starts the native Go library once. | Keep lifecycle and recovery explicit. |
 
 ## 1. Notification, pause, stop, and exit
 
@@ -56,7 +56,7 @@ Deliver two groups of improvements: reliable download controls, then a simpler a
 - Remove stopping/deleting IDs from polling eligibility immediately; invalidate in-flight results using an operation generation, without losing the metadata required for recovery.
 - Stop the service after transfer cleanup, not before launching asynchronous cleanup. A timeout must produce a recoverable failure, never a false successful shutdown.
 - Persist stopped/paused intent before allowing restore. Surface persistence failure instead of silently risking an unwanted resume.
-- Initial exit contract: no torrent traffic, active streams, or foreground notification; the OS may retain the process. Full embedded Node termination is a separate technical spike because same-process restart must be proven first.
+- Initial exit contract: no torrent traffic, active streams, or foreground notification; the OS may retain the process.
 - Explain that stopping an active streamed video ends its stream. Local-file playback in another app is independent.
 
 ### Acceptance checks
@@ -147,7 +147,7 @@ Acceptance: completed MP4, MKV, short clip, black opening scene, unsupported cod
 - Map full torrent order left to right with file boundaries and a selected-files filter. Account for files sharing boundary pieces; never imply byte-exact file isolation.
 - Add an on-demand piece telemetry endpoint, provisionally `GET /pieces/:id?maxBuckets=256`.
 - Proposed response: torrent/session generation, sample timestamp, total piece count, piece length, and up to 256 buckets with index range, selected-piece count, verified-piece count, and receiving-piece count. Define overlap rules explicitly; receiving excludes verified, while selection is a separate dimension.
-- Build state from real verified-piece data and actual outstanding requests. Validate WebTorrent 2.2.1 instrumentation against the installed patched dependency; if receiving state cannot be measured reliably, omit it and adjust the legend.
+- Build state from real verified-piece data and actual outstanding requests. If receiving state cannot be measured reliably, omit it and adjust the legend.
 - Fetch at most once per second only while Details is visible and the app is foregrounded. Pause freezes activity; completion leaves a stable verified map. Missing telemetry shows “Map unavailable” without interrupting playback/download.
 - Bound response size and computation; cache/group engine data rather than sending raw bitfields for every library poll.
 
@@ -155,7 +155,7 @@ Acceptance: a controlled torrent with known piece completion matches the display
 
 ## Review-driven implementation clarifications
 
-The following decisions make the requirements implementable against the current Android and WebTorrent architecture.
+The following decisions make the requirements implementable against the current Android and Go-engine architecture.
 
 ### Shared lifecycle and race rules
 
@@ -169,7 +169,7 @@ The following decisions make the requirements implementable against the current 
 - Attach a `deleteIntent` to the transfer notification wherever Android permits dismissal callbacks. Dismissal invokes the same idempotent Stop all operation and sets a persisted service-suppressed gate before asynchronous cleanup begins.
 - Do not call `stopForeground` or `stopSelf` until the session coordinator reports that engine cleanup and state persistence have completed. Polling must observe the suppression gate and cannot repost the notification during shutdown.
 - The paused presentation must define whether the foreground service is stopped while a normal dismissible notification remains, according to the target Android version and device behavior. Active transfers retain an always-visible Stop all action when dismissal cannot be intercepted.
-- Stop all & exit must not call the engine `/shutdown` endpoint: the current endpoint terminates the embedded Node host process. The initial contract ends transfer activity, persists stopped state, stops the service, and finishes the Activity; process termination is a separate validated runtime spike.
+- Stop all & exit ends transfer activity, persists stopped state, stops the service, and finishes the Activity without killing the Android process.
 - Expose Stop all & exit in an app-level action, such as the Library overflow menu and Settings App actions, and state that it cancels metadata preparation and telemetry jobs as well as downloads and seeding.
 
 ### Deletion and storage contract
@@ -209,10 +209,10 @@ The following decisions make the requirements implementable against the current 
 
 | Phase | Main files | Deliverable |
 | --- | --- | --- |
-| 1 — reliable controls | `PlayService.kt`, `LibrarySession.kt`, `UiModels.kt`, `engine/main.js`, `EngineClient.kt` | Acknowledged pause/stop, shutdown gate, stale-response protection, deletion fixes, Stop all & exit. |
+| 1 — reliable controls | `PlayService.kt`, `LibrarySession.kt`, `UiModels.kt`, `engine-go/server.go`, `EngineClient.kt` | Acknowledged pause/stop, shutdown gate, stale-response protection, deletion fixes, Stop all & exit. |
 | 2 — unified add | `AddSheet.kt`, `PrepareScreen.kt`, `MainActivity.kt`, `MainViewModel.kt`, `LibrarySession.kt` | One add-and-select surface, single commit, cancellable metadata-only preparation. |
 | 3 — thumbnails and details | `LibraryScreen.kt`, `TorrentFilesScreen.kt`, `DownloadStorage.kt`, new thumbnail repository | Cached frame previews, explicit Details, richer file information. |
-| 4 — truthful live map | `engine/protocol.js`, `engine/main.js`, `EngineClient.kt`, `TorrentFilesScreen.kt` | Bounded on-demand piece telemetry and accessible map. |
+| 4 — truthful live map | `engine-go/server.go`, `EngineClient.kt`, `TorrentFilesScreen.kt` | Bounded on-demand piece telemetry and accessible map. |
 
 Verify each phase before proceeding: meaningful coordinator/race tests, engine protocol tests, then Android device checks for notification behavior, background transfers, storage providers, external playback, and thumbnail decoding. No runtime tests are claimed by this planning document.
 

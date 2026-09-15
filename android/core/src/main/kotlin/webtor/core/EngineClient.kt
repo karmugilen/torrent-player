@@ -1,12 +1,16 @@
 package webtor.core
 
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
+
+data class EngineResponse(
+    val statusCode: Int,
+    val body: String,
+)
+
+fun interface EngineTransport {
+    fun request(method: String, path: String, body: String?): EngineResponse
+}
 
 data class EngineStats(
     val downloadSpeed: Long,
@@ -87,15 +91,8 @@ class EngineException(
 ) : RuntimeException(message)
 
 class EngineClient(
-    private val baseUrl: String,
-    private val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .build(),
+    private val transport: EngineTransport,
 ) {
-    constructor(ctlPort: Int) : this("http://127.0.0.1:$ctlPort")
-
     fun stats(): EngineStats {
         val json = get("/stats")
         return EngineStats(
@@ -166,32 +163,21 @@ class EngineClient(
         post("/shutdown", JSONObject())
     }
 
-    private fun get(path: String): JSONObject = execute(
-        Request.Builder().url(baseUrl + path).get().build()
-    )
+    private fun get(path: String): JSONObject = execute("GET", path, null)
 
-    private fun post(path: String, body: JSONObject): JSONObject = execute(
-        Request.Builder()
-            .url(baseUrl + path)
-            .post(body.toString().toRequestBody(JSON))
-            .build()
-    )
+    private fun post(path: String, body: JSONObject): JSONObject = execute("POST", path, body.toString())
 
-    private fun execute(request: Request): JSONObject {
-        http.newCall(request).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            val json = runCatching { JSONObject(text) }.getOrNull()
-            if (!resp.isSuccessful) {
-                val err = json?.optString("error").orEmpty().ifEmpty { text }
-                throw EngineException("HTTP ${resp.code}: $err", statusCode = resp.code)
-            }
-            return json ?: throw EngineException("The download engine returned an invalid response.")
+    private fun execute(method: String, path: String, body: String?): JSONObject {
+        val response = transport.request(method, path, body)
+        val json = runCatching { JSONObject(response.body) }.getOrNull()
+        if (response.statusCode !in 200..299) {
+            val err = json?.optString("error").orEmpty().ifEmpty { response.body }
+            throw EngineException("Engine ${response.statusCode}: $err", statusCode = response.statusCode)
         }
+        return json ?: throw EngineException("The download engine returned an invalid response.")
     }
 
     companion object {
-        private val JSON = "application/json; charset=utf-8".toMediaType()
-
         private fun parsePlay(json: JSONObject) = PlayInfo(
             id = json.getString("id"),
             fileIndex = json.optInt("fileIndex"),

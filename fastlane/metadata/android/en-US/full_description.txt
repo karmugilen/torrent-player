@@ -8,7 +8,7 @@
   <li><b>In-Progress Video Streaming:</b> Stream growing video files directly to external players such as VLC, Nova Video Player, MPV, or Just Player without waiting for downloads to finish.</li>
   <li><b>Selective File Downloading:</b> Choose specific files to prioritize or download in multi-file swarms.</li>
   <li><b>Bitfield Piece Visualizer:</b> Interactive real-time visualizer showing piece distribution and swarm availability.</li>
-  <li><b>Optimized Resource & Battery Usage:</b> Adaptive polling back-off and low memory footprint with an optimized 96MB V8 engine heap.</li>
+  <li><b>Optimized Resource & Battery Usage:</b> Adaptive polling back-off and a native Go engine with bounded preparation storage.</li>
   <li><b>Modern Material 3 Interface:</b> Intuitive UI with dynamic colors, dark theme support, and animated video preview cards.</li>
 </ul>
 

@@ -1,43 +1,14 @@
 # F-Droid submission: Torrent Player (`webtor.app`)
 
-The active submission is [fdroiddata merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893),
-from `karmugilrc/fdroiddata:add-webtor-app` to `fdroid/fdroiddata:master`.
-Updating that branch updates the existing submission. Do not open a duplicate MR.
+The active submission is [fdroiddata merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893). Update that branch instead of opening a duplicate merge request.
 
 ## Build recipe
 
-The canonical recipe is [`webtor.app.yml`](../webtor.app.yml). Copy it to
-`metadata/webtor.app.yml` in fdroiddata. Descriptions, screenshots, icon and
-changelogs live in `fastlane/metadata/android/en-US/` in this upstream repository.
+The canonical recipe is [`webtor.app.yml`](../webtor.app.yml). The app now builds a native Go engine from `engine-go/` with Android NDK r26b. It does not use Node.js, npm, V8, CMake, JavaScript bundles, or native Node addons.
 
-The Gradle subdirectory is `android/app`, where the APK output is written.
-The recipe must reference the full commit SHA of the tested release. Version
-1.4.2's previous recipe was not buildable from a clean checkout: it required an
-untracked binary Node archive. Downloading that archive would also fail F-Droid's
-[source dependency requirement](https://f-droid.org/docs/Inclusion_Policy/).
+Gradle runs `engine-go/build.sh` before packaging. The build requires Go 1.24 or newer, Java 17 or 21, Android SDK 34, and NDK 26.1.10909125. The Android release APK contains `libengine.so` for `arm64-v8a`.
 
-Version 1.4.3 prepares an entirely source-built native dependency chain:
-
-- F-Droid's existing `NodejsMobile` srclib is pinned to
-  `959b6e8637c86fb1f63f1aaf72adc86c7e8c335d` (v18.20.4).
-- `vendor/libdatachannel` and its nested dependencies are pinned Git submodules.
-- npm installs the lockfile with lifecycle scripts disabled. This avoids native
-  package installers downloading host binaries or invoking unpinned build tools.
-- Unused libsrtp and usrsctp fuzzing fixtures are removed before the source scan.
-  JavaScript dependencies are scanned normally, without binary exemptions.
-- Native compilation runs in the recipe's `build` phase, after the source scan.
-  Node, uTP and WebRTC compile with NDK r26b for `arm64-v8a`.
-- Gradle stages JavaScript, applies the Android loader patches, and builds an
-  unsigned release APK. F-Droid handles signing after acceptance.
-- Python 3 with setuptools supports the Node build on Debian trixie. Java uses
-  the build environment rather than a developer-specific absolute path.
-
-See the [README build instructions](../README.md#building-from-source) for local
-builds. A first Node build takes substantially longer than an incremental APK build.
-
-## Validation and review
-
-Run in an fdroiddata checkout with fdroidserver and the required SDK installed:
+Before submitting a release, update the recipe's full commit SHA and version fields, then validate from a clean checkout in F-Droid's current buildserver image:
 
 ```sh
 fdroid rewritemeta webtor.app
@@ -46,15 +17,7 @@ fdroid checkupdates --auto webtor.app
 fdroid build --latest webtor.app
 ```
 
-Use the same buildserver image as fdroiddata CI:
-`registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie`.
-Do not mark the MR's build/pipeline checkbox complete unless those checks pass.
-A failed pipeline with zero jobs is not evidence of either build success or a
-compiler error. Investigate runner availability separately.
-
-The maintainer's earlier requests are retained: `New app: Torrent Player` title,
-App Inclusion template, valid `Download` / `Online Media Player` categories,
-full commit SHA, `gradle: yes`, and separate shell commands in the recipe.
+The recipe installs Debian Go 1.24.4, downloads the exact go.mod/go.sum dependencies during prebuild, and runs `go mod verify`. `GOTOOLCHAIN=local` prevents automatic toolchain downloads. The local anet source patch replaces its unused precompiled mobile binaries. Packaged Go dependency notices can be refreshed with `python3 scripts/update-go-notices.py` after building libengine.so. Do not claim an official successful build until the fdroiddata pipeline has built and scanned the new Go-engine release.
 
 ## Submit updates
 
@@ -64,57 +27,19 @@ After testing and pushing the referenced upstream release commit, run:
 ./scripts/submit-to-fdroid.sh
 ```
 
-The script updates only the existing submission branch, checks for concurrent
-changes, and skips a commit if the remote recipe is already identical. It never
-force-pushes or creates another MR.
+The script updates only the existing submission branch. F-Droid maintainers control review, builds, signing, and publication.
 
-F-Droid maintainers control review, merge, builds, signing and publication.
-An open or merged MR does not mean the app is already available in the catalogue;
-confirm the [app page](https://f-droid.org/packages/webtor.app/) before announcing
-availability. Publication timing is not guaranteed.
+## Release 1.4.4 validation (2026-09-15)
 
-## Future releases
-
-Update the app version and changelog, test the source build, then push the
-release commit and tag. `UpdateCheckMode: Tags` and `AutoUpdateMode: Version`
-allow F-Droid to discover later tagged releases. Keep source revision pins and
-build instructions consistent when native dependencies change.
-
-## Validation on 2026-09-14
-
-The official build job [16483867794](https://gitlab.com/fdroid/fdroiddata/-/jobs/16483867794)
-for the old 1.4.2 recipe failed with `npm: command not found`; the other seven
-checks passed and the APK check was skipped. The revised recipe installs Node,
-npm and native build prerequisites explicitly.
-
-A clean checkout of `bb6845006bf1b78b567fefe5f9208d51a19cd57f` was compiled
-inside F-Droid's `buildserver-trixie` image, with NDK r26b and fdroidserver 2.4.2.
-The source scan and complete native/Gradle compilation passed. The final F-Droid
-output lookup initially failed because the old recipe used `subdir: android`.
-The recipe now uses `android/app`; output discovery and F-Droid's APK identity,
-version, release-mode and ABI checks passed against the generated APK. Its
-binary scan also passed. This is not a claim that the updated official pipeline
-has passed; that still requires a new pipeline for the updated MR commit.
-
-The unsigned 1.4.3/build 20 APK is 20,117,712 bytes with SHA-256:
-`475ff422490fceb25df83aacb3d70b6cca85eff19a3ba2683f99c41fb518fe6b`.
-
-## Automatic pipeline status
-
-GitLab creates merge request pipelines automatically when the submission branch
-changes. CI and shared runners are enabled on the fork. Pipeline `2847963877`
-did not start any jobs because GitLab's API reports:
-`Identity verification is required in order to run CI jobs`.
-
-The account owner can complete **Verify identity** from the
-[fork pipeline page](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2847963877)
-to unblock their CI runs. This account action cannot be completed by changing
-the app or build recipe. F-Droid project members can run the pipeline using the
-parent project's resources; external contributors cannot trigger that run.
-See [GitLab's fork pipeline documentation](https://docs.gitlab.com/ci/pipelines/merge_request_pipelines/#use-with-forked-projects).
-
-A [rerun request was posted to linsui](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893#note_3831602426)
-with the corrected commit and local validation results. Maintainer review, a
-successful official build, and publication are still pending. Account
-verification is required for the fork's CI, not a prerequisite for a maintainer
-to run the official pipeline.
+- Release source: `cb711809578404b46761ecb679591c34b34d9cdb`, version 1.4.4 (21).
+- F-Droid 2.4.2 in `buildserver-trixie`, Debian Go 1.24.4 and NDK r26b:
+  metadata lint/rewritemeta, module verification, clean source scan, release
+  build, APK identity checks and APK binary scan all passed.
+- Command: `fdroid build -v --latest --test --scan-binary webtor.app`.
+- The first empty local workspace exposed F-Droid 2.4.2's SOURCE_DATE_EPOCH
+  lookup-before-clone error. Pre-cloning the repository resolved that tooling
+  issue; subsequent builds used F-Droid's normal checkout/clean/scanning flow.
+- The new recipe removes the previous Node/npm/srclib preparation and retains
+  full commit pinning. No binary/source scanner exemptions were added.
+- F-Droid review and publication remain controlled by maintainers. Check the
+  existing MR for the current upstream pipeline and review status.

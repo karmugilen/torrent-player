@@ -28,8 +28,11 @@ import webtor.core.EngineClient
 import webtor.core.EngineException
 import webtor.core.TorrentStatus
 
-class LibrarySession(private val app: Application) {
-    private val client = EngineClient(NodeHost.DEFAULT_CTL_PORT)
+class LibrarySession(
+    private val app: Application,
+    private val client: EngineClient,
+    private val engineHost: EngineHost,
+) {
     private val storage = DownloadStorage(app)
     private val settings = app.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -47,7 +50,7 @@ class LibrarySession(private val app: Application) {
     private var debounceJob: Job? = null
     private var prefetchJob: Job? = null
     private var storageStatsJob: Job? = null
-    private var pollJob: Job? = null
+    private var eventJob: Job? = null
     private var lastServiceUpdate = 0L
     private var draftGeneration = 0L
     private var commitInProgress = false
@@ -65,10 +68,10 @@ class LibrarySession(private val app: Application) {
 
     private fun shutdownInProgress(): Boolean = isShuttingDown.get() && !shutdownComplete
 
-    private fun restartPollIfNeeded() {
-        if (pollJob?.isActive == true) return
-        pollJob?.cancel()
-        pollJob = scope.launch { pollLoop() }
+    private fun restartEventsIfNeeded() {
+        if (eventJob?.isActive == true) return
+        eventJob?.cancel()
+        eventJob = scope.launch { eventLoop() }
     }
 
     private fun reopenAfterShutdown(): Boolean {
@@ -77,7 +80,7 @@ class LibrarySession(private val app: Application) {
             isShuttingDown.set(false)
             shutdownComplete = false
         }
-        restartPollIfNeeded()
+        restartEventsIfNeeded()
         return true
     }
 
@@ -104,7 +107,16 @@ class LibrarySession(private val app: Application) {
         scope.launch {
             try {
                 val loaded = withContext(io) { storage.load() }.map {
-                    it.copy(engineId = null, paused = it.paused || serviceSuppressed)
+                    val staysPaused = it.paused || serviceSuppressed
+                    it.copy(
+                        engineId = null,
+                        paused = staysPaused,
+                        lifecycleState = when {
+                            it.complete -> EntryLifecycleState.COMPLETED
+                            staysPaused -> EntryLifecycleState.PAUSED
+                            else -> EntryLifecycleState.PREPARING
+                        },
+                    )
                 }
                 _ui.update {
                     it.copy(
@@ -130,7 +142,7 @@ class LibrarySession(private val app: Application) {
                 initialized.complete(Unit)
             }
         }
-        pollJob = scope.launch { pollLoop() }
+        eventJob = scope.launch { eventLoop() }
     }
 
     fun setMagnet(value: String) {
@@ -585,8 +597,14 @@ class LibrarySession(private val app: Application) {
                 if (current.isDeleting) return@launchCommand
                 val targetIndex = fileIndex ?: pickPlayIndex(current)
                 check(targetIndex in current.selected) { "This file was not selected for download." }
+                current.engineId?.let { id ->
+                    val status = withContext(io) { client.torrent(id) }
+                    applyStatus(status, current.key, current.generation)
+                    current = _ui.value.library.find { it.key == entry.key } ?: current
+                }
                 completedPlayFile(current, targetIndex)?.let { file ->
-                    _events.send(UiEvent.OpenContent(file.uri!!, mimeFor(file.name), file.name))
+                    withContext(io) { storage.prepareForPlayback(file) }
+                    _events.send(UiEvent.OpenContent(PlaybackProvider.uriFor(current, file).toString(), mimeFor(file.name), file.name))
                     return@launchCommand
                 }
                 if (current.files.none { it.index in current.selected && it.uri != null }) {
@@ -606,10 +624,11 @@ class LibrarySession(private val app: Application) {
                     withContext(io) { client.resume(id) }
                     patch(current.key) { it.copy(paused = false) }
                 }
-                val info = withContext(io) { client.play(id, targetIndex) }
+                withContext(io) { client.play(id, targetIndex) }
+                val file = current.files.first { it.index == targetIndex }
                 persist()
-                _events.send(UiEvent.PlayStream(info))
                 syncService()
+                _events.send(UiEvent.OpenContent(PlaybackProvider.uriFor(current, file).toString(), mimeFor(file.name), file.name))
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 val msg = readableError(t)
@@ -1000,7 +1019,7 @@ class LibrarySession(private val app: Application) {
         debounceJob?.cancel()
         prefetchJob?.cancel()
         storageStatsJob?.cancel()
-        pollJob?.cancel()
+        eventJob?.cancel()
 
         scope.launch {
             initialized.await()
@@ -1072,8 +1091,8 @@ class LibrarySession(private val app: Application) {
                     serviceSuppressed = false
                     settings.edit().putBoolean("serviceSuppressed", false).apply()
                     _ui.update { it.copy(error = "Some transfers could not be stopped. Retry Shutdown.") }
-                    pollJob?.cancel()
-                    pollJob = scope.launch { pollLoop() }
+                    eventJob?.cancel()
+                    eventJob = scope.launch { eventLoop() }
                     syncService()
                     return@withLock
                 }
@@ -1198,7 +1217,10 @@ class LibrarySession(private val app: Application) {
     private suspend fun waitReady(id: String, timeoutMs: Long = 90_000, forPrepare: Boolean = true): TorrentStatus {
         val start = System.currentTimeMillis()
         var last: TorrentStatus? = null
+        var version = -1L
         while (System.currentTimeMillis() - start < timeoutMs) {
+            val remaining = timeoutMs - (System.currentTimeMillis() - start)
+            version = engineHost.awaitChange(version, remaining.coerceAtLeast(1))
             if (forPrepare && _ui.value.prepare?.engineId != id) throw CancellationException("prefetch cleared")
             val t = withContext(io) { client.torrent(id) }
             last = t
@@ -1211,7 +1233,6 @@ class LibrarySession(private val app: Application) {
                 }
                 return t
             }
-            delay(500)
         }
         val peers = last?.numPeers ?: 0
         error(
@@ -1405,24 +1426,23 @@ class LibrarySession(private val app: Application) {
         }
     }
 
-    private data class PollTarget(val key: String, val engineId: String, val generation: Long)
+    private data class StatusTarget(val key: String, val engineId: String, val generation: Long)
 
-    private suspend fun pollLoop() {
+    private suspend fun eventLoop() {
+        initialized.await()
+        var eventVersion = -1L
         while (true) {
             if (isShuttingDown.get()) break
-            val snapshot = _ui.value
-            val active = snapshot.library.any {
-                it.engineId != null && !it.complete && !it.paused && !it.isDeleting &&
-                    it.lifecycleState != EntryLifecycleState.STOPPING && it.lifecycleState != EntryLifecycleState.DELETING
-            } || snapshot.prepare != null
-            delay(
-                when {
-                    snapshot.prepare != null && snapshot.prepare.torrent?.ready != true -> 500
-                    active -> 750
-                    else -> 8000
-                },
-            )
+            val nextVersion = try {
+                withContext(io) { engineHost.awaitChange(eventVersion) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                delay(500)
+                continue
+            }
             if (isShuttingDown.get()) break
+            if (nextVersion == eventVersion) continue
+            eventVersion = nextVersion
             val state = _ui.value
             if (!state.engineReady) continue
 
@@ -1431,7 +1451,7 @@ class LibrarySession(private val app: Application) {
                 if (e.isDeleting || e.lifecycleState == EntryLifecycleState.PREPARING || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING || e.lifecycleState == EntryLifecycleState.PAUSING) {
                     return@mapNotNull null
                 }
-                PollTarget(e.key, id, e.generation)
+                StatusTarget(e.key, id, e.generation)
             }
             val prepareTarget = if (prefetchJob?.isActive != true) state.prepare?.engineId else null
 
@@ -1463,7 +1483,7 @@ class LibrarySession(private val app: Application) {
 
                     if (is404 && isIntentional) {
                         // Silent expected lifecycle 404 suppression
-                    } else if (!state.restoring && current != null && current.generation == target.generation && !current.isDeleting) {
+                    } else if (is404 && !state.restoring && current != null && current.generation == target.generation && !current.isDeleting) {
                         markMissingEngine(target.engineId, e)
                     }
                 } catch (_: Throwable) {
@@ -1499,7 +1519,7 @@ class LibrarySession(private val app: Application) {
             }
             val lifecycleState = when {
                 t.error != null -> EntryLifecycleState.ERROR
-                entry.complete || files.filter { it.index in entry.selected }.all { it.length == 0L || it.progress >= 1.0 } -> EntryLifecycleState.COMPLETED
+                files.filter { it.index in entry.selected }.all { it.length == 0L || it.progress >= 1.0 } -> EntryLifecycleState.COMPLETED
                 t.paused -> EntryLifecycleState.PAUSED
                 else -> EntryLifecycleState.DOWNLOADING
             }
@@ -1609,14 +1629,10 @@ class LibrarySession(private val app: Application) {
     }
 
     private suspend fun waitForEngine() {
-        repeat(200) {
-            try {
-                withContext(io) { client.stats() }
-                _ui.update { it.copy(engineReady = true, statusLine = "Ready") }
-                return
-            } catch (_: Throwable) {
-                delay(100)
-            }
+        val ready = withContext(io) { engineHost.awaitReady() }
+        if (ready && runCatching { withContext(io) { client.stats() } }.isSuccess) {
+            _ui.update { it.copy(engineReady = true, statusLine = "Ready") }
+            return
         }
         _ui.update {
             it.copy(
