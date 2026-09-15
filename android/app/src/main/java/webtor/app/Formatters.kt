@@ -44,8 +44,23 @@ fun mediaType(entry: DownloadEntry): String {
 }
 
 fun mimeFor(name: String): String =
-    MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+    commonMediaMime(name) ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
         ?: "application/octet-stream"
+
+internal fun commonMediaMime(name: String): String? = when (name.substringAfterLast('.', "").lowercase()) {
+    "mp4", "m4v" -> "video/mp4"
+    "mkv" -> "video/x-matroska"
+    "webm" -> "video/webm"
+    "avi" -> "video/x-msvideo"
+    "mov" -> "video/quicktime"
+    "ts", "m2ts", "mts" -> "video/mp2t"
+    "mp3" -> "audio/mpeg"
+    "m4a", "m4b" -> "audio/mp4"
+    "flac" -> "audio/flac"
+    "ogg", "opus" -> "audio/ogg"
+    "wav" -> "audio/wav"
+    else -> null
+}
 
 fun TorrentStatus.timeRemainingMs(): Long? {
     timeRemaining?.takeIf { it >= 0 }?.let { return it }

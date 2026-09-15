@@ -20,7 +20,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -89,12 +88,7 @@ private val GaleShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp),
 )
 
-private val AppFont = FontFamily(
-    Font(R.font.adwaita_sans_regular, FontWeight.Normal),
-    Font(R.font.adwaita_sans_semibold, FontWeight.Medium),
-    Font(R.font.adwaita_sans_semibold, FontWeight.SemiBold),
-    Font(R.font.adwaita_sans_semibold, FontWeight.Bold),
-)
+private val AppFont = FontFamily.SansSerif
 
 private val GaleTypography = Typography(
     displayLarge = TextStyle(fontFamily = AppFont, fontSize = 57.sp, lineHeight = 64.sp),

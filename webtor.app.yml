@@ -13,32 +13,22 @@ RepoType: git
 Repo: https://github.com/karmugilen/torrent-player.git
 
 Builds:
-  - versionName: 1.4.3
-    versionCode: 20
+  - versionName: 1.4.4
+    versionCode: 21
     commit: bb6845006bf1b78b567fefe5f9208d51a19cd57f
-    timeout: 14400
+    timeout: 3600
     subdir: android/app
-    submodules: true
     sudo:
       - apt-get update
-      - apt-get install -y nodejs npm python3-setuptools g++ make rsync
+      - apt-get install -y golang-go
     gradle:
       - yes
-    srclibs:
-      - NodejsMobile@959b6e8637c86fb1f63f1aaf72adc86c7e8c335d
-    rm:
-      - vendor/libdatachannel/deps/libsrtp/fuzzer
-      - vendor/libdatachannel/deps/usrsctp/fuzzer
     prebuild:
-      - sdkmanager "cmake;3.22.1"
-      - npm --prefix ../../engine ci --omit=optional --omit=dev --ignore-scripts
-      - find ../../engine/node_modules -name '*.node' -delete
-    build:
-      - ANDROID_NDK_HOME=$$NDK$$ ../../scripts/vendor-node.sh $$NodejsMobile$$
-      - ANDROID_HOME=$$SDK$$ ANDROID_NDK_HOME=$$NDK$$ ../../scripts/build-native-addons.sh
+      - GOTOOLCHAIN=local go -C ../../engine-go mod download
+      - GOTOOLCHAIN=local go -C ../../engine-go mod verify
     ndk: r26b
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.4.3
-CurrentVersionCode: 20
+CurrentVersion: 1.4.4
+CurrentVersionCode: 21

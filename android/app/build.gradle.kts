@@ -4,37 +4,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// The Kotlin client and bundled daemon must come from the same checkout.
-// Stage the engine before Android reads assets, including IDE builds.
-// Hook merge*Assets too: depending only on preBuild races packaging.
 val repoRoot = rootProject.projectDir.parentFile
-val engineDir = repoRoot.resolve("engine")
-val syncEngine by tasks.registering(Exec::class) {
+
+val buildGoEngine by tasks.registering(Exec::class) {
     group = "build"
-    description = "Bundle the current torrent engine and Android-compatible dependencies"
+    description = "Compile Go torrent engine into libengine.so for arm64-v8a"
     workingDir(repoRoot)
-    commandLine("bash", repoRoot.resolve("scripts/sync-engine.sh").absolutePath)
-    inputs.files(
-        engineDir.resolve("main.js"),
-        engineDir.resolve("protocol.js"),
-        engineDir.resolve("document-store.js"),
-        engineDir.resolve("package.json"),
-        engineDir.resolve("package-lock.json"),
-        engineDir.resolve("scripts/patch-webtorrent.mjs"),
-        engineDir.resolve("scripts/patch-native-addons.mjs"),
-        repoRoot.resolve("scripts/sync-engine.sh"),
-    )
-    outputs.dir(file("src/main/assets/nodejs-project"))
+    commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
+    inputs.dir(repoRoot.resolve("engine-go"))
+    outputs.file(file("src/main/jniLibs/arm64-v8a/libengine.so"))
 }
 
 tasks.named("preBuild") {
-    dependsOn(syncEngine)
-}
-
-tasks.configureEach {
-    if (name.startsWith("merge") && name.endsWith("Assets")) {
-        dependsOn(syncEngine)
-    }
+    dependsOn(buildGoEngine)
 }
 
 android {
@@ -46,16 +28,11 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.4.3"
+        versionCode = 21
+        versionName = "1.4.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")
-        }
-        externalNativeBuild {
-            cmake {
-                arguments += listOf("-DANDROID_STL=c++_shared")
-            }
         }
     }
 
@@ -85,7 +62,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Publishing must never silently use the public development certificate.
             signingConfig = when {
                 !releaseStore.isNullOrBlank() -> signingConfigs.getByName("production")
                 providers.gradleProperty("webtor.localSigning").orNull == "true" -> signingConfigs.getByName("debug")
@@ -109,42 +85,11 @@ android {
     buildFeatures {
         compose = true
     }
-
-    androidResources {
-        noCompress += listOf("node")
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
 }
 
-val buildNativeAddons by tasks.registering(Exec::class) {
-    group = "build"
-    description = "Cross-compile utp-native and node-datachannel for Android arm64"
-    workingDir(repoRoot)
+buildGoEngine.configure {
     environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
     environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
-    commandLine("bash", repoRoot.resolve("scripts/build-native-addons.sh").absolutePath)
-    inputs.files(
-        repoRoot.resolve("scripts/build-native-addons.sh"),
-        repoRoot.resolve("scripts/native-addons/CMakeLists.txt"),
-        engineDir.resolve("package-lock.json"),
-        file("src/main/jniLibs/arm64-v8a/libnode.so"),
-    )
-    inputs.dir(repoRoot.resolve("vendor/libdatachannel"))
-    inputs.dir(file("src/main/cpp/include"))
-    outputs.files(
-        file("src/main/jniLibs/arm64-v8a/libutp_native.so"),
-        file("src/main/jniLibs/arm64-v8a/libnode_datachannel.so"),
-    )
-}
-
-tasks.named("preBuild") {
-    dependsOn(buildNativeAddons)
 }
 
 dependencies {
@@ -164,8 +109,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

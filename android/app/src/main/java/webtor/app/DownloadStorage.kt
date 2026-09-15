@@ -199,6 +199,23 @@ class DownloadStorage(private val context: Context) {
         return runCatching { resolver.openFileDescriptor(uri, "r")?.use { true } == true }.getOrDefault(false)
     }
 
+    fun prepareForPlayback(file: SavedFile) {
+        val uri = Uri.parse(file.uri ?: error("Downloaded file is unavailable"))
+        resolver.openFileDescriptor(uri, "r")?.use { fd ->
+            check(fd.statSize < 0 || fd.statSize >= file.length) { "Downloaded file is shorter than expected. Resume it before playing." }
+        } ?: error("Downloaded file is unavailable")
+        if (Build.VERSION.SDK_INT >= 29 && uri.authority == MediaStore.AUTHORITY) {
+            // Ask MediaStore to refresh metadata after native descriptor writes.
+            // Older builds could leave an empty-file scan in its database.
+            runCatching {
+                resolver.update(uri, ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeFor(file.name))
+                }, null, null)
+            }.onFailure { android.util.Log.w("webtor-playback", "Could not refresh saved-file metadata", it) }
+        }
+    }
+
     fun createFiles(entry: DownloadEntry, tree: String?): List<SavedFile> {
         val created = mutableListOf<Uri>()
         try {
@@ -251,7 +268,7 @@ class DownloadStorage(private val context: Context) {
         }
     }
 
-    // Keep originals alive until Node has duplicated them. Node then owns its
+    // Keep originals alive until the Go engine has duplicated them. It then owns its
     // copies; these Kotlin descriptors can be closed immediately after configure.
     fun openFiles(files: List<SavedFile>): List<ParcelFileDescriptor?> {
         val handles = mutableListOf<ParcelFileDescriptor?>()
@@ -387,8 +404,7 @@ class DownloadStorage(private val context: Context) {
 
     private fun safe(name: String): String = name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
         .trim().take(120).let { if (it.isBlank() || it == "." || it == "..") "download" else it }
-    private fun mime(name: String) = android.webkit.MimeTypeMap.getSingleton()
-        .getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
+    private fun mime(name: String) = mimeFor(name)
 }
 
 // Only return ancestors within the app's download root; never the shared root itself.

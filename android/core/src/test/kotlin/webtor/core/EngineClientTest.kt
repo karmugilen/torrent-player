@@ -1,9 +1,6 @@
 package webtor.core
 
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
-import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -12,65 +9,90 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 
+private class TestResponse {
+    var statusCode: Int = 200
+    var body: String = ""
+
+    fun setResponseCode(value: Int) = apply { statusCode = value }
+    fun setBody(value: String) = apply { body = value }
+}
+
+private class RecordedBody(private val value: String) {
+    fun readUtf8(): String = value
+}
+
+private data class RecordedRequest(
+    val path: String,
+    val body: RecordedBody,
+)
+
+private class FakeEngineTransport : EngineTransport {
+    private val responses = ArrayDeque<TestResponse>()
+    private val requests = ArrayDeque<RecordedRequest>()
+
+    fun enqueue(response: TestResponse) { responses.addLast(response) }
+    fun takeRequest(): RecordedRequest = requests.removeFirst()
+
+    override fun request(method: String, path: String, body: String?): EngineResponse {
+        requests.addLast(RecordedRequest(path, RecordedBody(body.orEmpty())))
+        val response = responses.removeFirst()
+        return EngineResponse(response.statusCode, response.body)
+    }
+}
+
 class EngineClientTest {
-    private lateinit var server: MockWebServer
+    private lateinit var transport: FakeEngineTransport
     private lateinit var client: EngineClient
 
     @BeforeEach
     fun setUp() {
-        server = MockWebServer()
-        server.start()
-        client = EngineClient(server.url("/").toString().trimEnd('/'))
-    }
-
-    @AfterEach
-    fun tearDown() {
-        server.shutdown()
+        transport = FakeEngineTransport()
+        client = EngineClient(transport)
     }
 
     @Test
     fun statsParsesPorts() {
-        server.enqueue(
-            MockResponse().setBody(
+        transport.enqueue(
+            TestResponse().setBody(
                 """{"downloadSpeed":1,"uploadSpeed":2,"progress":0.5,"ratio":1.2,
-                    "torrents":1,"ctlPort":18080,"streamPort":8000,"path":"/tmp"}"""
+                    "torrents":1,"ctlPort":0,"streamPort":8000,"path":"/tmp"}"""
             )
         )
         val s = client.stats()
-        assertEquals(18080, s.ctlPort)
+        assertEquals(0, s.ctlPort)
         assertEquals(8000, s.streamPort)
         assertEquals(1L, s.downloadSpeed)
     }
 
     @Test
     fun addAndPlay() {
-        server.enqueue(MockResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
         val added = client.add("magnet:?xt=urn:btih:dead")
         assertEquals("abc", added.id)
 
-        server.enqueue(
-            MockResponse().setBody(
+        transport.enqueue(
+            TestResponse().setBody(
                 """{"id":"abc","fileIndex":0,"name":"a.mp4","length":12,
                     "streamUrl":"http://127.0.0.1:8000/webtorrent/dead/a.mp4"}"""
             )
         )
         val play = client.play("abc")
         assertTrue(play.streamUrl.startsWith("http://127.0.0.1:"))
-        assertEquals("/add", server.takeRequest().path)
-        assertEquals("/play", server.takeRequest().path)
+        assertEquals("/add", transport.takeRequest().path)
+        assertEquals("/play", transport.takeRequest().path)
     }
 
     @Test
     fun notFoundThrows() {
-        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"torrent not found"}"""))
+        transport.enqueue(TestResponse().setResponseCode(404).setBody("""{"error":"torrent not found"}"""))
         val ex = assertThrows<EngineException> { client.torrent("nope") }
         assertTrue(ex.message!!.contains("404"))
     }
 
     @Test
     fun torrentParsesStatusFields() {
-        server.enqueue(
-            MockResponse().setBody(
+        transport.enqueue(
+            TestResponse().setBody(
                 """{"id":"abc","infoHash":"dead","name":"n","ready":true,"done":false,
                     "paused":true,"progress":0.25,"downloadSpeed":10,"uploadSpeed":2,
                     "numPeers":3,"length":100,"downloaded":25,"uploaded":4,
@@ -85,13 +107,13 @@ class EngineClientTest {
         assertEquals(listOf(0, 2), t.selected)
         assertTrue(t.paused)
         assertEquals("slow", t.error)
-        assertEquals("/torrent/abc", server.takeRequest().path)
+        assertEquals("/torrent/abc", transport.takeRequest().path)
     }
 
     @Test
     fun progressClampsAndRejectsNonFiniteValues() {
-        server.enqueue(
-            MockResponse().setBody(
+        transport.enqueue(
+            TestResponse().setBody(
                 """{"id":"abc","progress":"NaN","files":[{"index":0,"name":"a.bin","path":"a.bin","length":10,"progress":2}]}"""
             )
         )
@@ -102,7 +124,7 @@ class EngineClientTest {
 
     @Test
     fun torrentDefaultsMissingFields() {
-        server.enqueue(MockResponse().setBody("""{"id":"abc"}"""))
+        transport.enqueue(TestResponse().setBody("""{"id":"abc"}"""))
         val t = client.torrent("abc")
         assertNull(t.timeRemaining)
         assertFalse(t.configured)
@@ -113,9 +135,9 @@ class EngineClientTest {
 
     @Test
     fun addPrepareSendsFlag() {
-        server.enqueue(MockResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
         client.add("magnet:?xt=urn:btih:dead", prepare = true)
-        val req = server.takeRequest()
+        val req = transport.takeRequest()
         assertEquals("/add", req.path)
         val body = JSONObject(req.body.readUtf8())
         assertEquals("magnet:?xt=urn:btih:dead", body.getString("torrentId"))
@@ -124,9 +146,9 @@ class EngineClientTest {
 
     @Test
     fun selectSendsIndexes() {
-        server.enqueue(MockResponse().setBody("""{"ok":true,"selected":[0,2]}"""))
+        transport.enqueue(TestResponse().setBody("""{"ok":true,"selected":[0,2]}"""))
         client.select("abc", setOf(0, 2))
-        val req = server.takeRequest()
+        val req = transport.takeRequest()
         assertEquals("/select", req.path)
         val body = JSONObject(req.body.readUtf8())
         assertEquals("abc", body.getString("id"))
@@ -138,9 +160,9 @@ class EngineClientTest {
 
     @Test
     fun configureSendsDescriptorsAndSelected() {
-        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        transport.enqueue(TestResponse().setBody("""{"ok":true}"""))
         client.configure("abc", listOf(7, null, 9), setOf(0, 2))
-        val req = server.takeRequest()
+        val req = transport.takeRequest()
         assertEquals("/configure", req.path)
         val body = JSONObject(req.body.readUtf8())
         assertEquals("abc", body.getString("id"))
@@ -156,21 +178,21 @@ class EngineClientTest {
 
     @Test
     fun pauseResumeRemoveHitPaths() {
-        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        transport.enqueue(TestResponse().setBody("""{"ok":true}"""))
         client.pause("abc")
-        val pause = server.takeRequest()
+        val pause = transport.takeRequest()
         assertEquals("/pause", pause.path)
         assertEquals("abc", JSONObject(pause.body.readUtf8()).getString("id"))
 
-        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        transport.enqueue(TestResponse().setBody("""{"ok":true}"""))
         client.resume("abc")
-        val resume = server.takeRequest()
+        val resume = transport.takeRequest()
         assertEquals("/resume", resume.path)
         assertEquals("abc", JSONObject(resume.body.readUtf8()).getString("id"))
 
-        server.enqueue(MockResponse().setBody("""{"ok":true}"""))
+        transport.enqueue(TestResponse().setBody("""{"ok":true}"""))
         client.remove("abc", destroyStore = false)
-        val remove = server.takeRequest()
+        val remove = transport.takeRequest()
         assertEquals("/remove", remove.path)
         val body = JSONObject(remove.body.readUtf8())
         assertEquals("abc", body.getString("id"))
@@ -179,24 +201,24 @@ class EngineClientTest {
 
     @Test
     fun metadataReturnsTorrentData() {
-        server.enqueue(MockResponse().setBody("""{"torrentData":"d8:announce"}"""))
+        transport.enqueue(TestResponse().setBody("""{"torrentData":"d8:announce"}"""))
         assertEquals("d8:announce", client.metadata("abc"))
-        assertEquals("/metadata/abc", server.takeRequest().path)
+        assertEquals("/metadata/abc", transport.takeRequest().path)
     }
 
     @Test
     fun setMaxPeersHitsSettings() {
-        server.enqueue(MockResponse().setBody("""{"maxPeers":24}"""))
+        transport.enqueue(TestResponse().setBody("""{"maxPeers":24}"""))
         assertEquals(24, client.setMaxPeers(24))
-        val req = server.takeRequest()
+        val req = transport.takeRequest()
         assertEquals("/settings", req.path)
         assertEquals(24, JSONObject(req.body.readUtf8()).getInt("maxPeers"))
     }
 
     @Test
     fun piecesParsesBucketsAndHitsPath() {
-        server.enqueue(
-            MockResponse().setBody(
+        transport.enqueue(
+            TestResponse().setBody(
                 """{"id":"abc","infoHash":"dead","generation":3,"timestamp":1700000000000,
                     "totalPieces":4,"pieceLength":16384,"lastPieceLength":1024,"maxBuckets":256,
                     "buckets":[
@@ -229,6 +251,6 @@ class EngineClientTest {
         assertEquals(1, second.selected)
         assertEquals(2, second.verified)
         assertEquals(0, second.receiving)
-        assertEquals("/pieces/abc?maxBuckets=256", server.takeRequest().path)
+        assertEquals("/pieces/abc?maxBuckets=256", transport.takeRequest().path)
     }
 }

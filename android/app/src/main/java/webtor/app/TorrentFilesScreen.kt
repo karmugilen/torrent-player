@@ -33,7 +33,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import webtor.core.EngineClient
 import webtor.core.PieceTelemetry
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -49,8 +48,9 @@ fun TorrentFilesScreen(
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
-    val client = remember { EngineClient(NodeHost.DEFAULT_CTL_PORT) }
-    val thumbnails = (LocalContext.current.applicationContext as WebtorApp).thumbnails
+    val app = LocalContext.current.applicationContext as WebtorApp
+    val client = app.engineClient
+    val thumbnails = app.thumbnails
     var telemetry by remember(entry.key) { mutableStateOf<PieceTelemetry?>(null) }
     val previewVideo = firstPreviewVideo(entry)
     val previewUri = previewVideo?.uri
@@ -72,14 +72,19 @@ fun TorrentFilesScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(entry.key, entry.engineId, entry.complete, lifecycleOwner) {
         val engineId = entry.engineId ?: return@LaunchedEffect
+        var eventVersion = -1L
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
+                val nextVersion = withContext(Dispatchers.IO) {
+                    app.engine.awaitChange(eventVersion)
+                }
+                if (nextVersion == eventVersion) continue
+                eventVersion = nextVersion
                 val next = withContext(Dispatchers.IO) {
                     runCatching { client.pieces(engineId, 256) }.getOrNull()
                 }
                 if (next != null) telemetry = next
                 if (entry.complete) break
-                delay(1000)
             }
         }
     }

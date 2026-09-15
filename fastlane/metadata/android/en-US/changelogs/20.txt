@@ -1,2 +1,2 @@
-Build the Node runtime and native torrent transports from pinned source code for F-Droid.
-Make Android builds portable across developer machines and F-Droid builders.
+Replace the embedded Node/V8 runtime with a smaller native Go torrent engine.
+Improve reliable pause/resume, metadata loading, storage restoration, and streaming.

@@ -7,9 +7,9 @@
     <strong>Fast, native, battery-friendly torrent downloader and streaming player for Android.</strong>
   </p>
   <p align="center">
-    <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Android-10%2B%20(API%2029%2B)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 10+ (API 29+)"></a>
+    <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 8.0+ (API 26+)"></a>
     <a href="https://m3.material.io"><img src="https://img.shields.io/badge/Material%20Design-3-795548?style=flat-square&logo=materialdesign&logoColor=white" alt="Material Design 3"></a>
-    <a href="https://webtorrent.io"><img src="https://img.shields.io/badge/WebTorrent-2.2.1-brightgreen?style=flat-square&logo=webtorrent&logoColor=white" alt="WebTorrent"></a>
+    <a href="https://github.com/anacrolix/torrent"><img src="https://img.shields.io/badge/Engine-Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Native Go torrent engine"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
     <a href="https://github.com/karmugilen/torrent-player/releases"><img src="https://img.shields.io/github/v/release/karmugilen/torrent-player?style=flat-square&color=orange" alt="Release"></a>
   </p>
@@ -36,9 +36,10 @@
 - **In-Progress Streaming & Per-File Playback**: Launch directly into your favorite Android video player (VLC, Nova Player, Just Player, MPV, etc.) while downloading progresses, or play finished videos anytime.
 - **Selective File Downloads**: Choose exactly which files, episodes, or bonus materials to download from multi-file torrents.
 - **Battery-Friendly & Low-RAM Stability**:
-  - Constrained **V8 memory cap (96MB)** to prevent Out-Of-Memory crashes on low-spec devices.
-  - Adaptive polling back-off (up to 8s idle interval) to conserve battery during background downloads.
+  - Native Go engine with bounded preparation and piece-boundary storage.
+  - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's existing one-second sampling clock.
 - **Modern Material 3 Design**: Built with Jetpack Compose featuring dynamic colors, light and dark themes, interactive piece bitfield visualizer, and animated video preview frames.
+- **Cached Public Trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled. See [tracker discovery details](docs/RELEASE_1.4.4.md).
 - **Full Swarm Connectivity**: Connects to seeds and peers via DHT, UDP trackers (OpenTrackr and more), and WebTorrent WebSocket trackers, transferring data over TCP, native uTP, and WebRTC data channels.
 
 ---
@@ -77,47 +78,38 @@ adb install -r torrent-player.apk
 │      Jetpack Compose (Material 3) • Foreground Service      │
 │            LibrarySession • Storage Management              │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ Loopback IPC (127.0.0.1)
+                               │ Direct JNI commands and events
 ┌──────────────────────────────▼──────────────────────────────┐
 │                    Swarm Engine Runtime                     │
-│      nodejs-mobile (Node 18.20.4) • WebTorrent 2.2.1        │
-│       Native uTP & WebRTC Channels • V8 Memory Cap (96MB)   │
+│        Native Go engine • anacrolix/torrent                 │
+│            TCP • uTP • WebRTC • DHT • PEX                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 - **Android Host (`android/app/`, `android/core/`)**:
   - Written in Kotlin with Jetpack Compose.
   - Manages Android foreground services, notifications, intent dispatch to external media players, and library state persistence.
-- **Engine Runtime (`engine/`)**:
-  - Embedded `nodejs-mobile` (Node 18.20.4) runtime executing `webtorrent@2.2.1`.
-  - Built-in native C++ addons for uTP protocol support and WebRTC data channels.
-  - Communicates with the Android host through a secure, local-only HTTP/JSON bridge on `127.0.0.1`.
+- **Engine Runtime (`engine-go/`)**:
+  - Native Go shared library based on `anacrolix/torrent`.
+  - Supports TCP, uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, and HTTP/WebSocket trackers.
+  - Android commands run through JNI; there is no Android control listener on port 18080 and no OkHttp dependency.
+  - External players receive a read-only Android content URI. Incomplete files use a seekable proxy descriptor backed by verified Go torrent reads; completed files use their saved descriptor.
+  - A loopback HTTP media endpoint remains available for streaming compatibility. The standalone host engine also provides an HTTP control adapter for development.
 
 ---
 
 ## Building from Source
 
 ### Prerequisites
-- Linux, Git, GCC/G++, Make, rsync, Python 3 and setuptools
-- Android SDK platform 34, build tools 34.0.0, NDK 26.1.10909125 and CMake 3.22.1
-- Node.js 18+ and `npm`
+- Linux and Git
+- Go 1.24 or newer
+- Android SDK platform 34, build tools 34.0.0, and NDK 26.1.10909125
 - Java 17 or 21; set `JAVA_HOME` and `ANDROID_HOME` for your machine
 
 ### Build Steps
 
 ```bash
-# 1. Fetch pinned native sources and install JavaScript dependencies
-git submodule update --init --recursive
-git clone --depth 1 --branch v18.20.4 \
-  https://github.com/nodejs-mobile/nodejs-mobile.git vendor/nodejs-mobile/source
-npm --prefix engine ci --omit=optional --omit=dev --ignore-scripts
-
-# 2. Build the Node runtime and native addons from source (first build is slow)
-# vendor-node.sh verifies the exact source revision before compiling.
-./scripts/vendor-node.sh
-./scripts/build-native-addons.sh
-
-# 3. Build an installable development APK
+# Gradle compiles engine-go into libengine.so, then packages the APK.
 cd android
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
@@ -126,8 +118,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 `assembleRelease` produces an optimized, unsigned APK for F-Droid to sign.
 Upstream releases use the `WEBTOR_KEYSTORE`, `WEBTOR_STORE_PASSWORD`,
 `WEBTOR_KEY_ALIAS` and `WEBTOR_KEY_PASSWORD` environment variables for signing.
-Native compilation uses two parallel jobs by default; set `WEBTOR_BUILD_JOBS`
-to adjust it. Source builds do not download or reuse prebuilt Node libraries.
+The build contains no Node.js runtime, npm packages, V8 engine, or JavaScript bundle.
 
 F-Droid inclusion is tracked in [merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893).
 See [the submission notes](docs/FDROID_SUBMISSION.md) for the build recipe and validation status.

@@ -3,9 +3,12 @@ package webtor.app
 import android.app.Activity
 import android.app.Application
 import java.lang.ref.WeakReference
+import webtor.core.EngineClient
 
 class WebtorApp : Application() {
-    lateinit var node: NodeHost
+    lateinit var engine: EngineHost
+        private set
+    lateinit var engineClient: EngineClient
         private set
     lateinit var session: LibrarySession
         private set
@@ -26,10 +29,11 @@ class WebtorApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        node = NodeHost(this)
-        session = LibrarySession(this)
+        engine = EngineHost(this)
+        engineClient = EngineClient(engine)
+        session = LibrarySession(this, engineClient, engine)
         thumbnails = ThumbnailRepository(this)
-        node.start()
+        engine.start()
         session.start()
     }
 }
