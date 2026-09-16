@@ -2,6 +2,19 @@
 
 The active submission is [fdroiddata merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893). Update that branch instead of opening a duplicate merge request.
 
+## Current status (2026-09-16)
+
+- The 1.4.4 submission passed all nine jobs in
+  [pipeline 2851213344](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2851213344).
+- The recipe now targets 1.4.5 (22), source
+  `b772ad8183ef9f6e229f1309a7b1bcccb00462df`, to fix large-download resume.
+- Local F-Droid 2.4.2 in `buildserver-trixie` passed metadata rewrite/lint,
+  module verification, clean source scan, release build, APK identity checks and
+  binary scan for that exact source. No scanner exemptions were used.
+- Submitted recipe commit: `8593e91a5083091071f71b9a9c0d29e12d144b34`.
+  [Pipeline 2853130363](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2853130363)
+  is running. MR !48893 remains open and needs maintainer review and publication.
+
 ## Build recipe
 
 The canonical recipe is [`webtor.app.yml`](../webtor.app.yml). The app now builds a native Go engine from `engine-go/` with Android NDK r26b. It does not use Node.js, npm, V8, CMake, JavaScript bundles, or native Node addons.

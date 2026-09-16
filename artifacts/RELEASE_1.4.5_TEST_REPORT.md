@@ -28,6 +28,9 @@ matches the seed byte for byte. Previously verified data is not downloaded again
   suppression and responsive pause controls during checking.
 - Android release lint, minification/resource shrinking and APK assembly.
 - APK version/package, ZIP integrity and signature verification.
+- F-Droid 2.4.2 (`buildserver-trixie`, Go 1.24.4, NDK r26b): metadata rewrite/lint,
+  module verification, clean source scan, release build and APK binary scan for
+  `b772ad8183ef9f6e229f1309a7b1bcccb00462df` passed.
 
 ## APK
 

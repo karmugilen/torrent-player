@@ -31,3 +31,12 @@ same work. The record lock also blocks status and pause during verification.
 The 1.4.4 submission pipeline 2851213344 passed all checks. MR !48893 is still
 open; maintainer review, signing and publication remain pending. Update the
 existing submission to the tested fix once its source/release is published.
+
+## Validation completed
+
+- [x] Deadline regression reproduces the exact failure with the old handler.
+- [x] Background check, pause/resume, cancellation and restart/peer recovery pass.
+- [x] Go race/vet, JNI, Android unit tests, release lint and signed APK pass.
+- [x] F-Droid clean source build and APK scan pass for source `b772ad8`.
+- [x] The existing F-Droid MR now targets 1.4.5; its new pipeline is running.
+- [ ] Publish/merge 1.4.5 and report the final external review status.
