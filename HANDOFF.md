@@ -1,5 +1,14 @@
 # Handoff: Go BitTorrent Engine Migration (`webtor-go`)
 
+## Resume recovery update — 2026-09-16
+
+Version 1.4.5 (22) fixes the saved-data verification timeout on large downloads.
+Verification now runs outside the JNI request deadline, reports progress and
+honors pause/resume/removal. See `docs/RESUME_RECOVERY_PLAN.md`,
+`docs/RELEASE_1.4.5.md` and `artifacts/RELEASE_1.4.5_TEST_REPORT.md`.
+The 1.4.4 F-Droid submission passed all nine jobs; maintainer acceptance remains
+pending.
+
 ## Tracker release update — 2026-09-15
 
 Version 1.4.4 (21) adds background public tracker fetching and persistent caching.

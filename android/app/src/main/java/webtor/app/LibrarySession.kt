@@ -602,6 +602,10 @@ class LibrarySession(
                     applyStatus(status, current.key, current.generation)
                     current = _ui.value.library.find { it.key == entry.key } ?: current
                 }
+                if (current.checking) {
+                    _ui.update { it.copy(message = "Checking saved data. Play will be available when the check finishes.") }
+                    return@launchCommand
+                }
                 completedPlayFile(current, targetIndex)?.let { file ->
                     withContext(io) { storage.prepareForPlayback(file) }
                     _events.send(UiEvent.OpenContent(PlaybackProvider.uriFor(current, file).toString(), mimeFor(file.name), file.name))
@@ -620,6 +624,13 @@ class LibrarySession(
                 }
                 val id = current.engineId ?: error(current.error ?: "Could not start this torrent.")
                 val status = withContext(io) { client.torrent(id) }
+                if (status.checking) {
+                    applyStatus(status, current.key, current.generation)
+                    persist()
+                    syncService()
+                    _ui.update { it.copy(message = "Checking saved data. Play will be available when the check finishes.") }
+                    return@launchCommand
+                }
                 if (status.paused || current.paused) {
                     withContext(io) { client.resume(id) }
                     patch(current.key) { it.copy(paused = false) }
@@ -1515,11 +1526,13 @@ class LibrarySession(
             if (entry.generation != generation || entry.isDeleting) return@update state
             val files = entry.files.map { f ->
                 val tf = t.files.find { it.index == f.index }
-                if (tf != null) f.copy(progress = tf.progress) else f
+                // Keep the saved progress visible while rechecking. Only the
+                // final verified result may correct it (e.g. after corruption).
+                if (tf != null && !t.checking) f.copy(progress = tf.progress) else f
             }
             val lifecycleState = when {
                 t.error != null -> EntryLifecycleState.ERROR
-                files.filter { it.index in entry.selected }.all { it.length == 0L || it.progress >= 1.0 } -> EntryLifecycleState.COMPLETED
+                !t.checking && files.filter { it.index in entry.selected }.all { it.length == 0L || it.progress >= 1.0 } -> EntryLifecycleState.COMPLETED
                 t.paused -> EntryLifecycleState.PAUSED
                 else -> EntryLifecycleState.DOWNLOADING
             }
@@ -1613,7 +1626,11 @@ class LibrarySession(
         val got = live.sumOf { it.downloaded }
         val progress = if (total <= 0L) 0 else ((got.toDouble() / total) * 100).toInt().coerceIn(0, 100)
         val title = if (live.size == 1) live.first().title else "${live.size} downloads"
-        val text = "${formatBytes(got)} / ${formatBytes(total)}  ·  ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
+        val text = if (downloading.all { it.checking }) {
+            "Checking saved data · ${downloading.map { it.checkPercent }.average().toInt()}%"
+        } else {
+            "${formatBytes(got)} / ${formatBytes(total)}  ·  ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
+        }
         val now = android.os.SystemClock.elapsedRealtime()
         if (force || now - lastServiceUpdate >= 1000) {
             PlayService.start(

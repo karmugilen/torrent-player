@@ -71,6 +71,11 @@ type TorrentRecord struct {
 	Paused               bool
 	SupplementalTrackers int
 	OriginalTrackers     [][]string
+	Checking             bool
+	CheckedPieces        int
+	CheckTotal           int
+	verification         *savedDataCheck
+	removed              bool
 }
 
 type EngineServer struct {
@@ -145,8 +150,8 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	}).DialContext
 	cfg.TrackerDialContext = cfg.HTTPDialContext
 
-	cfg.HTTPUserAgent = "TorrentPlayer/1.4.4"
-	cfg.ExtendedHandshakeClientVersion = "Torrent Player 1.4.4 (Go)"
+	cfg.HTTPUserAgent = "TorrentPlayer/1.4.5"
+	cfg.ExtendedHandshakeClientVersion = "Torrent Player 1.4.5 (Go)"
 
 	// Robust STUN servers for WebRTC ICE traversal & hole punching
 	cfg.ICEServerList = []webrtc.ICEServer{
@@ -363,12 +368,23 @@ func (s *EngineServer) Done() <-chan struct{} { return s.done }
 func (s *EngineServer) Close() {
 	s.closeOnce.Do(func() {
 		s.shuttingDown.Store(true)
+		s.addMu.Lock()
+		defer s.addMu.Unlock()
 		s.trackers.close()
 		if s.ctlListener != nil {
 			_ = s.ctlListener.Close()
 		}
 		if s.streamListener != nil {
 			_ = s.streamListener.Close()
+		}
+		s.mu.RLock()
+		records := make([]*TorrentRecord, 0, len(s.records))
+		for _, rec := range s.records {
+			records = append(records, rec)
+		}
+		s.mu.RUnlock()
+		for _, rec := range records {
+			stopSavedDataCheck(rec)
 		}
 		s.client.Close()
 		s.notifyChange()
@@ -471,6 +487,10 @@ func (s *EngineServer) watchMetadata(rec *TorrentRecord) {
 }
 
 func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
+	if s.shuttingDown.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine is shutting down"})
+		return
+	}
 	// Guard against non-local requests
 	if !strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") && !strings.HasPrefix(r.RemoteAddr, "[::1]:") {
 		http.Error(w, "Forbidden", http.StatusForbidden)
@@ -583,6 +603,10 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	s.addMu.Lock()
 	defer s.addMu.Unlock()
+	if s.shuttingDown.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine is shutting down"})
+		return
+	}
 
 	var t *torrent.Torrent
 	var err error
@@ -760,7 +784,7 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	done := ready && totalLen > 0 && completed >= totalLen
+	done := ready && !rec.Checking && totalLen > 0 && completed >= totalLen
 	tStats := t.Stats()
 	numPeers := tStats.ActivePeers
 	if numPeers == 0 {
@@ -793,6 +817,9 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		TimeRemaining: timeRemaining,
 		Configured:    rec.Configured,
 		Selected:      rec.Selected,
+		Checking:      rec.Checking,
+		CheckedPieces: rec.CheckedPieces,
+		CheckTotal:    rec.CheckTotal,
 	}
 
 	writeJSON(w, http.StatusOK, view)
@@ -933,6 +960,10 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	if rec.removed || s.shuttingDown.Load() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "torrent is closing"})
+		return
+	}
 
 	t := rec.Torrent
 	if err := waitForInfo(r, t); err != nil {
@@ -951,42 +982,15 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if st != nil && st.NeedsVerify() {
-		pieces := make(map[int]bool)
-		for _, index := range req.Selected {
-			file := t.Files()[index]
-			for p := file.BeginPieceIndex(); p < file.EndPieceIndex(); p++ {
-				pieces[p] = true
-			}
-		}
-		for p := range pieces {
-			if err := t.Piece(p).VerifyDataContext(r.Context()); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("verify saved data: %v", err)})
-				return
-			}
-		}
-	}
-
 	rec.Configured = true
 	rec.Selected = req.Selected
 	rec.Paused = false
 	rec.Generation++
 
-	// Apply selection priority
-	selectedSet := make(map[int]bool)
-	for _, idx := range req.Selected {
-		selectedSet[idx] = true
+	if st != nil && st.NeedsVerify() {
+		s.startSavedDataCheck(rec)
 	}
-
-	for i, f := range t.Files() {
-		if selectedSet[i] {
-			f.SetPriority(torrent.PiecePriorityNormal)
-		} else {
-			f.SetPriority(torrent.PiecePriorityNone)
-		}
-	}
-	t.AllowDataDownload()
-	t.AllowDataUpload()
+	applyTransferState(rec)
 
 	writeJSON(w, http.StatusOK, OkResponse{Ok: true})
 	s.notifyChange()
@@ -1023,22 +1027,7 @@ func (s *EngineServer) handleSelect(w http.ResponseWriter, r *http.Request) {
 	rec.Selected = req.Selected
 	rec.Generation++
 
-	selectedSet := make(map[int]bool)
-	for _, idx := range req.Selected {
-		selectedSet[idx] = true
-	}
-
-	for i, f := range t.Files() {
-		if !rec.Configured || rec.Paused {
-			f.SetPriority(torrent.PiecePriorityNone)
-			continue
-		}
-		if selectedSet[i] {
-			f.SetPriority(torrent.PiecePriorityNormal)
-		} else {
-			f.SetPriority(torrent.PiecePriorityNone)
-		}
-	}
+	applyTransferState(rec)
 
 	writeJSON(w, http.StatusOK, SelectResponse{Ok: true, Selected: req.Selected})
 	s.notifyChange()
@@ -1062,35 +1051,20 @@ func (s *EngineServer) handlePauseResume(w http.ResponseWriter, r *http.Request,
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 
-	t := rec.Torrent
-	if pause {
-		t.DisallowDataDownload()
-		t.DisallowDataUpload()
-		for _, f := range t.Files() {
-			f.SetPriority(torrent.PiecePriorityNone)
-		}
-	} else {
-		if !rec.Configured {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not configured"})
-			return
-		}
-		selectedSet := make(map[int]bool)
-		for _, idx := range rec.Selected {
-			selectedSet[idx] = true
-		}
-		for i, f := range t.Files() {
-			if selectedSet[i] {
-				f.SetPriority(torrent.PiecePriorityNormal)
-			} else {
-				f.SetPriority(torrent.PiecePriorityNone)
-			}
-		}
-		t.AllowDataDownload()
-		t.AllowDataUpload()
+	if !pause && !rec.Configured {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not configured"})
+		return
 	}
 
 	rec.Generation++
 	rec.Paused = pause
+	applyTransferState(rec)
+	if rec.verification != nil {
+		select {
+		case rec.verification.wake <- struct{}{}:
+		default:
+		}
+	}
 
 	writeJSON(w, http.StatusOK, OkResponse{Ok: true})
 	s.notifyChange()
@@ -1118,6 +1092,7 @@ func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stopSavedDataCheck(rec)
 	rec.Torrent.Drop()
 	writeJSON(w, http.StatusOK, OkResponse{Ok: true, ID: req.ID})
 	s.notifyChange()

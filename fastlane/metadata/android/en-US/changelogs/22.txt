@@ -1,0 +1,1 @@
+Fix resuming large downloads after restart or force-stop. Saved data is checked in the background without the old 60-second timeout. Show checking progress and keep pause, resume and remove responsive. Keep verified pieces and fetch only missing or damaged data. Existing magnet trackers, cached public trackers and peer connection settings are preserved.

@@ -52,6 +52,9 @@ data class TorrentStatus(
     val timeRemaining: Long? = null,
     val configured: Boolean = false,
     val selected: List<Int> = emptyList(),
+    val checking: Boolean = false,
+    val checkedPieces: Int = 0,
+    val checkTotal: Int = 0,
 )
 
 data class PlayInfo(
@@ -260,6 +263,9 @@ class EngineClient(
                 timeRemaining = json.finiteLong("timeRemaining"),
                 configured = json.optBoolean("configured"),
                 selected = selected,
+                checking = json.optBoolean("checking"),
+                checkedPieces = json.optInt("checkedPieces"),
+                checkTotal = json.optInt("checkTotal"),
             )
         }
     }

@@ -307,7 +307,7 @@ private fun TorrentRow(
                 if (canPlay || entry.complete) {
                     Button(
                         onClick = if (isMultiVideo) onOpen else if (canPlay) onPlay else onOpen,
-                        enabled = !busy,
+                        enabled = !busy && !entry.checking,
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null)
                         Spacer(Modifier.width(4.dp))
@@ -366,7 +366,9 @@ private fun selectedEta(status: webtor.core.TorrentStatus?, done: Long, total: L
 private fun entryTelemetry(entry: DownloadEntry): String = buildString {
     append("${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)}")
     val status = entry.status
-    if (!entry.complete && !entry.paused && !entry.controlsBusy() && entry.engineId != null && status != null) {
+    if (entry.checking) {
+        append(" · Checked ${entry.checkPercent}%")
+    } else if (!entry.complete && !entry.paused && !entry.controlsBusy() && entry.engineId != null && status != null) {
         append(" · ${formatSpeed(status.downloadSpeed)} · ${formatPeers(status.numPeers)}")
         formatEta(selectedEta(status, entry.downloaded, entry.total))?.let { eta ->
             append(" · $eta")
@@ -446,7 +448,7 @@ private fun StatusMark(entry: DownloadEntry) {
         entry.complete -> Triple("Complete", colors.primaryContainer, colors.onPrimaryContainer)
         entry.paused || entry.engineId == null -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
         entry.controlsBusy() -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
-        else -> Triple("Downloading", colors.primaryContainer, colors.onPrimaryContainer)
+        else -> Triple(entry.stateLabel(), colors.primaryContainer, colors.onPrimaryContainer)
     }
     Text(
         text = label,

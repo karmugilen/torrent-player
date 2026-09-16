@@ -6,6 +6,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DownloadEntryTest {
+    @Test
+    fun checkingDoesNotMarkCachedProgressCompleteOrDisablePause() {
+        val status = webtor.core.EngineClient.parseTorrent(org.json.JSONObject(
+            """{"id":"e1","checking":true,"checkedPieces":3,"checkTotal":10}""",
+        ))
+        val checking = entry(listOf(file(0, 100, 1.0)), setOf(0)).copy(
+            engineId = "e1", status = status, lifecycleState = EntryLifecycleState.DOWNLOADING,
+        )
+        assertFalse(checking.complete)
+        assertFalse(checking.controlsBusy())
+        assertEquals("Checking saved data", checking.stateLabel())
+        assertEquals(30, checking.checkPercent)
+        assertEquals("Paused", checking.copy(paused = true).stateLabel())
+        assertTrue(checking.copy(status = status.copy(checking = false)).complete)
+    }
+
     private fun file(index: Int, length: Long, progress: Double, name: String = "f$index.bin") =
         SavedFile(index, name, name, length, uri = null, progress = progress)
 
