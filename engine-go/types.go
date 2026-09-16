@@ -51,6 +51,9 @@ type TorrentView struct {
 	TimeRemaining *int64     `json:"timeRemaining"`
 	Configured    bool       `json:"configured"`
 	Selected      []int      `json:"selected"`
+	Checking      bool       `json:"checking"`
+	CheckedPieces int        `json:"checkedPieces"`
+	CheckTotal    int        `json:"checkTotal"`
 }
 
 type PlayRequest struct {

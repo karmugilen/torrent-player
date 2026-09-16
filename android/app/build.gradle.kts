@@ -28,8 +28,8 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "1.4.4"
+        versionCode = 22
+        versionName = "1.4.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")

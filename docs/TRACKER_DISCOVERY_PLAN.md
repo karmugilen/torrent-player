@@ -65,8 +65,8 @@ a torrent, ignoring labels/unsupported endpoints and retaining valid tracker URL
 - [x] Bump to the next available release version; record checksums and test results.
 - [x] Validate F-Droid metadata and source-build recipe with verified Go tooling and
   dependency preparation. Clean source build and APK scan pass.
-- [ ] Update the existing MR with current evidence.
-- [ ] Commit, push and merge the tested release, publish the APK on GitHub, and
+- [x] Update the existing MR with current evidence.
+- [x] Commit, push and merge the tested release, publish the APK on GitHub, and
   report F-Droid's actual pipeline/review status without claiming acceptance.
 
 ## Sources
@@ -75,3 +75,9 @@ a torrent, ignoring labels/unsupported endpoints and retaining valid tracker URL
 - https://webtorrent.io/docs
 - https://f-droid.org/docs/Submitting_to_F-Droid_Quick_Start_Guide/
 - https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893
+
+## Delivery result (2026-09-16)
+
+1.4.4 was merged and published on GitHub. F-Droid pipeline 2851213344 passed all
+nine jobs, including the source build and APK scan. MR !48893 awaits maintainer
+review. See `RESUME_RECOVERY_PLAN.md` for the subsequent large-file resume fix.

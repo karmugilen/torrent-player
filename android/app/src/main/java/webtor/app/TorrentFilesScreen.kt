@@ -141,7 +141,7 @@ fun TorrentFilesScreen(
                     file = file,
                     isSelected = file.index in entry.selected,
                     paused = entry.paused,
-                    canPlay = !busy,
+                    canPlay = !busy && !entry.checking,
                     onPlay = { onPlay(file.index) },
                 )
             }
@@ -160,7 +160,7 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
         error != null || entry.error != null -> Triple("Needs attention", colors.errorContainer, colors.onErrorContainer)
         entry.complete -> Triple("Complete", colors.primaryContainer, colors.onPrimaryContainer)
         entry.paused || entry.engineId == null -> Triple("Paused", colors.tertiaryContainer, colors.onTertiaryContainer)
-        else -> Triple("Downloading", colors.primaryContainer, colors.onPrimaryContainer)
+        else -> Triple(entry.stateLabel(), colors.primaryContainer, colors.onPrimaryContainer)
     }
     val video = entry.files.any { it.index in entry.selected && it.name.isVideoName() }
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
@@ -187,7 +187,8 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
                 color = labelColor,
             )
             Text(
-                "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)} · $percent%",
+                if (entry.checking) "Checking saved data · ${entry.checkPercent}%"
+                else "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)} · $percent%",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurfaceVariant,
             )

@@ -41,6 +41,17 @@ private class FakeEngineTransport : EngineTransport {
 }
 
 class EngineClientTest {
+    @Test
+    fun parseCheckingProgressAndDefaultForOlderStatus() {
+        val checking = EngineClient.parseTorrent(JSONObject(
+            """{"id":"a","checking":true,"checkedPieces":7,"checkTotal":20}""",
+        ))
+        assertTrue(checking.checking)
+        assertEquals(7, checking.checkedPieces)
+        assertEquals(20, checking.checkTotal)
+        assertFalse(EngineClient.parseTorrent(JSONObject("""{"id":"a"}""")).checking)
+    }
+
     private lateinit var transport: FakeEngineTransport
     private lateinit var client: EngineClient
 

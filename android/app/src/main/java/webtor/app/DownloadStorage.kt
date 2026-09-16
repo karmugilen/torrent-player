@@ -48,7 +48,11 @@ data class DownloadEntry(
     val total get() = files.filter { it.index in selected }.sumOf { it.length }
     val downloaded get() = files.filter { it.index in selected }.sumOf { (it.length * it.progress.coerceIn(0.0, 1.0)).toLong() }
     val progress get() = if (total == 0L) 1f else (downloaded.toDouble() / total).toFloat().coerceIn(0f, 1f)
-    val complete get() = files.filter { it.index in selected }.all { it.length == 0L || it.progress >= 1.0 }
+    val checking get() = status?.checking == true
+    val checkPercent get() = status?.let {
+        if (it.checkTotal > 0) (100L * it.checkedPieces / it.checkTotal).toInt().coerceIn(0, 100) else 0
+    } ?: 0
+    val complete get() = !checking && files.filter { it.index in selected }.all { it.length == 0L || it.progress >= 1.0 }
 
     fun controlsBusy(): Boolean = isDeleting || lifecycleState == EntryLifecycleState.PREPARING ||
         lifecycleState == EntryLifecycleState.PAUSING || lifecycleState == EntryLifecycleState.STOPPING ||
@@ -64,6 +68,7 @@ data class DownloadEntry(
         paused || (engineId == null && lifecycleState != EntryLifecycleState.DOWNLOADING) ||
             lifecycleState == EntryLifecycleState.PAUSED ||
             lifecycleState == EntryLifecycleState.STOPPED -> "Paused"
+        checking -> "Checking saved data"
         else -> "Downloading"
     }
 }
