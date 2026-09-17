@@ -167,6 +167,9 @@ func (s *EngineServer) applyTransferState(rec *TorrentRecord) {
 	if active {
 		t.AllowDataDownload()
 		t.AllowDataUpload()
+		// Must run after base file SetPriority: moov-first download demotes
+		// incomplete selected videos to None so mid-file pieces are held while
+		// head and tail pieces download at Now priority.
 		s.applyVideoStartupHints(rec)
 	}
 	s.applyBackgroundFocus(rec)

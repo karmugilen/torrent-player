@@ -34,7 +34,7 @@ func TestIsVideoFileName(t *testing.T) {
 }
 
 func TestVideoStartupHintsRaiseHeadAndTail(t *testing.T) {
-	s, rec, pieceLen := configuredLargeVideo(t, 48)
+	s, rec, pieceLen, data := configuredLargeVideo(t, 48)
 	tr := rec.Torrent
 	file := tr.Files()[0]
 	headBegin, headEnd := filePieceRange(file, 0, videoStartupHeadBytes)
@@ -55,19 +55,40 @@ func TestVideoStartupHintsRaiseHeadAndTail(t *testing.T) {
 	s.applyTransferState(rec)
 	rec.mu.Unlock()
 
-	if got := rawPiecePriority(tr.Piece(headBegin)); got != torrent.PiecePriorityHigh {
-		t.Fatalf("head piece %d priority=%v want High", headBegin, got)
+	// Before tips complete: file priority None, head+tail Now, mid effective not downloading (file None + mid piece not Now)
+	if got := file.Priority(); got != torrent.PiecePriorityNone {
+		t.Fatalf("before tips complete: file priority=%v want None", got)
 	}
-	if got := rawPiecePriority(tr.Piece(headEnd - 1)); got != torrent.PiecePriorityHigh {
-		t.Fatalf("head end piece %d priority=%v want High", headEnd-1, got)
+	if got := rawPiecePriority(tr.Piece(headBegin)); got != torrent.PiecePriorityNow {
+		t.Fatalf("head piece %d priority=%v want Now", headBegin, got)
 	}
-	if got := rawPiecePriority(tr.Piece(tailBegin)); got != torrent.PiecePriorityHigh {
-		t.Fatalf("tail piece %d priority=%v want High", tailBegin, got)
+	if got := rawPiecePriority(tr.Piece(headEnd - 1)); got != torrent.PiecePriorityNow {
+		t.Fatalf("head end piece %d priority=%v want Now", headEnd-1, got)
 	}
-	// Head/tail use piece-level High; the middle keeps the default piece field
-	// (None) and still downloads via the file's Normal priority.
-	if got := rawPiecePriority(tr.Piece(middle)); got == torrent.PiecePriorityHigh {
-		t.Fatalf("middle piece %d should not be High, got %v", middle, got)
+	if got := rawPiecePriority(tr.Piece(tailBegin)); got != torrent.PiecePriorityNow {
+		t.Fatalf("tail piece %d priority=%v want Now", tailBegin, got)
+	}
+	if got := rawPiecePriority(tr.Piece(tailEnd - 1)); got != torrent.PiecePriorityNow {
+		t.Fatalf("tail end piece %d priority=%v want Now", tailEnd-1, got)
+	}
+	if got := rawPiecePriority(tr.Piece(middle)); got == torrent.PiecePriorityNow {
+		t.Fatalf("middle piece %d should not be Now, got %v", middle, got)
+	}
+
+	// After marking head+tail complete: file restored Normal
+	for p := headBegin; p < headEnd; p++ {
+		writeVerifiedPiece(t, s, rec, data, p)
+	}
+	for p := tailBegin; p < tailEnd; p++ {
+		writeVerifiedPiece(t, s, rec, data, p)
+	}
+
+	rec.mu.Lock()
+	s.applyTransferState(rec)
+	rec.mu.Unlock()
+
+	if got := file.Priority(); got != torrent.PiecePriorityNormal {
+		t.Fatalf("after tips complete: file priority=%v want Normal", got)
 	}
 }
 
@@ -138,15 +159,18 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 	s.applyTransferState(rec)
 	rec.mu.Unlock()
 
-	if got := rawPiecePriority(tr.Piece(video.BeginPieceIndex())); got != torrent.PiecePriorityHigh {
-		t.Fatalf("video head priority=%v want High", got)
+	if got := rawPiecePriority(tr.Piece(video.BeginPieceIndex())); got != torrent.PiecePriorityNow {
+		t.Fatalf("video head priority=%v want Now", got)
 	}
 	textMiddle := (text.BeginPieceIndex() + text.EndPieceIndex()) / 2
-	if got := rawPiecePriority(tr.Piece(textMiddle)); got == torrent.PiecePriorityHigh {
-		t.Fatalf("non-video piece should not get startup High, got %v", got)
+	if got := rawPiecePriority(tr.Piece(textMiddle)); got == torrent.PiecePriorityNow {
+		t.Fatalf("non-video piece should not get startup Now, got %v", got)
 	}
 	if text.Priority() != torrent.PiecePriorityNormal {
 		t.Fatalf("selected non-video file priority=%v want Normal", text.Priority())
+	}
+	if video.Priority() != torrent.PiecePriorityNone {
+		t.Fatalf("incomplete selected video file priority=%v want None", video.Priority())
 	}
 
 	code, response = s.DispatchControl("POST", "/pause", `{"id":"`+added.ID+`"}`)
@@ -158,6 +182,44 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 	}
 }
 
+func TestVideoStartupHintsPlaybackCoexistence(t *testing.T) {
+	s, rec, _, _ := configuredLargeVideo(t, 48)
+	file := rec.Torrent.Files()[0]
+
+	rec.mu.Lock()
+	s.applyTransferState(rec)
+	rec.mu.Unlock()
+
+	if got := file.Priority(); got != torrent.PiecePriorityNone {
+		t.Fatalf("before playback: file priority=%v want None", got)
+	}
+
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	rec.mu.Lock()
+	s.applyTransferState(rec)
+	rec.mu.Unlock()
+
+	// Active playback skips mid-hold so seeking and streaming are not starved
+	if got := file.Priority(); got != torrent.PiecePriorityNormal {
+		t.Fatalf("during playback: file priority=%v want Normal", got)
+	}
+
+	reader.Close()
+
+	rec.mu.Lock()
+	s.applyTransferState(rec)
+	rec.mu.Unlock()
+
+	if got := file.Priority(); got != torrent.PiecePriorityNone {
+		t.Fatalf("after playback closed: file priority=%v want None", got)
+	}
+}
+
 // rawPiecePriority reads the piece-level override SetPriority stores. State().Priority
 // is the effective value and returns None while hashing / completion is unknown.
 func rawPiecePriority(p *torrent.Piece) torrent.PiecePriority {
@@ -165,7 +227,7 @@ func rawPiecePriority(p *torrent.Piece) torrent.PiecePriority {
 	return torrent.PiecePriority(reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Uint())
 }
 
-func configuredLargeVideo(t *testing.T, pieces int) (*EngineServer, *TorrentRecord, int64) {
+func configuredLargeVideo(t *testing.T, pieces int) (*EngineServer, *TorrentRecord, int64, []byte) {
 	t.Helper()
 	s := testEngine(t)
 	pieceLen := int64(1024 * 1024)
@@ -205,5 +267,5 @@ func configuredLargeVideo(t *testing.T, pieces int) (*EngineServer, *TorrentReco
 	if code != 200 {
 		t.Fatalf("configure: %d %s", code, response)
 	}
-	return s, s.records[added.ID], pieceLen
+	return s, s.records[added.ID], pieceLen, data
 }
