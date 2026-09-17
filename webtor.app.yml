@@ -12,10 +12,8 @@ AutoName: Torrent Player
 RepoType: git
 Repo: https://github.com/karmugilen/torrent-player.git
 
-Binaries: https://github.com/karmugilen/torrent-player/releases/download/v%v/torrent-player-%v.apk
-
-AllowedAPKSigningKeys:
-  - 9c33627be30850a9fd315b374896b5fe229bd8c09c51e0d7a77583cd6d3a38f3
+Binaries:
+  https://github.com/karmugilen/torrent-player/releases/download/v%v/torrent-player-%v.apk
 
 Builds:
   - versionName: 1.4.5
@@ -32,7 +30,25 @@ Builds:
       - GOTOOLCHAIN=local go -C ../../engine-go mod verify
     ndk: r26b
 
+  - versionName: 2.0.0
+    versionCode: 23
+    commit: 5cfbdc1e8a1d9672c969ffbf4a215217d99477a0
+    subdir: android/app
+    sudo:
+      - apt-get update
+      - apt-get install -y golang-go
+    gradle:
+      - yes
+    prebuild:
+      - GOTOOLCHAIN=local go -C ../../engine-go mod download
+      - GOTOOLCHAIN=local go -C ../../engine-go mod verify
+    ndk: r26b
+
+AllowedAPKSigningKeys:
+  - 9c33627be30850a9fd315b374896b5fe229bd8c09c51e0d7a77583cd6d3a38f3
+  - b26e9a22c1a40c5f8bd2bb5ba9e8639f7835c1ca986e9607e240beeddbd9f71f
+
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.4.5
-CurrentVersionCode: 22
+CurrentVersion: 2.0.0
+CurrentVersionCode: 23
