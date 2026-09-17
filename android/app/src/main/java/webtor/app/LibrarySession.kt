@@ -1489,12 +1489,12 @@ class LibrarySession(
 
     private suspend fun restoreAll(entries: List<DownloadEntry>) {
         for (entry in entries) {
-            if (shouldSkipStartupRestore(entry)) continue
-            // A peerless magnet has no files or selected destinations yet. It is
-            // still a valid saved job and must be restored so discovery can keep
-            // running after relaunch.
-            if (entry.metadataReady && entry.files.none { it.uri != null }) continue
-            restoreEntry(entry, startPaused = false)
+            // Commands are already enabled while startup runs. Re-read intent
+            // under the same lock so pause/resume cannot race an old snapshot.
+            mutex.withLock {
+                val live = _ui.value.library.find { it.key == entry.key } ?: return@withLock
+                if (shouldRestoreAtStartup(live)) restoreEntry(live, startPaused = false)
+            }
         }
     }
 
@@ -1659,10 +1659,8 @@ class LibrarySession(
         var createdFiles: List<SavedFile>? = null
         var createdGroupUri: String? = null
         try {
-            val torrentId = current.source.ifBlank { current.key }
-            val data = current.metadata.takeIf { it.isNotBlank() }
             val added = withContext(io + NonCancellable) {
-                client.add(torrentId, prepare = true, torrentData = data).also { addedId = it.id }
+                client.addSavedDownload(current).also { addedId = it.id }
             }
             recentlyInvalidatedIds.remove(added.id)
 
@@ -1675,18 +1673,19 @@ class LibrarySession(
                     withContext(io + NonCancellable) { runCatching { client.remove(added.id, false) } }
                     return
                 }
+                // /add may return an existing paused record during Retry.
+                withContext(io) {
+                    if (startPaused) client.pause(added.id) else client.resume(added.id)
+                }
                 val status = runCatching { withContext(io) { client.torrent(added.id) } }.getOrNull()
                 patch(current.key) {
                     if (it.generation != expectedGen || it.isDeleting) it
-                    else it.copy(
-                        engineId = added.id,
-                        status = status ?: it.status,
-                        paused = startPaused,
-                        error = null,
-                        lifecycleState = if (startPaused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING,
-                    )
+                    else restoredPendingDiscovery(it, added.id, status, startPaused)
                 }
-                if (startPaused) withContext(io) { client.pause(added.id) }
+                val restored = _ui.value.library.find { it.key == current.key }
+                if (!startPaused && restored?.engineId == added.id && status?.ready == true && status.files.isNotEmpty()) {
+                    schedulePendingMaterialization(restored, status)
+                }
                 persist()
                 syncService(force = true)
                 return
@@ -1837,26 +1836,29 @@ class LibrarySession(
         while (true) {
             if (isShuttingDown.get()) break
             val nextVersion = try {
-                withContext(io) { engineHost.awaitChange(eventVersion) }
+                // Bound recovery reads for newly attached/missing status and
+                // metadata-pending records; ordinary idle rows stay event-driven.
+                withContext(io) { engineHost.awaitChange(eventVersion, 5_000) }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 delay(500)
                 continue
             }
             if (isShuttingDown.get()) break
-            if (nextVersion == eventVersion) continue
+            val engineChanged = nextVersion != eventVersion
             eventVersion = nextVersion
             val state = _ui.value
             if (!state.engineReady) continue
 
             val targets = state.library.mapNotNull { e ->
                 val id = e.engineId ?: return@mapNotNull null
+                if (!engineChanged && !needsDiscoveryStatusRefresh(e)) return@mapNotNull null
                 if (e.isDeleting || e.lifecycleState == EntryLifecycleState.PREPARING || e.lifecycleState == EntryLifecycleState.DELETING || e.lifecycleState == EntryLifecycleState.STOPPING || e.lifecycleState == EntryLifecycleState.PAUSING) {
                     return@mapNotNull null
                 }
                 StatusTarget(e.key, id, e.generation)
             }
-            val prepareTarget = if (prefetchJob?.isActive != true) state.prepare?.engineId else null
+            val prepareTarget = if (engineChanged && prefetchJob?.isActive != true) state.prepare?.engineId else null
 
             var changed = false
             var completed = false
@@ -2067,40 +2069,21 @@ class LibrarySession(
             lastServiceUpdate = 0L
             return
         }
-        val live = _ui.value.library.filter {
-            it.engineId != null && !it.complete && !it.isDeleting && it.lifecycleState != EntryLifecycleState.DELETING
-        }
-        if (live.isEmpty()) {
+        val notification = downloadNotification(_ui.value.library)
+        if (notification == null) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
             return
-        }
-        val downloading = live.filter { !it.paused }
-        if (downloading.isEmpty()) {
-            PlayService.stop(app)
-            lastServiceUpdate = 0L
-            return
-        }
-        val total = live.sumOf { it.total }
-        val got = live.sumOf { it.downloaded }
-        val progress = if (total <= 0L) 0 else ((got.toDouble() / total) * 100).toInt().coerceIn(0, 100)
-        val title = if (live.size == 1) live.first().title else "${live.size} downloads"
-        val text = if (downloading.all { it.checking }) {
-            "Checking saved data · ${downloading.map { it.checkPercent }.average().toInt()}%"
-        } else if (downloading.all { !it.metadataReady }) {
-            "Waiting for peers"
-        } else {
-            "${formatBytes(got)} / ${formatBytes(total)}  ·  ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
         }
         val now = android.os.SystemClock.elapsedRealtime()
         if (force || now - lastServiceUpdate >= 1000) {
             PlayService.start(
                 app,
-                title,
-                progress,
+                notification.title,
+                notification.progress,
                 paused = false,
-                text = text,
-                multiple = live.size > 1,
+                text = notification.text,
+                multiple = notification.multiple,
             )
             lastServiceUpdate = now
         }

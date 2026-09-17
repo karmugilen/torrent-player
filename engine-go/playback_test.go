@@ -216,11 +216,11 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 		t.Fatalf("open should prioritize playhead tip, got %v", got)
 	}
 
-	mid := 10 * pieceLen // jump ≥ 2MB into body → scrubbing mode: tip Now, no readahead, no lookbehind
+	mid := 10 * pieceLen // seek: tip Now and full forward window immediately
 	reader.testApplyOffset(mid)
 	urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
 	if urgent.begin != 10 || urgent.end != 12 ||
-		!readahead.empty() || !lookbehind.empty() ||
+		readahead.begin != 12 || readahead.end != 36 || lookbehind.begin != 9 || lookbehind.end != 10 ||
 		!scrubbing || openPhase || headBoost || tailBoost {
 		t.Fatalf("urgent=%v readahead=%v lookbehind=%v scrubbing=%v openPhase=%v head=%v tail=%v",
 			urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost)
@@ -228,8 +228,8 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 	if got := reader.testPiecePriority(10); got != torrent.PiecePriorityNow {
 		t.Fatalf("tip should be Now, got %v", got)
 	}
-	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityNormal {
-		t.Fatalf("forward should have no readahead during scrub, got %v", got)
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityReadahead {
+		t.Fatalf("forward readahead should start immediately during scrub, got %v", got)
 	}
 	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNormal {
 		// Old tip cleared immediately; no seek hotspots retained.
@@ -239,7 +239,7 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 		t.Fatalf("old head boost outside playhead should be Normal, got %v", got)
 	}
 
-	// Settle quiet ≥ 250ms restores normal urgent + 24MB readahead
+	// Settling leaves the already-active full window unchanged.
 	reader.testSettleScrub()
 	urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost = reader.testWindow()
 	if urgent.begin != 10 || urgent.end != 12 ||
@@ -255,7 +255,7 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 	_ = rec
 }
 
-func TestPlaybackDebouncedScrubSettlesThenExpands(t *testing.T) {
+func TestPlaybackScrubHasImmediateFullReadahead(t *testing.T) {
 	s, rec, pieceLen := largePlaybackFixture(t, 64)
 	reader, err := s.OpenPlayback(rec.ID, 0)
 	if err != nil {
@@ -266,18 +266,18 @@ func TestPlaybackDebouncedScrubSettlesThenExpands(t *testing.T) {
 	start := 20 * pieceLen
 	reader.testApplyOffset(start)
 	urgent, readahead, _, scrubbing, _, _, _ := reader.testWindow()
-	if !scrubbing || urgent.begin != 20 || urgent.end != 22 || !readahead.empty() {
-		t.Fatalf("expected scrub window without readahead, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
+	if !scrubbing || urgent.begin != 20 || urgent.end != 22 || readahead.begin != 22 || readahead.end != 46 {
+		t.Fatalf("expected full readahead immediately, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
 	}
 
 	// Active reads while scrubbing keep resetting debounce
 	reader.testApplyOffset(start + pieceLen/2)
 	urgent, readahead, _, scrubbing, _, _, _ = reader.testWindow()
-	if !scrubbing || !readahead.empty() {
+	if !scrubbing || readahead.end-readahead.begin < 24 {
 		t.Fatalf("still scrubbing, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
 	}
 
-	// Playhead quiet: settle scrub restores 24MB readahead
+	// Continuous reads and later settling never hold off the forward window.
 	reader.testSettleScrub()
 	urgent, readahead, _, scrubbing, _, _, _ = reader.testWindow()
 	if scrubbing {
@@ -364,7 +364,7 @@ func TestPlaybackDebounceTimerQuietExpiration(t *testing.T) {
 
 	reader.testApplyOffset(15 * pieceLen)
 	_, readahead, _, scrubbing, _, _, _ := reader.testWindow()
-	if !scrubbing || !readahead.empty() {
+	if !scrubbing || readahead.begin != 17 || readahead.end != 41 {
 		t.Fatalf("expected scrub mode, scrubbing=%v readahead=%v", scrubbing, readahead)
 	}
 
@@ -436,11 +436,11 @@ func TestPlaybackGatedOpenPhaseDualNowAndMoovProbe(t *testing.T) {
 	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNow {
 		t.Fatalf("head tip should be Now, got %v", got)
 	}
-	if !scrubbing || !readahead.empty() {
-		t.Fatalf("expected scrubbing with empty readahead immediately after seek: scrubbing=%v readahead=%v", scrubbing, readahead)
+	if !scrubbing || readahead.begin != 2 || readahead.end != 26 {
+		t.Fatalf("expected full readahead immediately after seek: scrubbing=%v readahead=%v", scrubbing, readahead)
 	}
 
-	// Settle quiet restores full readahead at head
+	// Settling preserves the full readahead at head.
 	reader.testSettleScrub()
 	_, readahead, _, scrubbing, _, _, _ = reader.testWindow()
 	if scrubbing || readahead.empty() {

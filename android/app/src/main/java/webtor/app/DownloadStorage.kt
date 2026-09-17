@@ -86,8 +86,8 @@ data class DownloadEntry(
         lifecycleState == EntryLifecycleState.STOPPING -> "Stopping…"
         lifecycleState == EntryLifecycleState.PREPARING -> "Preparing…"
         paused || lifecycleState == EntryLifecycleState.PAUSED -> "Paused"
-        !metadataReady -> "Waiting for peers"
         error != null || lifecycleState == EntryLifecycleState.ERROR -> "Needs attention"
+        !metadataReady -> "Waiting for peers"
         complete || lifecycleState == EntryLifecycleState.COMPLETED -> "Complete"
         transferReason != null && transferStage != TransferStage.DOWNLOADING -> transferReason
         paused || (engineId == null && lifecycleState != EntryLifecycleState.DOWNLOADING) ||

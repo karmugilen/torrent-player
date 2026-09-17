@@ -361,22 +361,6 @@ private fun TorrentRow(
     }
 }
 
-private fun selectedEta(status: webtor.core.TorrentStatus?, done: Long, total: Long): Long? =
-    if (status == null || status.downloadSpeed <= 0 || done >= total) null else ((total - done).toDouble() / status.downloadSpeed * 1000).toLong()
-
-private fun entryTelemetry(entry: DownloadEntry): String = buildString {
-    append("${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)}")
-    val status = entry.status
-    if (entry.checking) {
-        append(" · Checked ${entry.checkPercent}%")
-    } else if (!entry.complete && !entry.paused && !entry.controlsBusy() && entry.engineId != null && status != null) {
-        append(" · ${formatSpeed(status.downloadSpeed)} · ${formatPeers(status.numPeers)}")
-        formatEta(selectedEta(status, entry.downloaded, entry.total))?.let { eta ->
-            append(" · $eta")
-        }
-    }
-}
-
 @Composable
 fun VideoPreviewPager(
     entry: DownloadEntry,

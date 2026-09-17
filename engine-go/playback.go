@@ -15,7 +15,7 @@ import (
 //   - Forward readahead: PiecePriorityReadahead — sequential within the window
 //   - Lookbehind: PiecePriorityHigh — warm recent timestamps
 //   - Open phase: Head (~5MB) and Tail (~3MB) at PiecePriorityNow, hold fat readahead
-//   - Scrubbing: Tip only (~2MB) at PiecePriorityNow, no forward readahead, debounce 250ms
+//   - Scrubbing: Tip (~2MB) at PiecePriorityNow + full forward readahead immediately
 const (
 	playbackUrgentBytes     = int64(2 * 1024 * 1024)
 	playbackReadaheadBytes  = int64(24 * 1024 * 1024)
@@ -295,10 +295,9 @@ func (p *playbackReader) scheduleScrubDebounceLocked() {
 }
 
 // updateWindowLocked retargets peer piece priorities around the playhead.
-// Seeks enter debounced scrubbing mode (tight tip at Now, no readahead) until
-// the playhead has been quiet for >= 250ms, at which point normal urgent + 24MB
-// settled readahead is restored. Open phase gates dual head+tail at Now until
-// player reads body or moov probe finishes.
+// Seeks immediately retarget the urgent tip and full 24MB forward window.
+// The quiet timer only settles seek tracking; it never gates downloading.
+// Open phase gates dual head+tail at Now until the body/moov probe completes.
 func (p *playbackReader) updateWindowLocked(offset int64) {
 	if p.torrent == nil || p.file == nil || p.length <= 0 {
 		return
@@ -366,7 +365,7 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	}
 
 	var newUrgent, newReadahead, newLookbehind pieceSpan
-	if p.openPhase || p.scrubbing {
+	if p.openPhase {
 		p.reader.SetReadahead(playbackUrgentBytes)
 		newUrgent = spanFromFile(p.file, offset, urgentEndOff)
 		newReadahead = pieceSpan{}

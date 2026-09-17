@@ -195,7 +195,7 @@ fun TorrentFilesScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item { DownloadSummary(entry, error, frames) }
-            item { TransferSection(entry, status) }
+            item { TransferSection(entry) }
             item { TrackerDetailsSection(status) }
             item {
                 PieceHeatGridSection(
@@ -261,10 +261,14 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
             )
             Text(
                 if (entry.checking) "Checking saved data · ${entry.checkPercent}%"
+                else if (!entry.metadataReady) "Fetching file list…"
                 else "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)} · $percent%",
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
             )
+            transferTelemetry(entry)?.let { text ->
+                Text(text, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
             if (!entry.complete) {
                 LinearProgressIndicator(
                     progress = { entry.progress.coerceIn(0f, 1f) },
@@ -282,29 +286,29 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
 }
 
 @Composable
-private fun TransferSection(entry: DownloadEntry, status: webtor.core.TorrentStatus?) {
+private fun TransferSection(entry: DownloadEntry) {
     val colors = MaterialTheme.colorScheme
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         SectionTitle("Transfer")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             TransferCard(
                 label = "Download",
-                value = formatSpeed(status?.downloadSpeed ?: 0),
+                value = entry.liveDownloadSpeed()?.let(::formatSpeed) ?: "—",
                 modifier = Modifier.weight(1f),
             )
             TransferCard(
                 label = "Upload",
-                value = formatSpeed(status?.uploadSpeed ?: 0),
+                value = entry.liveUploadSpeed()?.let(::formatSpeed) ?: "—",
                 modifier = Modifier.weight(1f),
             )
             TransferCard(
                 label = "ETA",
-                value = formatEta(selectedEta(status, entry.downloaded, entry.total)) ?: "—",
+                value = formatEta(entry.selectedEta()) ?: "—",
                 modifier = Modifier.weight(1f),
             )
         }
         Text(
-            formatPeers(status?.numPeers ?: 0),
+            entry.liveStatus()?.let { formatPeers(it.numPeers) } ?: "Peers —",
             style = MaterialTheme.typography.labelSmall,
             color = colors.onSurfaceVariant,
             modifier = Modifier.padding(start = 2.dp),
@@ -434,9 +438,6 @@ private fun SectionTitle(title: String, subtitle: String? = null) {
         }
     }
 }
-
-private fun selectedEta(status: webtor.core.TorrentStatus?, done: Long, total: Long): Long? =
-    if (status == null || status.downloadSpeed <= 0 || done >= total) null else ((total - done).toDouble() / status.downloadSpeed * 1000).toLong()
 
 @Composable
 private fun TorrentFileRow(

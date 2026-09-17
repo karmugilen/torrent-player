@@ -78,6 +78,7 @@ type TorrentRecord struct {
 	CheckTotal           int
 	verification         *savedDataCheck
 	removed              bool
+	rates                transferRates
 }
 
 type EngineServer struct {
@@ -262,6 +263,7 @@ func (s *EngineServer) rateTrackerLoop() {
 			s.lastRateTime = now
 		}
 		s.mu.Unlock()
+		s.sampleTorrentRates(now)
 		current := s.statusFingerprint()
 		if current != previous {
 			previous = current
@@ -287,8 +289,8 @@ func (s *EngineServer) statusFingerprint() [sha256.Size]byte {
 		rec.mu.RLock()
 		t := rec.Torrent
 		stats := t.Stats()
-		fmt.Fprintf(h, "%s:%d:%t:%t:%d:%d:%d;", rec.ID, rec.Generation, rec.Paused,
-			t.Info() != nil, stats.ActivePeers, stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64())
+		fmt.Fprintf(h, "%s:%d:%t:%t:%d:%d:%d:%d:%d;", rec.ID, rec.Generation, rec.Paused,
+			t.Info() != nil, stats.ActivePeers, stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64(), rec.rates.down, rec.rates.up)
 		// Includes hash completion, even when the last received byte was already
 		// accounted for by the previous sample.
 		_ = json.NewEncoder(h).Encode(t.PieceStateRuns())
@@ -803,6 +805,7 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 		Selected:   []int{},
 		Generation: 1,
 		Paused:     false,
+		rates:      transferRates{lastSample: time.Now()},
 	}
 	// Keep managed supplements out of exported metadata and the persisted
 	// magnet, otherwise each restore would promote them to permanent originals.
@@ -827,7 +830,6 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, id string) {
 	s.mu.RLock()
 	rec, ok := s.records[id]
-	downSpeed, upSpeed := s.downloadSpeed, s.uploadSpeed
 	s.mu.RUnlock()
 
 	if !ok {
@@ -836,6 +838,10 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	downSpeed, upSpeed := rec.rates.down, rec.rates.up
+	if rec.Paused {
+		downSpeed, upSpeed = 0, 0
+	}
 
 	t := rec.Torrent
 	ready := t.Info() != nil
@@ -1245,11 +1251,8 @@ func (s *EngineServer) handlePauseResume(w http.ResponseWriter, r *http.Request,
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 
-	if !pause && !rec.Configured {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not configured"})
-		return
-	}
-
+	// A prepared magnet can resume discovery before metadata/storage exist.
+	// applyTransferState still requires Configured before enabling file bytes.
 	rec.Generation++
 	rec.Paused = pause
 	if !pause && rec.Error != nil {
