@@ -29,7 +29,7 @@ Builds:
       - GOTOOLCHAIN=local go -C ../../engine-go mod verify
     ndk: r26b
 
-AllowedAPKSigningKeys: 9c33627be30850a9fd315b374896b5fe229bd8c09c51e0d7a77583cd6d3a38f3
+AllowedAPKSigningKeys: b26e9a22c1a40c5f8bd2bb5ba9e8639f7835c1ca986e9607e240beeddbd9f71f
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags ^v1\.4\.5$
