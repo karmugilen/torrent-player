@@ -18,3 +18,4 @@ c76900d9ae4eeae9a0035411e13af92bd00408daadddde576e47421523597e1b  torrent-player
 644d63f6a398882bf6f084aa38aa57cc18ba5de0947a755dd7af5ad418f42dc9  torrent-player-1.4.5-markcomplete-coalesce-release.apk
 c92c2cc375d1e6ff430363db80fc6ce9ee1da073f265695d90a14b9472cec2b8  torrent-player-1.4.5-live-progress-release.apk
 6d201bb80fdc652300c0d2da2317d5f8d45ae03abc7126ad2f2afb1658ac1ba2  torrent-player-1.4.5-no-transfer-limits.apk
+6ed2b146c6841f7c138eb7612cdcf22c80875ab32550799d9d9c565d4723e729  torrent-player-1.4.5-fastplay-good.apk

@@ -13,24 +13,21 @@ import (
 // Streaming piece orchestration:
 //   - Tip (urgent): PiecePriorityNow — peers focus here for resume-after-seek
 //   - Forward readahead: PiecePriorityReadahead — sequential within the window
-//   - Lookbehind + seek hotspots: PiecePriorityHigh — warm recent timestamps
-//
-// Flat Now across the whole window diluted urgency and lost readahead's
-// sequential request order, so seeks competed with far-ahead pieces.
+//   - Lookbehind: PiecePriorityHigh — warm recent timestamps
+//   - Open phase: Head (~5MB) and Tail (~3MB) at PiecePriorityNow, hold fat readahead
+//   - Scrubbing: Tip only (~2MB) at PiecePriorityNow, no forward readahead, debounce 250ms
 const (
-	playbackUrgentBytes        = int64(2 * 1024 * 1024)
-	playbackReadaheadBytes     = int64(24 * 1024 * 1024)
-	playbackFastReadaheadBytes = int64(6 * 1024 * 1024)
-	playbackLookbehindBytes    = int64(512 * 1024)
-	playbackSeekHotspotBytes   = int64(2 * 1024 * 1024)
-	playbackFastSeekJumpBytes  = int64(8 * 1024 * 1024)
-	playbackMaxSeekHotspots    = 4
-	playbackSeekSettleReads    = 3
+	playbackUrgentBytes     = int64(2 * 1024 * 1024)
+	playbackReadaheadBytes  = int64(24 * 1024 * 1024)
+	playbackLookbehindBytes = int64(512 * 1024)
+	playbackScrubJumpBytes  = int64(2 * 1024 * 1024)
+	playbackScrubDebounce   = 250 * time.Millisecond
+
 	// Kept for HTTP ServeContent and as the settled forward span.
 	playbackWindowBytes = playbackUrgentBytes + playbackReadaheadBytes
 
 	// Background download hints for selected videos (also used by /play and
-	// OpenPlayback head/tail boost). High, not Now, so an active player still wins.
+	// OpenPlayback head/tail boost). High for background, Now for open phase.
 	videoStartupHeadBytes = int64(5 * 1024 * 1024)
 	videoStartupTailBytes = int64(3 * 1024 * 1024)
 )
@@ -45,11 +42,6 @@ func (s pieceSpan) contains(i int) bool { return i >= s.begin && i < s.end }
 
 func (s pieceSpan) overlaps(o pieceSpan) bool {
 	return !s.empty() && !o.empty() && s.begin < o.end && o.begin < s.end
-}
-
-type seekHotspot struct {
-	span   pieceSpan
-	offset int64
 }
 
 // playbackPriorityCoordinator owns the torrent-global piece priorities used
@@ -143,19 +135,31 @@ type playbackReader struct {
 	urgent     pieceSpan
 	readahead  pieceSpan
 	lookbehind pieceSpan
-	hotspots   []seekHotspot
 
 	headBegin, headEnd int
 	tailBegin, tailEnd int
 	headBoostActive    bool
 	tailBoostActive    bool
 
-	fastSeek      bool
-	settleReads   int
+	openPhase     bool
+	headRead      bool
+	tailRead      bool
+	scrubbing     bool
+	lastScrubTime time.Time
+	scrubTimer    *time.Timer
+	nowFn         func() time.Time
+
 	priorityOwner *playbackPriorityCoordinator
 	// refreshCompletion is set for Watch/stream storage so discarded cache
 	// pieces are re-queued when the playhead returns to them.
 	refreshCompletion bool
+}
+
+func (p *playbackReader) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
 }
 
 func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, error) {
@@ -180,7 +184,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	file := files[index]
 	reader := file.NewReader()
 	reader.SetReadaheadFunc(nil)
-	reader.SetReadahead(playbackWindowBytes)
+	reader.SetReadahead(playbackUrgentBytes)
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &playbackReader{
 		reader:  reader,
@@ -210,6 +214,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 		p.tailBegin, p.tailEnd = filePieceRange(file, file.Length()-videoStartupTailBytes, file.Length())
 		p.tailBoostActive = p.tailBegin < p.tailEnd
 	}
+	p.openPhase = true
 	p.updateWindowLocked(0)
 	return p, nil
 }
@@ -259,18 +264,41 @@ func (p *playbackReader) Close() {
 }
 
 func (p *playbackReader) clearPrioritiesLocked() {
+	if p.scrubTimer != nil {
+		p.scrubTimer.Stop()
+		p.scrubTimer = nil
+	}
 	p.urgent, p.readahead, p.lookbehind = pieceSpan{}, pieceSpan{}, pieceSpan{}
-	p.hotspots = nil
 	p.headBoostActive, p.tailBoostActive = false, false
+	p.openPhase = false
+	p.scrubbing = false
 	if p.priorityOwner != nil {
 		p.priorityOwner.remove(p)
 	}
 }
 
+func (p *playbackReader) scheduleScrubDebounceLocked() {
+	if p.scrubTimer != nil {
+		p.scrubTimer.Stop()
+	}
+	p.scrubTimer = time.AfterFunc(playbackScrubDebounce, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.closed || !p.scrubbing {
+			return
+		}
+		if p.now().Sub(p.lastScrubTime) >= playbackScrubDebounce {
+			p.scrubbing = false
+			p.updateWindowLocked(p.lastOffset)
+		}
+	})
+}
+
 // updateWindowLocked retargets peer piece priorities around the playhead.
-// Large jumps enter fast-seek mode (tight tip + short readahead) until a few
-// near-sequential reads settle; prior positions are kept as High hotspots so
-// switching between recent timestamps stays warm.
+// Seeks enter debounced scrubbing mode (tight tip at Now, no readahead) until
+// the playhead has been quiet for >= 250ms, at which point normal urgent + 24MB
+// settled readahead is restored. Open phase gates dual head+tail at Now until
+// player reads body or moov probe finishes.
 func (p *playbackReader) updateWindowLocked(offset int64) {
 	if p.torrent == nil || p.file == nil || p.length <= 0 {
 		return
@@ -282,85 +310,92 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 		offset = p.length - 1
 	}
 
+	now := p.now()
+
+	headLimit := minInt64(p.length, videoStartupHeadBytes)
+	hasTail := p.length > videoStartupTailBytes
+	var tailLimit int64
+	if hasTail {
+		tailLimit = p.length - videoStartupTailBytes
+	}
+
+	inHead := offset < headLimit
+	inTail := hasTail && offset >= tailLimit
+	inBody := !inHead && !inTail
+
+	if p.openPhase {
+		if inBody {
+			p.openPhase = false
+		} else if inHead {
+			if p.headRead && p.tailRead {
+				p.openPhase = false
+			} else {
+				p.headRead = true
+			}
+		} else if inTail {
+			p.tailRead = true
+		}
+	}
+
+	if p.scrubbing && now.Sub(p.lastScrubTime) >= playbackScrubDebounce {
+		p.scrubbing = false
+		if p.scrubTimer != nil {
+			p.scrubTimer.Stop()
+			p.scrubTimer = nil
+		}
+	}
+
 	wasPositioned := p.haveOffset
 	if p.haveOffset {
 		delta := offset - p.lastOffset
-		if delta < 0 {
-			delta = -delta
-		}
-		if delta >= playbackFastSeekJumpBytes {
-			p.rememberHotspotLocked(p.lastOffset)
-			p.fastSeek = true
-			p.settleReads = 0
-		} else if delta <= playbackUrgentBytes {
-			if p.fastSeek {
-				p.settleReads++
-				if p.settleReads >= playbackSeekSettleReads {
-					p.fastSeek = false
-					p.settleReads = 0
-				}
-			}
-		} else {
-			// Medium jump: refresh tip urgently; keep settled readahead size
-			// unless already scrubbing fast.
-			p.rememberHotspotLocked(p.lastOffset)
-			if p.fastSeek {
-				p.settleReads = 0
-			}
+		if !p.openPhase && (delta < 0 || delta >= playbackScrubJumpBytes) {
+			p.scrubbing = true
+			p.lastScrubTime = now
+			p.scheduleScrubDebounceLocked()
+		} else if p.scrubbing {
+			p.lastScrubTime = now
+			p.scheduleScrubDebounceLocked()
 		}
 	}
 	p.lastOffset = offset
 	p.haveOffset = true
 
-	forward := playbackUrgentBytes + playbackReadaheadBytes
-	if p.fastSeek {
-		forward = playbackUrgentBytes + playbackFastReadaheadBytes
-	}
-	p.reader.SetReadahead(forward)
-
 	urgentEndOff := offset + playbackUrgentBytes
 	if urgentEndOff > p.length {
 		urgentEndOff = p.length
 	}
-	forwardEnd := offset + forward
-	if forwardEnd > p.length {
-		forwardEnd = p.length
-	}
-	lookStart := offset - playbackLookbehindBytes
-	if lookStart < 0 {
-		lookStart = 0
-	}
 
-	newUrgent := spanFromFile(p.file, offset, urgentEndOff)
-	newReadahead := spanFromFile(p.file, urgentEndOff, forwardEnd)
-	newLookbehind := spanFromFile(p.file, lookStart, offset)
-
-	kept := map[int]torrent.PiecePriority{}
-	raiseSpan(kept, newUrgent, torrent.PiecePriorityNow)
-	raiseSpan(kept, newReadahead, torrent.PiecePriorityReadahead)
-	raiseSpan(kept, newLookbehind, torrent.PiecePriorityHigh)
-	for _, h := range p.hotspots {
-		raiseSpan(kept, h.span, torrent.PiecePriorityHigh)
-	}
-	if p.headBoostActive {
-		raiseSpan(kept, pieceSpan{p.headBegin, p.headEnd}, torrent.PiecePriorityHigh)
-	}
-	if p.tailBoostActive {
-		raiseSpan(kept, pieceSpan{p.tailBegin, p.tailEnd}, torrent.PiecePriorityHigh)
+	var newUrgent, newReadahead, newLookbehind pieceSpan
+	if p.openPhase || p.scrubbing {
+		p.reader.SetReadahead(playbackUrgentBytes)
+		newUrgent = spanFromFile(p.file, offset, urgentEndOff)
+		newReadahead = pieceSpan{}
+		newLookbehind = pieceSpan{}
+	} else {
+		forward := playbackUrgentBytes + playbackReadaheadBytes
+		p.reader.SetReadahead(forward)
+		forwardEnd := offset + forward
+		if forwardEnd > p.length {
+			forwardEnd = p.length
+		}
+		lookStart := offset - playbackLookbehindBytes
+		if lookStart < 0 {
+			lookStart = 0
+		}
+		newUrgent = spanFromFile(p.file, offset, urgentEndOff)
+		newReadahead = spanFromFile(p.file, urgentEndOff, forwardEnd)
+		newLookbehind = spanFromFile(p.file, lookStart, offset)
 	}
 
 	playhead := unionSpan(newUrgent, newReadahead, newLookbehind)
-	// Drop expired head/tail demands before publishing this reader's demand.
-	if wasPositioned {
-		p.demoteBoostOutsideLocked(kept, playhead)
+	if !p.openPhase && wasPositioned {
+		p.demoteBoostOutsideLocked(playhead)
 	}
-	kept = p.currentDemandLocked(newUrgent, newReadahead, newLookbehind)
+	kept := p.currentDemandLocked(newUrgent, newReadahead, newLookbehind)
 	if p.priorityOwner != nil {
 		p.priorityOwner.update(p, kept)
 	}
 	if p.refreshCompletion {
-		// Watch-mode cache trim may have punched pieces; refresh torrent
-		// completion for the active window so discarded pieces are requested again.
 		for i := range kept {
 			p.torrent.Piece(i).UpdateCompletion()
 		}
@@ -369,56 +404,7 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	p.urgent, p.readahead, p.lookbehind = newUrgent, newReadahead, newLookbehind
 }
 
-func (p *playbackReader) rememberHotspotLocked(offset int64) {
-	if p.file == nil || p.length <= 0 {
-		return
-	}
-	start := offset
-	if start < 0 {
-		start = 0
-	}
-	end := start + playbackSeekHotspotBytes
-	if end > p.length {
-		end = p.length
-	}
-	span := spanFromFile(p.file, start, end)
-	if span.empty() {
-		return
-	}
-	// Drop an existing hotspot that overlaps heavily with this one.
-	filtered := p.hotspots[:0]
-	for _, h := range p.hotspots {
-		if h.span.overlaps(span) {
-			continue
-		}
-		filtered = append(filtered, h)
-	}
-	p.hotspots = append(filtered, seekHotspot{span: span, offset: start})
-	for len(p.hotspots) > playbackMaxSeekHotspots {
-		evict := p.hotspots[0]
-		p.hotspots = p.hotspots[1:]
-		// Evicted pieces may still be in the active window; next update reapplies.
-		inWindow := false
-		for i := evict.span.begin; i < evict.span.end; i++ {
-			if p.urgent.contains(i) || p.readahead.contains(i) || p.lookbehind.contains(i) {
-				inWindow = true
-				break
-			}
-			for _, h := range p.hotspots {
-				if h.span.contains(i) {
-					inWindow = true
-					break
-				}
-			}
-			if inWindow {
-				break
-			}
-		}
-		_ = inWindow // the next coordinator update computes the effective demand.
-	}
-}
-
-func (p *playbackReader) demoteBoostOutsideLocked(kept map[int]torrent.PiecePriority, playhead pieceSpan) {
+func (p *playbackReader) demoteBoostOutsideLocked(playhead pieceSpan) {
 	demote := func(begin, end int, active *bool) {
 		if !*active || begin >= end {
 			return
@@ -437,14 +423,20 @@ func (p *playbackReader) currentDemandLocked(urgent, readahead, lookbehind piece
 	raiseSpan(demand, urgent, torrent.PiecePriorityNow)
 	raiseSpan(demand, readahead, torrent.PiecePriorityReadahead)
 	raiseSpan(demand, lookbehind, torrent.PiecePriorityHigh)
-	for _, h := range p.hotspots {
-		raiseSpan(demand, h.span, torrent.PiecePriorityHigh)
-	}
-	if p.headBoostActive {
-		raiseSpan(demand, pieceSpan{p.headBegin, p.headEnd}, torrent.PiecePriorityHigh)
-	}
-	if p.tailBoostActive {
-		raiseSpan(demand, pieceSpan{p.tailBegin, p.tailEnd}, torrent.PiecePriorityHigh)
+	if p.openPhase {
+		if p.headBoostActive {
+			raiseSpan(demand, pieceSpan{p.headBegin, p.headEnd}, torrent.PiecePriorityNow)
+		}
+		if p.tailBoostActive {
+			raiseSpan(demand, pieceSpan{p.tailBegin, p.tailEnd}, torrent.PiecePriorityNow)
+		}
+	} else {
+		if p.headBoostActive {
+			raiseSpan(demand, pieceSpan{p.headBegin, p.headEnd}, torrent.PiecePriorityHigh)
+		}
+		if p.tailBoostActive {
+			raiseSpan(demand, pieceSpan{p.tailBegin, p.tailEnd}, torrent.PiecePriorityHigh)
+		}
 	}
 	return demand
 }
@@ -501,11 +493,22 @@ func (p *playbackReader) testApplyOffset(offset int64) {
 	p.updateWindowLocked(offset)
 }
 
-// testWindow reports active playhead spans for tests.
-func (p *playbackReader) testWindow() (urgent, readahead, lookbehind pieceSpan, hotspots int, fastSeek, headBoost, tailBoost bool) {
+func (p *playbackReader) testSettleScrub() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.urgent, p.readahead, p.lookbehind, len(p.hotspots), p.fastSeek, p.headBoostActive, p.tailBoostActive
+	p.scrubbing = false
+	if p.scrubTimer != nil {
+		p.scrubTimer.Stop()
+		p.scrubTimer = nil
+	}
+	p.updateWindowLocked(p.lastOffset)
+}
+
+// testWindow reports active playhead spans for tests.
+func (p *playbackReader) testWindow() (urgent, readahead, lookbehind pieceSpan, scrubbing, openPhase, headBoost, tailBoost bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.urgent, p.readahead, p.lookbehind, p.scrubbing, p.openPhase, p.headBoostActive, p.tailBoostActive
 }
 
 // testPiecePriority reports this reader's demand for deterministic window
@@ -517,16 +520,25 @@ func (p *playbackReader) testPiecePriority(i int) torrent.PiecePriority {
 	if p.urgent.contains(i) {
 		return torrent.PiecePriorityNow
 	}
+	if p.openPhase {
+		if p.headBoostActive && (i >= p.headBegin && i < p.headEnd) {
+			return torrent.PiecePriorityNow
+		}
+		if p.tailBoostActive && (i >= p.tailBegin && i < p.tailEnd) {
+			return torrent.PiecePriorityNow
+		}
+	}
 	if p.readahead.contains(i) {
 		return torrent.PiecePriorityReadahead
 	}
 	if p.lookbehind.contains(i) {
 		return torrent.PiecePriorityHigh
 	}
-	for _, h := range p.hotspots {
-		if h.span.contains(i) {
-			return torrent.PiecePriorityHigh
-		}
+	if p.headBoostActive && (i >= p.headBegin && i < p.headEnd) {
+		return torrent.PiecePriorityHigh
+	}
+	if p.tailBoostActive && (i >= p.tailBegin && i < p.tailEnd) {
+		return torrent.PiecePriorityHigh
 	}
 	return torrent.PiecePriorityNormal
 }

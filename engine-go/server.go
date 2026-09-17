@@ -1059,32 +1059,22 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	rec.FocusedFile = &focused
 	targetFile.Download()
 
-	// Give the HTTP media adapter the same bounded startup policy as JNI
-	// playback: only the first 2 MiB is urgent, the remainder of the header
-	// window is readahead, and the MP4 tail is a lower-priority metadata hint.
-	// Keeping the tail below Now prevents it from competing with the first frame.
+	// Give the HTTP media adapter the same startup open-phase policy as JNI
+	// playback: Head (~5MB) and Tail (~3MB) at PiecePriorityNow.
 	if t.Info() != nil && t.Info().PieceLength > 0 && targetFile.Length() > 0 {
 		pieceLen := t.Info().PieceLength
 		beginPiece := targetFile.Offset() / pieceLen
-		urgentEnd := targetFile.Offset() + min(targetFile.Length(), playbackUrgentBytes)
-		for p := beginPiece; int64(p)*pieceLen < urgentEnd; p++ {
+		headEnd := targetFile.Offset() + min(targetFile.Length(), videoStartupHeadBytes)
+		for p := beginPiece; int64(p)*pieceLen < headEnd; p++ {
 			t.Piece(int(p)).SetPriority(torrent.PiecePriorityNow)
 		}
-		readaheadEnd := targetFile.Offset() + min(targetFile.Length(), videoStartupHeadBytes)
-		for p := beginPiece; int64(p)*pieceLen < readaheadEnd; p++ {
-			if int64(p)*pieceLen >= urgentEnd {
-				t.Piece(int(p)).SetPriority(torrent.PiecePriorityReadahead)
-			}
-		}
 
-		// Also hint the last few MiB (crucial for MP4 moov atoms at the end).
+		// Also boost the last few MiB at Now during startup (crucial for MP4 moov atoms at the end).
 		if targetFile.Length() > videoStartupTailBytes {
 			lastBeginPiece := (targetFile.Offset() + targetFile.Length() - videoStartupTailBytes) / pieceLen
 			lastEndPiece := (targetFile.Offset() + targetFile.Length() - 1) / pieceLen
 			for p := lastBeginPiece; p <= lastEndPiece; p++ {
-				if int64(p)*pieceLen >= urgentEnd {
-					t.Piece(int(p)).SetPriority(torrent.PiecePriorityHigh)
-				}
+				t.Piece(int(p)).SetPriority(torrent.PiecePriorityNow)
 			}
 		}
 	}

@@ -216,33 +216,46 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 		t.Fatalf("open should prioritize playhead tip, got %v", got)
 	}
 
-	mid := 10 * pieceLen // large jump → fast-seek: tip Now, short Readahead
+	mid := 10 * pieceLen // jump ≥ 2MB into body → scrubbing mode: tip Now, no readahead, no lookbehind
 	reader.testApplyOffset(mid)
-	urgent, readahead, lookbehind, hotspots, fastSeek, headBoost, tailBoost := reader.testWindow()
+	urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
 	if urgent.begin != 10 || urgent.end != 12 ||
-		readahead.begin != 12 || readahead.end != 18 ||
-		lookbehind.begin != 9 || lookbehind.end != 10 ||
-		!fastSeek || hotspots < 1 || headBoost || tailBoost {
-		t.Fatalf("urgent=%v readahead=%v lookbehind=%v hotspots=%d fast=%v head=%v tail=%v",
-			urgent, readahead, lookbehind, hotspots, fastSeek, headBoost, tailBoost)
+		!readahead.empty() || !lookbehind.empty() ||
+		!scrubbing || openPhase || headBoost || tailBoost {
+		t.Fatalf("urgent=%v readahead=%v lookbehind=%v scrubbing=%v openPhase=%v head=%v tail=%v",
+			urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost)
 	}
 	if got := reader.testPiecePriority(10); got != torrent.PiecePriorityNow {
 		t.Fatalf("tip should be Now, got %v", got)
 	}
-	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityReadahead {
-		t.Fatalf("forward should be Readahead, got %v", got)
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityNormal {
+		t.Fatalf("forward should have no readahead during scrub, got %v", got)
 	}
-	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityHigh {
-		// Prior playhead kept as hotspot High, not Now.
-		t.Fatalf("old tip should be hotspot High, got %v", got)
+	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNormal {
+		// Old tip cleared immediately; no seek hotspots retained.
+		t.Fatalf("old tip should be cleared to Normal, got %v", got)
 	}
 	if got := reader.testPiecePriority(4); got != torrent.PiecePriorityNormal {
-		t.Fatalf("old head boost outside hotspot should be Normal, got %v", got)
+		t.Fatalf("old head boost outside playhead should be Normal, got %v", got)
+	}
+
+	// Settle quiet ≥ 250ms restores normal urgent + 24MB readahead
+	reader.testSettleScrub()
+	urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost = reader.testWindow()
+	if urgent.begin != 10 || urgent.end != 12 ||
+		readahead.begin != 12 || readahead.end != 36 ||
+		lookbehind.begin != 9 || lookbehind.end != 10 ||
+		scrubbing || openPhase || headBoost || tailBoost {
+		t.Fatalf("settled: urgent=%v readahead=%v lookbehind=%v scrubbing=%v open=%v head=%v tail=%v",
+			urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost)
+	}
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityReadahead {
+		t.Fatalf("settled forward should be Readahead, got %v", got)
 	}
 	_ = rec
 }
 
-func TestPlaybackFastSeekSettlesThenExpands(t *testing.T) {
+func TestPlaybackDebouncedScrubSettlesThenExpands(t *testing.T) {
 	s, rec, pieceLen := largePlaybackFixture(t, 64)
 	reader, err := s.OpenPlayback(rec.ID, 0)
 	if err != nil {
@@ -252,18 +265,25 @@ func TestPlaybackFastSeekSettlesThenExpands(t *testing.T) {
 
 	start := 20 * pieceLen
 	reader.testApplyOffset(start)
-	urgent, readahead, _, _, fastSeek, _, _ := reader.testWindow()
-	if !fastSeek || urgent.begin != 20 || readahead.end-readahead.begin != 6 {
-		t.Fatalf("expected fast window, urgent=%v readahead=%v fast=%v", urgent, readahead, fastSeek)
+	urgent, readahead, _, scrubbing, _, _, _ := reader.testWindow()
+	if !scrubbing || urgent.begin != 20 || urgent.end != 22 || !readahead.empty() {
+		t.Fatalf("expected scrub window without readahead, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
 	}
-	for i := 0; i < playbackSeekSettleReads; i++ {
-		reader.testApplyOffset(start + int64(i+1)*pieceLen/2)
+
+	// Active reads while scrubbing keep resetting debounce
+	reader.testApplyOffset(start + pieceLen/2)
+	urgent, readahead, _, scrubbing, _, _, _ = reader.testWindow()
+	if !scrubbing || !readahead.empty() {
+		t.Fatalf("still scrubbing, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
 	}
-	urgent, readahead, _, _, fastSeek, _, _ = reader.testWindow()
-	if fastSeek {
-		t.Fatal("expected settle out of fast-seek")
+
+	// Playhead quiet: settle scrub restores 24MB readahead
+	reader.testSettleScrub()
+	urgent, readahead, _, scrubbing, _, _, _ = reader.testWindow()
+	if scrubbing {
+		t.Fatal("expected settle out of scrubbing")
 	}
-	if readahead.end <= readahead.begin || (readahead.end-urgent.begin) < 20 {
+	if readahead.end-readahead.begin < 24 {
 		t.Fatalf("settled readahead too small: urgent=%v readahead=%v", urgent, readahead)
 	}
 }
@@ -307,7 +327,7 @@ func TestPlaybackHandlesSharePriorityOwnership(t *testing.T) {
 	}
 }
 
-func TestPlaybackSeekHotspotsWarmPriorTimestamps(t *testing.T) {
+func TestPlaybackNoSeekHotspotsRetained(t *testing.T) {
 	s, rec, pieceLen := largePlaybackFixture(t, 64)
 	reader, err := s.OpenPlayback(rec.ID, 0)
 	if err != nil {
@@ -319,12 +339,136 @@ func TestPlaybackSeekHotspotsWarmPriorTimestamps(t *testing.T) {
 	for _, off := range positions {
 		reader.testApplyOffset(off)
 	}
-	_, _, _, hotspots, _, _, _ := reader.testWindow()
-	if hotspots < 2 {
-		t.Fatalf("expected seek hotspots for prior positions, got %d", hotspots)
+	reader.testSettleScrub()
+
+	// Prior positions (5 and 25) must NOT be retained as High hotspots.
+	if got := reader.testPiecePriority(5); got != torrent.PiecePriorityNormal {
+		t.Fatalf("prior position 5 should be Normal, got %v", got)
 	}
-	if got := reader.testPiecePriority(5); got != torrent.PiecePriorityHigh {
-		t.Fatalf("prior timestamp hotspot should stay High, got %v", got)
+	if got := reader.testPiecePriority(25); got != torrent.PiecePriorityNormal {
+		t.Fatalf("prior position 25 should be Normal, got %v", got)
+	}
+	// Current settled position (45) has urgent Now
+	if got := reader.testPiecePriority(45); got != torrent.PiecePriorityNow {
+		t.Fatalf("current tip 45 should be Now, got %v", got)
+	}
+}
+
+func TestPlaybackDebounceTimerQuietExpiration(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 48)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	reader.testApplyOffset(15 * pieceLen)
+	_, readahead, _, scrubbing, _, _, _ := reader.testWindow()
+	if !scrubbing || !readahead.empty() {
+		t.Fatalf("expected scrub mode, scrubbing=%v readahead=%v", scrubbing, readahead)
+	}
+
+	// Allow the 250ms quiet timer to fire
+	time.Sleep(300 * time.Millisecond)
+
+	urgent, readahead, _, scrubbing, _, _, _ := reader.testWindow()
+	if scrubbing {
+		t.Fatal("timer should have settled scrubbing mode")
+	}
+	if readahead.begin != urgent.end || readahead.end != urgent.end+24 {
+		t.Fatalf("settled readahead after timer: urgent=%v readahead=%v", urgent, readahead)
+	}
+}
+
+func TestPlaybackGatedOpenPhaseDualNowAndMoovProbe(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 48) // 48 pieces * 1MB = 48MB; head=5MB (0..5), tail=3MB (45..48)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	// 1. In open phase: Head and Tail are both at PiecePriorityNow; fat readahead is held
+	_, readahead, _, _, openPhase, headBoost, tailBoost := reader.testWindow()
+	if !openPhase || !headBoost || !tailBoost || !readahead.empty() {
+		t.Fatalf("expected open phase with held readahead: open=%v head=%v tail=%v readahead=%v",
+			openPhase, headBoost, tailBoost, readahead)
+	}
+	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNow {
+		t.Fatalf("head piece 0 should be Now, got %v", got)
+	}
+	if got := reader.testPiecePriority(4); got != torrent.PiecePriorityNow {
+		t.Fatalf("head piece 4 should be Now, got %v", got)
+	}
+	if got := reader.testPiecePriority(45); got != torrent.PiecePriorityNow {
+		t.Fatalf("tail piece 45 should be Now, got %v", got)
+	}
+	if got := reader.testPiecePriority(47); got != torrent.PiecePriorityNow {
+		t.Fatalf("tail piece 47 should be Now, got %v", got)
+	}
+
+	// 2. Moov probe read at tail: stays in open phase, both head and tail stay Now
+	reader.testApplyOffset(46 * pieceLen)
+	_, readahead, _, _, openPhase, headBoost, tailBoost = reader.testWindow()
+	if !openPhase || !headBoost || !tailBoost || !readahead.empty() {
+		t.Fatalf("expected open phase during tail probe: open=%v head=%v tail=%v readahead=%v",
+			openPhase, headBoost, tailBoost, readahead)
+	}
+	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNow {
+		t.Fatalf("head piece 0 should remain Now during tail probe, got %v", got)
+	}
+	if got := reader.testPiecePriority(46); got != torrent.PiecePriorityNow {
+		t.Fatalf("tail piece 46 should remain Now during tail probe, got %v", got)
+	}
+
+	// 3. Subsequent playback read at head: exits open phase, demotes unused tail
+	reader.testApplyOffset(0)
+	urgent, readahead, _, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
+	if openPhase {
+		t.Fatal("open phase should exit after moov probe completes and playback continues")
+	}
+	if tailBoost {
+		t.Fatal("tail boost should be demoted outside playhead")
+	}
+	if got := reader.testPiecePriority(46); got != torrent.PiecePriorityNormal {
+		t.Fatalf("tail piece 46 should demote to Normal after open phase exit, got %v", got)
+	}
+	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNow {
+		t.Fatalf("head tip should be Now, got %v", got)
+	}
+	if !scrubbing || !readahead.empty() {
+		t.Fatalf("expected scrubbing with empty readahead immediately after seek: scrubbing=%v readahead=%v", scrubbing, readahead)
+	}
+
+	// Settle quiet restores full readahead at head
+	reader.testSettleScrub()
+	_, readahead, _, scrubbing, _, _, _ = reader.testWindow()
+	if scrubbing || readahead.empty() {
+		t.Fatalf("readahead should be populated after settling: scrubbing=%v readahead=%v", scrubbing, readahead)
+	}
+	_ = urgent
+	_ = headBoost
+}
+
+func TestPlaybackOpenPhaseExitOnBodyRead(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 48)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	// Advance into body (6MB, past 5MB head without tail read)
+	reader.testApplyOffset(6 * pieceLen)
+	_, _, _, _, openPhase, _, tailBoost := reader.testWindow()
+	if openPhase {
+		t.Fatal("expected exit of open phase when read lands in body")
+	}
+	if tailBoost {
+		t.Fatal("tail boost should be demoted when advancing past head")
+	}
+	if got := reader.testPiecePriority(46); got != torrent.PiecePriorityNormal {
+		t.Fatalf("tail piece 46 should be Normal, got %v", got)
 	}
 }
 
