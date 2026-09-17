@@ -666,7 +666,7 @@ class LibrarySession(
 
             val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
             if (current.isDeleting || current.complete) return@launchCommand
-            if (current.metadataReady && current.selected.isEmpty()) {
+            if (requiresFileSelectionForResume(current)) {
                 _ui.update { it.copy(message = "Select at least one file to resume this download.") }
                 return@launchCommand
             }
@@ -1628,21 +1628,13 @@ class LibrarySession(
             failRestore(current.key, expectedGen, "Transfers were stopped. Try Resume again.")
             return
         }
+        val validationError = restoreValidationError(current)
+        if (validationError != null) {
+            failRestore(current.key, expectedGen, validationError)
+            return
+        }
         val hasAnyUri = current.files.any { it.uri != null }
-        if (hasAnyUri) {
-            val hasFiles = current.files.any { it.index in current.selected && it.uri != null }
-            // An explicit empty selection is a valid configured/stopped state.
-            // It must be restored with payload disabled so a later reselect can
-            // attach a destination without losing this torrent's identity.
-            if (current.selected.isNotEmpty() && !hasFiles) {
-                failRestore(current.key, expectedGen, "This download has no saved files to restore.")
-                return
-            }
-        } else {
-            if (current.selected.isEmpty()) {
-                failRestore(current.key, expectedGen, "Select at least one file to download.")
-                return
-            }
+        if (!hasAnyUri && (current.metadataReady || current.files.isNotEmpty())) {
             if (Build.VERSION.SDK_INT < 29) {
                 failRestore(current.key, expectedGen, "Torrent Player needs Android 10 or newer to save into Downloads.")
                 return
@@ -1657,10 +1649,6 @@ class LibrarySession(
                 )
                 return
             }
-        }
-        if (current.metadata.isBlank() && current.source.isBlank()) {
-            failRestore(current.key, expectedGen, "This download has no torrent metadata to restore.")
-            return
         }
         if (!_ui.value.engineReady) waitForEngine()
         if (!_ui.value.engineReady) {
@@ -2099,6 +2087,8 @@ class LibrarySession(
         val title = if (live.size == 1) live.first().title else "${live.size} downloads"
         val text = if (downloading.all { it.checking }) {
             "Checking saved data · ${downloading.map { it.checkPercent }.average().toInt()}%"
+        } else if (downloading.all { !it.metadataReady }) {
+            "Waiting for peers"
         } else {
             "${formatBytes(got)} / ${formatBytes(total)}  ·  ${formatSpeed(downloading.sumOf { it.status?.downloadSpeed ?: 0L })}"
         }

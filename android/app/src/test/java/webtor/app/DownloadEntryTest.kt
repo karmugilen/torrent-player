@@ -158,7 +158,7 @@ class DownloadEntryTest {
         )
         assertEquals(0f, e.progress)
         assertFalse(e.complete)
-        assertEquals("Connecting…", e.stateLabel())
+        assertEquals("Waiting for peers", e.stateLabel())
     }
 
     @Test
@@ -380,5 +380,70 @@ class DownloadEntryTest {
         assertEquals("Paused", base.copy(paused = true, engineId = null, lifecycleState = EntryLifecycleState.PAUSED).stateLabel())
         assertEquals("Paused", base.copy(paused = true, engineId = "e1", lifecycleState = EntryLifecycleState.PAUSED).stateLabel())
         assertEquals("Complete", base.copy(paused = false, files = listOf(file(0, 100, 1.0)), lifecycleState = EntryLifecycleState.COMPLETED).stateLabel())
+    }
+
+    @Test
+    fun pendingMagnetRestoreAndResumeDoNotRequireFileSelection() {
+        val pendingMagnet = DownloadEntry(
+            key = "0123456789012345678901234567890123456789",
+            title = "waiting-magnet",
+            source = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            metadata = "",
+            engineId = null,
+            destination = "Downloads/Webtor",
+            files = emptyList(),
+            selected = emptySet(),
+            metadataReady = false,
+            paused = false,
+            lifecycleState = EntryLifecycleState.DOWNLOADING,
+        )
+        val readyWithoutSelection = entry(listOf(file(0, 100, 0.0)), emptySet())
+
+        // restoreValidationError must allow empty selected for metadata-pending magnets
+        assertEquals(null, restoreValidationError(pendingMagnet))
+        assertEquals("Select at least one file to download.", restoreValidationError(readyWithoutSelection))
+
+        // requiresFileSelectionForResume must not block pending magnets
+        assertFalse(requiresFileSelectionForResume(pendingMagnet))
+        assertTrue(requiresFileSelectionForResume(readyWithoutSelection))
+
+        // shouldSkipStartupRestore must not skip runnable pending magnets
+        assertFalse(shouldSkipStartupRestore(pendingMagnet))
+        assertTrue(shouldSkipStartupRestore(pendingMagnet.copy(paused = true)))
+    }
+
+    @Test
+    fun pendingMagnetWaitingForPeersLabels() {
+        val pendingMagnet = DownloadEntry(
+            key = "0123456789012345678901234567890123456789",
+            title = "waiting-magnet",
+            source = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            metadata = "",
+            engineId = null,
+            destination = "Downloads/Webtor",
+            files = emptyList(),
+            selected = emptySet(),
+            metadataReady = false,
+            paused = false,
+            lifecycleState = EntryLifecycleState.DOWNLOADING,
+        )
+
+        // stateLabel: Waiting for peers when discovery is active, Paused when actually paused
+        assertEquals("Waiting for peers", pendingMagnet.stateLabel())
+        assertEquals("Waiting for peers", pendingMagnet.copy(engineId = "engine-1").stateLabel())
+        assertEquals("Paused", pendingMagnet.copy(paused = true).stateLabel())
+        assertEquals("Paused", pendingMagnet.copy(lifecycleState = EntryLifecycleState.PAUSED).stateLabel())
+        assertEquals("Paused", pendingMagnet.copy(paused = true, engineId = "engine-1").stateLabel())
+
+        // downloadSummaryLabel in DownloadSummary: engineId == null during pending discovery must show "Waiting for peers", NOT "Paused"
+        assertEquals("Waiting for peers", downloadSummaryLabel(pendingMagnet))
+        assertEquals("Waiting for peers", downloadSummaryLabel(pendingMagnet.copy(engineId = "engine-1")))
+        assertEquals("Paused", downloadSummaryLabel(pendingMagnet.copy(paused = true)))
+        assertEquals("Paused", downloadSummaryLabel(pendingMagnet.copy(paused = true, engineId = null)))
+
+        val ready = entry(listOf(file(0, 100, 0.4)), setOf(0))
+        assertEquals("Paused", downloadSummaryLabel(ready.copy(engineId = null)))
+        assertEquals("Downloading", downloadSummaryLabel(ready.copy(engineId = "engine-1", lifecycleState = EntryLifecycleState.DOWNLOADING)))
+        assertEquals("Paused", downloadSummaryLabel(ready.copy(engineId = "engine-1", lifecycleState = EntryLifecycleState.STOPPED)))
     }
 }

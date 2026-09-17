@@ -85,10 +85,11 @@ data class DownloadEntry(
         lifecycleState == EntryLifecycleState.PAUSING -> "Pausing…"
         lifecycleState == EntryLifecycleState.STOPPING -> "Stopping…"
         lifecycleState == EntryLifecycleState.PREPARING -> "Preparing…"
-        !metadataReady -> "Connecting…"
-        transferReason != null && transferStage != TransferStage.DOWNLOADING -> transferReason
+        paused || lifecycleState == EntryLifecycleState.PAUSED -> "Paused"
+        !metadataReady -> "Waiting for peers"
         error != null || lifecycleState == EntryLifecycleState.ERROR -> "Needs attention"
         complete || lifecycleState == EntryLifecycleState.COMPLETED -> "Complete"
+        transferReason != null && transferStage != TransferStage.DOWNLOADING -> transferReason
         paused || (engineId == null && lifecycleState != EntryLifecycleState.DOWNLOADING) ||
             lifecycleState == EntryLifecycleState.PAUSED ||
             lifecycleState == EntryLifecycleState.STOPPED -> "Paused"
@@ -99,6 +100,39 @@ data class DownloadEntry(
 
 fun shouldSkipStartupRestore(entry: DownloadEntry): Boolean =
     entry.complete || entry.paused || entry.isDeleting
+
+fun requiresFileSelectionForResume(entry: DownloadEntry): Boolean =
+    entry.metadataReady && entry.selected.isEmpty()
+
+fun restoreValidationError(entry: DownloadEntry): String? {
+    val hasAnyUri = entry.files.any { it.uri != null }
+    if (hasAnyUri) {
+        val hasFiles = entry.files.any { it.index in entry.selected && it.uri != null }
+        if (entry.selected.isNotEmpty() && !hasFiles) {
+            return "This download has no saved files to restore."
+        }
+    } else if (!entry.metadataReady && entry.files.isEmpty()) {
+        // A metadata-pending magnet legitimately has no files or selected destinations yet.
+        // Discovery must proceed without requiring file selection or storage checks.
+    } else {
+        if (entry.selected.isEmpty()) {
+            return "Select at least one file to download."
+        }
+    }
+    if (entry.metadata.isBlank() && entry.source.isBlank()) {
+        return "This download has no torrent metadata to restore."
+    }
+    return null
+}
+
+fun downloadSummaryLabel(entry: DownloadEntry, error: String? = null): String = when {
+    entry.controlsBusy() -> entry.stateLabel()
+    error != null || entry.error != null -> "Needs attention"
+    entry.complete -> "Complete"
+    entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
+        (entry.metadataReady && (entry.lifecycleState == EntryLifecycleState.STOPPED || entry.engineId == null)) -> "Paused"
+    else -> entry.stateLabel()
+}
 
 fun restoreStillApplies(
     liveGeneration: Long,

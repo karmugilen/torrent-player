@@ -236,6 +236,58 @@ func TestWriteBackCacheEvictsLRUAfterFlush(t *testing.T) {
 	}
 }
 
+// Regression: partial chunk write after RAM eviction must merge with disk, not
+// flush a zero-filled hole over previously saved chunks (progress loop while playing).
+func TestWriteBackPartialWriteAfterEvictReloadsDisk(t *testing.T) {
+	base := t.TempDir()
+	info := &metainfo.Info{Name: "one", PieceLength: 8, Length: 16, Pieces: make([]byte, 40)}
+	st := newDocumentTorrentStorage(info, metainfo.Hash{}, base)
+	st.maxCacheBytes = 8 // one piece in RAM
+	t.Cleanup(func() { _ = st.Close() })
+	dest, err := os.CreateTemp(base, "dest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dest.Close()
+	fd := int(dest.Fd())
+	if err := st.AttachDescriptors([]*int{&fd}, []int{0}); err != nil {
+		t.Fatal(err)
+	}
+
+	p0 := &documentPiece{storage: st, piece: info.Piece(0)}
+	p1 := &documentPiece{storage: st, piece: info.Piece(1)}
+	if _, err := p0.WriteAt([]byte("AAAAxxxx"), 0); err != nil {
+		t.Fatal(err)
+	}
+	// Force piece 0 to disk and out of RAM by filling the single-slot cache with piece 1.
+	if _, err := p1.WriteAt([]byte("BBBBBBBB"), 0); err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	if _, ok := st.cache[0]; ok {
+		st.mu.Unlock()
+		t.Fatal("piece 0 should have been evicted")
+	}
+	st.mu.Unlock()
+
+	// Resume piece 0 with only the second half — must not zero-clobber "AAAA".
+	if _, err := p0.WriteAt([]byte("YYYY"), 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := p0.MarkComplete(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make([]byte, 8)
+	if _, err := dest.ReadAt(got, 0); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("AAAAYYYY")
+	if string(got) != string(want) {
+		t.Fatalf("disk got %q want %q (zero-clobber after evict)", got, want)
+	}
+}
+
 func TestDeleteEngineOwnedStorageWipesStreamAndBoundary(t *testing.T) {
 	base := t.TempDir()
 	hash := "aabbccddeeff00112233445566778899aabbccdd"

@@ -444,10 +444,12 @@ fun VideoPreviewPager(
 @Composable
 private fun StatusMark(entry: DownloadEntry) {
     val colors = MaterialTheme.colorScheme
+    val isPaused = entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
+        (entry.metadataReady && (entry.lifecycleState == EntryLifecycleState.STOPPED || entry.engineId == null))
     val (label, bg, fg) = when {
         entry.error != null -> Triple("Needs attention", colors.errorContainer, colors.onErrorContainer)
         entry.complete -> Triple("Complete", colors.primaryContainer, colors.onPrimaryContainer)
-        entry.paused || entry.engineId == null -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
+        isPaused -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
         entry.controlsBusy() -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
         else -> Triple(entry.stateLabel(), colors.primaryContainer, colors.onPrimaryContainer)
     }

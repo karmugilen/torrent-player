@@ -909,24 +909,27 @@ func (st *DocumentTorrentStorage) dropCacheLocked(index int) {
 	}
 }
 
-func (st *DocumentTorrentStorage) ensureCacheSlotLocked(index int, expected int64) error {
+// ensureCacheSlotLocked makes sure piece index has a RAM buffer. created is
+// true when a fresh buffer was allocated (caller must reload from disk before
+// partial writes, or zero-fill will clobber previously flushed chunks).
+func (st *DocumentTorrentStorage) ensureCacheSlotLocked(index int, expected int64) (created bool, err error) {
 	if _, ok := st.cache[index]; ok {
-		return nil
+		return false, nil
 	}
 	for st.cacheBytes+expected > st.maxCacheBytes {
 		if len(st.cacheOrder) == 0 {
-			return fmt.Errorf("piece cache is full")
+			return false, fmt.Errorf("piece cache is full")
 		}
 		victim := st.cacheOrder[0]
 		if victim == index {
 			if len(st.cacheOrder) == 1 {
-				return fmt.Errorf("piece cache is full")
+				return false, fmt.Errorf("piece cache is full")
 			}
 			victim = st.cacheOrder[1]
 		}
 		if st.cacheDirty[victim] {
 			if err := st.flushPieceLocked(victim); err != nil {
-				return err
+				return false, err
 			}
 		}
 		st.dropCacheLocked(victim)
@@ -934,7 +937,21 @@ func (st *DocumentTorrentStorage) ensureCacheSlotLocked(index int, expected int6
 	st.cache[index] = make([]byte, expected)
 	st.cacheBytes += expected
 	st.touchCacheLocked(index)
-	return nil
+	return true, nil
+}
+
+// loadCacheFromDiskLocked fills a fresh cache slot from durable storage so a
+// later partial WriteAt cannot flush zero holes over already-saved chunks.
+func (st *DocumentTorrentStorage) loadCacheFromDiskLocked(index int) {
+	data, ok := st.cache[index]
+	if !ok || !st.attached || len(data) == 0 {
+		return
+	}
+	if _, err := st.readFromFiles(int64(index)*st.chunkLength, data); err != nil {
+		// Sparse / never-written regions read as zeros; leave the buffer as-is.
+		return
+	}
+	st.cacheDirty[index] = false
 }
 
 func (st *DocumentTorrentStorage) flushPieceLocked(index int) error {
@@ -1054,21 +1071,24 @@ func (p *documentPiece) ReadAt(b []byte, off int64) (int, error) {
 	st.lastReadOffset = abs
 	// Populate the hot cache from disk for repeated playhead reads.
 	expected := int64(p.piece.Length())
-	if err := st.ensureCacheSlotLocked(index, expected); err == nil {
+	if created, err := st.ensureCacheSlotLocked(index, expected); err == nil {
 		if data := st.cache[index]; data != nil {
-			if _, err := st.readFromFiles(int64(index)*st.chunkLength, data); err == nil {
+			if created {
+				if _, err := st.readFromFiles(int64(index)*st.chunkLength, data); err != nil {
+					st.dropCacheLocked(index)
+					return st.readFromFiles(abs, b)
+				}
 				st.cacheDirty[index] = false
-				st.touchCacheLocked(index)
-				if off >= int64(len(data)) {
-					return 0, io.EOF
-				}
-				n := copy(b, data[off:])
-				if n != len(b) {
-					return n, io.EOF
-				}
-				return n, nil
 			}
-			st.dropCacheLocked(index)
+			st.touchCacheLocked(index)
+			if off >= int64(len(data)) {
+				return 0, io.EOF
+			}
+			n := copy(b, data[off:])
+			if n != len(b) {
+				return n, io.EOF
+			}
+			return n, nil
 		}
 	}
 	return st.readFromFiles(abs, b)
@@ -1101,9 +1121,17 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	// Attached: RAM first (write-back). Disk flush is asynchronous so peer
 	// receives are not blocked on storage I/O.
-	if err := st.ensureCacheSlotLocked(index, expected); err != nil {
+	created, err := st.ensureCacheSlotLocked(index, expected)
+	if err != nil {
 		// Cache full of dirty pieces that could not be flushed: fall back to disk.
 		return st.writeToFiles(int64(index)*st.chunkLength+off, b)
+	}
+	// Critical: after eviction a fresh slot is all zeros. Reload any chunks
+	// already flushed to disk before merging this write, otherwise the next
+	// flush zero-clobbers them, hash fails, and BytesCompleted loops
+	// (seen as ~37–60MB thrash around the 64MB write-back cap while playing).
+	if created {
+		st.loadCacheFromDiskLocked(index)
 	}
 	copy(st.cache[index][off:], b)
 	st.cacheDirty[index] = true

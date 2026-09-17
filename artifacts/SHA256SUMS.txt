@@ -21,3 +21,4 @@ c92c2cc375d1e6ff430363db80fc6ce9ee1da073f265695d90a14b9472cec2b8  torrent-player
 6ed2b146c6841f7c138eb7612cdcf22c80875ab32550799d9d9c565d4723e729  torrent-player-1.4.5-fastplay-good.apk
 203c6cfe7b7785f523eaa8e829e014c1cd6f894a51f397407bd2a7f02e2da048  torrent-player-1.4.5-moov-first.apk
 2fa3faf74f73d853f3e21b00700d11c38adb71ed3b217ac2e510f3a6ae9da198  torrent-player-1.4.5-moov-soft.apk
+f66e8426f4dc3bc4045b475604b72e097be59075fd06396f431f8bcc9b753e22  torrent-player-1.4.5-magnet-cachefix.apk

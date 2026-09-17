@@ -12,6 +12,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -48,10 +50,13 @@ fun TorrentFilesScreen(
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
-    val app = LocalContext.current.applicationContext as WebtorApp
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val app = context.applicationContext as WebtorApp
     val client = app.engineClient
     val thumbnails = app.thumbnails
     var telemetry by remember(entry.key) { mutableStateOf<PieceTelemetry?>(null) }
+    var menuExpanded by remember(entry.key) { mutableStateOf(false) }
     val previewVideo = firstPreviewVideo(entry)
     val previewUri = previewVideo?.uri
     val latestEntry by rememberUpdatedState(entry)
@@ -133,6 +138,47 @@ fun TorrentFilesScreen(
                             contentDescription = "Remove download",
                         )
                     }
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "More options",
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Share magnet") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Share, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    val uri = resolveMagnetUri(entry)
+                                    if (uri != null) {
+                                        shareMagnetUri(context, uri)
+                                    } else {
+                                        Toast.makeText(context, "Magnet link is not available yet.", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Copy magnet") },
+                                onClick = {
+                                    menuExpanded = false
+                                    val uri = resolveMagnetUri(entry)
+                                    if (uri != null) {
+                                        clipboardManager.setText(AnnotatedString(uri))
+                                        Toast.makeText(context, "Magnet link copied to clipboard", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Magnet link is not available yet.", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                            )
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = colors.background,
@@ -181,13 +227,14 @@ fun TorrentFilesScreen(
 @Composable
 private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<android.graphics.Bitmap>?) {
     val colors = MaterialTheme.colorScheme
-    val (label, labelBackground, labelColor) = when {
-        entry.controlsBusy() -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
-        error != null || entry.error != null -> Triple("Needs attention", colors.errorContainer, colors.onErrorContainer)
-        entry.complete -> Triple("Complete", colors.primaryContainer, colors.onPrimaryContainer)
-        entry.paused || entry.engineId == null -> Triple("Paused", colors.tertiaryContainer, colors.onTertiaryContainer)
-        else -> Triple(entry.stateLabel(), colors.primaryContainer, colors.onPrimaryContainer)
+    val isPaused = entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
+        (entry.metadataReady && (entry.lifecycleState == EntryLifecycleState.STOPPED || entry.engineId == null))
+    val (labelBackground, labelColor) = when {
+        entry.controlsBusy() || isPaused -> colors.tertiaryContainer to colors.onTertiaryContainer
+        error != null || entry.error != null -> colors.errorContainer to colors.onErrorContainer
+        else -> colors.primaryContainer to colors.onPrimaryContainer
     }
+    val label = downloadSummaryLabel(entry, error)
     val video = entry.files.any { it.index in entry.selected && it.name.isVideoName() }
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
     ElevatedCard(
