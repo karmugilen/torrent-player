@@ -8,13 +8,10 @@ import (
 	"github.com/anacrolix/torrent"
 )
 
-// applyVideoStartupHints implements moov-first downloading for selected video
-// files. Until head (~5MB) and tail (~3MB) pieces are complete, the file is set
-// to PiecePriorityNone to hold mid-file pieces from downloading, while only the
-// head and tail pieces are raised to PiecePriorityNow. Once all head and tail
-// pieces are complete (or if the file is so small that head/tail cover the entire
-// file), the file is restored to PiecePriorityNormal so the rest can download.
-// If active playback is open on the file, mid-hold is skipped.
+// applyVideoStartupHints applies soft startup hints for selected video files.
+// Head (~5MB) and tail (~3MB) pieces are raised to PiecePriorityNow so container
+// metadata (such as moov atoms) downloads urgently, while the file remains at
+// PiecePriorityNormal so mid-file pieces can download concurrently without gating.
 func (s *EngineServer) applyVideoStartupHints(rec *TorrentRecord) {
 	if !s.payloadTransfersAllowed.Load() || rec.Paused || !rec.Configured || rec.Checking || rec.removed || rec.Error != nil {
 		return
@@ -37,61 +34,11 @@ func (s *EngineServer) applyVideoStartupHints(rec *TorrentRecord) {
 			continue
 		}
 
-		headBegin, headEnd := filePieceRange(f, 0, minInt64(length, videoStartupHeadBytes))
-		var tailBegin, tailEnd int
-		hasTail := length > videoStartupTailBytes
-		if hasTail {
-			tailBegin, tailEnd = filePieceRange(f, length-videoStartupTailBytes, length)
-		}
-
-		// Active playback skips mid-hold so streaming / seeking is not starved.
-		if s.hasActivePlaybackForFile(t, f) {
-			f.SetPriority(torrent.PiecePriorityNormal)
-			continue
-		}
-
-		coversWholeFile := headEnd >= f.EndPieceIndex() || (hasTail && headEnd >= tailBegin)
-		tipsComplete := isPieceRangeComplete(t, headBegin, headEnd) && (!hasTail || isPieceRangeComplete(t, tailBegin, tailEnd))
-
-		if coversWholeFile || tipsComplete {
-			f.SetPriority(torrent.PiecePriorityNormal)
-			if !tipsComplete {
-				raisePieceRange(t, headBegin, headEnd, torrent.PiecePriorityNow)
-				if hasTail {
-					raisePieceRange(t, tailBegin, tailEnd, torrent.PiecePriorityNow)
-				}
-			}
-			continue
-		}
-
-		// Hold mid-file: file priority None stops anacrolix from pulling pieces
-		// outside the explicit Now tips.
-		f.SetPriority(torrent.PiecePriorityNone)
-		raisePieceRange(t, headBegin, headEnd, torrent.PiecePriorityNow)
-		if hasTail {
-			raisePieceRange(t, tailBegin, tailEnd, torrent.PiecePriorityNow)
+		raiseFileByteRange(t, f, 0, minInt64(length, videoStartupHeadBytes), torrent.PiecePriorityNow)
+		if length > videoStartupTailBytes {
+			raiseFileByteRange(t, f, length-videoStartupTailBytes, length, torrent.PiecePriorityNow)
 		}
 	}
-}
-
-func (s *EngineServer) hasActivePlaybackForFile(t *torrent.Torrent, f *torrent.File) bool {
-	s.playbackMu.Lock()
-	defer s.playbackMu.Unlock()
-	if s.playbackOwners == nil {
-		return false
-	}
-	coordinator := s.playbackOwners[t]
-	if coordinator == nil {
-		return false
-	}
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
-	for reader := range coordinator.owners {
-		if reader.file == f || (reader.file != nil && f != nil && reader.file.Path() == f.Path()) {
-			return true
-		}
-	}
-	return false
 }
 
 func raiseFileByteRange(t *torrent.Torrent, file *torrent.File, start, end int64, priority torrent.PiecePriority) {
@@ -103,15 +50,6 @@ func raisePieceRange(t *torrent.Torrent, begin, end int, priority torrent.PieceP
 	for p := begin; p < end; p++ {
 		t.Piece(p).SetPriority(priority)
 	}
-}
-
-func isPieceRangeComplete(t *torrent.Torrent, begin, end int) bool {
-	for p := begin; p < end; p++ {
-		if !t.Piece(p).State().Complete {
-			return false
-		}
-	}
-	return true
 }
 
 func isVideoFileName(name string) bool {

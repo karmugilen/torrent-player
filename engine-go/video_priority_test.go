@@ -34,7 +34,7 @@ func TestIsVideoFileName(t *testing.T) {
 }
 
 func TestVideoStartupHintsRaiseHeadAndTail(t *testing.T) {
-	s, rec, pieceLen, data := configuredLargeVideo(t, 48)
+	s, rec, pieceLen, _ := configuredLargeVideo(t, 48)
 	tr := rec.Torrent
 	file := tr.Files()[0]
 	headBegin, headEnd := filePieceRange(file, 0, videoStartupHeadBytes)
@@ -55,9 +55,10 @@ func TestVideoStartupHintsRaiseHeadAndTail(t *testing.T) {
 	s.applyTransferState(rec)
 	rec.mu.Unlock()
 
-	// Before tips complete: file priority None, head+tail Now, mid effective not downloading (file None + mid piece not Now)
-	if got := file.Priority(); got != torrent.PiecePriorityNone {
-		t.Fatalf("before tips complete: file priority=%v want None", got)
+	// Soft prepare: file remains Normal so mid-file pieces are allowed to download,
+	// while head and tail pieces are raised to Now for urgent metadata.
+	if got := file.Priority(); got != torrent.PiecePriorityNormal {
+		t.Fatalf("file priority=%v want Normal", got)
 	}
 	if got := rawPiecePriority(tr.Piece(headBegin)); got != torrent.PiecePriorityNow {
 		t.Fatalf("head piece %d priority=%v want Now", headBegin, got)
@@ -73,22 +74,6 @@ func TestVideoStartupHintsRaiseHeadAndTail(t *testing.T) {
 	}
 	if got := rawPiecePriority(tr.Piece(middle)); got == torrent.PiecePriorityNow {
 		t.Fatalf("middle piece %d should not be Now, got %v", middle, got)
-	}
-
-	// After marking head+tail complete: file restored Normal
-	for p := headBegin; p < headEnd; p++ {
-		writeVerifiedPiece(t, s, rec, data, p)
-	}
-	for p := tailBegin; p < tailEnd; p++ {
-		writeVerifiedPiece(t, s, rec, data, p)
-	}
-
-	rec.mu.Lock()
-	s.applyTransferState(rec)
-	rec.mu.Unlock()
-
-	if got := file.Priority(); got != torrent.PiecePriorityNormal {
-		t.Fatalf("after tips complete: file priority=%v want Normal", got)
 	}
 }
 
@@ -169,8 +154,8 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 	if text.Priority() != torrent.PiecePriorityNormal {
 		t.Fatalf("selected non-video file priority=%v want Normal", text.Priority())
 	}
-	if video.Priority() != torrent.PiecePriorityNone {
-		t.Fatalf("incomplete selected video file priority=%v want None", video.Priority())
+	if video.Priority() != torrent.PiecePriorityNormal {
+		t.Fatalf("selected video file priority=%v want Normal", video.Priority())
 	}
 
 	code, response = s.DispatchControl("POST", "/pause", `{"id":"`+added.ID+`"}`)
@@ -185,13 +170,17 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 func TestVideoStartupHintsPlaybackCoexistence(t *testing.T) {
 	s, rec, _, _ := configuredLargeVideo(t, 48)
 	file := rec.Torrent.Files()[0]
+	headPiece := file.BeginPieceIndex()
 
 	rec.mu.Lock()
 	s.applyTransferState(rec)
 	rec.mu.Unlock()
 
-	if got := file.Priority(); got != torrent.PiecePriorityNone {
-		t.Fatalf("before playback: file priority=%v want None", got)
+	if got := file.Priority(); got != torrent.PiecePriorityNormal {
+		t.Fatalf("before playback: file priority=%v want Normal", got)
+	}
+	if got := rawPiecePriority(rec.Torrent.Piece(headPiece)); got != torrent.PiecePriorityNow {
+		t.Fatalf("before playback: head piece priority=%v want Now", got)
 	}
 
 	reader, err := s.OpenPlayback(rec.ID, 0)
@@ -204,19 +193,12 @@ func TestVideoStartupHintsPlaybackCoexistence(t *testing.T) {
 	s.applyTransferState(rec)
 	rec.mu.Unlock()
 
-	// Active playback skips mid-hold so seeking and streaming are not starved
+	// Active playback coexists with soft hints: file remains Normal and head piece remains Now
 	if got := file.Priority(); got != torrent.PiecePriorityNormal {
 		t.Fatalf("during playback: file priority=%v want Normal", got)
 	}
-
-	reader.Close()
-
-	rec.mu.Lock()
-	s.applyTransferState(rec)
-	rec.mu.Unlock()
-
-	if got := file.Priority(); got != torrent.PiecePriorityNone {
-		t.Fatalf("after playback closed: file priority=%v want None", got)
+	if got := rawPiecePriority(rec.Torrent.Piece(headPiece)); got != torrent.PiecePriorityNow {
+		t.Fatalf("during playback: head piece priority=%v want Now", got)
 	}
 }
 
