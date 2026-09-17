@@ -38,9 +38,15 @@ details. Install over the existing APK; saved downloads are reused.
 ## Package
 
 - APK: `torrent-player-2.0.0.apk` (arm64-v8a, version code 23, version name 2.0.0).
-- Optimized release build, locally signed with the same certificate used by
-  prior GitHub 1.4.x installs so updates install over existing installs.
+- Optimized release build signed with the dedicated **Torrent Player release
+  keystore** (`CN=Torrent Player`), not the Android Debug key. See
+  [SIGNING.md](SIGNING.md).
+- If you previously installed a debug-signed 1.4.x / early 2.0.0 build, uninstall
+  once before installing this APK (signature change). Future updates signed with
+  this same release key install over it normally.
 - Branch: `go-engine`. Tag: `v2.0.0`.
+- Play Protect may still show a scan prompt for sideloaded (non–Play Store)
+  installs; that is expected and not an unsigned-APK failure.
 
 ## Changes since `v1.4.5`
 
