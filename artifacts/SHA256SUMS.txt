@@ -32,3 +32,4 @@ f97b3730543743ba86e77115198ea0ea797c3bfae43dc6fc3c6f013cc619af75  torrent-player
 1f0f4fbaec2dafa78fa3d9c4ac9f4204b0e05867f6594bc5892850da57e1ff3d  torrent-player-1.4.5-playback-update.apk
 ab7ca19a7935e9e9daabb850838d1b0a37cbd685dc6ad99d0cbd7a26be0b9b82  torrent-player-2.0.0.apk
 0c8eaec2c5c81f988991020ccb4ca5931663144010ebbc7a5653280b088ffa88  torrent-player-2.0.0.apk
+0f5f90590a81c04bde1fd5ce227df5e9ed28f093166268df77677b8844fb6386  artifacts/torrent-player-1.4.5.apk
