@@ -71,10 +71,19 @@ func writeVerifiedPiece(t *testing.T, s *EngineServer, rec *TorrentRecord, data 
 	info := rec.Torrent.Info()
 	start := int64(index) * info.PieceLength
 	end := min(start+info.PieceLength, int64(len(data)))
-	p := &documentPiece{storage: s.storage.GetStorage(rec.InfoHash), piece: info.Piece(index)}
+	st := s.storage.GetStorage(rec.InfoHash)
+	p := &documentPiece{storage: st, piece: info.Piece(index)}
 	if _, err := p.WriteAt(data[start:end], 0); err != nil {
 		t.Fatal(err)
 	}
+	// Flush write-back to disk before verify so restore-verify hole detection
+	// and peer hashing both see the same bytes.
+	st.mu.Lock()
+	if err := st.flushPieceLocked(index); err != nil {
+		st.mu.Unlock()
+		t.Fatal(err)
+	}
+	st.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := rec.Torrent.Piece(index).VerifyDataContext(ctx); err != nil {
@@ -147,6 +156,193 @@ func TestPlaybackWaitsForVerificationThenSupportsSeeking(t *testing.T) {
 	}
 }
 
+func largePlaybackFixture(t *testing.T, pieces int) (*EngineServer, *TorrentRecord, int64) {
+	t.Helper()
+	s := testEngine(t)
+	pieceLen := int64(1024 * 1024)
+	total := int64(pieces) * pieceLen
+	data := bytes.Repeat([]byte("abcdefgh"), int(total/8))
+	info := metainfo.Info{Name: "movie.mp4", Length: total, PieceLength: pieceLen}
+	for start := int64(0); start < total; start += pieceLen {
+		hash := sha1.Sum(data[start : start+pieceLen])
+		info.Pieces = append(info.Pieces, hash[:]...)
+	}
+	encoded, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata bytes.Buffer
+	mi := metainfo.MetaInfo{InfoBytes: encoded}
+	if err := mi.Write(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(AddRequest{Prepare: true, TorrentData: base64.StdEncoding.EncodeToString(metadata.Bytes())})
+	code, response := s.DispatchControl("POST", "/add", string(body))
+	if code != 200 {
+		t.Fatalf("add: %d %s", code, response)
+	}
+	var added AddResponse
+	if err := json.Unmarshal(response, &added); err != nil {
+		t.Fatal(err)
+	}
+	rec := s.records[added.ID]
+	f, err := os.CreateTemp(t.TempDir(), "movie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := int(f.Fd())
+	body, _ = json.Marshal(ConfigureRequest{ID: added.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	code, response = s.DispatchControl("POST", "/configure", string(body))
+	_ = f.Close()
+	if code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	playBody, _ := json.Marshal(PlayRequest{ID: added.ID, FileIndex: intPtr(0)})
+	code, response = s.DispatchControl("POST", "/play", string(playBody))
+	if code != 200 {
+		t.Fatalf("play: %d %s", code, response)
+	}
+	return s, rec, pieceLen
+}
+
+func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 48)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNow {
+		t.Fatalf("open should prioritize playhead tip, got %v", got)
+	}
+
+	mid := 10 * pieceLen // large jump → fast-seek: tip Now, short Readahead
+	reader.testApplyOffset(mid)
+	urgent, readahead, lookbehind, hotspots, fastSeek, headBoost, tailBoost := reader.testWindow()
+	if urgent.begin != 10 || urgent.end != 12 ||
+		readahead.begin != 12 || readahead.end != 18 ||
+		lookbehind.begin != 9 || lookbehind.end != 10 ||
+		!fastSeek || hotspots < 1 || headBoost || tailBoost {
+		t.Fatalf("urgent=%v readahead=%v lookbehind=%v hotspots=%d fast=%v head=%v tail=%v",
+			urgent, readahead, lookbehind, hotspots, fastSeek, headBoost, tailBoost)
+	}
+	if got := reader.testPiecePriority(10); got != torrent.PiecePriorityNow {
+		t.Fatalf("tip should be Now, got %v", got)
+	}
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityReadahead {
+		t.Fatalf("forward should be Readahead, got %v", got)
+	}
+	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityHigh {
+		// Prior playhead kept as hotspot High, not Now.
+		t.Fatalf("old tip should be hotspot High, got %v", got)
+	}
+	if got := reader.testPiecePriority(4); got != torrent.PiecePriorityNormal {
+		t.Fatalf("old head boost outside hotspot should be Normal, got %v", got)
+	}
+	_ = rec
+}
+
+func TestPlaybackFastSeekSettlesThenExpands(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 64)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	start := 20 * pieceLen
+	reader.testApplyOffset(start)
+	urgent, readahead, _, _, fastSeek, _, _ := reader.testWindow()
+	if !fastSeek || urgent.begin != 20 || readahead.end-readahead.begin != 6 {
+		t.Fatalf("expected fast window, urgent=%v readahead=%v fast=%v", urgent, readahead, fastSeek)
+	}
+	for i := 0; i < playbackSeekSettleReads; i++ {
+		reader.testApplyOffset(start + int64(i+1)*pieceLen/2)
+	}
+	urgent, readahead, _, _, fastSeek, _, _ = reader.testWindow()
+	if fastSeek {
+		t.Fatal("expected settle out of fast-seek")
+	}
+	if readahead.end <= readahead.begin || (readahead.end-urgent.begin) < 20 {
+		t.Fatalf("settled readahead too small: urgent=%v readahead=%v", urgent, readahead)
+	}
+}
+
+func TestPlaybackHandlesSharePriorityOwnership(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 48)
+	first, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	first.testApplyOffset(0)
+	second.testApplyOffset(40 * pieceLen)
+	second.priorityOwner.mu.Lock()
+	gotSecond := second.priorityOwner.effective[40]
+	second.priorityOwner.mu.Unlock()
+	if gotSecond != torrent.PiecePriorityNow {
+		t.Fatalf("second handle did not publish urgent demand: %v", gotSecond)
+	}
+	second.Close()
+	second.priorityOwner.mu.Lock()
+	gotSecond = second.priorityOwner.effective[40]
+	gotFirst := second.priorityOwner.effective[0]
+	second.priorityOwner.mu.Unlock()
+	if gotSecond != 0 {
+		t.Fatalf("closing second handle retained stale priority: %v", gotSecond)
+	}
+	if gotFirst != torrent.PiecePriorityNow {
+		t.Fatalf("closing second handle erased first handle demand: %v", gotFirst)
+	}
+	first.Close()
+	second.priorityOwner.mu.Lock()
+	gotFinal := second.priorityOwner.effective[0]
+	second.priorityOwner.mu.Unlock()
+	if gotFinal != 0 {
+		t.Fatalf("closing final handle retained priority: %v", gotFinal)
+	}
+}
+
+func TestPlaybackSeekHotspotsWarmPriorTimestamps(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 64)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	positions := []int64{5 * pieceLen, 25 * pieceLen, 45 * pieceLen}
+	for _, off := range positions {
+		reader.testApplyOffset(off)
+	}
+	_, _, _, hotspots, _, _, _ := reader.testWindow()
+	if hotspots < 2 {
+		t.Fatalf("expected seek hotspots for prior positions, got %d", hotspots)
+	}
+	if got := reader.testPiecePriority(5); got != torrent.PiecePriorityHigh {
+		t.Fatalf("prior timestamp hotspot should stay High, got %v", got)
+	}
+}
+
+func TestFilePieceRangeAndOverlapHelpers(t *testing.T) {
+	s, rec, _ := playbackFixture(t)
+	file := rec.Torrent.Files()[1]
+	begin, end := filePieceRange(file, 0, 8)
+	if begin != file.BeginPieceIndex() || end <= begin {
+		t.Fatalf("range %d-%d for file pieces %d-%d", begin, end, file.BeginPieceIndex(), file.EndPieceIndex())
+	}
+	_ = s
+	if !rangesOverlap(0, 5, 4, 8) || rangesOverlap(0, 3, 3, 5) {
+		t.Fatal("rangesOverlap helper incorrect")
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
 func TestPlaybackCloseCancelsBlockedRead(t *testing.T) {
 	s, rec, _ := playbackFixture(t)
 	reader, err := s.OpenPlayback(rec.ID, 1)
@@ -211,9 +407,51 @@ func TestCompletedAndStreamingHTTPRanges(t *testing.T) {
 	if err := json.Unmarshal(body, &status); err != nil {
 		t.Fatal(err)
 	}
-	if code != 200 || !status.Done || status.Files[1].Progress != 1 {
+	if code != 200 || !status.Done || status.Files[1].VerifiedBytes != status.Files[1].Length {
 		t.Fatalf("not completed: %s", body)
 	}
+}
+
+func TestTorrentStatusDoneUsesVerifiedNotOnlyLiveProgress(t *testing.T) {
+	s, rec, data := playbackFixture(t)
+	writeVerifiedPiece(t, s, rec, data, 0)
+	code, body := s.DispatchControl("GET", "/torrent/"+rec.ID, "")
+	var status TorrentView
+	if err := json.Unmarshal(body, &status); err != nil {
+		t.Fatal(err)
+	}
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	if status.Done {
+		t.Fatal("one verified piece must not complete a multi-file selection")
+	}
+	if status.VerifiedBytes <= 0 {
+		t.Fatalf("expected verified bytes after piece 0, got %d", status.VerifiedBytes)
+	}
+	if status.Downloaded < status.VerifiedBytes {
+		t.Fatalf("live downloaded %d < verified %d", status.Downloaded, status.VerifiedBytes)
+	}
+	if status.Files[0].VerifiedBytes <= 0 {
+		t.Fatalf("file0 missing verified bytes: %+v", status.Files[0])
+	}
+	for i := 0; i < infoNumPieces(rec); i++ {
+		writeVerifiedPiece(t, s, rec, data, i)
+	}
+	code, body = s.DispatchControl("GET", "/torrent/"+rec.ID, "")
+	if err := json.Unmarshal(body, &status); err != nil {
+		t.Fatal(err)
+	}
+	if code != 200 || !status.Done || status.VerifiedBytes < status.Length {
+		t.Fatalf("expected verified completion: %s", body)
+	}
+	if status.Downloaded < status.VerifiedBytes {
+		t.Fatalf("live downloaded %d < verified %d after done", status.Downloaded, status.VerifiedBytes)
+	}
+}
+
+func infoNumPieces(rec *TorrentRecord) int {
+	return rec.Torrent.Info().NumPieces()
 }
 
 func TestPlaybackRejectsUnselectedFilesAndUnverifiedCompletion(t *testing.T) {
@@ -232,7 +470,7 @@ func TestPlaybackRejectsUnselectedFilesAndUnverifiedCompletion(t *testing.T) {
 	if err := json.Unmarshal(body, &status); err != nil {
 		t.Fatal(err)
 	}
-	if code != 200 || status.Done || status.Files[1].Progress >= 1 {
+	if code != 200 || status.Done || status.Files[1].VerifiedBytes >= status.Files[1].Length {
 		t.Fatalf("premature completion: %s", body)
 	}
 	if rec.Torrent.Files()[1].Priority() != torrent.PiecePriorityNormal {

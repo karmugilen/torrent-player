@@ -30,6 +30,16 @@ data class TorrentFile(
     val length: Long,
     val progress: Double,
     val type: String,
+    /** Hashed complete bytes; used for Done / offline-safe play, not the live UI bar. */
+    val verifiedBytes: Long = 0L,
+)
+
+data class TrackerStatus(
+    val url: String,
+    val tier: Int = 0,
+    val status: String = "waiting",
+    val message: String? = null,
+    val original: Boolean = true,
 )
 
 data class TorrentStatus(
@@ -48,6 +58,7 @@ data class TorrentStatus(
     val downloaded: Long,
     val uploaded: Long,
     val files: List<TorrentFile>,
+    val trackers: List<TrackerStatus> = emptyList(),
     val error: String? = null,
     val timeRemaining: Long? = null,
     val configured: Boolean = false,
@@ -55,6 +66,8 @@ data class TorrentStatus(
     val checking: Boolean = false,
     val checkedPieces: Int = 0,
     val checkTotal: Int = 0,
+    val focusedFile: Int? = null,
+    val verifiedBytes: Long = 0L,
 )
 
 data class PlayInfo(
@@ -74,6 +87,8 @@ data class PieceBucket(
     val selected: Int,
     val verified: Int,
     val receiving: Int,
+    val selectedVerified: Int = 0,
+    val selectedReceiving: Int = 0,
 )
 
 data class PieceTelemetry(
@@ -144,23 +159,55 @@ class EngineClient(
 
     fun metadata(id: String): String = get("/metadata/$id").getString("torrentData")
 
-    fun configure(id: String, descriptors: List<Int?>, selected: Set<Int>) {
+    fun configure(
+        id: String,
+        descriptors: List<Int?>,
+        selected: Set<Int>,
+        storageMode: String = "download",
+    ) {
         post("/configure", JSONObject().put("id", id)
             .put("descriptors", JSONArray().apply { descriptors.forEach { put(it ?: JSONObject.NULL) } })
-            .put("selected", JSONArray(selected.toList())))
+            .put("selected", JSONArray(selected.toList()))
+            .put("storageMode", storageMode))
     }
 
-    fun select(id: String, selected: Set<Int>) {
-        post("/select", JSONObject().put("id", id).put("selected", JSONArray(selected.toList())))
+    fun select(id: String, selected: Set<Int>, descriptors: List<Int?>? = null) {
+        post("/select", JSONObject().put("id", id).put("selected", JSONArray(selected.toList())).apply {
+            if (descriptors != null) {
+                put("descriptors", JSONArray().apply {
+                    descriptors.forEach { put(it ?: JSONObject.NULL) }
+                })
+            }
+        })
     }
 
     fun pause(id: String) { post("/pause", JSONObject().put("id", id)) }
     fun resume(id: String) { post("/resume", JSONObject().put("id", id)) }
+    fun focus(id: String, fileIndex: Int?) { post("/focus", JSONObject().put("id", id).apply { if (fileIndex == null) put("fileIndex", JSONObject.NULL) else put("fileIndex", fileIndex) }) }
 
     fun maxPeers(): Int = get("/settings").optInt("maxPeers", 40)
 
     fun setMaxPeers(maxPeers: Int): Int =
         post("/settings", JSONObject().put("maxPeers", maxPeers)).optInt("maxPeers", maxPeers)
+
+    fun transferRates(): Pair<Long, Long> {
+        val j = get("/settings")
+        return j.optLong("downloadRateBytesSec", 0L) to j.optLong("uploadRateBytesSec", 0L)
+    }
+
+    fun setTransferRates(downloadRateBytesSec: Long, uploadRateBytesSec: Long): Pair<Long, Long> {
+        val j = post("/settings", JSONObject().put("downloadRateBytesSec", downloadRateBytesSec.coerceAtLeast(0L)).put("uploadRateBytesSec", uploadRateBytesSec.coerceAtLeast(0L)))
+        return j.optLong("downloadRateBytesSec", downloadRateBytesSec) to j.optLong("uploadRateBytesSec", uploadRateBytesSec)
+    }
+
+    /**
+     * Gates torrent payload bytes globally while preserving tracker, DHT and
+     * magnet metadata discovery. Older engines simply reject the optional
+     * setting; callers treat that as an unavailable engine capability.
+     */
+    fun setPayloadTransfersAllowed(allowed: Boolean): Boolean =
+        post("/settings", JSONObject().put("payloadTransfersAllowed", allowed))
+            .optBoolean("payloadTransfersAllowed", allowed)
 
     fun shutdown() {
         post("/shutdown", JSONObject())
@@ -204,6 +251,8 @@ class EngineClient(
                         selected = b.optInt("selected"),
                         verified = b.optInt("verified"),
                         receiving = b.optInt("receiving"),
+                        selectedVerified = b.optInt("selectedVerified"),
+                        selectedReceiving = b.optInt("selectedReceiving"),
                     )
                 )
             }
@@ -233,6 +282,7 @@ class EngineClient(
                         length = f.optLong("length"),
                         progress = f.progress(),
                         type = f.optString("type"),
+                        verifiedBytes = f.optLong("verifiedBytes", 0L),
                     )
                 )
             }
@@ -242,6 +292,22 @@ class EngineClient(
                 for (i in 0 until selectedArr.length()) {
                     selected.add(selectedArr.optInt(i))
                 }
+            }
+            val trackers = ArrayList<TrackerStatus>()
+            val trackersArr: JSONArray = json.optJSONArray("trackers") ?: JSONArray()
+            for (i in 0 until trackersArr.length()) {
+                val tr = trackersArr.optJSONObject(i) ?: continue
+                val url = tr.optString("url")
+                if (url.isBlank()) continue
+                trackers.add(
+                    TrackerStatus(
+                        url = url,
+                        tier = tr.optInt("tier"),
+                        status = tr.optString("status", "waiting").ifBlank { "waiting" },
+                        message = tr.nullableString("message"),
+                        original = tr.optBoolean("original", true),
+                    )
+                )
             }
             return TorrentStatus(
                 id = json.getString("id"),
@@ -259,6 +325,7 @@ class EngineClient(
                 downloaded = json.optLong("downloaded"),
                 uploaded = json.optLong("uploaded"),
                 files = files,
+                trackers = trackers,
                 error = if (json.isNull("error")) null else json.optString("error").ifEmpty { null },
                 timeRemaining = json.finiteLong("timeRemaining"),
                 configured = json.optBoolean("configured"),
@@ -266,6 +333,8 @@ class EngineClient(
                 checking = json.optBoolean("checking"),
                 checkedPieces = json.optInt("checkedPieces"),
                 checkTotal = json.optInt("checkTotal"),
+                focusedFile = if (json.has("focusedFile") && !json.isNull("focusedFile")) json.optInt("focusedFile") else null,
+                verifiedBytes = json.optLong("verifiedBytes", 0L),
             )
         }
     }

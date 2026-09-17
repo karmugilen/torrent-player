@@ -142,7 +142,7 @@ fun LibraryScreen(
                     shape = RoundedCornerShape(12.dp),
                 )
             }
-            val visible = state.visibleLibrary().filter { query.isBlank() || it.title.contains(query.trim(), ignoreCase = true) }
+            val visible = state.visibleLibrary(LibrarySort.RECENT).filterLibrary(query)
             if (visible.isEmpty()) item {
                 Box(
                     modifier = Modifier
@@ -207,19 +207,20 @@ private fun TorrentRow(
     val progress by animateFloatAsState(entry.progress, tween(200), label = "downloadProgress")
     val previewVideo = firstPreviewVideo(entry)
     val previewUri = previewVideo?.uri
-    val previewBucket = previewUpdateBucket(previewVideo?.progress ?: 0.0, entry.complete)
     val latestEntry by rememberUpdatedState(entry)
     var frames by remember(entry.key) { mutableStateOf(repository.cached(entry)) }
-    LaunchedEffect(entry.key, previewUri, entry.complete, previewBucket, entry.paused, entry.engineId) {
+    // Mode C: refresh up to 3 live frames every 4s while downloading; 3 finals when complete.
+    LaunchedEffect(entry.key, previewUri, entry.complete, entry.paused, entry.engineId) {
         if (previewUri.isNullOrBlank()) return@LaunchedEffect
         while (true) {
             val current = latestEntry
             val next = repository.previews(current)
             if (next.isNotEmpty()) frames = next
             else if (frames == null) frames = emptyList()
-            val live = !current.complete && !current.paused && current.engineId != null
-            if (!frames.isNullOrEmpty() || !live) break
-            delay(1000)
+            if (current.complete) break
+            val live = !current.paused && current.engineId != null
+            if (!live) break
+            delay(4_000)
         }
     }
     ElevatedCard(

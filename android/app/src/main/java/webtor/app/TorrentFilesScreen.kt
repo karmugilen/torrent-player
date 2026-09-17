@@ -1,8 +1,8 @@
 package webtor.app
 
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -17,9 +17,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -42,9 +39,12 @@ fun TorrentFilesScreen(
     error: String?,
     onBack: () -> Unit,
     onPlay: (Int) -> Unit,
+    onToggleFile: (Int) -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onDelete: () -> Unit,
+    onFocus: (Int) -> Unit = {},
+    onClearFocus: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -54,37 +54,51 @@ fun TorrentFilesScreen(
     var telemetry by remember(entry.key) { mutableStateOf<PieceTelemetry?>(null) }
     val previewVideo = firstPreviewVideo(entry)
     val previewUri = previewVideo?.uri
-    val previewBucket = previewUpdateBucket(previewVideo?.progress ?: 0.0, entry.complete)
     val latestEntry by rememberUpdatedState(entry)
     var frames by remember(entry.key) { mutableStateOf(thumbnails.cached(entry)) }
-    LaunchedEffect(entry.key, previewUri, entry.complete, previewBucket, entry.paused, entry.engineId) {
+    LaunchedEffect(entry.key, previewUri, entry.complete, entry.paused, entry.engineId) {
         if (previewUri.isNullOrBlank()) return@LaunchedEffect
         while (true) {
             val current = latestEntry
             val next = thumbnails.previews(current)
             if (next.isNotEmpty()) frames = next
             else if (frames == null) frames = emptyList()
-            val live = !current.complete && !current.paused && current.engineId != null
-            if (!frames.isNullOrEmpty() || !live) break
-            delay(1000)
+            if (current.complete) break
+            val live = !current.paused && current.engineId != null
+            if (!live) break
+            delay(4_000)
         }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(entry.key, entry.engineId, entry.complete, lifecycleOwner) {
-        val engineId = entry.engineId ?: return@LaunchedEffect
-        var eventVersion = -1L
+    LaunchedEffect(entry.key, entry.engineId, lifecycleOwner) {
+        val engineId = entry.engineId
+        // Engine id changes (or going offline) must not keep a stale map.
+        telemetry = null
+        if (engineId == null) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var eventVersion = -1L
+            var lastFetchElapsed = 0L
+            // First map loads promptly; later reads stay ≤ 1 Hz.
+            val first = withContext(Dispatchers.IO) {
+                runCatching { client.pieces(engineId, 256) }.getOrNull()
+            }
+            if (first != null) telemetry = first
+            lastFetchElapsed = SystemClock.elapsedRealtime()
+            if (latestEntry.complete) return@repeatOnLifecycle
             while (true) {
                 val nextVersion = withContext(Dispatchers.IO) {
                     app.engine.awaitChange(eventVersion)
                 }
                 if (nextVersion == eventVersion) continue
                 eventVersion = nextVersion
+                val elapsed = SystemClock.elapsedRealtime() - lastFetchElapsed
+                if (elapsed < 1_000L) delay(1_000L - elapsed)
                 val next = withContext(Dispatchers.IO) {
                     runCatching { client.pieces(engineId, 256) }.getOrNull()
                 }
                 if (next != null) telemetry = next
-                if (entry.complete) break
+                lastFetchElapsed = SystemClock.elapsedRealtime()
+                if (latestEntry.complete) break
             }
         }
     }
@@ -131,10 +145,19 @@ fun TorrentFilesScreen(
     ) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item { DownloadSummary(entry, error, frames) }
+            item { TransferSection(entry, status) }
+            item { TrackerDetailsSection(status) }
+            item {
+                PieceHeatGridSection(
+                    map = telemetry,
+                    frozen = entry.paused || entry.complete,
+                    files = entry.files,
+                )
+            }
             item { SectionTitle("Files", "${entry.selected.size} of ${files.size} selected") }
             items(files, key = { it.index }) { file ->
                 TorrentFileRow(
@@ -143,10 +166,13 @@ fun TorrentFilesScreen(
                     paused = entry.paused,
                     canPlay = !busy && !entry.checking,
                     onPlay = { onPlay(file.index) },
+                    onToggle = { onToggleFile(file.index) },
+                    focused = entry.focusedFile == file.index,
+                    onFocus = { onFocus(file.index) },
+                    onClearFocus = onClearFocus,
+                    canToggle = !busy && !entry.checking && entry.metadataReady,
                 )
             }
-            item { TransferSection(entry, status) }
-            item { PiecesSection(telemetry, entry.paused || entry.complete) }
             item { TechnicalSection(entry, status, telemetry, entry.selected.size) }
         }
     }
@@ -165,15 +191,15 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
     val video = entry.files.any { it.index in entry.selected && it.name.isVideoName() }
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
     ElevatedCard(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.elevatedCardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (video) VideoPreviewPager(entry, frames, Modifier.fillMaxWidth().aspectRatio(16f / 9f), large = true)
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (video) VideoPreviewPager(entry, frames, Modifier.fillMaxWidth().aspectRatio(16f / 9f), large = false)
             Text(
                 entry.title,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                 color = colors.onSurface,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -181,15 +207,15 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
             Text(
                 label,
                 Modifier
-                    .background(labelBackground, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .background(labelBackground, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = labelColor,
             )
             Text(
                 if (entry.checking) "Checking saved data · ${entry.checkPercent}%"
                 else "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)} · $percent%",
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
             )
             if (!entry.complete) {
@@ -197,7 +223,7 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
                     progress = { entry.progress.coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(4.dp)
+                        .height(3.dp)
                         .clip(MaterialTheme.shapes.extraSmall),
                     color = colors.primary,
                     trackColor = colors.surface,
@@ -211,9 +237,9 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
 @Composable
 private fun TransferSection(entry: DownloadEntry, status: webtor.core.TorrentStatus?) {
     val colors = MaterialTheme.colorScheme
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         SectionTitle("Transfer")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             TransferCard(
                 label = "Download",
                 value = formatSpeed(status?.downloadSpeed ?: 0),
@@ -232,7 +258,7 @@ private fun TransferSection(entry: DownloadEntry, status: webtor.core.TorrentSta
         }
         Text(
             formatPeers(status?.numPeers ?: 0),
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.labelSmall,
             color = colors.onSurfaceVariant,
             modifier = Modifier.padding(start = 2.dp),
         )
@@ -244,10 +270,10 @@ private fun TransferCard(label: String, value: String, modifier: Modifier = Modi
     val colors = MaterialTheme.colorScheme
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
     ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 label,
                 style = MaterialTheme.typography.labelSmall,
@@ -257,7 +283,7 @@ private fun TransferCard(label: String, value: String, modifier: Modifier = Modi
             )
             Text(
                 value,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                 color = colors.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -267,12 +293,88 @@ private fun TransferCard(label: String, value: String, modifier: Modifier = Modi
 }
 
 @Composable
+private fun TrackerDetailsSection(status: webtor.core.TorrentStatus?) {
+    val colors = MaterialTheme.colorScheme
+    val trackers = status?.trackers.orEmpty()
+    var expanded by remember(status?.id) { mutableStateOf(false) }
+    val working = trackers.count {
+        it.status.equals("working", true) || it.status.equals("connected", true) || it.status.equals("ok", true)
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+    ) {
+        Column {
+            TextButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    when {
+                        trackers.isEmpty() -> "Connection details · unavailable"
+                        else -> "Connection details · $working/${trackers.size} trackers responding"
+                    },
+                    modifier = Modifier.weight(1f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Start,
+                    color = colors.onSurface,
+                )
+                Text(if (expanded) "Hide" else "Show", color = colors.primary)
+            }
+            if (expanded) {
+                if (trackers.isEmpty()) {
+                    Text(
+                        "Tracker status is not available yet.",
+                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        trackers.take(MAX_TRACKERS_SHOWN).forEach { tracker ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    redactedTrackerUrl(tracker.url),
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    tracker.status,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (tracker.status.equals("error", true)) colors.error else colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (trackers.size > MAX_TRACKERS_SHOWN) {
+                            Text(
+                                "+${trackers.size - MAX_TRACKERS_SHOWN} more",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val MAX_TRACKERS_SHOWN = 12
+
+@Composable
 private fun SectionTitle(title: String, subtitle: String? = null) {
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             title,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
             color = colors.onBackground,
             modifier = Modifier.weight(1f),
         )
@@ -290,72 +392,23 @@ private fun selectedEta(status: webtor.core.TorrentStatus?, done: Long, total: L
     if (status == null || status.downloadSpeed <= 0 || done >= total) null else ((total - done).toDouble() / status.downloadSpeed * 1000).toLong()
 
 @Composable
-private fun PiecesSection(map: PieceTelemetry?, frozen: Boolean) {
-    val colors = MaterialTheme.colorScheme
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionTitle("Pieces")
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
-        ) {
-            if (map == null || map.buckets.isEmpty()) {
-                Text(
-                    "Map unavailable",
-                    Modifier.padding(14.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-            } else {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PieceCanvas(map, frozen, Modifier.fillMaxWidth().height(24.dp))
-                    Text(
-                        "Missing · Receiving · Verified · Excluded",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PieceCanvas(map: PieceTelemetry, frozen: Boolean, modifier: Modifier) {
-    val colors = MaterialTheme.colorScheme
-    Canvas(modifier) {
-        val gap = 1.5f
-        val width = (size.width - gap * (map.buckets.size - 1).coerceAtLeast(0)) / map.buckets.size.coerceAtLeast(1)
-        map.buckets.forEachIndexed { index, b ->
-            val color = when {
-                b.verified == b.total -> colors.primary
-                !frozen && b.receiving > 0 -> colors.tertiary
-                b.selected == 0 -> colors.outlineVariant
-                else -> colors.surfaceVariant
-            }
-            drawRoundRect(
-                color = color,
-                topLeft = Offset(index * (width + gap), 0f),
-                size = Size(width, size.height),
-                cornerRadius = CornerRadius(2f, 2f),
-            )
-        }
-    }
-}
-
-@Composable
 private fun TorrentFileRow(
     file: SavedFile,
     isSelected: Boolean,
     paused: Boolean,
     canPlay: Boolean,
     onPlay: () -> Unit,
+    onToggle: () -> Unit,
+    canToggle: Boolean,
+    focused: Boolean = false,
+    onFocus: () -> Unit = {},
+    onClearFocus: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
-    val complete = file.length == 0L || file.progress >= 1.0
-    val canPlayVideo = isVideo && isSelected && !file.uri.isNullOrBlank()
-    val canOpenOther = !isVideo && isSelected && !file.uri.isNullOrBlank() && complete
+    val complete = file.isVerifiedComplete
+    val canPlayVideo = isVideo && !file.uri.isNullOrBlank() && (isSelected || complete)
+    val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
     val statusText = when {
         !isSelected -> "Not selected"
         file.uri.isNullOrBlank() -> "Not downloaded"
@@ -364,35 +417,68 @@ private fun TorrentFileRow(
         else -> "Downloading"
     }
 
-    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = { if (canToggle) onToggle() },
+                enabled = canToggle,
+                modifier = Modifier.size(32.dp),
+            )
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Text(
                     file.name,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
                     color = colors.onSurface,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     "${formatBytes((file.length * file.progress).toLong())} of ${formatBytes(file.length)} · $statusText",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant,
                 )
+            }
+            if (isSelected) {
+                FilledTonalButton(
+                    onClick = if (focused) onClearFocus else onFocus,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .width(88.dp)
+                        .height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    colors = if (focused) {
+                        ButtonDefaults.filledTonalButtonColors(
+                            containerColor = colors.primary,
+                            contentColor = colors.onPrimary,
+                        )
+                    } else {
+                        ButtonDefaults.filledTonalButtonColors()
+                    },
+                ) {
+                    Text(
+                        if (focused) "Clear" else "Priority",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                    )
+                }
             }
             if (canPlayVideo || canOpenOther) {
                 FilledTonalButton(
                     onClick = onPlay,
                     enabled = canPlay,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.heightIn(min = 34.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 ) {
-                    Text(if (isVideo) "Play" else "Open")
+                    Text(
+                        if (isVideo) "Play" else "Open",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
                 }
             }
         }
@@ -401,13 +487,13 @@ private fun TorrentFileRow(
                 progress = { file.progress.toFloat().coerceIn(0f, 1f) },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(2.5.dp)
+                    .height(2.dp)
                     .clip(MaterialTheme.shapes.extraSmall),
                 color = colors.primary,
                 trackColor = colors.surface,
             )
         }
-        HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(top = 4.dp))
+        HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -423,9 +509,9 @@ private fun TechnicalSection(
     val infoHash = status?.infoHash ?: entry.key.takeIf { it.length == 40 } ?: "—"
     val pieceDetails = telemetry?.let { "${it.totalPieces} pieces · ${formatBytes(it.pieceLength)} each" } ?: "—"
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         SectionTitle("Technical information")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             TechnicalCard(
                 label = "Files",
                 value = "$selectedCount of ${entry.files.size} selected",
@@ -466,14 +552,14 @@ private fun TechnicalCard(
     val colors = MaterialTheme.colorScheme
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
     ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             Text(
                 value,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurface,
                 fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
                 maxLines = 2,

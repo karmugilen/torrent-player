@@ -40,6 +40,17 @@ func (s *EngineServer) startSavedDataCheck(rec *TorrentRecord) {
 func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, job *savedDataCheck, pieces []int) {
 	defer close(job.done)
 	defer job.cancel()
+	st := s.storage.GetStorage(rec.InfoHash)
+	if st != nil {
+		st.SetRestoreVerify(true)
+		// Always clear before peer hashing can start, including cancel paths.
+		defer st.SetRestoreVerify(false)
+	}
+	clearRestore := func() {
+		if st != nil {
+			st.SetRestoreVerify(false)
+		}
+	}
 	lastNotify := time.Now()
 	for _, index := range pieces {
 		for {
@@ -60,7 +71,15 @@ func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, j
 		}
 		// Removal/shutdown cancels and joins this worker before closing the
 		// torrent, so no verification call can race a dropped torrent.
-		err := rec.Torrent.Piece(index).VerifyDataContext(ctx)
+		trusted := st != nil && st.PieceComplete(index)
+		var err error
+		if trusted {
+			// Storage already has a durable verified bit for this piece (usually
+			// from a checkpoint). Refresh torrent completion without re-hashing.
+			rec.Torrent.Piece(index).UpdateCompletion()
+		} else {
+			err = rec.Torrent.Piece(index).VerifyDataContext(ctx)
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -68,7 +87,11 @@ func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, j
 		if err != nil {
 			message := fmt.Sprintf("Could not check saved data: %v", err)
 			rec.Error, rec.Paused, rec.Checking = &message, true, false
-			applyTransferState(rec)
+			clearRestore()
+			if st != nil {
+				st.UnfreezeTrusted()
+			}
+			s.applyTransferState(rec)
 			rec.mu.Unlock()
 			s.notifyChange()
 			return
@@ -84,8 +107,15 @@ func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, j
 	if !rec.removed && ctx.Err() == nil {
 		rec.Checking = false
 		rec.Generation++
+		if st != nil {
+			st.MarkVerified()
+			st.UnfreezeTrusted()
+		}
+		clearRestore()
 		// Honor pause and selection changes made while hashing was running.
-		applyTransferState(rec)
+		s.applyTransferState(rec)
+	} else if st != nil {
+		st.UnfreezeTrusted()
 	}
 	rec.mu.Unlock()
 	s.notifyChange()
@@ -107,12 +137,21 @@ func stopSavedDataCheck(rec *TorrentRecord) {
 
 // Called with rec.mu held. Resume during a check records intent without letting
 // incoming payload overwrite data that has not yet been checked.
-func applyTransferState(rec *TorrentRecord) {
+func (s *EngineServer) applyTransferState(rec *TorrentRecord) {
 	t := rec.Torrent
-	active := rec.Configured && !rec.Paused && !rec.Checking && !rec.removed && rec.Error == nil
+	// DisallowData* gates only torrent piece payload. It leaves the torrent in
+	// the client, so trackers, DHT, PEX, handshakes, and magnet metadata
+	// exchange continue while Android's global data policy is disabled.
+	active := s.payloadTransfersAllowed.Load() && rec.Configured && !rec.Paused && !rec.Checking && !rec.removed && rec.Error == nil
 	if !active {
 		t.DisallowDataDownload()
 		t.DisallowDataUpload()
+	}
+	// Files() waits for magnet metadata. A global setting must never turn a
+	// pending magnet into a blocking control request; when metadata arrives,
+	// configure/select will apply the same policy before payload is enabled.
+	if t.Info() == nil {
+		return
 	}
 	selected := make(map[int]bool, len(rec.Selected))
 	for _, index := range rec.Selected {
@@ -128,5 +167,7 @@ func applyTransferState(rec *TorrentRecord) {
 	if active {
 		t.AllowDataDownload()
 		t.AllowDataUpload()
+		s.applyVideoStartupHints(rec)
 	}
+	s.applyBackgroundFocus(rec)
 }

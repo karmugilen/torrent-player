@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"mime"
 	"net"
@@ -64,6 +65,7 @@ type TorrentRecord struct {
 	Prepared             bool
 	Configured           bool
 	Selected             []int
+	FocusedFile          *int
 	Generation           int64
 	Error                *string
 	Warning              *string
@@ -79,25 +81,35 @@ type TorrentRecord struct {
 }
 
 type EngineServer struct {
-	mu             sync.RWMutex
-	addMu          sync.Mutex
-	client         *torrent.Client
-	trackers       *trackerPool
-	storage        *DocumentStorageClient
-	records        map[string]*TorrentRecord
-	recordsByHash  map[string]*TorrentRecord
-	ctlListener    net.Listener
-	streamListener net.Listener
-	ctlPort        int
-	streamPort     int
-	downloadDir    string
-	maxPeers       int
-	shuttingDown   atomic.Bool
-	done           chan struct{}
-	closeOnce      sync.Once
-	eventMu        sync.Mutex
-	eventVersion   uint64
-	eventCh        chan struct{}
+	mu              sync.RWMutex
+	addMu           sync.Mutex
+	client          *torrent.Client
+	trackers        *trackerPool
+	storage         *DocumentStorageClient
+	records         map[string]*TorrentRecord
+	recordsByHash   map[string]*TorrentRecord
+	ctlListener     net.Listener
+	streamListener  net.Listener
+	ctlPort         int
+	streamPort      int
+	downloadDir     string
+	maxPeers        int
+	downloadLimiter *rate.Limiter
+	uploadLimiter   *rate.Limiter
+	// This is a global payload-byte gate. It deliberately does not pause or
+	// remove torrents: peer discovery and metadata exchange must continue.
+	payloadTransfersAllowed atomic.Bool
+	shuttingDown            atomic.Bool
+	done                    chan struct{}
+	closeOnce               sync.Once
+	eventMu                 sync.Mutex
+	eventVersion            uint64
+	eventCh                 chan struct{}
+
+	trackerStatusMu sync.RWMutex
+	trackerStatus   map[string]map[string]trackerLiveStatus
+	playbackMu      sync.Mutex
+	playbackOwners  map[*torrent.Torrent]*playbackPriorityCoordinator
 
 	prevDownloadBytes int64
 	prevUploadBytes   int64
@@ -127,6 +139,10 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 
 	// Balanced peer dialing rate limiter (avoids network/router bufferbloat)
 	cfg.DialRateLimiter = rate.NewLimiter(30, 30)
+	// These limiters are retained so settings can be changed without rebuilding
+	// the torrent client. A zero value means unlimited (the anacrolix default).
+	cfg.DownloadRateLimiter = rate.NewLimiter(rate.Inf, 1024*1024)
+	cfg.UploadRateLimiter = rate.NewLimiter(rate.Inf, 1024*1024)
 
 	// Resilient timeouts for mobile and residential networks
 	cfg.NominalDialTimeout = 8 * time.Second
@@ -166,23 +182,33 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 		}},
 	}
 
+	s := &EngineServer{
+		storage:         storageClient,
+		records:         make(map[string]*TorrentRecord),
+		recordsByHash:   make(map[string]*TorrentRecord),
+		trackerStatus:   make(map[string]map[string]trackerLiveStatus),
+		playbackOwners:  make(map[*torrent.Torrent]*playbackPriorityCoordinator),
+		downloadDir:     downloadDir,
+		maxPeers:        maxPeers,
+		downloadLimiter: cfg.DownloadRateLimiter,
+		uploadLimiter:   cfg.UploadRateLimiter,
+		ctlPort:         ctlPort,
+		lastRateTime:    time.Now(),
+		done:            make(chan struct{}),
+		eventCh:         make(chan struct{}),
+	}
+	cfg.Slogger = slog.New(&trackerStatusHandler{
+		s:    s,
+		next: slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}),
+	})
+	cfg.Callbacks.StatusUpdated = append(cfg.Callbacks.StatusUpdated, s.onStatusUpdated)
+
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("torrent client init error: %w", err)
 	}
-
-	s := &EngineServer{
-		client:        client,
-		storage:       storageClient,
-		records:       make(map[string]*TorrentRecord),
-		recordsByHash: make(map[string]*TorrentRecord),
-		downloadDir:   downloadDir,
-		maxPeers:      maxPeers,
-		ctlPort:       ctlPort,
-		lastRateTime:  time.Now(),
-		done:          make(chan struct{}),
-		eventCh:       make(chan struct{}),
-	}
+	s.client = client
+	s.payloadTransfersAllowed.Store(true)
 
 	s.trackers = newTrackerPool(downloadDir)
 	s.trackers.start(s.refreshTorrentTrackers)
@@ -464,6 +490,24 @@ func validateSelection(t *torrent.Torrent, selected []int, allowEmpty bool) erro
 	return nil
 }
 
+// storageForTorrent makes the anacrolix storage handle observable before a
+// configure/select request uses it. Metadata arrival and storage OpenTorrent
+// happen on separate goroutines; returning a configured record while the
+// storage map is still empty loses the descriptors and makes resume appear to
+// succeed while reads fail with "storage is not configured".
+func (s *EngineServer) storageForTorrent(t *torrent.Torrent) *DocumentTorrentStorage {
+	if t == nil {
+		return nil
+	}
+	if st := s.storage.GetStorage(t.InfoHash().HexString()); st != nil {
+		return st
+	}
+	if t.Info() != nil && t.NumPieces() > 0 {
+		_ = t.Piece(0).Storage()
+	}
+	return s.storage.GetStorage(t.InfoHash().HexString())
+}
+
 func newRecordID() string {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -531,6 +575,10 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 			s.handlePlay(w, r)
 			return
 		}
+		if len(parts) == 1 && parts[0] == "focus" {
+			s.handleFocus(w, r)
+			return
+		}
 		if len(parts) == 1 && parts[0] == "configure" {
 			s.handleConfigure(w, r)
 			return
@@ -560,6 +608,65 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 }
 
+// handleFocus sets a lower-priority background focus. Playback readers use the
+// shared coordinator and apply PiecePriorityNow/Readahead afterward, so active
+// reads always win over this hint.
+func (s *EngineServer) handleFocus(w http.ResponseWriter, r *http.Request) {
+	var req FocusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	s.mu.RLock()
+	rec, ok := s.records[req.ID]
+	s.mu.RUnlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "torrent not found"})
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if req.FileIndex != nil {
+		if *req.FileIndex < 0 || *req.FileIndex >= len(rec.Torrent.Files()) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid file index"})
+			return
+		}
+		selected := false
+		for _, i := range rec.Selected {
+			if i == *req.FileIndex {
+				selected = true
+				break
+			}
+		}
+		if !selected {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file is not selected"})
+			return
+		}
+		v := *req.FileIndex
+		rec.FocusedFile = &v
+	} else {
+		rec.FocusedFile = nil
+	}
+	s.applyTransferState(rec)
+	s.applyBackgroundFocus(rec)
+	writeJSON(w, http.StatusOK, OkResponse{Ok: true, ID: rec.ID})
+	s.notifyChange()
+}
+
+func (s *EngineServer) applyBackgroundFocus(rec *TorrentRecord) {
+	if !s.payloadTransfersAllowed.Load() || rec.FocusedFile == nil || rec.Paused || !rec.Configured || rec.Checking {
+		return
+	}
+	files := rec.Torrent.Files()
+	idx := *rec.FocusedFile
+	if idx < 0 || idx >= len(files) {
+		return
+	}
+	for p := files[idx].BeginPieceIndex(); p < files[idx].EndPieceIndex(); p++ {
+		rec.Torrent.Piece(p).SetPriority(torrent.PiecePriorityHigh)
+	}
+}
+
 func (s *EngineServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -577,14 +684,15 @@ func (s *EngineServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := StatsResponse{
-		DownloadSpeed: s.downloadSpeed,
-		UploadSpeed:   s.uploadSpeed,
-		Progress:      totalProgress,
-		Ratio:         0.0,
-		Torrents:      totalTorrents,
-		CtlPort:       s.ctlPort,
-		StreamPort:    s.streamPort,
-		Path:          s.downloadDir,
+		DownloadSpeed:           s.downloadSpeed,
+		UploadSpeed:             s.uploadSpeed,
+		Progress:                totalProgress,
+		Ratio:                   0.0,
+		Torrents:                totalTorrents,
+		CtlPort:                 s.ctlPort,
+		StreamPort:              s.streamPort,
+		Path:                    s.downloadDir,
+		PayloadTransfersAllowed: s.payloadTransfersAllowed.Load(),
 	}
 
 	writeJSON(w, http.StatusOK, stats)
@@ -726,8 +834,8 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "torrent not found"})
 		return
 	}
-	rec.mu.RLock()
-	defer rec.mu.RUnlock()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
 
 	t := rec.Torrent
 	ready := t.Info() != nil
@@ -746,24 +854,42 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var totalLen int64
-	var completed int64
+	var received int64
+	var verifiedTotal int64
 	var files []FileView
 	var progress float64
 
 	if ready {
 		n := t.Name()
 		name = &n
-		totalLen = t.Length()
 		tfFiles := t.Files()
 		verified := verifiedFileBytes(t)
+		selected := make(map[int]bool, len(rec.Selected))
+		for _, index := range rec.Selected {
+			selected[index] = true
+		}
 		files = make([]FileView, len(tfFiles))
 		for i, f := range tfFiles {
 			fLen := f.Length()
+			// Display progress uses received bytes (partial pieces included) so
+			// the UI bar/MB ticks continuously. VerifiedBytes stay authoritative
+			// for Done / offline-safe completion.
+			got := f.BytesCompleted()
+			if got < verified[i] {
+				got = verified[i]
+			}
+			if got > fLen && fLen > 0 {
+				got = fLen
+			}
 			fProg := 1.0
 			if fLen > 0 {
-				fProg = float64(verified[i]) / float64(fLen)
+				fProg = float64(got) / float64(fLen)
 			}
-			completed += verified[i]
+			if selected[i] {
+				totalLen += fLen
+				received += got
+				verifiedTotal += verified[i]
+			}
 			ext := filepath.Ext(f.DisplayPath())
 			mimeType := mime.TypeByExtension(ext)
 			if mimeType == "" {
@@ -771,20 +897,23 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 			}
 
 			files[i] = FileView{
-				Index:    i,
-				Name:     filepath.Base(f.DisplayPath()),
-				Path:     f.DisplayPath(),
-				Length:   fLen,
-				Progress: math.Min(fProg, 1.0),
-				Type:     mimeType,
+				Index:         i,
+				Name:          filepath.Base(f.DisplayPath()),
+				Path:          f.DisplayPath(),
+				Length:        fLen,
+				Progress:      math.Min(fProg, 1.0),
+				VerifiedBytes: verified[i],
+				Type:          mimeType,
 			}
 		}
 		if totalLen > 0 {
-			progress = float64(completed) / float64(totalLen)
+			progress = float64(received) / float64(totalLen)
 		}
 	}
 
-	done := ready && !rec.Checking && totalLen > 0 && completed >= totalLen
+	// An explicit empty selection means “download nothing”, not a completed
+	// torrent. This distinction matters when users uncheck every file.
+	done := ready && len(rec.Selected) > 0 && !rec.Checking && totalLen > 0 && verifiedTotal >= totalLen
 	tStats := t.Stats()
 	numPeers := tStats.ActivePeers
 	if numPeers == 0 {
@@ -792,8 +921,8 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var timeRemaining *int64
-	if downSpeed > 0 && totalLen > completed {
-		rem := int64(float64(totalLen-completed) / float64(downSpeed) * 1000)
+	if downSpeed > 0 && totalLen > received {
+		rem := int64(float64(totalLen-received) / float64(downSpeed) * 1000)
 		timeRemaining = &rem
 	}
 
@@ -810,13 +939,16 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		UploadSpeed:   upSpeed,
 		NumPeers:      numPeers,
 		Length:        totalLen,
-		Downloaded:    completed,
+		Downloaded:    received,
+		VerifiedBytes: verifiedTotal,
 		Uploaded:      0,
 		Files:         files,
+		Trackers:      buildTrackerViews(rec, s.trackerStatusSnapshot(infoHashStr)),
 		Error:         rec.Error,
 		TimeRemaining: timeRemaining,
 		Configured:    rec.Configured,
 		Selected:      rec.Selected,
+		FocusedFile:   rec.FocusedFile,
 		Checking:      rec.Checking,
 		CheckedPieces: rec.CheckedPieces,
 		CheckTotal:    rec.CheckTotal,
@@ -825,8 +957,8 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, view)
 }
 
-// Count only verified pieces. BytesCompleted includes unverified received
-// chunks and cannot be used to decide when a file is safe for offline playback.
+// Count only verified pieces. Display progress uses File.BytesCompleted
+// instead; verified bytes decide Done and offline-safe playback.
 func verifiedFileBytes(t *torrent.Torrent) []int64 {
 	files := t.Files()
 	verified := make([]int64, len(files))
@@ -911,23 +1043,48 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	targetFile := files[fileIdx]
+	// A completed local file remains playable while the global data policy is
+	// off. An incomplete stream would otherwise appear to start and then hang
+	// waiting for bytes which this policy deliberately blocks.
+	if !s.payloadTransfersAllowed.Load() && !fileIsVerified(t, targetFile) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "payload transfers are disabled in settings",
+		})
+		return
+	}
+	// Persist one focused file so status and future priority recalculation agree
+	// with the active playback demand. The playback coordinator still owns
+	// urgent read regions and therefore wins over this background focus.
+	focused := fileIdx
+	rec.FocusedFile = &focused
 	targetFile.Download()
 
-	// Prioritize the first 5MB of the video for instant playback start & codec header detection
+	// Give the HTTP media adapter the same bounded startup policy as JNI
+	// playback: only the first 2 MiB is urgent, the remainder of the header
+	// window is readahead, and the MP4 tail is a lower-priority metadata hint.
+	// Keeping the tail below Now prevents it from competing with the first frame.
 	if t.Info() != nil && t.Info().PieceLength > 0 && targetFile.Length() > 0 {
 		pieceLen := t.Info().PieceLength
 		beginPiece := targetFile.Offset() / pieceLen
-		endPiece := (targetFile.Offset() + min(targetFile.Length(), 5*1024*1024) - 1) / pieceLen
-		for p := beginPiece; p <= endPiece; p++ {
+		urgentEnd := targetFile.Offset() + min(targetFile.Length(), playbackUrgentBytes)
+		for p := beginPiece; int64(p)*pieceLen < urgentEnd; p++ {
 			t.Piece(int(p)).SetPriority(torrent.PiecePriorityNow)
 		}
+		readaheadEnd := targetFile.Offset() + min(targetFile.Length(), videoStartupHeadBytes)
+		for p := beginPiece; int64(p)*pieceLen < readaheadEnd; p++ {
+			if int64(p)*pieceLen >= urgentEnd {
+				t.Piece(int(p)).SetPriority(torrent.PiecePriorityReadahead)
+			}
+		}
 
-		// Also prioritize the last 3MB (crucial for MP4 moov atom index located at end of file)
-		if targetFile.Length() > 3*1024*1024 {
-			lastBeginPiece := (targetFile.Offset() + targetFile.Length() - 3*1024*1024) / pieceLen
+		// Also hint the last few MiB (crucial for MP4 moov atoms at the end).
+		if targetFile.Length() > videoStartupTailBytes {
+			lastBeginPiece := (targetFile.Offset() + targetFile.Length() - videoStartupTailBytes) / pieceLen
 			lastEndPiece := (targetFile.Offset() + targetFile.Length() - 1) / pieceLen
 			for p := lastBeginPiece; p <= lastEndPiece; p++ {
-				t.Piece(int(p)).SetPriority(torrent.PiecePriorityNow)
+				if int64(p)*pieceLen >= urgentEnd {
+					t.Piece(int(p)).SetPriority(torrent.PiecePriorityHigh)
+				}
 			}
 		}
 	}
@@ -970,27 +1127,54 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := validateSelection(t, req.Selected, false); err != nil {
+	// An empty selection is a valid configured state (for example after the
+	// user unchecks every file). The engine remains metadata-ready and can be
+	// reconfigured through /select without treating the torrent as complete.
+	if err := validateSelection(t, req.Selected, true); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	st := s.storage.GetStorage(rec.InfoHash)
-	if st != nil {
-		if err := st.AttachDescriptors(req.Descriptors, req.Selected); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
+	st := s.storageForTorrent(t)
+	if st == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not available"})
+		return
+	}
+	if req.StorageMode == StorageModeStream {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stream storage mode is not supported"})
+		return
+	}
+	if req.StorageMode != "" && req.StorageMode != StorageModeDownload {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid storageMode"})
+		return
+	}
+	if err := st.AttachDescriptors(req.Descriptors, req.Selected); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 	rec.Configured = true
 	rec.Selected = req.Selected
+	if rec.FocusedFile != nil {
+		keep := false
+		for _, i := range req.Selected {
+			if i == *rec.FocusedFile {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			rec.FocusedFile = nil
+		}
+	}
 	rec.Paused = false
 	rec.Generation++
 
 	if st != nil && st.NeedsVerify() {
 		s.startSavedDataCheck(rec)
+	} else if st != nil {
+		st.UnfreezeTrusted()
 	}
-	applyTransferState(rec)
+	s.applyTransferState(rec)
 
 	writeJSON(w, http.StatusOK, OkResponse{Ok: true})
 	s.notifyChange()
@@ -1023,11 +1207,31 @@ func (s *EngineServer) handleSelect(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if !rec.Configured {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not configured"})
+		return
+	}
+	st := s.storageForTorrent(t)
+	if st == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not configured"})
+		return
+	}
+	if req.Descriptors != nil {
+		if err := st.UpdateSelection(req.Descriptors, req.Selected); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	} else if !st.SelectionCanUseExistingFiles(req.Selected) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "descriptors are required when selecting a file for the first time",
+		})
+		return
+	}
 
 	rec.Selected = req.Selected
 	rec.Generation++
 
-	applyTransferState(rec)
+	s.applyTransferState(rec)
 
 	writeJSON(w, http.StatusOK, SelectResponse{Ok: true, Selected: req.Selected})
 	s.notifyChange()
@@ -1058,7 +1262,16 @@ func (s *EngineServer) handlePauseResume(w http.ResponseWriter, r *http.Request,
 
 	rec.Generation++
 	rec.Paused = pause
-	applyTransferState(rec)
+	if !pause && rec.Error != nil {
+		// A failed saved-data check is recoverable: resume clears the visible
+		// error and starts a fresh check before allowing payload transfer. This
+		// keeps retry useful while preserving the safety gate for unverified data.
+		rec.Error = nil
+		if st := s.storage.GetStorage(rec.InfoHash); st != nil && st.NeedsVerify() {
+			s.startSavedDataCheck(rec)
+		}
+	}
+	s.applyTransferState(rec)
 	if rec.verification != nil {
 		select {
 		case rec.verification.wake <- struct{}{}:
@@ -1091,9 +1304,20 @@ func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "torrent not found"})
 		return
 	}
+	s.clearTrackerStatus(rec.InfoHash)
 
 	stopSavedDataCheck(rec)
+	destroy := req.DestroyStore == nil || *req.DestroyStore
+	// Drop flushes storage; clear the durable bitfield after Close so remove
+	// cannot leave a resume shortcut for deleted library entries.
+	if st := s.storage.GetStorage(rec.InfoHash); st != nil {
+		_ = st.DeleteCheckpoint()
+	}
 	rec.Torrent.Drop()
+	_ = s.storage.DeleteCheckpoint(rec.InfoHash)
+	if destroy {
+		_ = DeleteEngineOwnedStorage(s.downloadDir, rec.InfoHash)
+	}
 	writeJSON(w, http.StatusOK, OkResponse{Ok: true, ID: req.ID})
 	s.notifyChange()
 }
@@ -1161,14 +1385,11 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 	for i := range bucketList {
 		b := &bucketList[i]
 		b.Total = b.End - b.Start + 1
-		b.Selected = b.Total // Default all pieces selected
 		for p := b.Start; p <= b.End; p++ {
 			st := pieceStates[p]
-			if st.Complete {
-				b.Verified++
-			} else if st.Partial || st.Checking || st.Hashing {
-				b.Receiving++
-			}
+			selected := pieceSelectedByFiles(t.Files(), rec.Selected, p)
+			receiving := !st.Complete && (st.Partial || st.Checking || st.Hashing)
+			accumulateBucketPiece(b, selected, st.Complete, receiving)
 		}
 	}
 
@@ -1185,6 +1406,47 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// pieceSelectedByFiles reports whether any selected file intersects a piece.
+// Torrent pieces can cross file boundaries, so selected telemetry must be
+// computed from file ranges rather than assuming all pieces are selected.
+func pieceSelectedByFiles(files []*torrent.File, selected []int, piece int) bool {
+	if piece < 0 {
+		return false
+	}
+	for _, index := range selected {
+		if index < 0 || index >= len(files) {
+			continue
+		}
+		file := files[index]
+		if piece >= file.BeginPieceIndex() && piece < file.EndPieceIndex() {
+			return true
+		}
+	}
+	return false
+}
+
+// accumulateBucketPiece updates inclusive bucket counters for one piece.
+// Verified and Receiving cover all pieces; Selected* only intersect selection.
+// Receiving is mutually exclusive with verified (complete never counts as receiving).
+func accumulateBucketPiece(b *PieceBucket, selected, complete, receiving bool) {
+	if selected {
+		b.Selected++
+	}
+	if complete {
+		b.Verified++
+		if selected {
+			b.SelectedVerified++
+		}
+		return
+	}
+	if receiving {
+		b.Receiving++
+		if selected {
+			b.SelectedReceiving++
+		}
+	}
 }
 
 func (s *EngineServer) handleMetadata(w http.ResponseWriter, r *http.Request, id string) {
@@ -1220,8 +1482,39 @@ func (s *EngineServer) handleMetadata(w http.ResponseWriter, r *http.Request, id
 func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	peers := s.maxPeers
+	down := limiterRate(s.downloadLimiter)
+	up := limiterRate(s.uploadLimiter)
 	s.mu.RUnlock()
-	writeJSON(w, http.StatusOK, SettingsResponse{MaxPeers: peers})
+	writeJSON(w, http.StatusOK, SettingsResponse{
+		MaxPeers:                peers,
+		DownloadRateBytesSec:    down,
+		UploadRateBytesSec:      up,
+		PayloadTransfersAllowed: s.payloadTransfersAllowed.Load(),
+	})
+}
+
+// limiterRate exposes zero for unlimited to keep the API simple for Android.
+func limiterRate(l *rate.Limiter) int64 {
+	if l == nil || l.Limit() == rate.Inf {
+		return 0
+	}
+	return int64(l.Limit())
+}
+
+func setLimiterRate(l *rate.Limiter, bytesPerSecond int64) {
+	if bytesPerSecond <= 0 {
+		l.SetLimit(rate.Inf)
+		return
+	}
+	l.SetLimit(rate.Limit(bytesPerSecond))
+	burst := bytesPerSecond
+	if burst > 1024*1024 {
+		burst = 1024 * 1024
+	}
+	if burst < 1 {
+		burst = 1
+	}
+	l.SetBurst(int(burst))
 }
 
 func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request) {
@@ -1237,9 +1530,40 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 			rec.Torrent.SetMaxEstablishedConns(req.MaxPeers)
 		}
 	}
+	if req.DownloadRateBytesSec != nil && *req.DownloadRateBytesSec >= 0 {
+		setLimiterRate(s.downloadLimiter, *req.DownloadRateBytesSec)
+	}
+	if req.UploadRateBytesSec != nil && *req.UploadRateBytesSec >= 0 {
+		setLimiterRate(s.uploadLimiter, *req.UploadRateBytesSec)
+	}
+	if req.PayloadTransfersAllowed != nil {
+		s.payloadTransfersAllowed.Store(*req.PayloadTransfersAllowed)
+	}
+	records := make([]*TorrentRecord, 0, len(s.records))
+	for _, rec := range s.records {
+		records = append(records, rec)
+	}
 	peers := s.maxPeers
+	down := limiterRate(s.downloadLimiter)
+	up := limiterRate(s.uploadLimiter)
+	payloadAllowed := s.payloadTransfersAllowed.Load()
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, SettingsResponse{MaxPeers: peers})
+	// Re-evaluate every torrent after releasing the map lock. This changes only
+	// piece-data admission; it never mutates rec.Paused, so a manual pause is
+	// still in force when the global setting is enabled again.
+	if req.PayloadTransfersAllowed != nil {
+		for _, rec := range records {
+			rec.mu.Lock()
+			s.applyTransferState(rec)
+			rec.mu.Unlock()
+		}
+	}
+	writeJSON(w, http.StatusOK, SettingsResponse{
+		MaxPeers:                peers,
+		DownloadRateBytesSec:    down,
+		UploadRateBytesSec:      up,
+		PayloadTransfersAllowed: payloadAllowed,
+	})
 	s.notifyChange()
 }
 
@@ -1302,8 +1626,15 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if !selected {
+	// A deselected file may still be opened for verified offline playback. It
+	// must remain rejected while any byte could require network transfer.
+	verified := fileIsVerified(t, file)
+	if !selected && !verified {
 		http.Error(w, "file is not selected", http.StatusForbidden)
+		return
+	}
+	if !s.payloadTransfersAllowed.Load() && !verified {
+		http.Error(w, "payload transfers are disabled in settings", http.StatusConflict)
 		return
 	}
 	reader := file.NewReader()
@@ -1313,7 +1644,7 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	reader.SetContext(r.Context())
 	// SetReadaheadFunc(nil) enables fixed readahead rather than dynamic piece-count throttling
 	reader.SetReadaheadFunc(nil)
-	reader.SetReadahead(20 * 1024 * 1024)
+	reader.SetReadahead(playbackWindowBytes)
 
 	ext := filepath.Ext(file.DisplayPath())
 	mimeType := mime.TypeByExtension(ext)
@@ -1328,6 +1659,18 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
 	http.ServeContent(w, r, filepath.Base(file.DisplayPath()), time.Time{}, reader)
+}
+
+func fileIsVerified(t *torrent.Torrent, file *torrent.File) bool {
+	if t == nil || file == nil || file.Length() == 0 {
+		return file != nil && file.Length() == 0
+	}
+	for _, state := range file.State() {
+		if !state.Complete || !state.Ok {
+			return false
+		}
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

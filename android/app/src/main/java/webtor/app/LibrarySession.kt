@@ -46,6 +46,9 @@ class LibrarySession(
     private val recentlyInvalidatedIds = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     )
+    private val pendingMaterializations = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
     private var lastPersistAt = 0L
     private var debounceJob: Job? = null
     private var prefetchJob: Job? = null
@@ -54,6 +57,11 @@ class LibrarySession(
     private var lastServiceUpdate = 0L
     private var draftGeneration = 0L
     private var commitInProgress = false
+    private val retryStates = mutableMapOf<String, RetryState>()
+    private val retryJobs = mutableMapOf<String, Job>()
+    private var networkConnected = true
+    private var networkWifi = true
+    private var networkMetered = false
     @Volatile private var shutdownComplete = false
 
     private val _ui = MutableStateFlow(UiState())
@@ -126,19 +134,31 @@ class LibrarySession(
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
+                        networkPolicy = savedNetworkPolicy(),
                     )
                 }
-                settings.edit().remove("playerPackage").remove("playerActivity").apply()
+                // Publish the local library before slow metadata and descriptor
+                // recovery so unrelated commands remain responsive.
+                initialized.complete(Unit)
+                settings.edit().also { editor ->
+                    editor.remove("playerPackage").remove("playerActivity")
+                    editor.remove("downloadRateBytesSec").remove("uploadRateBytesSec")
+                    LEGACY_DOWNLOAD_QUEUE_PREF_KEYS.forEach(editor::remove)
+                }.apply()
                 refreshStorageStats()
                 waitForEngine()
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
+                    runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
                     restoreAll(loaded)
                 }
+                mutex.withLock { reconcileTransferState() }
                 _ui.update { it.copy(restoring = false, statusLine = if (it.engineReady) "Ready" else it.statusLine) }
                 persist()
                 syncService()
-            } finally {
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t), restoring = false) }
                 initialized.complete(Unit)
             }
         }
@@ -183,6 +203,31 @@ class LibrarySession(
         settings.edit().putBoolean("darkTheme", dark).apply()
         _ui.update { it.copy(darkTheme = dark) }
     }
+    fun setNetworkPolicy(policy: TransferNetworkPolicy) {
+        settings.edit().putString("networkPolicy", policy.name).apply()
+        updateNetworkState(networkConnected, networkWifi, networkMetered, policy)
+    }
+
+    fun updateNetworkState(connected: Boolean, wifi: Boolean, metered: Boolean) =
+        updateNetworkState(connected, wifi, metered, _ui.value.networkPolicy)
+
+    private fun updateNetworkState(connected: Boolean, wifi: Boolean, metered: Boolean, policy: TransferNetworkPolicy) {
+        val wasAllowed = _ui.value.networkAllowed
+        networkConnected = connected
+        networkWifi = wifi
+        networkMetered = metered
+        val allowed = transferAllowed(policy, connected, wifi, metered)
+        _ui.update { it.copy(networkPolicy = policy, networkAllowed = allowed, networkReason = if (allowed) null else "Waiting for ${policy.name.lowercase().replace('_', ' ')} network") }
+        scope.launch {
+            if (_ui.value.engineReady) runCatching { withContext(io) { client.setPayloadTransfersAllowed(allowed) } }
+            mutex.withLock {
+                reconcileTransferState()
+                if (!wasAllowed && allowed) advanceRetriesForNetworkRecovery()
+            }
+        }
+    }
+
+    fun persistFolder(uri: android.net.Uri) { runCatching { storage.persistFolder(uri, "Selected folder") }.onSuccess { _ui.update { it.copy(message = "Download folder updated") } }.onFailure { showError("Folder access is unavailable") } }
 
     fun closeSettings() = _ui.update { it.copy(screen = Screen.Library, clearAllConfirm = false) }
     fun setMaxPeers(value: Int) {
@@ -195,6 +240,15 @@ class LibrarySession(
         val n = _ui.value.maxPeers
         scope.launch {
             if (_ui.value.engineReady) runCatching { withContext(io) { client.setMaxPeers(n) } }
+        }
+    }
+    fun focusEntryFile(key: String, index: Int?) {
+        scope.launchCommand {
+            val e = _ui.value.library.find { it.key == key } ?: return@launchCommand
+            val id = e.engineId ?: return@launchCommand
+            runCatching { withContext(io) { client.focus(id, index) } }.onSuccess {
+                patch(key) { it.copy(focusedFile = index) }; persist()
+            }
         }
     }
     fun consumeMessage() = _ui.update { it.copy(message = null) }
@@ -213,6 +267,9 @@ class LibrarySession(
     fun requestClearAll() = _ui.update { it.copy(clearAllConfirm = true) }
     fun dismissClearAll() = _ui.update { it.copy(clearAllConfirm = false) }
     fun pickTorrent() { _events.trySend(UiEvent.PickTorrent) }
+    fun exportDiagnostics() { _ui.update { it.copy(diagnosticsPreview = buildDiagnosticsReport(it.library, "1.4.5")) } }
+    fun closeDiagnostics() { _ui.update { it.copy(diagnosticsPreview = null) } }
+    fun shareDiagnostics() { _ui.value.diagnosticsPreview?.let { _events.trySend(UiEvent.ShareText(it)) } }
 
     fun addCurrent() {
         if (!beginUserWork()) return
@@ -337,6 +394,64 @@ class LibrarySession(
         syncPrepareSelection()
     }
 
+    /** Change selection for an already committed torrent from its details page. */
+    fun toggleDownloadFile(entryKey: String, index: Int) {
+        scope.launchCommand {
+            if (isShuttingDown.get()) return@launchCommand
+            val current = _ui.value.library.find { it.key == entryKey } ?: return@launchCommand
+            if (current.isDeleting || current.controlsBusy() || !current.metadataReady) return@launchCommand
+            val file = current.files.find { it.index == index } ?: return@launchCommand
+            val selecting = index !in current.selected
+            val next = if (selecting) current.selected + index else current.selected - index
+            val generation = current.generation + 1
+            patch(entryKey) { it.copy(generation = generation, error = null) }
+            var addedFile: SavedFile? = null
+            try {
+                val effectiveFiles = if (selecting && file.uri.isNullOrBlank()) {
+                    // Allocate the destination only when the user requests the
+                    // file. The operation is reversible if /select fails.
+                    withContext(io) { storage.createAdditionalFile(current, file) }.also { addedFile = it }
+                    current.files.map { if (it.index == index) addedFile!! else it }
+                } else current.files
+                val id = current.engineId
+                if (id != null) {
+                    val pfds = withContext(io) { storage.openFiles(effectiveFiles, next) }
+                    try {
+                        val descriptors = descriptorsFor(effectiveFiles, pfds, next)
+                        withContext(io) { client.select(id, next, descriptors) }
+                    } finally {
+                        pfds.forEach { runCatching { it?.close() } }
+                    }
+                }
+                patch(entryKey) {
+                    if (it.generation != generation) it
+                    else {
+                        val updated = it.copy(
+                            files = if (addedFile == null) it.files else it.files.map { f -> if (f.index == index) addedFile!! else f },
+                            selected = next,
+                            error = null,
+                        )
+                        updated.copy(
+                            lifecycleState = when {
+                                updated.paused -> EntryLifecycleState.PAUSED
+                                next.isEmpty() -> EntryLifecycleState.STOPPED
+                                updated.complete -> EntryLifecycleState.COMPLETED
+                                else -> EntryLifecycleState.DOWNLOADING
+                            },
+                        )
+                    }
+                }
+                persist()
+                syncService(force = true)
+                reconcileTransferState()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                addedFile?.let { runCatching { withContext(io) { storage.deleteFiles(listOf(it)) } } }
+                patch(entryKey) { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
     fun startDownload() = commitPreparedDownload()
 
     private suspend fun releasePreparedEngine(id: String) {
@@ -357,7 +472,44 @@ class LibrarySession(
                 val draft = _ui.value.prepare ?: return@withLock
                 val torrent = draft.torrent
                 if (torrent?.ready != true) {
-                    setPrepareError("Still fetching torrent info.")
+                    val source = draft.source.trim()
+                    val key = infoHashFromMagnet(source) ?: draft.engineId
+                    if (_ui.value.library.any { it.key.equals(key, true) || it.engineId == draft.engineId }) {
+                        setPrepareError("This torrent is already in your library.")
+                        return@withLock
+                    }
+                    val pending = DownloadEntry(
+                        key = key,
+                        title = source.substringAfter("dn=", "").substringBefore('&')
+                            .ifBlank { key.take(12) },
+                        source = source,
+                        metadata = "",
+                        engineId = draft.engineId,
+                        destination = "Downloads/Webtor",
+                        files = emptyList(),
+                        selected = emptySet(),
+                        paused = false,
+                        status = torrent,
+                        lifecycleState = EntryLifecycleState.DOWNLOADING,
+                        metadataReady = false,
+                        autoSelect = true,
+                    )
+                    _ui.update {
+                        it.copy(
+                            library = listOf(pending) + it.library,
+                            prepare = null,
+                            addSheetOpen = false,
+                            screen = Screen.Library,
+                            magnetDraft = "",
+                            message = null,
+                        )
+                    }
+                    // The draft prefetch may be in waitReady; it must not own or
+                    // remove this now committed engine record.
+                    prefetchJob?.cancel()
+                    persist()
+                    syncService(force = true)
+                    reconcileTransferState()
                     return@withLock
                 }
                 if (draft.selected.isEmpty()) {
@@ -381,11 +533,18 @@ class LibrarySession(
                     metadata = "",
                     engineId = draft.engineId,
                     destination = "Downloads/Webtor",
-                    files = torrent.files.map { SavedFile(it.index, it.name, it.path, it.length) },
+                    files = torrent.files.map {
+                        SavedFile(
+                            it.index, it.name, it.path, it.length,
+                            progress = it.progress,
+                            verifiedBytes = it.verifiedBytes.coerceIn(0L, it.length.coerceAtLeast(0L)),
+                        )
+                    },
                     selected = draft.selected,
                     paused = false,
                     status = torrent,
                     lifecycleState = EntryLifecycleState.PREPARING,
+                    metadataReady = true,
                 )
                 // Render the accepted download before any storage or engine I/O. The
                 // provisional entry is not persisted until configuration succeeds.
@@ -406,9 +565,10 @@ class LibrarySession(
                     }
                     val metadata = withContext(io) { client.metadata(draft.engineId) }
                     val skeleton = provisional.copy(metadata = metadata)
-                    val created = withContext(io) { storage.createFiles(skeleton, null) }
+                    val createdResult = withContext(io) { storage.createFiles(skeleton, storage.folder) }
+                    val created = createdResult.files
                     try {
-                        val pfds = withContext(io) { storage.openFiles(created) }
+                        val pfds = withContext(io) { storage.openFiles(created, draft.selected) }
                         try {
                             val descriptors = descriptorsFor(created, pfds, draft.selected)
                             withContext(io) { client.configure(draft.engineId, descriptors, draft.selected) }
@@ -421,6 +581,7 @@ class LibrarySession(
                     }
                     val entry = skeleton.copy(
                         files = created,
+                        downloadGroupUri = createdResult.groupUri,
                         lifecycleState = EntryLifecycleState.DOWNLOADING,
                     )
                     serviceSuppressed = false
@@ -437,6 +598,7 @@ class LibrarySession(
                     persist()
                     refreshStorageStats()
                     syncService(force = true)
+                    reconcileTransferState()
                 } catch (t: Throwable) {
                     _ui.update {
                         it.copy(
@@ -453,11 +615,13 @@ class LibrarySession(
         }
     }
 
+
     fun pause(entry: DownloadEntry) {
         scope.launchCommand {
             if (isShuttingDown.get()) return@launchCommand
             val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
             if (current.isDeleting) return@launchCommand
+            cancelRetry(current.key)
             val id = current.engineId ?: return@launchCommand
             val prevLifecycle = current.lifecycleState
             val prevPaused = current.paused
@@ -480,6 +644,7 @@ class LibrarySession(
                 }
                 persist()
                 syncService(force = true)
+                reconcileTransferState()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 patch(current.key) {
@@ -492,12 +657,20 @@ class LibrarySession(
         }
     }
 
+    /** Applies a batch command independently so one bad entry does not block the rest. */
+    fun pauseAll(entries: List<DownloadEntry>) = entries.forEach { pause(it) }
+
     fun resume(entry: DownloadEntry) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand
 
             val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
             if (current.isDeleting || current.complete) return@launchCommand
+            if (current.metadataReady && current.selected.isEmpty()) {
+                _ui.update { it.copy(message = "Select at least one file to resume this download.") }
+                return@launchCommand
+            }
+            cancelRetry(current.key)
 
             val prevLifecycle = current.lifecycleState
             val prevPaused = current.paused
@@ -526,6 +699,7 @@ class LibrarySession(
                 persist()
                 refreshStorageStats()
                 syncService()
+                reconcileTransferState()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 patch(current.key) {
@@ -546,12 +720,34 @@ class LibrarySession(
         }
     }
 
+    /** Applies resume independently to each selected entry; failures remain on that row. */
+    fun resumeAll(entries: List<DownloadEntry>) = entries.forEach { resume(it) }
+
     fun stop(entry: DownloadEntry) {
         scope.launchCommand {
             val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
             if (current.isDeleting || isShuttingDown.get()) return@launchCommand
+            cancelRetry(current.key)
             val id = current.engineId
             val nextGen = current.generation + 1
+
+            if (id == null) {
+                // Cancel a queued/in-flight restore as a user intent. The
+                // generation prevents its eventual native add from reviving
+                // this entry after the pause command has returned.
+                patch(current.key) {
+                    if (it.generation != current.generation) it
+                    else it.copy(
+                        generation = nextGen,
+                        paused = true,
+                        lifecycleState = EntryLifecycleState.PAUSED,
+                        error = null,
+                    )
+                }
+                persist()
+                syncService(force = true)
+                return@launchCommand
+            }
 
             patch(current.key) {
                 it.copy(
@@ -561,17 +757,15 @@ class LibrarySession(
                 )
             }
 
-            if (id != null) {
-                recentlyInvalidatedIds.add(id)
-                try {
-                    withContext(io) { client.remove(id, false) }
-                } catch (t: Exception) {
-                    recentlyInvalidatedIds.remove(id)
-                    if (t is CancellationException) throw t
-                    patch(current.key) { it.copy(lifecycleState = current.lifecycleState, error = readableError(t)) }
-                    syncService(force = true)
-                    return@launchCommand
-                }
+            recentlyInvalidatedIds.add(id)
+            try {
+                withContext(io) { client.remove(id, false) }
+            } catch (t: Exception) {
+                recentlyInvalidatedIds.remove(id)
+                if (t is CancellationException) throw t
+                patch(current.key) { it.copy(lifecycleState = current.lifecycleState, error = readableError(t)) }
+                syncService(force = true)
+                return@launchCommand
             }
 
             patch(current.key) {
@@ -596,7 +790,9 @@ class LibrarySession(
                 var current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
                 if (current.isDeleting) return@launchCommand
                 val targetIndex = fileIndex ?: pickPlayIndex(current)
-                check(targetIndex in current.selected) { "This file was not selected for download." }
+                check(targetIndex != null && (targetIndex in current.selected || completedPlayFile(current, targetIndex) != null)) {
+                    "This file was not selected for download."
+                }
                 current.engineId?.let { id ->
                     val status = withContext(io) { client.torrent(id) }
                     applyStatus(status, current.key, current.generation)
@@ -673,6 +869,7 @@ class LibrarySession(
             if (!beginUserWork()) return@launchCommand
             val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
             if (current.isDeleting) return@launchCommand
+            cancelRetry(current.key)
             val nextGen = current.generation + 1
             patch(current.key) {
                 it.copy(generation = nextGen, error = null, lifecycleState = EntryLifecycleState.PREPARING)
@@ -683,6 +880,7 @@ class LibrarySession(
                 persist()
                 refreshStorageStats()
                 syncService()
+                reconcileTransferState()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 failRestore(current.key, nextGen, readableError(t))
@@ -697,6 +895,7 @@ class LibrarySession(
             _ui.update { it.copy(deleteRequest = null) }
             return
         }
+        cancelRetry(target.key)
         val nextGen = target.generation + 1
         // Immediately dismiss dialog and render Removing... state synchronously
         _ui.update { state ->
@@ -720,8 +919,10 @@ class LibrarySession(
                 val id = target.engineId
                 if (id != null) {
                     recentlyInvalidatedIds.add(id)
+                    // Stream cache has nothing useful to keep in Downloads; always wipe it.
                     withContext(io) { client.remove(id, false) }
                 }
+                (app as? WebtorApp)?.thumbnails?.invalidate(target)
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
@@ -752,6 +953,7 @@ class LibrarySession(
             _ui.update { it.copy(deleteRequest = null) }
             return
         }
+        cancelRetry(target.key)
         val nextGen = target.generation + 1
         // Immediately dismiss dialog and render Removing... state synchronously
         _ui.update { state ->
@@ -776,10 +978,11 @@ class LibrarySession(
                 val id = target.engineId
                 if (id != null) {
                     recentlyInvalidatedIds.add(id)
-                    withContext(io) { client.remove(id, false) }
+                    withContext(io) { client.remove(id, destroyStore = true) }
                     engineRemoved = true
                 }
                 withContext(io) { storage.deleteFiles(target.files) }
+                (app as? WebtorApp)?.thumbnails?.invalidate(target)
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
@@ -817,6 +1020,7 @@ class LibrarySession(
                     }
                     patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
                     withContext(io) { storage.deleteFiles(entry.files) }
+                    (app as? WebtorApp)?.thumbnails?.invalidate(entry)
                     entry.copy(
                         files = entry.files.map { it.copy(uri = null, progress = 0.0) },
                         engineId = null,
@@ -1226,12 +1430,10 @@ class LibrarySession(
     }
 
     private suspend fun waitReady(id: String, timeoutMs: Long = 90_000, forPrepare: Boolean = true): TorrentStatus {
-        val start = System.currentTimeMillis()
+        val start = android.os.SystemClock.elapsedRealtime()
         var last: TorrentStatus? = null
         var version = -1L
-        while (System.currentTimeMillis() - start < timeoutMs) {
-            val remaining = timeoutMs - (System.currentTimeMillis() - start)
-            version = engineHost.awaitChange(version, remaining.coerceAtLeast(1))
+        while (android.os.SystemClock.elapsedRealtime() - start < timeoutMs) {
             if (forPrepare && _ui.value.prepare?.engineId != id) throw CancellationException("prefetch cleared")
             val t = withContext(io) { client.torrent(id) }
             last = t
@@ -1244,6 +1446,9 @@ class LibrarySession(
                 }
                 return t
             }
+            val remaining = timeoutMs - (android.os.SystemClock.elapsedRealtime() - start)
+            if (remaining <= 0) break
+            version = engineHost.awaitChange(version, remaining)
         }
         val peers = last?.numPeers ?: 0
         error(
@@ -1284,21 +1489,133 @@ class LibrarySession(
 
     private suspend fun restoreAll(entries: List<DownloadEntry>) {
         for (entry in entries) {
-            if (shouldSkipStartupRestore(entry) || entry.files.none { it.index in entry.selected && it.uri != null }) continue
-            mutex.withLock { restoreEntry(entry, startPaused = false) }
+            if (shouldSkipStartupRestore(entry)) continue
+            // A peerless magnet has no files or selected destinations yet. It is
+            // still a valid saved job and must be restored so discovery can keep
+            // running after relaunch.
+            if (entry.metadataReady && entry.files.none { it.uri != null }) continue
+            restoreEntry(entry, startPaused = false)
         }
     }
 
-    private fun failRestore(key: String, commandGeneration: Long, message: String) {
+    private fun failRestore(key: String, commandGeneration: Long, message: String, retryable: Boolean = false) {
         patch(key) {
             if (it.generation != commandGeneration || it.isDeleting) it
             else it.copy(
                 engineId = null,
-                paused = true,
+                // Retain RUN intent so a bounded transient retry can recover.
+                // The error state remains visible and is never presented as a
+                // user pause.
+                paused = false,
                 status = null,
-                lifecycleState = EntryLifecycleState.STOPPED,
+                lifecycleState = EntryLifecycleState.ERROR,
                 error = message,
             )
+        }
+        if (retryable) scheduleTransientRestoreRetry(key, commandGeneration)
+    }
+
+    private fun schedulePendingMaterialization(entry: DownloadEntry, torrent: TorrentStatus) {
+        if (!pendingMaterializations.add(entry.key)) return
+        scope.launch {
+            var created: List<SavedFile>? = null
+            var createdGroupUri: String? = null
+            try {
+                val live = _ui.value.library.find { it.key == entry.key } ?: return@launch
+                if (live.engineId != entry.engineId || live.metadataReady || live.isDeleting || live.paused) return@launch
+                val selected = if (live.autoSelect) defaultVideoSelection(torrent.files) else live.selected
+                if (selected.isEmpty()) throw IllegalStateException("The torrent contains no downloadable files.")
+                val metadata = withContext(io) { runCatching { client.metadata(entry.engineId!!) }.getOrDefault("") }
+                val skeleton = live.copy(
+                    metadata = metadata,
+                    metadataReady = true,
+                    files = torrent.files.map {
+                        SavedFile(
+                            it.index, it.name, it.path, it.length,
+                            progress = it.progress,
+                            verifiedBytes = it.verifiedBytes.coerceIn(0L, it.length.coerceAtLeast(0L)),
+                        )
+                    },
+                    selected = selected,
+                )
+                val free = withContext(io) { storage.freeBytes }
+                val needed = selected.sumOf { index -> skeleton.files.first { it.index == index }.length }
+                check(needed <= free) {
+                    "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available."
+                }
+                val createdResult = withContext(io) { storage.createFiles(skeleton, storage.folder) }
+                created = createdResult.files
+                createdGroupUri = createdResult.groupUri
+                val pfds = withContext(io) { storage.openFiles(created!!, selected) }
+                var accepted = false
+                try {
+                    val descriptors = descriptorsFor(created!!, pfds, selected)
+                    mutex.withLock {
+                        val beforeConfigure = _ui.value.library.find { it.key == entry.key }
+                        if (beforeConfigure != null && restoreStillApplies(
+                                beforeConfigure.generation,
+                                entry.generation,
+                                beforeConfigure.isDeleting,
+                                shutdownInProgress(),
+                            )) {
+                            // Pause/delete commands take this same mutex. The
+                            // generation check and native configure are thus a
+                            // single serialized state transition.
+                            withContext(io) { client.configure(entry.engineId!!, descriptors, selected) }
+                            val latest = _ui.value.library.find { it.key == entry.key }
+                            if (latest != null && restoreStillApplies(
+                                    latest.generation,
+                                    entry.generation,
+                                    latest.isDeleting,
+                                    shutdownInProgress(),
+                                )) {
+                                if (latest.paused) withContext(io) { client.pause(entry.engineId!!) }
+                                else withContext(io) { client.resume(entry.engineId!!) }
+                                patch(entry.key) {
+                                    if (it.generation != entry.generation || it.isDeleting) it
+                                    else it.copy(
+                                        metadata = metadata,
+                                        metadataReady = true,
+                                        files = created!!,
+                                        downloadGroupUri = createdGroupUri,
+                                        selected = selected,
+                                        error = null,
+                                        lifecycleState = if (it.paused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING,
+                                    )
+                                }
+                                accepted = true
+                            }
+                        }
+                    }
+                } finally {
+                    pfds.forEach { runCatching { it?.close() } }
+                }
+                if (!accepted) {
+                    withContext(io + NonCancellable) { runCatching { client.remove(entry.engineId!!, false) } }
+                    withContext(io) { storage.deleteFiles(created!!) }
+                    created = null
+                    val latest = _ui.value.library.find { it.key == entry.key }
+                    if (latest?.let { it.engineId == entry.engineId && it.paused } == true) {
+                        patch(entry.key) {
+                            if (it.engineId == entry.engineId && it.paused) {
+                                it.copy(engineId = null, status = null, lifecycleState = EntryLifecycleState.PAUSED)
+                            } else it
+                        }
+                    }
+                    return@launch
+                }
+                created = null
+                persist()
+                refreshStorageStats()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                created?.let { runCatching { withContext(io) { storage.deleteFiles(it) } } }
+                patch(entry.key) {
+                    if (it.engineId != entry.engineId || it.isDeleting) it else it.copy(error = readableError(t))
+                }
+            } finally {
+                pendingMaterializations.remove(entry.key)
+            }
         }
     }
 
@@ -1314,20 +1631,11 @@ class LibrarySession(
         val hasAnyUri = current.files.any { it.uri != null }
         if (hasAnyUri) {
             val hasFiles = current.files.any { it.index in current.selected && it.uri != null }
-            if (!hasFiles) {
+            // An explicit empty selection is a valid configured/stopped state.
+            // It must be restored with payload disabled so a later reselect can
+            // attach a destination without losing this torrent's identity.
+            if (current.selected.isNotEmpty() && !hasFiles) {
                 failRestore(current.key, expectedGen, "This download has no saved files to restore.")
-                return
-            }
-            val missing = withContext(io) {
-                current.files.filter { it.index in current.selected && it.uri != null }
-                    .filter { !storage.fileAccessible(it) }
-            }
-            if (missing.isNotEmpty()) {
-                failRestore(
-                    current.key,
-                    expectedGen,
-                    "A downloaded file is missing or folder access was revoked. Re-grant folder access, then retry. You can also delete leftover files from your file manager.",
-                )
                 return
             }
         } else {
@@ -1361,6 +1669,7 @@ class LibrarySession(
         }
         var addedId: String? = null
         var createdFiles: List<SavedFile>? = null
+        var createdGroupUri: String? = null
         try {
             val torrentId = current.source.ifBlank { current.key }
             val data = current.metadata.takeIf { it.isNotBlank() }
@@ -1368,6 +1677,32 @@ class LibrarySession(
                 client.add(torrentId, prepare = true, torrentData = data).also { addedId = it.id }
             }
             recentlyInvalidatedIds.remove(added.id)
+
+            if (!current.metadataReady && current.files.isEmpty()) {
+                // Metadata may require a peer and can take an arbitrary amount
+                // of time. Keep the native magnet alive and let the event loop
+                // materialize files when the metadata-ready bit changes.
+                val latest = _ui.value.library.find { it.key == current.key }
+                if (latest == null || !restoreStillApplies(latest.generation, expectedGen, latest.isDeleting, shutdownInProgress())) {
+                    withContext(io + NonCancellable) { runCatching { client.remove(added.id, false) } }
+                    return
+                }
+                val status = runCatching { withContext(io) { client.torrent(added.id) } }.getOrNull()
+                patch(current.key) {
+                    if (it.generation != expectedGen || it.isDeleting) it
+                    else it.copy(
+                        engineId = added.id,
+                        status = status ?: it.status,
+                        paused = startPaused,
+                        error = null,
+                        lifecycleState = if (startPaused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING,
+                    )
+                }
+                if (startPaused) withContext(io) { client.pause(added.id) }
+                persist()
+                syncService(force = true)
+                return
+            }
             waitReady(added.id, timeoutMs = 30_000, forPrepare = false)
 
             val fetchedMetadata = if (current.metadata.isNotBlank()) current.metadata else {
@@ -1376,14 +1711,16 @@ class LibrarySession(
 
             val effectiveFiles = if (!hasAnyUri) {
                 val skeleton = current.copy(metadata = fetchedMetadata)
-                val created = withContext(io) { storage.createFiles(skeleton, null) }
-                createdFiles = created
-                created
+                val createdResult = withContext(io) { storage.createFiles(skeleton, storage.folder) }
+                createdFiles = createdResult.files
+                createdGroupUri = createdResult.groupUri
+                createdResult.files
             } else {
                 current.files
             }
 
-            val pfds = withContext(io) { storage.openFiles(effectiveFiles) }
+            // Opening once both validates access and supplies configuration.
+            val pfds = withContext(io) { storage.openFiles(effectiveFiles, current.selected) }
             try {
                 val descriptors = descriptorsFor(effectiveFiles, pfds, current.selected)
                 withContext(io) { client.configure(added.id, descriptors, current.selected) }
@@ -1419,11 +1756,16 @@ class LibrarySession(
                 else it.copy(
                     engineId = added.id,
                     files = effectiveFiles,
+                    downloadGroupUri = createdGroupUri ?: it.downloadGroupUri,
                     status = status ?: it.status,
                     metadata = if (it.metadata.isNotBlank()) it.metadata else fetchedMetadata,
                     paused = startPaused,
                     error = null,
-                    lifecycleState = if (startPaused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING,
+                    lifecycleState = when {
+                        current.selected.isEmpty() -> EntryLifecycleState.STOPPED
+                        startPaused -> EntryLifecycleState.PAUSED
+                        else -> EntryLifecycleState.DOWNLOADING
+                    },
                 )
             }
         } catch (t: Throwable) {
@@ -1433,7 +1775,69 @@ class LibrarySession(
                 failRestore(current.key, expectedGen, "Could not resume this download.")
                 throw t
             }
-            failRestore(current.key, expectedGen, readableError(t))
+            failRestore(current.key, expectedGen, readableError(t), retryable = isTransientRestoreFailure(t))
+        }
+    }
+
+    private fun isTransientRestoreFailure(error: Throwable): Boolean {
+        if (error is CancellationException) return false
+        val message = error.message.orEmpty().lowercase()
+        return listOf(
+            "not enough storage", "folder access", "file is unavailable",
+            "no torrent metadata", "select at least one", "android 10",
+        ).none { permanent -> permanent in message }
+    }
+
+    private fun cancelRetry(key: String) {
+        retryJobs.remove(key)?.cancel()
+        retryStates.remove(key)
+    }
+
+    private fun scheduleTransientRestoreRetry(key: String, generation: Long) {
+        val live = _ui.value.library.find { it.key == key } ?: return
+        if (live.paused || live.isDeleting || live.generation != generation) return
+        val episode = RetryEpisode(key.hashCode().toLong(), generation)
+        when (val directive = RetryPolicy.onTransientFailure(retryStates[key], episode, TransferIntent.RUN)) {
+            is RetryDirective.Schedule -> scheduleRetry(key, directive)
+            RetryDirective.Cancel -> cancelRetry(key)
+            else -> Unit
+        }
+    }
+
+    private fun scheduleRetry(key: String, directive: RetryDirective.Schedule) {
+        retryJobs.remove(key)?.cancel()
+        retryStates[key] = directive.state
+        patch(key) { entry ->
+            if (entry.generation == directive.state.episode.generation && !entry.isDeleting) {
+                entry.copy(transferStage = TransferStage.RETRYING, transferReason = "Will retry shortly")
+            } else entry
+        }
+        retryJobs[key] = scope.launch {
+            delay(directive.afterMillis)
+            mutex.withLock {
+                val currentState = retryStates[key] ?: return@withLock
+                val started = RetryPolicy.markAttemptStarted(currentState, directive.state.episode) ?: return@withLock
+                retryStates[key] = started
+                val live = _ui.value.library.find { it.key == key } ?: return@withLock
+                if (live.paused || live.isDeleting || live.generation != started.episode.generation) {
+                    cancelRetry(key)
+                    return@withLock
+                }
+                patch(key) { it.copy(error = null, lifecycleState = EntryLifecycleState.PREPARING) }
+                restoreEntry(live, startPaused = false, commandGeneration = live.generation)
+                reconcileTransferState()
+            }
+        }
+    }
+
+    private fun advanceRetriesForNetworkRecovery() {
+        retryStates.toMap().forEach { (key, state) ->
+            val live = _ui.value.library.find { it.key == key } ?: return@forEach
+            when (val directive = RetryPolicy.onNetworkRecovered(state, state.episode, if (live.paused) TransferIntent.PAUSED else TransferIntent.RUN)) {
+                is RetryDirective.Schedule -> scheduleRetry(key, directive)
+                RetryDirective.Cancel -> cancelRetry(key)
+                else -> Unit
+            }
         }
     }
 
@@ -1477,6 +1881,9 @@ class LibrarySession(
                         val beforeDownloaded = current.downloaded
                         applyStatus(t, target.key, target.generation)
                         val after = _ui.value.library.find { it.key == target.key }
+                        if (after != null && !after.metadataReady && t.ready && t.files.isNotEmpty()) {
+                            schedulePendingMaterialization(after, t)
+                        }
                         if (after != null && after.downloaded != beforeDownloaded) changed = true
                         if (after?.complete == true && current.complete != true) completed = true
                     }
@@ -1519,6 +1926,7 @@ class LibrarySession(
     }
 
     private fun applyStatus(t: TorrentStatus, key: String, generation: Long) {
+        var completed: DownloadEntry? = null
         _ui.update { state ->
             val idx = state.library.indexOfFirst { it.key == key }
             if (idx < 0) return@update state
@@ -1528,24 +1936,84 @@ class LibrarySession(
                 val tf = t.files.find { it.index == f.index }
                 // Keep the saved progress visible while rechecking. Only the
                 // final verified result may correct it (e.g. after corruption).
-                if (tf != null && !t.checking) f.copy(progress = tf.progress) else f
+                if (tf != null && !t.checking) {
+                    f.copy(
+                        progress = tf.progress,
+                        verifiedBytes = tf.verifiedBytes.coerceIn(0L, f.length.coerceAtLeast(0L)),
+                    )
+                } else {
+                    f
+                }
             }
             val lifecycleState = when {
                 t.error != null -> EntryLifecycleState.ERROR
-                !t.checking && files.filter { it.index in entry.selected }.all { it.length == 0L || it.progress >= 1.0 } -> EntryLifecycleState.COMPLETED
+                !entry.metadataReady -> if (t.paused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING
+                entry.selected.isEmpty() -> EntryLifecycleState.STOPPED
+                !t.checking && files.filter { it.index in entry.selected }.all { it.isVerifiedComplete } -> EntryLifecycleState.COMPLETED
                 t.paused -> EntryLifecycleState.PAUSED
                 else -> EntryLifecycleState.DOWNLOADING
             }
             val next = entry.copy(
                 files = files,
                 status = t,
-                paused = t.paused,
+                paused = entry.paused,
                 lifecycleState = lifecycleState,
                 error = t.error?.let { readableError(it) },
                 title = t.name?.takeIf { it.isNotBlank() } ?: entry.title,
             )
+            if (shouldNotifyCompletion(entry, next)) completed = next.copy(completionAck = next.generation)
             state.copy(library = state.library.toMutableList().also { it[idx] = next })
         }
+        completed?.let { done ->
+            patch(key) { if (it.generation == done.generation) done else it }
+            scope.launch { persist(); PlayService.notifyCompleted(app, done) }
+        }
+        scope.launch { mutex.withLock { reconcileTransferState() } }
+    }
+
+    private fun savedNetworkPolicy(): TransferNetworkPolicy = settings
+        .getString("networkPolicy", TransferNetworkPolicy.ANY.name)
+        ?.let { name -> TransferNetworkPolicy.entries.find { it.name == name } }
+        ?: TransferNetworkPolicy.ANY
+
+    /**
+     * Refresh visible transfer reasons from shared policy. Eligible torrents run
+     * simultaneously with no slot limits; native selection follows the saved
+     * selected intent via restore/configure and manual toggle paths.
+     */
+    private fun reconcileTransferState() {
+        _ui.update { current ->
+            current.copy(
+                library = current.library.map { entry ->
+                    val decision = decideTransfer(entry.asTransferInput(current))
+                    entry.copy(
+                        transferStage = decision.stage,
+                        transferReason = decision.visibleReason,
+                    )
+                },
+            )
+        }
+    }
+
+    private fun DownloadEntry.asTransferInput(state: UiState) = TransferDecisionInput(
+        intent = when {
+            isDeleting -> TransferIntent.DELETED
+            paused -> TransferIntent.PAUSED
+            else -> TransferIntent.RUN
+        },
+        engineReady = state.engineReady,
+        metadataReady = metadataReady,
+        hasSelection = selected.isNotEmpty(),
+        storage = storageReadiness(this),
+        networkAllowed = state.networkAllowed,
+        verificationActive = checking,
+    )
+
+    private fun storageReadiness(entry: DownloadEntry): StorageReadiness = when {
+        entry.error?.contains("folder access", ignoreCase = true) == true ||
+            entry.error?.contains("file is unavailable", ignoreCase = true) == true -> StorageReadiness.ACCESS_REQUIRED
+        entry.error?.contains("not enough storage", ignoreCase = true) == true -> StorageReadiness.FATAL_ERROR
+        else -> StorageReadiness.READY
     }
 
     private fun markMissingEngine(id: String, error: EngineException) {
@@ -1575,7 +2043,10 @@ class LibrarySession(
         val max = files.maxOfOrNull { it.index } ?: -1
         val fds = arrayOfNulls<Int>(max + 1)
         files.forEachIndexed { i, file ->
-            fds[file.index] = if (file.index in selected) pfds.getOrNull(i)?.fd else null
+            // A descriptor represents a durable Android destination, not just
+            // current download demand. Preserve descriptors for deselected
+            // files so a later reselect can reuse their saved bytes.
+            fds[file.index] = pfds.getOrNull(i)?.fd
         }
         return fds.toList()
     }

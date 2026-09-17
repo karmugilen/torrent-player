@@ -13,7 +13,8 @@ The active submission is [fdroiddata merge request !48893](https://gitlab.com/fd
   binary scan for that exact source. No scanner exemptions were used.
 - Submitted recipe commit: `8593e91a5083091071f71b9a9c0d29e12d144b34`.
   [Pipeline 2853130363](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2853130363)
-  is running. MR !48893 remains open and needs maintainer review and publication.
+  passed all nine jobs. MR !48893 is fully updated with all required checklist
+  items complete, awaiting maintainer review and publication.
 
 ## Build recipe
 

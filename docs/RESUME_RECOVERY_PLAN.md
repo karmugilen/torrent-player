@@ -38,12 +38,12 @@ existing submission to the tested fix once its source/release is published.
 - [x] Background check, pause/resume, cancellation and restart/peer recovery pass.
 - [x] Go race/vet, JNI, Android unit tests, release lint and signed APK pass.
 - [x] F-Droid clean source build and APK scan pass for source `b772ad8`.
-- [x] The existing F-Droid MR now targets 1.4.5; its new pipeline is running.
+- [x] The existing F-Droid MR now targets 1.4.5; pipeline 2853130363 succeeded.
 - [x] Publish/merge 1.4.5 and report the final external review status.
 
 ## Delivery
 
 - [GitHub PR #2](https://github.com/karmugilen/torrent-player/pull/2) merged.
 - [1.4.5 release and APK](https://github.com/karmugilen/torrent-player/releases/tag/v1.4.5) published. Remote asset SHA-256 matches the local tested APK.
-- F-Droid [pipeline 2853130363](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2853130363) is running for the updated recipe; maintainer review/publication remains pending.
+- F-Droid [pipeline 2853130363](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2853130363) passed all nine jobs; MR checklist and maintainer notification posted; maintainer review/publication remains pending.
 - Device force-stop/reboot testing remains for the user. No user download files were changed during this fix.

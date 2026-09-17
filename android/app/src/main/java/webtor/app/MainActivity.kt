@@ -15,6 +15,9 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -30,6 +33,7 @@ class MainActivity : ComponentActivity() {
     private val torrentPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(session::openTorrent)
     }
+    private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { (application as WebtorApp).session.persistFolder(it) } }
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -38,6 +42,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState == null) handleIncoming(intent)
+        intent.getStringExtra("open_key")?.let { session.openDetails(it) }
         setContent {
             val state by session.ui.collectAsState()
             GaleTheme(dark = state.darkTheme) {
@@ -78,9 +83,12 @@ class MainActivity : ComponentActivity() {
                                 error = state.error,
                                 onBack = session::closeFiles,
                                 onPlay = { index -> session.play(entry, index) },
+                                onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
                                 onPause = { session.pause(entry) },
                                 onResume = { session.resume(entry) },
                                 onDelete = { session.requestDelete(entry) },
+                                onFocus = { index -> session.focusEntryFile(entry.key, index) },
+                                onClearFocus = { session.focusEntryFile(entry.key, null) },
                             )
                         }
                         Screen.Library -> LibraryLayer(state)
@@ -131,6 +139,9 @@ class MainActivity : ComponentActivity() {
                             onConfirm = session::confirmClearAll,
                             onDismiss = session::dismissClearAll,
                         )
+                    }
+                    state.diagnosticsPreview?.let { report ->
+                        AlertDialog(onDismissRequest = session::closeDiagnostics, title = { androidx.compose.material3.Text("Diagnostics preview") }, text = { androidx.compose.material3.Text(report) }, confirmButton = { androidx.compose.material3.TextButton(onClick = session::shareDiagnostics) { androidx.compose.material3.Text("Share") } }, dismissButton = { androidx.compose.material3.TextButton(onClick = session::closeDiagnostics) { androidx.compose.material3.Text("Close") } })
                     }
                 }
             }
@@ -185,6 +196,7 @@ class MainActivity : ComponentActivity() {
             UiEvent.PickTorrent -> pickTorrentFile()
             UiEvent.RequestNotifications -> requestNotifications()
             is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
+            is UiEvent.ShareText -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, event.text) }, "Share diagnostics"))
             UiEvent.ExitApp -> finish()
         }
     }

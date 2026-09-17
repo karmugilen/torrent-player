@@ -6,6 +6,32 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DownloadEntryTest {
+    @Test fun networkPolicyRequiresMatchingConnection() {
+        assertTrue(transferAllowed(TransferNetworkPolicy.ANY, true, false, true))
+        assertFalse(transferAllowed(TransferNetworkPolicy.WIFI_ONLY, true, false, false))
+        assertTrue(transferAllowed(TransferNetworkPolicy.UNMETERED, true, true, false))
+    }
+    @Test
+    fun diagnosticsReportDoesNotLeakSecrets() {
+        val e = entry(listOf(file(0, 1, 0.0)), setOf(0)).copy(
+            title = "secret-title", source = "magnet:?xt=urn:btih:ABC&tr=https://secret.example/x",
+            metadata = "/private/path", error = "token=super-secret",
+        )
+        val report = buildDiagnosticsReport(listOf(e), "1.0", 1L)
+        assertTrue(report.contains("entry[0].stage="))
+        assertFalse(report.contains("secret-title"))
+        assertFalse(report.contains("super-secret"))
+        assertFalse(report.contains("private/path"))
+        assertFalse(report.contains("magnet:"))
+    }
+    @Test
+    fun librarySortIsStableAndSupportsFileSearch() {
+        val first = entry(listOf(file(0, 1, 0.0, "episode.mkv")), setOf(0)).copy(key = "a", title = "Same", addedAt = 10)
+        val second = entry(listOf(file(0, 1, 0.0, "notes.txt")), setOf(0)).copy(key = "b", title = "Same", addedAt = 10)
+        assertEquals(listOf("a", "b"), listOf(first, second).stableLibrarySort(LibrarySort.NAME).map { it.key })
+        assertEquals(listOf(first), listOf(first, second).filterLibrary("episode"))
+    }
+
     @Test
     fun checkingDoesNotMarkCachedProgressCompleteOrDisablePause() {
         val status = webtor.core.EngineClient.parseTorrent(org.json.JSONObject(
@@ -22,11 +48,35 @@ class DownloadEntryTest {
         assertTrue(checking.copy(status = status.copy(checking = false)).complete)
     }
 
-    private fun file(index: Int, length: Long, progress: Double, name: String = "f$index.bin") =
-        SavedFile(index, name, name, length, uri = null, progress = progress)
+    private fun file(
+        index: Int,
+        length: Long,
+        progress: Double,
+        name: String = "f$index.bin",
+        verifiedBytes: Long? = null,
+    ) = SavedFile(
+        index, name, name, length, uri = null, progress = progress,
+        verifiedBytes = verifiedBytes ?: (length * progress.coerceIn(0.0, 1.0)).toLong(),
+    )
 
     private fun entry(files: List<SavedFile>, selected: Set<Int>) =
         DownloadEntry("k", "title", "magnet:x", "", null, "Downloads", files, selected)
+
+    @Test
+    fun liveProgressDoesNotMarkCompleteUntilVerified() {
+        val almost = entry(
+            listOf(file(0, 100, progress = 1.0, verifiedBytes = 80)),
+            setOf(0),
+        )
+        assertEquals(100L, almost.downloaded)
+        assertEquals(1f, almost.progress)
+        assertFalse(almost.complete)
+        val done = entry(
+            listOf(file(0, 100, progress = 1.0, verifiedBytes = 100)),
+            setOf(0),
+        )
+        assertTrue(done.complete)
+    }
 
     @Test
     fun totalSumsSelectedLengthsOnly() {
@@ -85,12 +135,37 @@ class DownloadEntryTest {
     }
 
     @Test
-    fun emptySelectionIsCompleteWithFullProgress() {
+    fun emptySelectionIsAnIntentionalStoppedState() {
         val e = entry(listOf(file(0, 100, 0.0)), emptySet())
         assertEquals(0L, e.total)
         assertEquals(0L, e.downloaded)
-        assertEquals(1f, e.progress)
-        assertTrue(e.complete)
+        assertEquals(0f, e.progress)
+        assertFalse(e.complete)
+    }
+
+    @Test
+    fun metadataPendingMagnetHasUnknownProgressAndIsNotComplete() {
+        val e = DownloadEntry(
+            key = "0123456789012345678901234567890123456789",
+            title = "waiting",
+            source = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            metadata = "",
+            engineId = "engine-1",
+            destination = "Downloads/Webtor",
+            files = emptyList(),
+            selected = emptySet(),
+            metadataReady = false,
+        )
+        assertEquals(0f, e.progress)
+        assertFalse(e.complete)
+        assertEquals("Connecting…", e.stateLabel())
+    }
+
+    @Test
+    fun trackerIdentityRedactsAnnouncePathAndQuery() {
+        assertEquals("https://tracker.example:443", redactedTrackerUrl("HTTPS://Tracker.Example:443/announce?token=secret"))
+        assertEquals("udp://tracker.example:6969", redactedTrackerUrl("udp://tracker.example:6969/announce"))
+        assertEquals("tracker", redactedTrackerUrl("not a tracker"))
     }
 
     @Test
@@ -125,7 +200,9 @@ class DownloadEntryTest {
             file(1, 200, 1.0, "notes.txt").copy(uri = "content://media/2"),
         ), setOf(0, 1))
         assertEquals(0, completedPlayFile(e)?.index)
-        assertEquals(null, completedPlayFile(e.copy(files = e.files.map { it.copy(progress = 0.5) })))
+        assertEquals(null, completedPlayFile(e.copy(files = e.files.map {
+            it.copy(progress = 0.5, verifiedBytes = (it.length * 0.5).toLong())
+        })))
     }
 
     @Test
@@ -196,34 +273,23 @@ class DownloadEntryTest {
     }
 
     @Test
-    fun previewRatiosUseDownloadedSpanForInProgressAnd205080WhenComplete() {
+    fun previewRatiosModeCCompleteAndLiveThree() {
         assertEquals(listOf(0.20, 0.50, 0.80), previewRatios(0.4, true))
         assertEquals(listOf(0.20, 0.50, 0.80), previewRatios(1.0, false))
-        assertEquals(listOf(0.05, 0.25, 0.45), previewRatios(0.5, false))
-        val screenshot = previewRatios(0.026, false)
-        assertEquals(listOf(0.10 * 0.026, 0.50 * 0.026, 0.90 * 0.026), screenshot)
-        screenshot.forEach { assertTrue("ratio $it must stay inside downloaded span", it <= 0.026) }
-        assertEquals(listOf(0.10, 0.50, 0.90).map { it * 0.02 }, previewRatios(0.0, false))
+        assertEquals(listOf(0.10, 0.25, 0.40), previewRatios(0.5, false))
+        assertEquals(3, livePreviewRatios(0.5).size)
+        assertTrue(livePreviewRatios(0.5).all { it <= 0.5 + 1e-9 })
+        assertEquals(1, livePreviewRatios(0.08).size)
+        assertTrue(livePreviewRatios(0.01).isEmpty())
+        assertEquals(0.25, livePreviewRatio(0.5), 1e-9)
+        assertEquals(0.02, livePreviewRatio(0.0), 1e-9)
     }
 
     @Test
-    fun previewSlotRatiosNudgeLaterInsideDownloadedSpan() {
-        fun assertRatios(expected: List<Double>, actual: List<Double>) {
-            assertEquals(expected.size, actual.size)
-            expected.zip(actual).forEach { (e, a) -> assertEquals(e, a, 1e-9) }
-        }
-        assertRatios(listOf(0.20, 0.22, 0.25), previewSlotRatios(0.20, 0.4, true))
-        assertRatios(listOf(0.80, 0.82, 0.85), previewSlotRatios(0.80, 1.0, true))
-        assertRatios(listOf(0.05, 0.07, 0.10), previewSlotRatios(0.05, 0.5, false))
-        val last = previewSlotRatios(0.45, 0.5, false)
-        assertRatios(listOf(0.45, 0.47, 0.50), last)
-        last.forEach { assertTrue("nudge $it must stay ≤ progress", it <= 0.5) }
-        val tight = previewSlotRatios(0.10 * 0.026, 0.026, false)
-        assertEquals(3, tight.size)
-        assertEquals(0.10 * 0.026, tight.first(), 1e-9)
-        assertTrue(tight.last() <= 0.026 + 1e-12)
-        assertRatios(listOf(0.018, 0.02), previewSlotRatios(0.018, 0.0, false))
-        assertFalse("time 0 is not a displayed slot", previewRatios(0.5, false).contains(0.0))
+    fun previewSlotRatiosAreSingleTargetClampedToSpan() {
+        assertEquals(listOf(0.20), previewSlotRatios(0.20, 0.4, true))
+        assertEquals(listOf(0.50), previewSlotRatios(0.50, 0.5, false))
+        assertEquals(listOf(0.018), previewSlotRatios(0.018, 0.0, false))
     }
 
     @Test
@@ -246,6 +312,14 @@ class DownloadEntryTest {
         assertEquals(4, previewUpdateBucket(0.20, false))
         assertEquals(20, previewUpdateBucket(0.4, true))
         assertEquals(20, previewUpdateBucket(1.0, false))
+    }
+
+    @Test
+    fun thumbnailCacheKeyUsesStableIdentityNotHashCode() {
+        val video = file(2, 12345, 0.5, "ep.mkv")
+        val e = entry(listOf(video), setOf(2)).copy(key = "AbCDef")
+        assertEquals("v9-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
+        assertEquals("safe_name", ThumbnailRepository.sanitize("Safe/Name"))
     }
 
     @Test
@@ -293,7 +367,9 @@ class DownloadEntryTest {
         ), setOf(0, 1))
         assertEquals("content://media/2", completedPlayFile(e, 1)?.uri)
         assertEquals("content://media/1", completedPlayFile(e, 0)?.uri)
-        assertEquals(null, completedPlayFile(e, 2))
+        // Deselecting a fully saved file stops transfer demand but must not
+        // make its local media inaccessible.
+        assertEquals("content://media/3", completedPlayFile(e, 2)?.uri)
         assertEquals(null, completedPlayFile(e, 99))
     }
 

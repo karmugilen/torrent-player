@@ -36,6 +36,18 @@ fun formatEta(ms: Long?): String? {
 
 fun formatPeers(n: Int): String = if (n == 1) "1 peer" else "$n peers"
 
+/** Show tracker identity without leaking paths, query tokens, or announce keys. */
+fun redactedTrackerUrl(value: String): String {
+    // Parse only the scheme, host and numeric port. This deliberately drops
+    // announce paths and query parameters, which may contain private tokens.
+    val match = Regex("^([a-z][a-z0-9+.-]*):\\/\\/([^/?#:]+)(?::([0-9]{1,5}))?").find(value.trim().lowercase(Locale.US))
+        ?: return "tracker"
+    val scheme = match.groupValues[1]
+    val host = match.groupValues[2]
+    val port = match.groupValues[3].takeIf { it.isNotBlank() }?.let { ":$it" }.orEmpty()
+    return "$scheme://$host$port"
+}
+
 fun mediaType(entry: DownloadEntry): String {
     val names = entry.files.filter { it.index in entry.selected }.map { it.name }
     if (names.any { it.isVideoName() }) return "Video"
@@ -77,13 +89,17 @@ fun defaultVideoSelection(files: List<webtor.core.TorrentFile>): Set<Int> {
 }
 
 fun pickPlayIndex(entry: DownloadEntry): Int? {
-    val files = entry.files.filter { it.index in entry.selected }
+    // Prefer active transfer files; if all files were deselected, keep a
+    // completed local file discoverable from the library.
+    val files = entry.files.filter { it.index in entry.selected }.ifEmpty {
+        entry.files.filter { it.uri != null && it.isVerifiedComplete }
+    }
     val videos = files.filter { it.name.isVideoName() }
     return (videos.ifEmpty { files }).maxByOrNull { it.length }?.index
 }
 
 fun DownloadEntry.canPlay(): Boolean =
-    !isDeleting && !controlsBusy() && files.any { it.index in selected && !it.uri.isNullOrBlank() }
+    !isDeleting && !controlsBusy() && files.any { !it.uri.isNullOrBlank() && (it.index in selected || it.isVerifiedComplete) }
 
 fun DownloadEntry.selectedVideoCount(): Int =
     files.count { it.index in selected && it.name.isVideoName() }
@@ -92,23 +108,45 @@ fun DownloadEntry.selectedVideoCount(): Int =
 fun firstPreviewVideo(entry: DownloadEntry): SavedFile? =
     entry.files.filter { it.index in entry.selected && it.name.isVideoName() }.minByOrNull { it.index }
 
-/** Complete: 20/50/80 of full duration. In-progress: 10/50/90 of the downloaded span. */
+/** Complete: 20/50/80 of full duration. Live: up to 3 spots inside downloaded span. */
 fun previewRatios(progress: Double, complete: Boolean): List<Double> {
     if (complete || progress >= 1.0) return listOf(0.20, 0.50, 0.80)
-    val span = progress.coerceIn(0.02, 1.0)
-    return listOf(0.10, 0.50, 0.90).map { it * span }
+    return livePreviewRatios(progress)
+}
+
+/**
+ * Up to three seek ratios inside bytes already on disk.
+ * Does not request peer seeks or change download priority.
+ */
+fun livePreviewRatios(progress: Double): List<Double> {
+    val max = progress.coerceIn(0.0, 1.0)
+    if (max < 0.03) return emptyList()
+    if (max < 0.10) return listOf((max * 0.5).coerceAtLeast(0.02))
+    if (max < 0.25) {
+        return listOf(max * 0.35, max * 0.75)
+            .map { it.coerceIn(0.02, max) }
+            .distinct()
+    }
+    return listOf(max * 0.20, max * 0.50, max * 0.80)
+        .map { it.coerceIn(0.02, max) }
+        .distinct()
+}
+
+/** Midpoint of the live span; kept for callers/tests that want one ratio. */
+fun livePreviewRatio(progress: Double): Double {
+    val ratios = livePreviewRatios(progress)
+    if (ratios.isEmpty()) return (progress.coerceIn(0.02, 1.0) * 0.85).coerceIn(0.02, 1.0)
+    return ratios[ratios.size / 2]
 }
 
 /** Latest ratio a seek may use: full file when complete, otherwise the downloaded span. */
 fun previewMaxRatio(progress: Double, complete: Boolean): Double =
     if (complete || progress >= 1.0) 1.0 else progress.coerceIn(0.02, 1.0)
 
-/** Target, then +2% / +5% of duration, clamped to the downloaded span. */
+/** Kept for tests/helpers; complete thumbs no longer walk nudge slots. */
 fun previewSlotRatios(target: Double, progress: Double, complete: Boolean): List<Double> {
     val maxRatio = previewMaxRatio(progress, complete)
-    return listOf(target, target + 0.02, target + 0.05)
-        .map { it.coerceIn(0.0, maxRatio) }
-        .distinct()
+    return listOf(target.coerceIn(0.0, maxRatio))
 }
 
 /** True when a 16×16 ARGB sample's average Rec.601 luma is below 18 (black title cards). */
@@ -173,4 +211,6 @@ fun readableError(message: String?): String {
 
 // Use the same target for local playback and streaming.
 fun completedPlayFile(entry: DownloadEntry, fileIndex: Int? = pickPlayIndex(entry)): SavedFile? =
-    entry.files.find { it.index in entry.selected && it.index == fileIndex && it.uri != null && (it.length == 0L || it.progress >= 1.0) }
+    // A fully saved file remains locally playable after the user deselects it
+    // from transfer demand. Incomplete files still require selection.
+    entry.files.find { it.index == fileIndex && it.uri != null && it.isVerifiedComplete }

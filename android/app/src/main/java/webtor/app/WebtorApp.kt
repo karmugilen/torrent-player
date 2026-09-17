@@ -4,8 +4,11 @@ import android.app.Activity
 import android.app.Application
 import java.lang.ref.WeakReference
 import webtor.core.EngineClient
+import android.net.ConnectivityManager
+import android.net.Network
 
 class WebtorApp : Application() {
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     lateinit var engine: EngineHost
         private set
     lateinit var engineClient: EngineClient
@@ -35,5 +38,8 @@ class WebtorApp : Application() {
         thumbnails = ThumbnailRepository(this)
         engine.start()
         session.start()
+        val cm = getSystemService(ConnectivityManager::class.java)
+        networkCallback = object : ConnectivityManager.NetworkCallback() { override fun onAvailable(network: Network) { session.updateNetworkState(true, true, false) }; override fun onLost(network: Network) { session.updateNetworkState(false, false, true) } }
+        runCatching { cm.registerDefaultNetworkCallback(networkCallback!!) }
     }
 }

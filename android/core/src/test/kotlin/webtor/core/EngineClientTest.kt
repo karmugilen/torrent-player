@@ -109,6 +109,8 @@ class EngineClientTest {
                     "numPeers":3,"length":100,"downloaded":25,"uploaded":4,
                     "timeRemaining":90000,"configured":true,"selected":[0,2],
                     "files":[{"index":0,"name":"a.mp4","path":"a.mp4","length":50,"progress":0.5,"type":"video/mp4"}],
+                    "trackers":[{"url":"udp://tracker.example.org:1337/announce","tier":0,"status":"working","message":"3 peers","original":true},
+                                {"url":"wss://tracker.example.org","tier":1,"status":"error","message":"timeout","original":false}],
                     "error":"slow"}"""
             )
         )
@@ -118,6 +120,13 @@ class EngineClientTest {
         assertEquals(listOf(0, 2), t.selected)
         assertTrue(t.paused)
         assertEquals("slow", t.error)
+        assertEquals(2, t.trackers.size)
+        assertEquals("udp://tracker.example.org:1337/announce", t.trackers[0].url)
+        assertEquals("working", t.trackers[0].status)
+        assertEquals("3 peers", t.trackers[0].message)
+        assertTrue(t.trackers[0].original)
+        assertEquals("error", t.trackers[1].status)
+        assertFalse(t.trackers[1].original)
         assertEquals("/torrent/abc", transport.takeRequest().path)
     }
 
@@ -142,6 +151,7 @@ class EngineClientTest {
         assertEquals(emptyList<Int>(), t.selected)
         assertFalse(t.paused)
         assertNull(t.error)
+        assertEquals(emptyList<TrackerStatus>(), t.trackers)
     }
 
     @Test
@@ -170,6 +180,18 @@ class EngineClientTest {
     }
 
     @Test
+    fun selectCanSendDescriptorsWhenAFileIsSelectedLater() {
+        transport.enqueue(TestResponse().setBody("""{"ok":true,"selected":[0,2]}"""))
+        client.select("abc", setOf(0, 2), listOf(11, null, 13))
+        val req = transport.takeRequest()
+        val body = JSONObject(req.body.readUtf8())
+        val descriptors = body.getJSONArray("descriptors")
+        assertEquals(11, descriptors.getInt(0))
+        assertTrue(descriptors.isNull(1))
+        assertEquals(13, descriptors.getInt(2))
+    }
+
+    @Test
     fun configureSendsDescriptorsAndSelected() {
         transport.enqueue(TestResponse().setBody("""{"ok":true}"""))
         client.configure("abc", listOf(7, null, 9), setOf(0, 2))
@@ -177,6 +199,7 @@ class EngineClientTest {
         assertEquals("/configure", req.path)
         val body = JSONObject(req.body.readUtf8())
         assertEquals("abc", body.getString("id"))
+        assertEquals("download", body.getString("storageMode"))
         val descriptors = body.getJSONArray("descriptors")
         assertEquals(7, descriptors.getInt(0))
         assertTrue(descriptors.isNull(1))
@@ -186,6 +209,7 @@ class EngineClientTest {
         for (i in 0 until selectedArr.length()) selected.add(selectedArr.getInt(i))
         assertEquals(setOf(0, 2), selected)
     }
+
 
     @Test
     fun pauseResumeRemoveHitPaths() {
@@ -227,14 +251,23 @@ class EngineClientTest {
     }
 
     @Test
+    fun payloadTransferGateHitsSettingsWithoutChangingPauseIntent() {
+        transport.enqueue(TestResponse().setBody("""{"payloadTransfersAllowed":false}"""))
+        assertFalse(client.setPayloadTransfersAllowed(false))
+        val request = transport.takeRequest()
+        assertEquals("/settings", request.path)
+        assertFalse(JSONObject(request.body.readUtf8()).getBoolean("payloadTransfersAllowed"))
+    }
+
+    @Test
     fun piecesParsesBucketsAndHitsPath() {
         transport.enqueue(
             TestResponse().setBody(
                 """{"id":"abc","infoHash":"dead","generation":3,"timestamp":1700000000000,
                     "totalPieces":4,"pieceLength":16384,"lastPieceLength":1024,"maxBuckets":256,
                     "buckets":[
-                      {"start":0,"end":1,"total":2,"selected":2,"verified":1,"receiving":1},
-                      {"start":2,"end":3,"total":2,"selected":1,"verified":2,"receiving":0}
+                      {"start":0,"end":1,"total":2,"selected":2,"verified":1,"receiving":1,"selectedVerified":1,"selectedReceiving":1},
+                      {"start":2,"end":3,"total":2,"selected":1,"verified":2,"receiving":0,"selectedVerified":1,"selectedReceiving":0}
                     ]}"""
             )
         )
@@ -255,6 +288,8 @@ class EngineClientTest {
         assertEquals(2, first.selected)
         assertEquals(1, first.verified)
         assertEquals(1, first.receiving)
+        assertEquals(1, first.selectedVerified)
+        assertEquals(1, first.selectedReceiving)
         val second = t.buckets[1]
         assertEquals(2, second.start)
         assertEquals(3, second.end)
@@ -262,6 +297,27 @@ class EngineClientTest {
         assertEquals(1, second.selected)
         assertEquals(2, second.verified)
         assertEquals(0, second.receiving)
+        assertEquals(1, second.selectedVerified)
+        assertEquals(0, second.selectedReceiving)
         assertEquals("/pieces/abc?maxBuckets=256", transport.takeRequest().path)
+    }
+
+    @Test
+    fun piecesParsesAbsentSelectedCountsAsZero() {
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"id":"legacy","totalPieces":2,"pieceLength":1024,"lastPieceLength":1024,"maxBuckets":2,
+                    "buckets":[
+                      {"start":0,"end":0,"total":1,"selected":1,"verified":1,"receiving":0},
+                      {"start":1,"end":1,"total":1,"selected":0,"verified":1,"receiving":0}
+                    ]}"""
+            )
+        )
+        val t = client.pieces("legacy")
+        assertEquals(2, t.buckets.size)
+        assertEquals(0, t.buckets[0].selectedVerified)
+        assertEquals(0, t.buckets[0].selectedReceiving)
+        assertEquals(0, t.buckets[1].selectedVerified)
+        assertEquals(0, t.buckets[1].selectedReceiving)
     }
 }

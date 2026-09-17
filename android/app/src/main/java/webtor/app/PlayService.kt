@@ -144,6 +144,17 @@ class PlayService : Service() {
     }
 
     companion object {
+        fun notifyCompleted(ctx: Context, entry: DownloadEntry) {
+            runCatching {
+                val manager = ctx.getSystemService(NotificationManager::class.java)
+                if (Build.VERSION.SDK_INT >= 33 && manager.areNotificationsEnabled().not()) return
+                val channel = NotificationChannel("webtor-complete", "Completed downloads", NotificationManager.IMPORTANCE_DEFAULT)
+                manager.createNotificationChannel(channel)
+                val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                val open = PendingIntent.getActivity(ctx, entry.key.hashCode(), Intent(ctx, MainActivity::class.java).putExtra("open_key", entry.key), flags)
+                manager.notify(entry.key.hashCode(), NotificationCompat.Builder(ctx, "webtor-complete").setSmallIcon(android.R.drawable.stat_sys_download_done).setContentTitle("Download complete").setContentText("A download is ready").setContentIntent(open).setAutoCancel(true).build())
+            }
+        }
         const val ACTION_STOP = "webtor.app.STOP"
         private const val ACTION_REFRESH = "webtor.app.REFRESH_NOTIFICATION"
         const val EXTRA_TITLE = "title"

@@ -54,7 +54,8 @@ fun AddSheet(
     }
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedBytes
-    val canDownload = ready && selection.isNotEmpty() && !busy && !insufficientSpace && existingEntry == null && onDownload != null
+    val canAddPending = !ready && draft != null && !busy && existingEntry == null && onDownload != null && engineReady
+    val canDownload = (ready && selection.isNotEmpty() && !insufficientSpace || canAddPending) && existingEntry == null && onDownload != null
     Scaffold(
         modifier = Modifier.imePadding(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -74,7 +75,7 @@ fun AddSheet(
             )
         },
         bottomBar = {
-            if (ready || existingEntry != null) Surface(
+            if (ready || existingEntry != null || canAddPending) Surface(
                 color = MaterialTheme.colorScheme.background,
                 tonalElevation = 2.dp,
             ) {
@@ -86,7 +87,8 @@ fun AddSheet(
                     when {
                         existingEntry != null -> Text("This torrent is already in your library.", style = MaterialTheme.typography.bodyMedium)
                         insufficientSpace -> Text("Not enough storage to download ${formatBytes(selectedBytes)}.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                        selection.isEmpty() -> Text("Select at least one file to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        selection.isEmpty() && ready -> Text("Select at least one file to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        canAddPending -> Text("No peers yet. Save this magnet and keep trying in the background.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (existingEntry != null) {
                         Button(
@@ -102,7 +104,7 @@ fun AddSheet(
                             enabled = canDownload,
                             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
-                            Text("Download", maxLines = 1)
+                            Text(if (canAddPending) "Add and wait" else "Download", maxLines = 1)
                         }
                     }
                 }

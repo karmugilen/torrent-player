@@ -191,6 +191,51 @@ func TestRestoreOutlivesRequestAndPauseResumeRemainResponsive(t *testing.T) {
 	}
 }
 
+func TestFailedRestoreCanRetryOnResume(t *testing.T) {
+	s := testEngine(t)
+	want, metadata := recoveryMetadata(t)
+	rec := addRecoveryTorrent(t, s, metadata)
+	f, err := os.CreateTemp(t.TempDir(), "bad-saved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(want); err != nil {
+		t.Fatal(err)
+	}
+	fd := int(f.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	code, response := s.DispatchControl("POST", "/configure", string(body))
+	if code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	// Inject the recoverable state produced by a failed check after the initial
+	// checker is stopped. The resume path must clear the error and start a fresh
+	// verification job before enabling payload transfer.
+	stopSavedDataCheck(rec)
+	rec.mu.Lock()
+	rec.removed = false
+	rec.Checking = false
+	message := "saved data check failed"
+	rec.Error = &message
+	rec.Paused = true
+	s.applyTransferState(rec)
+	rec.mu.Unlock()
+	st := s.storage.GetStorage(rec.InfoHash)
+	st.mu.Lock()
+	st.needsVerify = true
+	st.mu.Unlock()
+	recoveryCommand(t, s, rec, "/resume")
+	waitRecovery(t, func() bool { return recoveryStatus(t, s, rec).Checking })
+	waitRecovery(t, func() bool {
+		status := recoveryStatus(t, s, rec)
+		return status.Error == nil && !status.Checking && status.Done
+	})
+	if rec.Torrent.Files()[0].Priority() != torrent.PiecePriorityNormal {
+		t.Fatal("retry did not re-enable the selected file")
+	}
+}
+
 func TestRemoveAndShutdownCancelSavedDataCheck(t *testing.T) {
 	for _, shutdown := range []bool{false, true} {
 		name := "remove"
