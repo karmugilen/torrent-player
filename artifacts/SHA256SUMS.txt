@@ -23,3 +23,11 @@ c92c2cc375d1e6ff430363db80fc6ce9ee1da073f265695d90a14b9472cec2b8  torrent-player
 2fa3faf74f73d853f3e21b00700d11c38adb71ed3b217ac2e510f3a6ae9da198  torrent-player-1.4.5-moov-soft.apk
 f66e8426f4dc3bc4045b475604b72e097be59075fd06396f431f8bcc9b753e22  torrent-player-1.4.5-magnet-cachefix.apk
 c58c0471b21df5d6ac3d49a5e30cd15240093d817dd6a7f122fa485a34cb246d  torrent-player-1.4.5-speed-peers-fix.apk
+f97b3730543743ba86e77115198ea0ea797c3bfae43dc6fc3c6f013cc619af75  torrent-player-1.4.5-nes-grid-share.apk
+93fb01f60b7ede7067efdc1860d12c412762fe5896adb76a1fa76c8feb416bff  torrent-player-1.4.5-pieces-material.apk
+4d81ef36d9e3d96c72ececf2606720a40b6f16a2c27de31cafb7b3d3b50e59ca  torrent-player-1.4.5-pieces-material.apk
+2b21999a5437d2590e82763559221af1e31bd82bf72050530a8f888f6a2564c7  torrent-player-1.4.5-pieces-material.apk
+8b178b481c039ac52bd936198f585090614590e9d7e5e2481acc4b51571eea66  torrent-player-1.4.5-pieces-pre-nes.apk
+1f0f4fbaec2dafa78fa3d9c4ac9f4204b0e05867f6594bc5892850da57e1ff3d  torrent-player-1.4.5-pieces-pre-nes.apk
+1f0f4fbaec2dafa78fa3d9c4ac9f4204b0e05867f6594bc5892850da57e1ff3d  torrent-player-1.4.5-playback-update.apk
+ab7ca19a7935e9e9daabb850838d1b0a37cbd685dc6ad99d0cbd7a26be0b9b82  torrent-player-2.0.0.apk

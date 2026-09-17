@@ -330,24 +330,6 @@ fun PieceHeatGridSection(
                     }
                 }
 
-                if (markers.any { it.label != null }) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        markers.filter { it.label != null }.take(3).forEach { marker ->
-                            Text(
-                                marker.label!!,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
-                            )
-                        }
-                    }
-                }
-
                 PieceHeatLegend(summary = summary)
 
                 val peek = peekIndex?.let { idx -> buckets.getOrNull(idx)?.let { peekForBucket(it) } }

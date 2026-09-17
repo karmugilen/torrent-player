@@ -28,7 +28,22 @@ Builds:
       - GOTOOLCHAIN=local go -C ../../engine-go mod verify
     ndk: r26b
 
+  - versionName: 2.0.0
+    versionCode: 23
+    commit: v2.0.0
+    timeout: 3600
+    subdir: android/app
+    sudo:
+      - apt-get update
+      - apt-get install -y golang-go
+    gradle:
+      - yes
+    prebuild:
+      - GOTOOLCHAIN=local go -C ../../engine-go mod download
+      - GOTOOLCHAIN=local go -C ../../engine-go mod verify
+    ndk: r26b
+
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.4.5
-CurrentVersionCode: 22
+CurrentVersion: 2.0.0
+CurrentVersionCode: 23

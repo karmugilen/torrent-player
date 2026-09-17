@@ -12,7 +12,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -56,7 +55,14 @@ fun TorrentFilesScreen(
     val client = app.engineClient
     val thumbnails = app.thumbnails
     var telemetry by remember(entry.key) { mutableStateOf<PieceTelemetry?>(null) }
-    var menuExpanded by remember(entry.key) { mutableStateOf(false) }
+    var copiedMagnet by remember(entry.key) { mutableStateOf(false) }
+    val magnetUri = resolveMagnetUri(entry)
+    LaunchedEffect(copiedMagnet) {
+        if (copiedMagnet) {
+            delay(2_000)
+            copiedMagnet = false
+        }
+    }
     val previewVideo = firstPreviewVideo(entry)
     val previewUri = previewVideo?.uri
     val latestEntry by rememberUpdatedState(entry)
@@ -138,47 +144,6 @@ fun TorrentFilesScreen(
                             contentDescription = "Remove download",
                         )
                     }
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(
-                                Icons.Default.MoreVert,
-                                contentDescription = "More options",
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false },
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Share magnet") },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Share, contentDescription = null)
-                                },
-                                onClick = {
-                                    menuExpanded = false
-                                    val uri = resolveMagnetUri(entry)
-                                    if (uri != null) {
-                                        shareMagnetUri(context, uri)
-                                    } else {
-                                        Toast.makeText(context, "Magnet link is not available yet.", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Copy magnet") },
-                                onClick = {
-                                    menuExpanded = false
-                                    val uri = resolveMagnetUri(entry)
-                                    if (uri != null) {
-                                        clipboardManager.setText(AnnotatedString(uri))
-                                        Toast.makeText(context, "Magnet link copied to clipboard", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        Toast.makeText(context, "Magnet link is not available yet.", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                            )
-                        }
-                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = colors.background,
@@ -194,7 +159,21 @@ fun TorrentFilesScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            item { DownloadSummary(entry, error, frames) }
+            item {
+                DownloadSummary(
+                    entry, error, frames,
+                    magnetAvailable = magnetUri != null,
+                    copiedMagnet = copiedMagnet,
+                    onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
+                    onCopyMagnet = {
+                        magnetUri?.let {
+                            clipboardManager.setText(AnnotatedString(it))
+                            copiedMagnet = true
+                            Toast.makeText(context, "Magnet link copied", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                )
+            }
             item { TransferSection(entry) }
             item { TrackerDetailsSection(status) }
             item {
@@ -225,7 +204,15 @@ fun TorrentFilesScreen(
 }
 
 @Composable
-private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<android.graphics.Bitmap>?) {
+private fun DownloadSummary(
+    entry: DownloadEntry,
+    error: String?,
+    frames: List<android.graphics.Bitmap>?,
+    magnetAvailable: Boolean,
+    copiedMagnet: Boolean,
+    onShareMagnet: () -> Unit,
+    onCopyMagnet: () -> Unit,
+) {
     val colors = MaterialTheme.colorScheme
     val isPaused = entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
         (entry.metadataReady && (entry.lifecycleState == EntryLifecycleState.STOPPED || entry.engineId == null))
@@ -281,6 +268,35 @@ private fun DownloadSummary(entry: DownloadEntry, error: String?, frames: List<a
                 )
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+            Row(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilledTonalButton(
+                    onClick = onShareMagnet,
+                    enabled = magnetAvailable,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Share magnet")
+                }
+                OutlinedButton(
+                    onClick = onCopyMagnet,
+                    enabled = magnetAvailable,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    Text(if (copiedMagnet) "Copied!" else "Copy link")
+                }
+            }
+            if (!magnetAvailable) {
+                Text("Magnet link not available yet", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
         }
     }
 }
