@@ -16,6 +16,18 @@ The active submission is [fdroiddata merge request !48893](https://gitlab.com/fd
   passed all nine jobs. MR !48893 is fully updated with all required checklist
   items complete, awaiting maintainer review and publication.
 
+## Maintainer review update (2026-09-17)
+
+@linsui requested reproducible-build metadata on MR !48893:
+
+- `Binaries:` GitHub release APK URL pattern
+- `AllowedAPKSigningKeys:` SHA-256 of the published 1.4.5 APK signer
+- Removed unnecessary `timeout: 3600`
+
+The listing AutoName remains **Torrent Player**. The metadata filename /
+application id `webtor.app` is the Android `applicationId` and cannot change
+without publishing a different app id.
+
 ## Build recipe
 
 The canonical recipe is [`webtor.app.yml`](../webtor.app.yml). The app now builds a native Go engine from `engine-go/` with Android NDK r26b. It does not use Node.js, npm, V8, CMake, JavaScript bundles, or native Node addons.
