@@ -14,14 +14,28 @@ import (
 // ok=false means the filesystem does not expose sparse extents.
 // io.EOF means there is no more data at or after offset (remaining bytes are holes).
 func seekData(f *os.File, offset int64) (pos int64, ok bool, err error) {
-	pos, err = unix.Seek(int(f.Fd()), offset, unix.SEEK_DATA)
+	return seekDataFd(int(f.Fd()), offset)
+}
+
+func seekDataFd(fd int, offset int64) (pos int64, ok bool, err error) {
+	pos, err = unix.Seek(fd, offset, unix.SEEK_DATA)
 	if err == nil {
 		return pos, true, nil
 	}
 	if err == unix.ENXIO {
 		return 0, true, io.EOF
 	}
-	// EINVAL/ENOTSUP and similar: provider or filesystem lacks hole seeking.
+	return 0, false, err
+}
+
+func seekHoleFd(fd int, offset int64) (pos int64, ok bool, err error) {
+	pos, err = unix.Seek(fd, offset, unix.SEEK_HOLE)
+	if err == nil {
+		return pos, true, nil
+	}
+	if err == unix.ENXIO {
+		return 0, true, io.EOF
+	}
 	return 0, false, err
 }
 

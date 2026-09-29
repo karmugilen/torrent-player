@@ -79,6 +79,11 @@ type TorrentRecord struct {
 	verification         *savedDataCheck
 	removed              bool
 	rates                transferRates
+	reconnectPeers       []torrent.PeerInfo
+	// Cached verified-byte totals. Rebuilt only when PiecesComplete changes so
+	// GET /torrent does not walk PieceStateRuns on every progress tick.
+	verifiedGen   int
+	verifiedBytes []int64
 }
 
 type EngineServer struct {
@@ -117,6 +122,13 @@ type EngineServer struct {
 	lastRateTime      time.Time
 	downloadSpeed     int64
 	uploadSpeed       int64
+
+	networkMu         sync.Mutex
+	networkKnown      bool
+	networkGeneration int64
+	networkCancel     context.CancelFunc
+	networkWorkers    sync.WaitGroup
+	trackerSockets    *networkDialer
 }
 
 func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServer, error) {
@@ -161,10 +173,8 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	cfg.TorrentPeersLowWater = max(40, maxPeers*2)
 
 	// HTTP & WebSocket tracker dialer with sensible 6s timeout (avoid 45s hang)
-	cfg.HTTPDialContext = (&net.Dialer{
-		Timeout:   6 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext
+	trackerSockets := &networkDialer{}
+	cfg.HTTPDialContext = trackerSockets.DialContext
 	cfg.TrackerDialContext = cfg.HTTPDialContext
 
 	cfg.HTTPUserAgent = "TorrentPlayer/1.4.5"
@@ -191,6 +201,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 		playbackOwners:  make(map[*torrent.Torrent]*playbackPriorityCoordinator),
 		downloadDir:     downloadDir,
 		maxPeers:        maxPeers,
+		trackerSockets:  trackerSockets,
 		downloadLimiter: cfg.DownloadRateLimiter,
 		uploadLimiter:   cfg.UploadRateLimiter,
 		ctlPort:         ctlPort,
@@ -274,6 +285,8 @@ func (s *EngineServer) rateTrackerLoop() {
 
 // Sample telemetry using the existing rate clock. Only a changed snapshot wakes
 // Android; final verification, idle peer changes and completion are not lost.
+// Cheap counters only: do not walk or JSON-encode PieceStateRuns here. Playback
+// priority churn must not wake the UI every second.
 func (s *EngineServer) statusFingerprint() [sha256.Size]byte {
 	s.mu.RLock()
 	records := make([]*TorrentRecord, 0, len(s.records))
@@ -289,16 +302,33 @@ func (s *EngineServer) statusFingerprint() [sha256.Size]byte {
 		rec.mu.RLock()
 		t := rec.Torrent
 		stats := t.Stats()
-		fmt.Fprintf(h, "%s:%d:%t:%t:%d:%d:%d:%d:%d;", rec.ID, rec.Generation, rec.Paused,
-			t.Info() != nil, stats.ActivePeers, stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64(), rec.rates.down, rec.rates.up)
-		// Includes hash completion, even when the last received byte was already
-		// accounted for by the previous sample.
-		_ = json.NewEncoder(h).Encode(t.PieceStateRuns())
+		err := ""
+		if rec.Error != nil {
+			err = *rec.Error
+		}
+		fmt.Fprintf(h, "%s:%d:%t:%t:%t:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%s;",
+			rec.ID, rec.Generation, rec.Paused, rec.Checking, rec.Configured,
+			rec.CheckedPieces, rec.CheckTotal, len(rec.Selected),
+			stats.ActivePeers, stats.PiecesComplete, stats.BytesHashed.Int64(),
+			stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64(),
+			rec.rates.down, rec.rates.up, err)
 		rec.mu.RUnlock()
 	}
 	var result [sha256.Size]byte
 	copy(result[:], h.Sum(nil))
 	return result
+}
+
+// verifiedFileBytesCached returns per-file verified totals. rec.mu must be held.
+func (rec *TorrentRecord) verifiedFileBytesCached(t *torrent.Torrent, piecesComplete int) []int64 {
+	files := t.Files()
+	if rec.verifiedBytes != nil && rec.verifiedGen == piecesComplete && len(rec.verifiedBytes) == len(files) {
+		return rec.verifiedBytes
+	}
+	bytes := verifiedFileBytes(t)
+	rec.verifiedGen = piecesComplete
+	rec.verifiedBytes = bytes
+	return bytes
 }
 
 func (s *EngineServer) notifyChange() {
@@ -396,6 +426,7 @@ func (s *EngineServer) Done() <-chan struct{} { return s.done }
 func (s *EngineServer) Close() {
 	s.closeOnce.Do(func() {
 		s.shuttingDown.Store(true)
+		s.stopNetworkRecovery()
 		s.addMu.Lock()
 		defer s.addMu.Unlock()
 		s.trackers.close()
@@ -569,6 +600,10 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case http.MethodPost:
+		if len(parts) == 1 && parts[0] == "network" {
+			s.handleNetworkChange(w, r)
+			return
+		}
 		if len(parts) == 1 && parts[0] == "add" {
 			s.handleAdd(w, r)
 			return
@@ -656,17 +691,22 @@ func (s *EngineServer) handleFocus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *EngineServer) applyBackgroundFocus(rec *TorrentRecord) {
+	c := s.ensurePlaybackCoordinator(rec.Torrent)
 	if !s.payloadTransfersAllowed.Load() || rec.FocusedFile == nil || rec.Paused || !rec.Configured || rec.Checking {
+		c.setFocus(nil)
 		return
 	}
 	files := rec.Torrent.Files()
 	idx := *rec.FocusedFile
 	if idx < 0 || idx >= len(files) {
+		c.setFocus(nil)
 		return
 	}
+	demand := make(map[int]torrent.PiecePriority)
 	for p := files[idx].BeginPieceIndex(); p < files[idx].EndPieceIndex(); p++ {
-		rec.Torrent.Piece(p).SetPriority(torrent.PiecePriorityHigh)
+		demand[p] = torrent.PiecePriorityHigh
 	}
+	c.setFocus(demand)
 }
 
 func (s *EngineServer) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -844,6 +884,7 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	t := rec.Torrent
+	tStats := t.Stats()
 	ready := t.Info() != nil
 	var name *string
 	infoHashStr := rec.InfoHash
@@ -869,7 +910,7 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		n := t.Name()
 		name = &n
 		tfFiles := t.Files()
-		verified := verifiedFileBytes(t)
+		verified := rec.verifiedFileBytesCached(t, tStats.PiecesComplete)
 		selected := make(map[int]bool, len(rec.Selected))
 		for _, index := range rec.Selected {
 			selected[index] = true
@@ -920,7 +961,6 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	// An explicit empty selection means “download nothing”, not a completed
 	// torrent. This distinction matters when users uncheck every file.
 	done := ready && len(rec.Selected) > 0 && !rec.Checking && totalLen > 0 && verifiedTotal >= totalLen
-	tStats := t.Stats()
 	numPeers := tStats.ActivePeers
 	if numPeers == 0 {
 		numPeers = len(t.PeerConns())
@@ -1064,26 +1104,8 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	focused := fileIdx
 	rec.FocusedFile = &focused
 	targetFile.Download()
-
-	// Give the HTTP media adapter the same startup open-phase policy as JNI
-	// playback: Head (~5MB) and Tail (~3MB) at PiecePriorityNow.
-	if t.Info() != nil && t.Info().PieceLength > 0 && targetFile.Length() > 0 {
-		pieceLen := t.Info().PieceLength
-		beginPiece := targetFile.Offset() / pieceLen
-		headEnd := targetFile.Offset() + min(targetFile.Length(), videoStartupHeadBytes)
-		for p := beginPiece; int64(p)*pieceLen < headEnd; p++ {
-			t.Piece(int(p)).SetPriority(torrent.PiecePriorityNow)
-		}
-
-		// Also boost the last few MiB at Now during startup (crucial for MP4 moov atoms at the end).
-		if targetFile.Length() > videoStartupTailBytes {
-			lastBeginPiece := (targetFile.Offset() + targetFile.Length() - videoStartupTailBytes) / pieceLen
-			lastEndPiece := (targetFile.Offset() + targetFile.Length() - 1) / pieceLen
-			for p := lastBeginPiece; p <= lastEndPiece; p++ {
-				t.Piece(int(p)).SetPriority(torrent.PiecePriorityNow)
-			}
-		}
-	}
+	s.applyVideoStartupHints(rec)
+	s.applyBackgroundFocus(rec)
 
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/torrent/%s/file/%d", s.streamPort, rec.ID, fileIdx)
 
@@ -1169,6 +1191,7 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		s.startSavedDataCheck(rec)
 	} else if st != nil {
 		st.UnfreezeTrusted()
+		s.publishStorageCompletions(rec)
 	}
 	s.applyTransferState(rec)
 
@@ -1347,43 +1370,10 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 	pieceLength := t.Info().PieceLength
 	lastPieceLength := t.Length() - int64(totalPieces-1)*pieceLength
 
-	// Gather piece states
-	runs := t.PieceStateRuns()
-	pieceStates := make([]torrent.PieceState, totalPieces)
-	idx := 0
-	for _, run := range runs {
-		for k := 0; k < run.Length && idx < totalPieces; k++ {
-			pieceStates[idx] = run.PieceState
-			idx++
-		}
-	}
-
-	// Compute ranges
-	var bucketList []PieceBucket
-	if totalPieces <= maxBuckets {
-		for i := 0; i < totalPieces; i++ {
-			bucketList = append(bucketList, PieceBucket{Start: i, End: i})
-		}
-	} else {
-		bucketSize := int(math.Ceil(float64(totalPieces) / float64(maxBuckets)))
-		for start := 0; start < totalPieces; start += bucketSize {
-			end := start + bucketSize - 1
-			if end >= totalPieces {
-				end = totalPieces - 1
-			}
-			bucketList = append(bucketList, PieceBucket{Start: start, End: end})
-		}
-	}
-
-	for i := range bucketList {
-		b := &bucketList[i]
-		b.Total = b.End - b.Start + 1
-		for p := b.Start; p <= b.End; p++ {
-			st := pieceStates[p]
-			selected := pieceSelectedByFiles(t.Files(), rec.Selected, p)
-			receiving := !st.Complete && (st.Partial || st.Checking || st.Hashing)
-			accumulateBucketPiece(b, selected, st.Complete, receiving)
-		}
+	bucketList, err := pieceBuckets(t, rec.Selected, maxBuckets)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
 
 	resp := PieceTelemetryResponse{
@@ -1399,25 +1389,6 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// pieceSelectedByFiles reports whether any selected file intersects a piece.
-// Torrent pieces can cross file boundaries, so selected telemetry must be
-// computed from file ranges rather than assuming all pieces are selected.
-func pieceSelectedByFiles(files []*torrent.File, selected []int, piece int) bool {
-	if piece < 0 {
-		return false
-	}
-	for _, index := range selected {
-		if index < 0 || index >= len(files) {
-			continue
-		}
-		file := files[index]
-		if piece >= file.BeginPieceIndex() && piece < file.EndPieceIndex() {
-			return true
-		}
-	}
-	return false
 }
 
 // accumulateBucketPiece updates inclusive bucket counters for one piece.

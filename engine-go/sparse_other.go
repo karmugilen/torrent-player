@@ -8,6 +8,14 @@ import (
 )
 
 func seekData(f *os.File, offset int64) (pos int64, ok bool, err error) {
+	return seekDataFd(int(f.Fd()), offset)
+}
+
+func seekDataFd(fd int, offset int64) (pos int64, ok bool, err error) {
+	return 0, false, errors.New("sparse seeking is unavailable on this platform")
+}
+
+func seekHoleFd(fd int, offset int64) (pos int64, ok bool, err error) {
 	return 0, false, errors.New("sparse seeking is unavailable on this platform")
 }
 

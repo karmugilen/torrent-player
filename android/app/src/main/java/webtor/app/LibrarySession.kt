@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -59,12 +60,11 @@ class LibrarySession(
     private var commitInProgress = false
     private val retryStates = mutableMapOf<String, RetryState>()
     private val retryJobs = mutableMapOf<String, Job>()
-    private var networkConnected = true
-    private var networkWifi = true
-    private var networkMetered = false
+    private var networkSnapshot = NetworkSnapshot()
+    private val networkUpdates = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var shutdownComplete = false
 
-    private val _ui = MutableStateFlow(UiState())
+    private val _ui = MutableStateFlow(UiState(networkPolicy = savedNetworkPolicy(), networkAllowed = false))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     private val _events = Channel<UiEvent>(Channel.BUFFERED)
@@ -106,6 +106,7 @@ class LibrarySession(
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
+        scope.launch { applyNetworkUpdates() }
         serviceSuppressed = settings.getBoolean("serviceSuppressed", false)
         // Reset previous custom connection tuning once; subsequent user changes persist.
         if (!settings.getBoolean("peerDefaultsV2", false)) {
@@ -205,24 +206,46 @@ class LibrarySession(
     }
     fun setNetworkPolicy(policy: TransferNetworkPolicy) {
         settings.edit().putString("networkPolicy", policy.name).apply()
-        updateNetworkState(networkConnected, networkWifi, networkMetered, policy)
+        updateNetworkState(networkSnapshot, policy)
     }
 
-    fun updateNetworkState(connected: Boolean, wifi: Boolean, metered: Boolean) =
-        updateNetworkState(connected, wifi, metered, _ui.value.networkPolicy)
+    fun updateNetworkState(snapshot: NetworkSnapshot) =
+        updateNetworkState(snapshot, _ui.value.networkPolicy)
 
-    private fun updateNetworkState(connected: Boolean, wifi: Boolean, metered: Boolean, policy: TransferNetworkPolicy) {
+    private fun updateNetworkState(snapshot: NetworkSnapshot, policy: TransferNetworkPolicy) {
         val wasAllowed = _ui.value.networkAllowed
-        networkConnected = connected
-        networkWifi = wifi
-        networkMetered = metered
-        val allowed = transferAllowed(policy, connected, wifi, metered)
+        networkSnapshot = snapshot
+        val allowed = transferAllowed(policy, snapshot.connected, snapshot.wifi, snapshot.metered)
         _ui.update { it.copy(networkPolicy = policy, networkAllowed = allowed, networkReason = if (allowed) null else "Waiting for ${policy.name.lowercase().replace('_', ' ')} network") }
+        networkUpdates.trySend(Unit)
         scope.launch {
-            if (_ui.value.engineReady) runCatching { withContext(io) { client.setPayloadTransfersAllowed(allowed) } }
             mutex.withLock {
                 reconcileTransferState()
-                if (!wasAllowed && allowed) advanceRetriesForNetworkRecovery()
+                if (!wasAllowed && _ui.value.networkAllowed) advanceRetriesForNetworkRecovery()
+            }
+        }
+    }
+
+    private suspend fun applyNetworkUpdates() {
+        for (ignored in networkUpdates) {
+            // One worker serializes JNI updates. Bursts collapse to the latest
+            // route, including events received while the engine was starting.
+            while (!engineHost.awaitReady()) delay(1_000)
+            if (networkSnapshot.connected) delay(750)
+            while (networkUpdates.tryReceive().isSuccess) { /* drain superseded events */ }
+            val snapshot = networkSnapshot
+            val allowed = _ui.value.networkAllowed
+            try {
+                withContext(io) {
+                    client.setPayloadTransfersAllowed(allowed)
+                    client.networkChanged(snapshot.generation, snapshot.connected)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.w(EngineHost.TAG, "Network recovery request failed; retrying", failure)
+                delay(2_000)
+                networkUpdates.trySend(Unit)
             }
         }
     }

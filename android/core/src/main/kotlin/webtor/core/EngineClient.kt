@@ -183,6 +183,9 @@ class EngineClient(
 
     fun pause(id: String) { post("/pause", JSONObject().put("id", id)) }
     fun resume(id: String) { post("/resume", JSONObject().put("id", id)) }
+    fun networkChanged(generation: Long, connected: Boolean) {
+        post("/network", JSONObject().put("generation", generation).put("connected", connected))
+    }
     fun focus(id: String, fileIndex: Int?) { post("/focus", JSONObject().put("id", id).apply { if (fileIndex == null) put("fileIndex", JSONObject.NULL) else put("fileIndex", fileIndex) }) }
 
     fun maxPeers(): Int = get("/settings").optInt("maxPeers", 40)

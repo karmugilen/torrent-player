@@ -30,11 +30,30 @@ func (s *EngineServer) startSavedDataCheck(rec *TorrentRecord) {
 		ordered = append(ordered, p)
 	}
 	sort.Ints(ordered)
+	st := s.storage.GetStorage(rec.InfoHash)
+	pending := make([]int, 0, len(ordered))
+	trusted := 0
+	for _, index := range ordered {
+		if st != nil && st.PieceComplete(index) {
+			trusted++
+			continue
+		}
+		pending = append(pending, index)
+	}
+	s.publishStorageCompletions(rec)
+	if len(pending) == 0 {
+		rec.Checking, rec.CheckedPieces, rec.CheckTotal = false, trusted, len(ordered)
+		if st != nil {
+			st.MarkVerified()
+			st.UnfreezeTrusted()
+		}
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &savedDataCheck{cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	rec.verification = job
-	rec.Checking, rec.CheckedPieces, rec.CheckTotal = true, 0, len(ordered)
-	go s.checkSavedData(ctx, rec, job, ordered)
+	rec.Checking, rec.CheckedPieces, rec.CheckTotal = true, trusted, len(ordered)
+	go s.checkSavedData(ctx, rec, job, pending)
 }
 
 func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, job *savedDataCheck, pieces []int) {
@@ -119,6 +138,16 @@ func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, j
 	}
 	rec.mu.Unlock()
 	s.notifyChange()
+}
+
+func (s *EngineServer) publishStorageCompletions(rec *TorrentRecord) {
+	if rec == nil || rec.Torrent == nil || rec.Torrent.Info() == nil {
+		return
+	}
+	n := rec.Torrent.NumPieces()
+	for i := 0; i < n; i++ {
+		rec.Torrent.Piece(i).UpdateCompletion()
+	}
 }
 
 // Never hold rec.mu while joining the worker. It may be publishing progress.

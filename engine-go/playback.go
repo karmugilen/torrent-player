@@ -54,6 +54,8 @@ type playbackPriorityCoordinator struct {
 	mu        sync.Mutex
 	torrent   *torrent.Torrent
 	owners    map[*playbackReader]map[int]torrent.PiecePriority
+	hints     map[int]torrent.PiecePriority
+	focus     map[int]torrent.PiecePriority
 	effective map[int]torrent.PiecePriority
 }
 
@@ -87,15 +89,46 @@ func (c *playbackPriorityCoordinator) remove(owner *playbackReader) {
 	c.applyLocked()
 }
 
+func (c *playbackPriorityCoordinator) setHints(demand map[int]torrent.PiecePriority) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hints = cloneDemand(demand)
+	c.applyLocked()
+}
+
+func (c *playbackPriorityCoordinator) setFocus(demand map[int]torrent.PiecePriority) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.focus = cloneDemand(demand)
+	c.applyLocked()
+}
+
+func cloneDemand(demand map[int]torrent.PiecePriority) map[int]torrent.PiecePriority {
+	if len(demand) == 0 {
+		return nil
+	}
+	out := make(map[int]torrent.PiecePriority, len(demand))
+	for index, priority := range demand {
+		out[index] = priority
+	}
+	return out
+}
+
+func raiseDemand(dst map[int]torrent.PiecePriority, src map[int]torrent.PiecePriority) {
+	for index, priority := range src {
+		if current, ok := dst[index]; !ok || priority > current {
+			dst[index] = priority
+		}
+	}
+}
+
 func (c *playbackPriorityCoordinator) applyLocked() {
 	next := make(map[int]torrent.PiecePriority)
 	for _, demand := range c.owners {
-		for index, priority := range demand {
-			if current, ok := next[index]; !ok || priority > current {
-				next[index] = priority
-			}
-		}
+		raiseDemand(next, demand)
 	}
+	raiseDemand(next, c.hints)
+	raiseDemand(next, c.focus)
 	changed := make(map[int]struct{}, len(c.effective)+len(next))
 	for index := range c.effective {
 		changed[index] = struct{}{}
@@ -150,9 +183,26 @@ type playbackReader struct {
 	nowFn         func() time.Time
 
 	priorityOwner *playbackPriorityCoordinator
+	storage       *DocumentTorrentStorage
+	waitCancel    context.CancelFunc
+	readSeq       uint64
 	// refreshCompletion is set for Watch/stream storage so discarded cache
 	// pieces are re-queued when the playhead returns to them.
 	refreshCompletion bool
+}
+
+func (s *EngineServer) ensurePlaybackCoordinator(t *torrent.Torrent) *playbackPriorityCoordinator {
+	s.playbackMu.Lock()
+	defer s.playbackMu.Unlock()
+	if s.playbackOwners == nil {
+		s.playbackOwners = make(map[*torrent.Torrent]*playbackPriorityCoordinator)
+	}
+	coordinator := s.playbackOwners[t]
+	if coordinator == nil {
+		coordinator = newPlaybackPriorityCoordinator(t)
+		s.playbackOwners[t] = coordinator
+	}
+	return coordinator
 }
 
 func (p *playbackReader) now() time.Time {
@@ -194,20 +244,13 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 		ctx:     ctx,
 		cancel:  cancel,
 	}
-	if st := s.storage.GetStorage(rec.InfoHash); st != nil && st.StreamMode() {
-		p.refreshCompletion = true
+	if st := s.storage.GetStorage(rec.InfoHash); st != nil {
+		p.storage = st
+		if st.StreamMode() {
+			p.refreshCompletion = true
+		}
 	}
-	s.playbackMu.Lock()
-	if s.playbackOwners == nil {
-		s.playbackOwners = make(map[*torrent.Torrent]*playbackPriorityCoordinator)
-	}
-	coordinator := s.playbackOwners[rec.Torrent]
-	if coordinator == nil {
-		coordinator = newPlaybackPriorityCoordinator(rec.Torrent)
-		s.playbackOwners[rec.Torrent] = coordinator
-	}
-	s.playbackMu.Unlock()
-	p.priorityOwner = coordinator
+	p.priorityOwner = s.ensurePlaybackCoordinator(rec.Torrent)
 	p.headBegin, p.headEnd = filePieceRange(file, 0, minInt64(file.Length(), videoStartupHeadBytes))
 	p.headBoostActive = p.headBegin < p.headEnd
 	if file.Length() > videoStartupTailBytes {
@@ -221,30 +264,80 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 
 func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
+		p.mu.Unlock()
 		return 0, fmt.Errorf("playback closed")
 	}
 	if offset < 0 {
+		p.mu.Unlock()
 		return 0, fmt.Errorf("invalid playback offset")
 	}
 	if offset >= p.length || len(data) == 0 {
+		p.mu.Unlock()
 		return 0, nil
 	}
 	data = data[:min(int64(len(data)), p.length-offset)]
+	if p.waitCancel != nil {
+		p.waitCancel()
+		p.waitCancel = nil
+	}
 	p.updateWindowLocked(offset)
+	p.readSeq++
+	seq := p.readSeq
+	st := p.storage
+	abs := p.file.Offset() + offset
+	stream := p.refreshCompletion
+	p.mu.Unlock()
+
+	if !stream && st != nil && st.RangeComplete(abs, int64(len(data))) {
+		if spans, ok := st.byteSpans(abs, int64(len(data))); ok {
+			n, err := preadFileSpans(spans, data)
+			p.mu.Lock()
+			if p.closed || p.readSeq != seq {
+				p.mu.Unlock()
+				return 0, fmt.Errorf("playback closed")
+			}
+			if n > 0 {
+				p.cursor = offset + int64(n)
+				p.positioned = false
+			}
+			p.mu.Unlock()
+			return n, err
+		}
+	}
+
+	p.mu.Lock()
+	if p.closed || p.readSeq != seq {
+		p.mu.Unlock()
+		return 0, fmt.Errorf("playback closed")
+	}
 	ctx, cancel := context.WithTimeout(p.ctx, 45*time.Second)
-	defer cancel()
+	p.waitCancel = cancel
 	p.reader.SetContext(ctx)
 	if !p.positioned || offset != p.cursor {
 		if _, err := p.reader.Seek(offset, io.SeekStart); err != nil {
+			cancel()
+			p.waitCancel = nil
+			p.mu.Unlock()
 			return 0, err
 		}
 		p.positioned = true
 	}
+	p.mu.Unlock()
+
 	// Android's proxy callback requires the requested length except at EOF.
 	// Never translate missing torrent bytes into zeros or premature EOF.
 	n, err := io.ReadFull(p.reader, data)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.waitCancel != nil {
+		p.waitCancel()
+		p.waitCancel = nil
+	}
+	if p.closed || p.readSeq != seq {
+		return 0, fmt.Errorf("playback closed")
+	}
 	if n > 0 {
 		p.cursor = offset + int64(n)
 	}
@@ -255,6 +348,10 @@ func (p *playbackReader) Close() {
 	p.cancel()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.waitCancel != nil {
+		p.waitCancel()
+		p.waitCancel = nil
+	}
 	if p.closed {
 		return
 	}

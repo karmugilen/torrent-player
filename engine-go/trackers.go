@@ -435,5 +435,8 @@ func cleanSuppliedTrackers(tiers [][]string) [][]string {
 
 func (s *EngineServer) addTorrentSpec(spec *torrent.TorrentSpec) (*torrent.Torrent, bool, error) {
 	spec.Trackers = cleanSuppliedTrackers(spec.Trackers)
+	// Restore checking is owned by startSavedDataCheck after descriptors attach.
+	// Hashing at onSetInfo races configure and cannot see the checkpoint.
+	spec.DisableInitialPieceCheck = true
 	return s.client.AddTorrentSpec(spec)
 }

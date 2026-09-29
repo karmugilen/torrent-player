@@ -23,13 +23,20 @@ func (p *restoreVerifyPiece) SelfHash() (metainfo.Hash, error) {
 	// Write-back may hold the only copy in RAM; never treat that as a hole.
 	p.storage.mu.Lock()
 	index := p.piece.Index()
-	inRAM := false
-	if _, ok := p.storage.cache[index]; ok {
-		inRAM = true
-	}
+	_, inRAM := p.storage.cache[index]
 	p.storage.mu.Unlock()
 	if inRAM {
 		return hashPieceContents(p.documentPiece)
+	}
+	spans, ok := p.storage.pieceSpans(p.piece)
+	if ok {
+		sum, allHoles, err := hashFileSpans(spans)
+		if err == nil {
+			if allHoles {
+				return zeroPieceHash(length), nil
+			}
+			return metainfo.Hash(sum), nil
+		}
 	}
 	allHoles, supported := p.storage.pieceExtentAllHoles(p.piece)
 	if supported && allHoles {

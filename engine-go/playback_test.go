@@ -100,6 +100,41 @@ func writeVerifiedPiece(t *testing.T, s *EngineServer, rec *TorrentRecord, data 
 	}
 }
 
+func TestPlaybackReadsVerifiedBytesWithoutWaiting(t *testing.T) {
+	s, rec, data := playbackFixture(t)
+	for index := 0; index < rec.Torrent.NumPieces(); index++ {
+		writeVerifiedPiece(t, s, rec, data, index)
+	}
+	reader, err := s.OpenPlayback(rec.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	want := data[5:]
+	buf := make([]byte, len(want))
+	done := make(chan error, 1)
+	go func() {
+		n, err := reader.ReadAt(buf, 0)
+		if err != nil {
+			done <- err
+			return
+		}
+		if n != len(want) || !bytes.Equal(buf, want) {
+			done <- io.ErrUnexpectedEOF
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("verified range read blocked")
+	}
+}
+
 func TestPlaybackWaitsForVerificationThenSupportsSeeking(t *testing.T) {
 	s, rec, data := playbackFixture(t)
 	reader, err := s.OpenPlayback(rec.ID, 1)
@@ -312,8 +347,8 @@ func TestPlaybackHandlesSharePriorityOwnership(t *testing.T) {
 	gotSecond = second.priorityOwner.effective[40]
 	gotFirst := second.priorityOwner.effective[0]
 	second.priorityOwner.mu.Unlock()
-	if gotSecond != 0 {
-		t.Fatalf("closing second handle retained stale priority: %v", gotSecond)
+	if gotSecond != torrent.PiecePriorityHigh {
+		t.Fatalf("closing second handle should leave background High, got %v", gotSecond)
 	}
 	if gotFirst != torrent.PiecePriorityNow {
 		t.Fatalf("closing second handle erased first handle demand: %v", gotFirst)
@@ -322,8 +357,8 @@ func TestPlaybackHandlesSharePriorityOwnership(t *testing.T) {
 	second.priorityOwner.mu.Lock()
 	gotFinal := second.priorityOwner.effective[0]
 	second.priorityOwner.mu.Unlock()
-	if gotFinal != 0 {
-		t.Fatalf("closing final handle retained priority: %v", gotFinal)
+	if gotFinal != torrent.PiecePriorityNow {
+		t.Fatalf("closing final handle should leave startup head Now, got %v", gotFinal)
 	}
 }
 

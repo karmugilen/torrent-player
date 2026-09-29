@@ -62,15 +62,31 @@ func identitiesMatch(saved, current []fileIdentity) bool {
 		return false
 	}
 	for i := range saved {
-		a, b := saved[i], current[i]
-		if a.External != b.External || a.Length != b.Length || a.Dev != b.Dev || a.Ino != b.Ino || a.ModNano != b.ModNano {
-			return false
-		}
-		if !a.External && a.Path != b.Path {
+		if !fileIdentityEqual(saved[i], current[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// fileStable is the resume key: same inode and torrent length. Mtime is not
+// required — our own writes bump it on every MarkComplete, and a force-stop
+// before the next .chk rename would otherwise drop the whole bitfield.
+func fileStable(saved, current fileIdentity) bool {
+	if saved.Dev == 0 && saved.Ino == 0 {
+		return false
+	}
+	if saved.External != current.External || saved.Length != current.Length || saved.Dev != current.Dev || saved.Ino != current.Ino {
+		return false
+	}
+	if !saved.External && saved.Path != current.Path {
+		return false
+	}
+	return true
+}
+
+func fileIdentityEqual(a, b fileIdentity) bool {
+	return fileStable(a, b) && a.ModNano == b.ModNano
 }
 
 func (cp *pieceCheckpoint) bitfieldBytes() []byte {

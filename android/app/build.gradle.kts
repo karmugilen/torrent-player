@@ -12,6 +12,10 @@ val buildGoEngine by tasks.registering(Exec::class) {
     workingDir(repoRoot)
     commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
     inputs.dir(repoRoot.resolve("engine-go"))
+    inputs.file(repoRoot.resolve("engine-rust/Cargo.toml"))
+    inputs.file(repoRoot.resolve("engine-rust/Cargo.lock"))
+    inputs.file(repoRoot.resolve("engine-rust/pieces.h"))
+    inputs.dir(repoRoot.resolve("engine-rust/src"))
     outputs.file(file("src/main/jniLibs/arm64-v8a/libengine.so"))
 }
 

@@ -151,6 +151,75 @@ func TestCheckpointSkipsTrustedPiecesOnResume(t *testing.T) {
 	if recoveryStatus(t, restoredEngine, restored).Downloaded < 32*1024 {
 		t.Fatal("verified bytes missing after checkpoint resume")
 	}
+	if recoveryStatus(t, restoredEngine, restored).Checking {
+		t.Fatal("trusted bitfield resume must not stay in checking")
+	}
+}
+
+func TestCheckpointSurvivesMtimeBumpOnSameInode(t *testing.T) {
+	oldDelay := checkpointFlushDelay
+	checkpointFlushDelay = 0
+	t.Cleanup(func() { checkpointFlushDelay = oldDelay })
+
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	configure := func(s *EngineServer, rec *TorrentRecord, f *os.File) {
+		fd := int(f.Fd())
+		body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+		code, response := s.DispatchControl("POST", "/configure", string(body))
+		if code != 200 {
+			t.Fatalf("configure: %d %s", code, response)
+		}
+	}
+
+	original := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, original, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	configure(original, rec, destination)
+	for p := 0; p < rec.Torrent.NumPieces(); p++ {
+		writeVerifiedPiece(t, original, rec, data, p)
+	}
+	st := original.storage.GetStorage(rec.InfoHash)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !st.AllSelectedComplete([]int{0}) {
+		time.Sleep(time.Millisecond)
+	}
+	st.mu.Lock()
+	for st.checkpointFlushing {
+		st.mu.Unlock()
+		time.Sleep(time.Millisecond)
+		st.mu.Lock()
+	}
+	st.checkpointDirty = true
+	if err := st.flushCheckpointLocked(); err != nil {
+		st.mu.Unlock()
+		t.Fatal(err)
+	}
+	st.mu.Unlock()
+	original.Close()
+
+	// Simulate a force-stop after our own write bumped mtime but left the
+	// previous .chk in place: same inode must keep piece 0 trusted.
+	if _, err := destination.WriteAt(data[:16], 0); err != nil {
+		t.Fatal(err)
+	}
+	_ = destination.Sync()
+	time.Sleep(10 * time.Millisecond)
+
+	restoredEngine := testEngineAt(t, dir)
+	restored := addRecoveryTorrent(t, restoredEngine, metadata)
+	configure(restoredEngine, restored, destination)
+	st2 := restoredEngine.storage.GetStorage(restored.InfoHash)
+	if st2 == nil || !st2.PieceComplete(0) {
+		t.Fatal("same-inode mtime bump dropped trusted bits")
+	}
+	if recoveryStatus(t, restoredEngine, restored).Checking {
+		t.Fatal("force-stop resume with a matching inode must skip the slow check")
+	}
 }
 
 func TestCheckpointIgnoredWhenFileIdentityChanges(t *testing.T) {
@@ -181,16 +250,20 @@ func TestCheckpointIgnoredWhenFileIdentityChanges(t *testing.T) {
 	st.mu.Unlock()
 	original.Close()
 
-	// Same path/inode family but content+mtime change must invalidate trust.
-	if _, err := destination.WriteAt([]byte("corrupted-data!!!!"), 0); err != nil {
+	// A different inode (replaced destination) must not inherit the bitfield.
+	replacement, err := os.CreateTemp(t.TempDir(), "replaced")
+	if err != nil {
 		t.Fatal(err)
 	}
-	_ = destination.Sync()
-	time.Sleep(10 * time.Millisecond)
+	defer replacement.Close()
+	if _, err := replacement.Write([]byte("corrupted-data!!!!")); err != nil {
+		t.Fatal(err)
+	}
+	_ = replacement.Sync()
 
 	restoredEngine := testEngineAt(t, dir)
 	restored := addRecoveryTorrent(t, restoredEngine, metadata)
-	configure(restoredEngine, restored, destination)
+	configure(restoredEngine, restored, replacement)
 	st2 := restoredEngine.storage.GetStorage(restored.InfoHash)
 	if st2 != nil && st2.PieceComplete(0) {
 		t.Fatal("checkpoint remained trusted after file identity changed")

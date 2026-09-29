@@ -93,18 +93,18 @@ type FileDescriptor struct {
 	external bool
 }
 type DocumentTorrentStorage struct {
-	mu                        sync.Mutex
-	info                      *metainfo.Info
-	infoHash                  metainfo.Hash
-	baseDir                   string
-	chunkLength, totalLength  int64
-	files                     []FileDescriptor
-	attached, closed          bool
+	mu                       sync.Mutex
+	info                     *metainfo.Info
+	infoHash                 metainfo.Hash
+	baseDir                  string
+	chunkLength, totalLength int64
+	files                    []FileDescriptor
+	attached, closed         bool
 	// stream is true when selected files are stored under .stream/ instead of
 	// Android document descriptors (Watch mode).
-	stream                    bool
-	needsVerify               bool
-	restoreVerify             atomic.Bool
+	stream        bool
+	needsVerify   bool
+	restoreVerify atomic.Bool
 	// freezeTrusted blocks MarkNotComplete from clearing checkpoint-restored
 	// bits until saved-data checking finishes (or UnfreezeTrusted is called).
 	freezeTrusted             atomic.Bool
@@ -159,8 +159,8 @@ func newDocumentTorrentStorage(info *metainfo.Info, hash metainfo.Hash, baseDir 
 		streamMaxBytes: DefaultStreamCacheMaxBytes,
 		cache:          make(map[int][]byte),
 		cacheDirty:     make(map[int]bool),
-		completed:   make(map[int]bool),
-		pendingSync: make(map[*os.File]struct{}),
+		completed:      make(map[int]bool),
+		pendingSync:    make(map[*os.File]struct{}),
 	}
 	if info != nil {
 		st.updateInfo(info)
@@ -239,7 +239,6 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 
 	opened := make([]*os.File, len(st.files))
 	preIdentities := make([]fileIdentity, len(st.files))
-	preOK := true
 	cleanup := func() {
 		for _, f := range opened {
 			if f != nil {
@@ -271,14 +270,12 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 			// Identity for checkpoint matching must be sampled before Truncate:
 			// some filesystems bump mtime even when the size is unchanged.
 			id, ok := identityFromStat(st.files[i], true, stat)
-			preIdentities[i] = id
-			if !ok || stat.Size() != st.files[i].Length {
-				preOK = false
+			if ok && stat.Size() == st.files[i].Length {
+				preIdentities[i] = id
 			}
 		} else if stream {
 			// Watch mode is RAM-only: no .stream / boundary disk files.
 			opened[i] = nil
-			preOK = false
 			continue
 		} else {
 			path := engineOwnedPartPath(st.baseDir, st.infoHash.HexString(), i, false)
@@ -299,9 +296,8 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 				return fmt.Errorf("inspect engine-owned file %d: %w", i, err)
 			}
 			id, ok := identityFromStat(st.files[i], false, stat)
-			preIdentities[i] = id
-			if !ok || stat.Size() != st.files[i].Length {
-				preOK = false
+			if ok && stat.Size() == st.files[i].Length {
+				preIdentities[i] = id
 			}
 		}
 		if err := f.Truncate(st.files[i].Length); err != nil {
@@ -356,10 +352,7 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 			st.cache, st.cacheBytes, st.cacheOrder = make(map[int][]byte), 0, nil
 		}
 	}
-	loaded := false
-	if preOK {
-		loaded = st.loadCheckpointLocked(preIdentities)
-	}
+	loaded := st.loadCheckpointLocked(preIdentities)
 	st.captureIdentitiesLocked()
 	if loaded {
 		// Rebind the durable identity to the post-truncate view so the next
@@ -1187,8 +1180,10 @@ func (p *documentPiece) Completion() storage.Completion {
 	if p.storage.closed {
 		return storage.Completion{Err: fmt.Errorf("storage closed")}
 	}
-	value, known := p.storage.completed[p.piece.Index()]
-	return storage.Completion{Complete: value, Ok: known}
+	if !p.storage.attached {
+		return storage.Completion{}
+	}
+	return storage.Completion{Complete: p.storage.completed[p.piece.Index()], Ok: true}
 }
 func maxInt64(a, b int64) int64 {
 	if a > b {
@@ -1231,15 +1226,39 @@ func (st *DocumentTorrentStorage) loadCheckpointLocked(identities []fileIdentity
 	if cp.InfoHash != hash || cp.PieceLength != st.chunkLength || cp.NumPieces != st.info.NumPieces() {
 		return false
 	}
-	if !identitiesMatch(cp.Files, identities) {
+	if len(cp.Files) != len(identities) || len(cp.Complete) != cp.NumPieces {
 		return false
 	}
-	for i, ok := range cp.Complete {
-		if ok {
-			st.completed[i] = true
+	loaded := false
+	for p, ok := range cp.Complete {
+		if !ok {
+			continue
+		}
+		if st.pieceFilesStableLocked(p, cp.Files, identities) {
+			st.completed[p] = true
+			loaded = true
 		}
 	}
-	return true
+	return loaded
+}
+
+func (st *DocumentTorrentStorage) pieceFilesStableLocked(index int, saved, current []fileIdentity) bool {
+	if st.info == nil || st.chunkLength <= 0 || index < 0 || index >= st.info.NumPieces() {
+		return false
+	}
+	start := int64(index) * st.chunkLength
+	end := start + st.info.Piece(index).Length()
+	matched := false
+	for i, f := range st.files {
+		if end <= f.Offset || start >= f.Offset+f.Length {
+			continue
+		}
+		if i >= len(saved) || i >= len(current) || !fileStable(saved[i], current[i]) {
+			return false
+		}
+		matched = true
+	}
+	return matched
 }
 
 func (st *DocumentTorrentStorage) clearCompletedOverlappingLocked(fileIndex int) {
