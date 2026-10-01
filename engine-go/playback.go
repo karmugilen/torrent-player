@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"sync"
 	"time"
 
@@ -26,8 +27,8 @@ const (
 	// Kept for HTTP ServeContent and as the settled forward span.
 	playbackWindowBytes = playbackUrgentBytes + playbackReadaheadBytes
 
-	// Background download hints for selected videos (also used by /play and
-	// OpenPlayback head/tail boost). High for background, Now for open phase.
+	// Startup ranges are Now while preparing a download and High while a
+	// reader is active; its own open-phase metadata probes remain Now.
 	videoStartupHeadBytes = int64(5 * 1024 * 1024)
 	videoStartupTailBytes = int64(3 * 1024 * 1024)
 )
@@ -70,6 +71,9 @@ func newPlaybackPriorityCoordinator(t *torrent.Torrent) *playbackPriorityCoordin
 func (c *playbackPriorityCoordinator) update(owner *playbackReader, demand map[int]torrent.PiecePriority) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if maps.Equal(c.owners[owner], demand) {
+		return
+	}
 	if len(demand) == 0 {
 		delete(c.owners, owner)
 	} else {
@@ -92,6 +96,9 @@ func (c *playbackPriorityCoordinator) remove(owner *playbackReader) {
 func (c *playbackPriorityCoordinator) setHints(demand map[int]torrent.PiecePriority) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if maps.Equal(c.hints, demand) {
+		return
+	}
 	c.hints = cloneDemand(demand)
 	c.applyLocked()
 }
@@ -99,6 +106,9 @@ func (c *playbackPriorityCoordinator) setHints(demand map[int]torrent.PiecePrior
 func (c *playbackPriorityCoordinator) setFocus(demand map[int]torrent.PiecePriority) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if maps.Equal(c.focus, demand) {
+		return
+	}
 	c.focus = cloneDemand(demand)
 	c.applyLocked()
 }
@@ -127,25 +137,35 @@ func (c *playbackPriorityCoordinator) applyLocked() {
 	for _, demand := range c.owners {
 		raiseDemand(next, demand)
 	}
-	raiseDemand(next, c.hints)
+	// Background metadata preparation must yield to active playback. Readers
+	// retain their own urgent head/tail probes until their open phase ends.
+	for index, priority := range c.hints {
+		if len(c.owners) > 0 && priority > torrent.PiecePriorityHigh {
+			priority = torrent.PiecePriorityHigh
+		}
+		if priority > next[index] {
+			next[index] = priority
+		}
+	}
 	raiseDemand(next, c.focus)
-	changed := make(map[int]struct{}, len(c.effective)+len(next))
 	for index := range c.effective {
-		changed[index] = struct{}{}
+		if _, ok := next[index]; !ok {
+			// Clear the override; the selected file's base priority remains.
+			c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNone)
+		}
 	}
-	for index := range next {
-		changed[index] = struct{}{}
-	}
-	for index := range changed {
-		priority := next[index]
+	for index, priority := range next {
 		if previous, ok := c.effective[index]; ok && previous == priority {
 			continue
 		}
-		// None deliberately clears only the playback-owned piece override;
-		// the selected file's base priority remains authoritative.
 		c.torrent.Piece(index).SetPriority(priority)
 	}
 	c.effective = next
+}
+
+type playbackWindowState struct {
+	urgent, readahead, lookbehind   pieceSpan
+	openPhase, headBoost, tailBoost bool
 }
 
 // Each Android proxy descriptor owns a reader. Its cursor/readahead survive
@@ -165,9 +185,12 @@ type playbackReader struct {
 	lastOffset int64
 	haveOffset bool
 
-	urgent     pieceSpan
-	readahead  pieceSpan
-	lookbehind pieceSpan
+	urgent          pieceSpan
+	readahead       pieceSpan
+	lookbehind      pieceSpan
+	appliedWindow   playbackWindowState
+	windowApplied   bool
+	readerReadahead int64
 
 	headBegin, headEnd int
 	tailBegin, tailEnd int
@@ -462,14 +485,14 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	}
 
 	var newUrgent, newReadahead, newLookbehind pieceSpan
+	readerReadahead := playbackWindowBytes
 	if p.openPhase {
-		p.reader.SetReadahead(playbackUrgentBytes)
+		readerReadahead = playbackUrgentBytes
 		newUrgent = spanFromFile(p.file, offset, urgentEndOff)
 		newReadahead = pieceSpan{}
 		newLookbehind = pieceSpan{}
 	} else {
 		forward := playbackUrgentBytes + playbackReadaheadBytes
-		p.reader.SetReadahead(forward)
 		forwardEnd := offset + forward
 		if forwardEnd > p.length {
 			forwardEnd = p.length
@@ -487,6 +510,19 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	if !p.openPhase && wasPositioned {
 		p.demoteBoostOutsideLocked(playhead)
 	}
+	if p.readerReadahead != readerReadahead {
+		p.reader.SetReadahead(readerReadahead)
+		p.readerReadahead = readerReadahead
+	}
+	window := playbackWindowState{
+		urgent: newUrgent, readahead: newReadahead, lookbehind: newLookbehind,
+		openPhase: p.openPhase, headBoost: p.headBoostActive, tailBoost: p.tailBoostActive,
+	}
+	// Byte reads within the same piece spans do not change download demand.
+	// Stream storage still needs its completion refresh after cache eviction.
+	if p.windowApplied && window == p.appliedWindow && !p.refreshCompletion {
+		return
+	}
 	kept := p.currentDemandLocked(newUrgent, newReadahead, newLookbehind)
 	if p.priorityOwner != nil {
 		p.priorityOwner.update(p, kept)
@@ -498,6 +534,7 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	}
 
 	p.urgent, p.readahead, p.lookbehind = newUrgent, newReadahead, newLookbehind
+	p.appliedWindow, p.windowApplied = window, true
 }
 
 func (p *playbackReader) demoteBoostOutsideLocked(playhead pieceSpan) {

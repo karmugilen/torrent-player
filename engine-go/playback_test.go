@@ -362,6 +362,58 @@ func TestPlaybackHandlesSharePriorityOwnership(t *testing.T) {
 	}
 }
 
+func TestPlaybackSeekYieldsStartupHintsToTarget(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 64)
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	reader.testApplyOffset(20 * pieceLen)
+	for _, index := range []int{0, 4, 61, 63} {
+		if got := rawPiecePriority(rec.Torrent.Piece(index)); got != torrent.PiecePriorityHigh {
+			t.Fatalf("startup piece %d should yield to seek target: got %v", index, got)
+		}
+	}
+	if got := rawPiecePriority(rec.Torrent.Piece(20)); got != torrent.PiecePriorityNow {
+		t.Fatalf("seek target priority=%v want Now", got)
+	}
+	if got := rawPiecePriority(rec.Torrent.Piece(24)); got != torrent.PiecePriorityReadahead {
+		t.Fatalf("seek forward priority=%v want Readahead", got)
+	}
+	// Refreshing download state must not reintroduce competing urgent hints.
+	rec.mu.Lock()
+	s.applyTransferState(rec)
+	rec.mu.Unlock()
+	if got := rawPiecePriority(rec.Torrent.Piece(63)); got != torrent.PiecePriorityHigh {
+		t.Fatalf("state refresh restored urgent tail: %v", got)
+	}
+	reader.testApplyOffset(30 * pieceLen)
+	if got := rawPiecePriority(rec.Torrent.Piece(20)); got != torrent.PiecePriorityHigh {
+		t.Fatalf("previous seek retained urgent demand: %v", got)
+	}
+	if got := rawPiecePriority(rec.Torrent.Piece(30)); got != torrent.PiecePriorityNow {
+		t.Fatalf("new seek target priority=%v want Now", got)
+	}
+	// A second reader's container probe still owns legitimate urgent demand.
+	probe, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	if got := rawPiecePriority(rec.Torrent.Piece(63)); got != torrent.PiecePriorityNow {
+		t.Fatalf("second reader lost urgent metadata probe: %v", got)
+	}
+	probe.Close()
+	if got := rawPiecePriority(rec.Torrent.Piece(63)); got != torrent.PiecePriorityHigh {
+		t.Fatalf("closed probe retained urgent tail: %v", got)
+	}
+	reader.Close()
+	if got := rawPiecePriority(rec.Torrent.Piece(63)); got != torrent.PiecePriorityNow {
+		t.Fatalf("background metadata hints not restored: %v", got)
+	}
+}
+
 func TestPlaybackNoSeekHotspotsRetained(t *testing.T) {
 	s, rec, pieceLen := largePlaybackFixture(t, 64)
 	reader, err := s.OpenPlayback(rec.ID, 0)
