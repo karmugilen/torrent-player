@@ -30,3 +30,7 @@ On-device testing is still to be done.
 Build each candidate using the current F-Droid buildserver image and the same recipe, Go version, Java/Gradle toolchain and Android NDK used by F-Droid. Run source and APK scans. Sign the buildserver-produced APK with the existing release key outside the source repository; do not use the debug signer. Before announcing or distributing a release, verify that F-Droid can rebuild that source and reproduce the signed candidate using `Binaries` and `AllowedAPKSigningKeys`. A successful local Android build alone is insufficient.
 
 If reproducible comparison differs in `classes.dex`, `baseline.prof` or `libengine.so`, resolve the environment or deterministic-build issue before publishing the candidate. Do not overwrite an already distributed release to repair verification. Advance to a new version for application changes. The current release has passed the pipeline comparison; this update must pass again before being described as verified.
+
+## Verification of the metadata-only source
+
+The Android and Go git tree hashes at `92b1a9914c17d0fb03cd6577ce889faf66cc2cd9` match `v2.0.0` exactly. [Pipeline 2910503829](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2910503829) rebuilt 2.0.0 and successfully compared it against the existing signed reference APK. All nine jobs passed, including the final APK scan. On-device testing remains pending.

@@ -2,7 +2,17 @@
 
 The active submission is [fdroiddata merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893). Update that branch instead of opening a duplicate merge request.
 
-## Current status (2026-09-16)
+## Current status (2026-10-04)
+
+- The submission targets **2.0.0 (23)** only.
+- Reviewed release source: `5cfbdc1e8a1d9672c969ffbf4a215217d99477a0`.
+- Metadata-only follow-up source: `92b1a9914c17d0fb03cd6577ce889faf66cc2cd9`.
+- The follow-up describes automatic tracker-list refresh, supplemental public trackers and WebRTC/STUN providers, and adds the missing versionCode 23 changelog. Android/Go source and build inputs are identical to the released source; the existing release APK and tag are retained.
+- See [the reviewer comment and follow-up](FDROID_REVIEW_2026-10-04.md). Optional controls and protocol client version cleanup are deferred to a later release.
+- The existing MR description has been updated. [Pipeline 2910503829](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2910503829) passed all nine jobs, including source build, reproducible comparison against the existing signed reference APK, source scan and APK scan. On-device testing and maintainer acceptance remain pending.
+- The recipe intentionally pins a metadata-only source revision after the existing release tag. The submission script requires an exact tagged release commit and should be used again for the next tested, tagged application release.
+
+## Historical status (2026-09-16)
 
 - The 1.4.4 submission passed all nine jobs in
   [pipeline 2851213344](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2851213344).
