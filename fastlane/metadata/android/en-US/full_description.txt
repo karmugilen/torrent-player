@@ -15,7 +15,15 @@
 <p><b>Privacy & Freedom:</b></p>
 <ul>
   <li>100% Free and Open Source Software (MIT License).</li>
-  <li>Zero trackers, zero analytics, zero telemetry.</li>
+  <li>No advertising trackers, analytics, or telemetry.</li>
   <li>Zero advertisements.</li>
-  <li>Direct peer-to-peer swarm connectivity (DHT, UDP trackers, TCP, uTP, and WebSockets).</li>
+  <li>Direct peer-to-peer swarm connectivity (DHT, UDP trackers, TCP, uTP, WebSockets, and WebRTC).</li>
+</ul>
+
+<p><b>Network connections:</b></p>
+<ul>
+  <li>When the app starts, the engine automatically refreshes a cached public tracker list from https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt. Successful refreshes are scheduled once per day; failed requests may be retried. This request downloads a shared list and does not send torrent hashes or user-supplied tracker URLs.</li>
+  <li>Up to 24 additional public BitTorrent trackers are automatically added to each non-private torrent to help discover peers. Cached and built-in fallback trackers are used when the list is unavailable. Private torrents are excluded. Torrent announces share your IP address and torrent info hash with the trackers contacted.</li>
+  <li>WebRTC peer connections use STUN servers operated by Google, Twilio, and Cloudflare to discover a public network address for connectivity. These providers can see the source IP address of STUN requests.</li>
+  <li>Version 2.0.0 does not provide settings to disable public tracker-list refresh, extra public trackers, or WebRTC. This build supports arm64-v8a devices.</li>
 </ul>
