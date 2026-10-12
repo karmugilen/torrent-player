@@ -27,6 +27,21 @@ class EngineHost(private val context: Context) : EngineTransport {
         Thread({
             try {
                 check(downloadDir().mkdirs() || downloadDir().isDirectory) { "Could not create engine storage" }
+                // A memory-mapped country database keeps peer lookup offline.
+                // Geo data is optional; a damaged asset must not stop downloads.
+                runCatching {
+                    val asset = "geoip-country-2026-10.mmdb"
+                    val destination = File(downloadDir(), asset)
+                    context.assets.openFd(asset).use { descriptor ->
+                        if (destination.length() != descriptor.length) {
+                            val temporary = File(downloadDir(), "$asset.tmp")
+                            context.assets.open(asset).use { input ->
+                                temporary.outputStream().use { input.copyTo(it) }
+                            }
+                            check(temporary.renameTo(destination))
+                        }
+                    }
+                }.onFailure { Log.w(TAG, "Offline peer countries unavailable", it) }
                 check(startEngine(downloadDir().absolutePath.toByteArray(StandardCharsets.UTF_8), maxPeers) == 0) { "Native engine initialization failed" }
                 Log.i(TAG, "native engine ready")
                 ready.complete(true)

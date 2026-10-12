@@ -80,6 +80,21 @@ data class PlayInfo(
 
 data class AddResult(val id: String, val infoHash: String?)
 
+data class PeerConnection(
+    val address: String,
+    val transport: String,
+    val client: String,
+    val downloaded: Long,
+    val uploaded: Long,
+    val country: String? = null,
+)
+
+data class TorrentConnections(
+    val id: String,
+    val paused: Boolean,
+    val peers: List<PeerConnection>,
+)
+
 data class PieceBucket(
     val start: Int,
     val end: Int,
@@ -158,6 +173,26 @@ class EngineClient(
     }
 
     fun metadata(id: String): String = get("/metadata/$id").getString("torrentData")
+
+    fun connections(id: String): TorrentConnections {
+        val json = get("/connections/$id")
+        val peers = json.optJSONArray("peers") ?: JSONArray()
+        return TorrentConnections(
+            id = json.getString("id"),
+            paused = json.optBoolean("paused"),
+            peers = List(peers.length()) { index ->
+                val peer = peers.getJSONObject(index)
+                PeerConnection(
+                    address = peer.getString("address"),
+                    transport = peer.optString("transport", "Unknown"),
+                    client = peer.optString("client"),
+                    downloaded = peer.optLong("downloaded"),
+                    uploaded = peer.optLong("uploaded"),
+                    country = peer.nullableString("country"),
+                )
+            },
+        )
+    }
 
     fun configure(
         id: String,

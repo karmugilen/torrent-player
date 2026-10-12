@@ -42,6 +42,24 @@ private class FakeEngineTransport : EngineTransport {
 
 class EngineClientTest {
     @Test
+    fun connectionsReadsNativeSnapshotAndHandlesEmptyPausedList() {
+        transport.enqueue(TestResponse().setBody(
+            """{"id":"abc","paused":false,"peers":[{"address":"8.8.8.8:1234","transport":"TCP","client":"Local peer","downloaded":4096,"uploaded":1024,"country":"US"}]}""",
+        ))
+        val snapshot = client.connections("abc")
+        assertEquals("/connections/abc", transport.takeRequest().path)
+        assertFalse(snapshot.paused)
+        assertEquals("8.8.8.8:1234", snapshot.peers.single().address)
+        assertEquals("US", snapshot.peers.single().country)
+        assertEquals(4096L, snapshot.peers.single().downloaded)
+        assertEquals(1024L, snapshot.peers.single().uploaded)
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","paused":true,"peers":[]}"""))
+        val paused = client.connections("abc")
+        assertTrue(paused.paused)
+        assertTrue(paused.peers.isEmpty())
+    }
+
+    @Test
     fun parseCheckingProgressAndDefaultForOlderStatus() {
         val checking = EngineClient.parseTorrent(JSONObject(
             """{"id":"a","checking":true,"checkedPieces":7,"checkTotal":20}""",

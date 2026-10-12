@@ -89,6 +89,10 @@ android {
     buildFeatures {
         compose = true
     }
+
+    androidResources {
+        noCompress += "mmdb"
+    }
 }
 
 buildGoEngine.configure {

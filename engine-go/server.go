@@ -27,6 +27,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	maxminddb "github.com/oschwald/maxminddb-golang"
 	"github.com/pion/webrtc/v4"
 	"golang.org/x/time/rate"
 )
@@ -129,6 +130,8 @@ type EngineServer struct {
 	networkCancel     context.CancelFunc
 	networkWorkers    sync.WaitGroup
 	trackerSockets    *networkDialer
+	geoMu             sync.RWMutex
+	geoIP             *maxminddb.Reader
 }
 
 func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServer, error) {
@@ -221,6 +224,8 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	}
 	s.client = client
 	s.payloadTransfersAllowed.Store(true)
+	// Optional offline country database. Missing geo data never blocks transfers.
+	s.geoIP, _ = maxminddb.Open(filepath.Join(downloadDir, "geoip-country-2026-10.mmdb"))
 
 	s.trackers = newTrackerPool(downloadDir)
 	s.trackers.start(s.refreshTorrentTrackers)
@@ -446,6 +451,12 @@ func (s *EngineServer) Close() {
 			stopSavedDataCheck(rec)
 		}
 		s.client.Close()
+		s.geoMu.Lock()
+		if s.geoIP != nil {
+			_ = s.geoIP.Close()
+			s.geoIP = nil
+		}
+		s.geoMu.Unlock()
 		s.notifyChange()
 		close(s.done)
 	})
@@ -589,6 +600,10 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) >= 2 && parts[0] == "pieces" {
 			s.handlePieces(w, r, parts[1])
+			return
+		}
+		if len(parts) == 2 && parts[0] == "connections" {
+			s.handleConnections(w, r, parts[1])
 			return
 		}
 		if len(parts) >= 2 && parts[0] == "metadata" {

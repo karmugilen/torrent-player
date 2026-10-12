@@ -175,6 +175,7 @@ fun TorrentFilesScreen(
                 )
             }
             item { TransferSection(entry) }
+            item { ConnectionMapSection(entry, client) }
             item { TrackerDetailsSection(status) }
             item {
                 PieceHeatGridSection(
