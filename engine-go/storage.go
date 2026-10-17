@@ -137,6 +137,7 @@ type DocumentTorrentStorage struct {
 	checkpointFailures        int
 	checkpointRetry           time.Duration
 	checkpointLastErr         error
+	checkpointPublishing      bool
 	// Test seams for fault injection through the public drain path.
 	fileSyncFn        func(*os.File) error
 	writeCheckpointFn func(string, *pieceCheckpoint) error
@@ -646,14 +647,20 @@ func (st *DocumentTorrentStorage) PieceComplete(index int) bool {
 
 func (st *DocumentTorrentStorage) DeleteCheckpoint() error {
 	st.mu.Lock()
-	defer st.mu.Unlock()
+	for st.checkpointPublishing {
+		st.mu.Unlock()
+		time.Sleep(time.Millisecond)
+		st.mu.Lock()
+	}
 	st.checkpointDirty = false
 	st.checkpointGen++
 	st.checkpointFailures = 0
 	st.checkpointRetry = 0
 	st.checkpointLastErr = nil
 	st.identities = nil
-	return deletePieceCheckpoint(st.baseDir, st.infoHash.HexString())
+	base, hash := st.baseDir, st.infoHash.HexString()
+	st.mu.Unlock()
+	return deletePieceCheckpoint(base, hash)
 }
 
 // CheckpointPersistError returns the last failed sync/checkpoint write, if any.
@@ -1503,10 +1510,24 @@ func (st *DocumentTorrentStorage) drainSyncAndCheckpoint() {
 		st.mu.Unlock()
 		if cp != nil && path != "" {
 			st.mu.Lock()
-			stillValid = !st.closed && st.attached && st.checkpointGen == gen
+			stillValid = !st.closed && st.attached && st.checkpointGen == gen && !st.checkpointPublishing
+			if stillValid {
+				st.checkpointPublishing = true
+			}
 			st.mu.Unlock()
 			if stillValid {
 				writeErr = st.persistCheckpoint(path, cp)
+				st.mu.Lock()
+				st.checkpointPublishing = false
+				// A delete/close that bumped generation while we published must
+				// not leave a resurrected checkpoint or clear dirty for a stale writer.
+				if st.checkpointGen != gen {
+					_ = deletePieceCheckpoint(st.baseDir, hashHex)
+					if writeErr == nil {
+						writeErr = fmt.Errorf("checkpoint publish aborted: generation changed")
+					}
+				}
+				st.mu.Unlock()
 			}
 		}
 	}

@@ -267,3 +267,103 @@ func TestMalformedCheckpointPieceCountRejected(t *testing.T) {
 		t.Fatal("expected oversized piece count to be rejected")
 	}
 }
+
+func TestCheckpointDeleteDuringPublishDoesNotResurrect(t *testing.T) {
+	oldDelay := checkpointFlushDelay
+	checkpointFlushDelay = 0
+	t.Cleanup(func() { checkpointFlushDelay = oldDelay })
+
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	writeVerifiedPiece(t, s, rec, data, 0)
+	st := s.storage.GetStorage(rec.InfoHash)
+	if st == nil {
+		t.Fatal("missing storage")
+	}
+
+	st.mu.Lock()
+	for st.checkpointFlushing {
+		st.mu.Unlock()
+		time.Sleep(time.Millisecond)
+		st.mu.Lock()
+	}
+	st.writeCheckpointFn = func(path string, cp *pieceCheckpoint) error {
+		// Concurrent delete bumps generation while the stale writer is publishing.
+		st.mu.Lock()
+		st.checkpointGen++
+		st.checkpointDirty = false
+		st.identities = nil
+		base, hash := st.baseDir, st.infoHash.HexString()
+		st.mu.Unlock()
+		_ = deletePieceCheckpoint(base, hash)
+		return writePieceCheckpoint(path, cp)
+	}
+	st.checkpointDirty = true
+	st.checkpointFlushing = true
+	gen := st.checkpointGen
+	st.mu.Unlock()
+
+	st.drainSyncAndCheckpoint()
+	if _, err := os.Stat(checkpointPath(dir, rec.InfoHash)); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint resurrected after delete during publish: %v", err)
+	}
+	st.mu.Lock()
+	if st.checkpointGen == gen {
+		t.Fatal("delete must bump generation")
+	}
+	// Stale writer must not clear dirty for a superseded generation when needCP
+	// still applied; generation mismatch leaves dirty only if gen matched.
+	st.mu.Unlock()
+}
+
+func TestCheckpointPersistErrorSurfacedInTorrentStatus(t *testing.T) {
+	oldDelay := checkpointFlushDelay
+	checkpointFlushDelay = 0
+	t.Cleanup(func() { checkpointFlushDelay = oldDelay })
+
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	writeVerifiedPiece(t, s, rec, data, 0)
+	st := s.storage.GetStorage(rec.InfoHash)
+	st.mu.Lock()
+	for st.checkpointFlushing {
+		st.mu.Unlock()
+		time.Sleep(time.Millisecond)
+		st.mu.Lock()
+	}
+	st.writeCheckpointFn = func(string, *pieceCheckpoint) error {
+		return errors.New("injected checkpoint write failure")
+	}
+	st.checkpointDirty = true
+	st.checkpointFlushing = true
+	st.mu.Unlock()
+	st.drainSyncAndCheckpoint()
+	view := recoveryStatus(t, s, rec)
+	if view.Warning == nil || *view.Warning == "" {
+		t.Fatalf("expected checkpoint persist warning in status, got %+v", view)
+	}
+}
