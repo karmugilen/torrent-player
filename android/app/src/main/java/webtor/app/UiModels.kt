@@ -108,20 +108,40 @@ data class ContinueWatchingTarget(
 
 fun List<DownloadEntry>.findContinueWatchingTarget(): ContinueWatchingTarget? {
     var bestTarget: ContinueWatchingTarget? = null
-    var bestTimestamp: Long = -1L
+    var bestBookmarkTime: Long = -1L
+    var bestAddedAt: Long = -1L
 
     for (entry in this) {
         if (entry.isDeleting) continue
         for (file in entry.files) {
-            if (file.playbackPositionMs > 0L) {
-                if (file.playbackDurationMs > 0 && file.playbackPositionMs >= file.playbackDurationMs - 3000) {
-                    continue
+            // Must be a playable video file
+            if (!file.name.isVideoName() && !file.path.isVideoName()) continue
+            if (file.playbackPositionMs <= 0L) continue
+            if (file.playbackDurationMs > 0L && file.playbackPositionMs >= file.playbackDurationMs - 3000L) {
+                continue
+            }
+
+            val bTime = file.bookmarkUpdatedAt
+            val aTime = entry.addedAt
+
+            val isBetter = when {
+                bestTarget == null -> true
+                bTime > bestBookmarkTime -> true
+                bTime == bestBookmarkTime && bTime > 0L -> {
+                    if (aTime != bestAddedAt) aTime > bestAddedAt
+                    else entry.key > bestTarget.entry.key || (entry.key == bestTarget.entry.key && file.index < bestTarget.file.index)
                 }
-                val ts = entry.addedAt
-                if (ts >= bestTimestamp) {
-                    bestTimestamp = ts
-                    bestTarget = ContinueWatchingTarget(entry, file)
+                bTime == 0L && bestBookmarkTime == 0L -> {
+                    if (aTime != bestAddedAt) aTime > bestAddedAt
+                    else entry.key > bestTarget.entry.key || (entry.key == bestTarget.entry.key && file.index < bestTarget.file.index)
                 }
+                else -> false
+            }
+
+            if (isBetter) {
+                bestTarget = ContinueWatchingTarget(entry, file)
+                bestBookmarkTime = bTime
+                bestAddedAt = aTime
             }
         }
     }

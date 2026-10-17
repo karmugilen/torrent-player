@@ -209,7 +209,7 @@ class MainActivity : ComponentActivity() {
             onSettings = session::openSettings,
             onPause = session::pause,
             onResume = session::resume,
-            onPlay = { session.play(it) },
+            onPlay = { entry, index -> session.play(entry, index) },
             onOpen = session::showFiles,
             onDelete = session::requestDelete,
             onRetry = session::retry,

@@ -49,7 +49,7 @@ fun LibraryScreen(
     onSettings: () -> Unit,
     onPause: (DownloadEntry) -> Unit,
     onResume: (DownloadEntry) -> Unit,
-    onPlay: (DownloadEntry) -> Unit,
+    onPlay: (DownloadEntry, Int?) -> Unit,
     onOpen: (DownloadEntry) -> Unit,
     onDelete: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
@@ -185,7 +185,7 @@ fun LibraryScreen(
                     ContinueWatchingCard(
                         target = continueTarget,
                         repository = repository,
-                        onPlay = { onPlay(continueTarget.entry) },
+                        onPlay = { onPlay(continueTarget.entry, continueTarget.file.index) },
                         onOpen = { onOpen(continueTarget.entry) },
                     )
                 }
@@ -353,7 +353,7 @@ fun LibraryScreen(
                     },
                     onPause = { onPause(entry) },
                     onResume = { onResume(entry) },
-                    onPlay = { onPlay(entry) },
+                    onPlay = { onPlay(entry, null) },
                     onOpen = {
                         if (inSelectionMode) {
                             selectedKeys = if (isSelected) selectedKeys - entry.key else selectedKeys + entry.key

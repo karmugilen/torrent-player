@@ -44,10 +44,11 @@ fun returnedPlaybackUri(returned: String?, launched: String?, playlist: Set<Stri
     else -> null // A player may have advanced episodes without identifying the returned item.
 }
 
-fun SavedFile.withPlaybackPosition(positionMs: Long, durationMs: Long): SavedFile = copy(
-    playbackPositionMs = if (durationMs > 0 && positionMs >= durationMs-3000) 0L
+fun SavedFile.withPlaybackPosition(positionMs: Long, durationMs: Long, updatedAt: Long = System.currentTimeMillis()): SavedFile = copy(
+    playbackPositionMs = if (durationMs > 0 && positionMs >= durationMs - 3000) 0L
         else positionMs.coerceAtLeast(0L).let { if (durationMs > 0) it.coerceAtMost(durationMs) else it },
     playbackDurationMs = durationMs.coerceAtLeast(0L),
+    bookmarkUpdatedAt = if (positionMs > 0L) updatedAt else 0L,
 )
 
 /** Approximate prefetch hint only; the player's timestamp controls its seek. */

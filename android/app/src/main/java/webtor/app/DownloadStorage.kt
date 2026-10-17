@@ -24,6 +24,7 @@ data class SavedFile(
     val verifiedBytes: Long = 0L,
     val playbackPositionMs: Long = 0L,
     val playbackDurationMs: Long = 0L,
+    val bookmarkUpdatedAt: Long = 0L,
 ) {
     val isVerifiedComplete: Boolean get() = length == 0L || verifiedBytes >= length
 }
@@ -581,6 +582,7 @@ class DownloadStorage(private val context: Context) {
                             .put("path", f.path).put("length", f.length).put("uri", f.uri).put("progress", f.progress)
                             .put("verifiedBytes", f.verifiedBytes)
                             .put("playbackPositionMs", f.playbackPositionMs).put("playbackDurationMs", f.playbackDurationMs)
+                            .put("bookmarkUpdatedAt", f.bookmarkUpdatedAt)
                             .put("relativePath", f.relativePath)) }
                     }))
             }
@@ -634,7 +636,8 @@ class DownloadStorage(private val context: Context) {
                         if (f.isNull("relativePath")) null else f.getString("relativePath"),
                         verifiedBytes = if (directPlay) 0L else verifiedBytes,
                         playbackPositionMs = f.optLong("playbackPositionMs", 0L).coerceAtLeast(0L),
-                        playbackDurationMs = f.optLong("playbackDurationMs", 0L).coerceAtLeast(0L))
+                        playbackDurationMs = f.optLong("playbackDurationMs", 0L).coerceAtLeast(0L),
+                        bookmarkUpdatedAt = f.optLong("bookmarkUpdatedAt", 0L).coerceAtLeast(0L))
                 } },
                 (0 until selected.length()).map { selected.getInt(it) }.toSet(),
                 paused || isDeleting || savedState == EntryLifecycleState.PAUSING || savedState == EntryLifecycleState.STOPPING,
