@@ -17,6 +17,7 @@ import (
 // download gives hash→name lookup with no peer upload. Sorted by infohash.
 const dumpURL = "https://codeberg.org/heretic/torrents-csv-data/raw/branch/main/torrents.csv"
 const dumpMaxAge = 24 * time.Hour
+
 // Bulk-apply chunk size for undelayed local dump seeding.
 const dumpSeedChunk = 2500
 
@@ -332,17 +333,19 @@ func (d *dashboard) applyDumpRowsBatch(hashes []string, idx *dumpIndex, seedOnly
 	if len(hashes) == 0 || idx == nil {
 		return 0
 	}
-	type item struct {
-		hash string
-		row  dumpRow
-	}
-	items := make([]item, 0, len(hashes))
-	for _, hash := range hashes {
-		row, ok := idx.lookup(hash)
-		if !ok {
-			continue
+	items := make([]dumpMatch, 0)
+	if idx.rust {
+		// One FFI call per batch; native workers search the mmap in parallel.
+		for start := 0; start < len(hashes); start += 50_000 {
+			end := min(len(hashes), start+50_000)
+			items = append(items, rustLookupMany(hashes[start:end])...)
 		}
-		items = append(items, item{hash: hash, row: row})
+	} else {
+		for _, hash := range hashes {
+			if row, ok := idx.lookup(hash); ok {
+				items = append(items, dumpMatch{hash: hash, row: row})
+			}
+		}
 	}
 	if len(items) == 0 {
 		return 0
@@ -434,4 +437,9 @@ func (d *dashboard) resolvePendingFromDump(idx *dumpIndex) int {
 		return 0
 	}
 	return d.applyDumpRowsBatch(pending, idx, false)
+}
+
+type dumpMatch struct {
+	hash string
+	row  dumpRow
 }

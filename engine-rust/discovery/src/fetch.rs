@@ -3,7 +3,9 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
+static CATALOG_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
 pub const DUMP_URL: &str =
     "https://codeberg.org/heretic/torrents-csv-data/raw/branch/main/torrents.csv";
@@ -85,11 +87,14 @@ pub fn fetch_catalog_page(query: &str, size: i32, after: i32) -> Result<CatalogP
     if after > 0 {
         url.push_str(&format!("&after={after}"));
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(4))
-        .timeout_read(Duration::from_secs(8))
-        .user_agent("TorrentAtlas/1.0 (metadata-only; rust catalog)")
-        .build();
+    // Reuse TLS sessions and idle sockets across paced worker requests.
+    let agent = CATALOG_AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(4))
+            .timeout_read(Duration::from_secs(8))
+            .user_agent("TorrentAtlas/1.0 (metadata-only; rust catalog)")
+            .build()
+    });
     let resp = agent
         .get(&url)
         .set("Accept", "application/json")
@@ -132,7 +137,10 @@ fn parse_catalog_json(body: &str) -> Result<CatalogPage, String> {
     let mut search_from = 0usize;
     while let Some(rel) = find_key(&bytes[search_from..], b"\"infohash\"") {
         let start = search_from + rel;
-        let obj_start = bytes[..start].iter().rposition(|&c| c == b'{').unwrap_or(start);
+        let obj_start = bytes[..start]
+            .iter()
+            .rposition(|&c| c == b'{')
+            .unwrap_or(start);
         let obj_end = match bytes[start..].iter().position(|&c| c == b'}') {
             Some(n) => start + n + 1,
             None => break,

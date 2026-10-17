@@ -176,7 +176,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	work.Add(1)
 	go func() {
 		defer work.Done()
-		t := time.NewTicker(10 * time.Second)
+		t := time.NewTicker(2 * time.Minute)
 		defer t.Stop()
 		for {
 			select {
@@ -297,34 +297,7 @@ func (s *sampler) markCacheTried(hash string) {
 func (s *sampler) publishResolved(j discoveryJob, rec observation, wasResolved bool, started time.Time) {
 	s.d.mu.Lock()
 	defer s.d.mu.Unlock()
-	if latest, exists := s.d.records[j.hash]; exists {
-		rec.LastSeen = latest.LastSeen
-		rec.SampleHits = latest.SampleHits
-		rec.ResolveAttempts = latest.ResolveAttempts
-		rec.Peers = latest.Peers
-		rec.Countries = latest.Countries
-		rec.Seeds = latest.Seeds
-	}
-	rec.CheckedAt = time.Now().UTC()
-	// Named torrents are done; leave NextAttempt zero so the scheduler skips them.
-	rec.NextAttempt = time.Time{}
-	s.d.records[j.hash] = rec
-	if rec.Resolved {
-		s.d.markResolvedLocked(j.hash)
-	} else {
-		s.d.markPendingLocked(j.hash)
-	}
-	s.d.pruneLocked()
-	s.d.state.Completed++
-	s.d.totalLookupTime += time.Since(started)
-	if !wasResolved && rec.Resolved {
-		s.d.state.Successes++
-		if rec.Source == "cache" {
-			s.d.state.CacheHits++
-		} else {
-			s.d.state.PeerHits++
-		}
-	}
+	s.d.applyNameLocked(namePatch{Hash: j.hash, Name: rec.Name, Source: rec.Source, Size: rec.Size, Files: rec.Files, Kind: rec.Kind, ResolutionMS: time.Since(started).Milliseconds()}, time.Now().UTC())
 }
 
 func (s *sampler) resolveCache(parent context.Context, j discoveryJob, hash metainfo.Hash, rec observation, wasResolved bool, started time.Time) bool {
@@ -375,10 +348,20 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		// Defensive: named rows must not consume cache/peer slots.
 		return
 	}
+	defer func() {
+		if parent.Err() == nil {
+			s.d.mu.Lock()
+			s.d.state.Completed++
+			s.d.recordLookupRateLocked(time.Now())
+			s.d.totalLookupTime += time.Since(started)
+			s.d.mu.Unlock()
+		}
+	}()
 	if j.kind == jobCache {
 		_ = s.resolveCache(parent, j, hash, rec, wasResolved, started)
 		return
 	}
+	defer s.clearCacheTried(j.hash)
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
 	t, _, err := s.client.AddTorrentSpec(&torrent.TorrentSpec{AddTorrentOpts: torrent.AddTorrentOpts{InfoHash: hash, DisallowDataDownload: true, DisallowDataUpload: true, DisableInitialPieceCheck: true}})
@@ -394,9 +377,12 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	cacheCtx, cancelCache := context.WithCancel(ctx)
 	defer cancelCache()
 	cacheEvents := make(chan *metainfo.Info, 1)
-	// Peer jobs still race caches for hashes that arrived with known peers
-	// before a cache worker claimed them.
-	if !wasResolved {
+	// Only untested peer-rich arrivals need to race HTTP. A cache miss has
+	// already been checked by the cache pool.
+	s.mu.Lock()
+	cacheAlreadyTried := s.cacheTried[j.hash]
+	s.mu.Unlock()
+	if !wasResolved && !cacheAlreadyTried {
 		work.Add(1)
 		go func() {
 			defer work.Done()
@@ -407,7 +393,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			}
 		}()
 	}
-	if wasResolved {
+	if wasResolved || cacheAlreadyTried {
 		close(cacheEvents)
 	}
 	// Known addresses only accelerate dialing. They are not fresh map sightings.
@@ -495,19 +481,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		cancelCache()
 		got = nil
 		startSettling()
-		// Show a name as soon as it arrives, while counts finish settling.
-		s.d.mu.Lock()
-		latest, retained := s.d.records[j.hash]
-		if retained {
-			rec.LastSeen = latest.LastSeen
-			rec.SampleHits = latest.SampleHits
-		}
-		s.d.records[j.hash] = rec
-		if rec.Resolved {
-			s.d.markResolvedLocked(j.hash)
-		}
-		s.d.pruneLocked()
-		s.d.mu.Unlock()
+		s.publishResolved(j, rec, wasResolved, started)
 		return true
 	}
 	noPeerTimer := time.NewTimer(8 * time.Second)
@@ -584,6 +558,10 @@ loop:
 	if latest, exists := s.d.records[j.hash]; exists {
 		rec.LastSeen = latest.LastSeen
 		rec.SampleHits = latest.SampleHits
+		if latest.Resolved {
+			rec.Name, rec.Resolved, rec.Source, rec.Size, rec.Kind, rec.Files = latest.Name, true, latest.Source, latest.Size, latest.Kind, latest.Files
+			rec.NextAttempt = time.Time{}
+		}
 	}
 	// A slow successful job must survive a newer sample evicting its unresolved
 	// row. Failed evicted jobs need no further retention.
@@ -597,19 +575,10 @@ loop:
 		s.d.pruneLocked()
 	}
 	s.d.state.PayloadBytes += stats.BytesReadData.Int64()
-	s.d.state.Completed++
 	if emptyExit {
 		s.d.state.EmptyLookups++
 	}
-	s.d.totalLookupTime += time.Since(started)
-	if !wasResolved && rec.Resolved {
-		s.d.state.Successes++
-		if rec.Source == "cache" {
-			s.d.state.CacheHits++
-		} else {
-			s.d.state.PeerHits++
-		}
-	}
+
 	s.d.mu.Unlock()
 }
 

@@ -29,6 +29,8 @@ int webtor_dump_ensure(const char *path, int force);
 /* Catalog JSON array into *json_out (caller frees with webtor_string_free). */
 int webtor_catalog_fetch(const char *query, int size, int after, char **json_out, int *next_out);
 void webtor_string_free(char *s);
+#include "search.h"
+
 
 #ifdef __cplusplus
 }

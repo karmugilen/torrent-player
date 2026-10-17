@@ -6,6 +6,32 @@ import (
 	"time"
 )
 
+func BenchmarkBrowseWindow(b *testing.B) {
+	d := newDashboard("", nil)
+	now := time.Now()
+	for i := 0; i < 100_000; i++ {
+		h := fmt.Sprintf("%040x", i)
+		d.records[h] = observation{Hash: h, Name: "Example.1080p.mkv", Resolved: true, Peers: i % 101, LastSeen: now, Countries: map[string]int{"US": 1}, Files: []string{"movie.mkv"}}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.snapshotForAPI(viewQuery{Limit: 150, Sort: "peers"})
+	}
+}
+
+func TestSearchMatchesReorderedWordsSeparatorsAccentsAndMagnet(t *testing.T) {
+	d := testDashboard(t)
+	h := fmt.Sprintf("%040x", 99)
+	d.applyNameLocked(namePatch{Hash: h, Name: "Café.Movie.2026.1080p.mkv", Source: "dump"}, time.Now())
+	for _, q := range []string{"2026 cafe movie", "café movie", "magnet:?xt=urn:btih:" + h + "&dn=Example"} {
+		s := d.snapshotForAPI(viewQuery{Limit: 10, Q: q})
+		if len(s.Records) != 1 || s.Records[0].Hash != h {
+			t.Fatalf("search %q lost match", q)
+		}
+	}
+}
+
 func TestSnapshotForAPIReturnsBoundedWindow(t *testing.T) {
 	d := testDashboard(t)
 	now := time.Now()

@@ -50,3 +50,19 @@ func TestSchedulerScansPendingSetNotWholeStore(t *testing.T) {
 		t.Fatalf("expected pending hash, got %#v ok=%v", job, ok)
 	}
 }
+
+func TestCacheMissCannotBeReclaimedBeforePeerHandoff(t *testing.T) {
+	d := testDashboard(t)
+	now := time.Now()
+	h := strings.Repeat("d", 40)
+	d.records[h] = observation{Hash: h, FirstSeen: now, NextAttempt: now.Add(-time.Second), ResolveAttempts: 1}
+	d.pendingSet[h] = struct{}{}
+	s := &sampler{d: d, cacheTried: map[string]bool{h: true}}
+	if _, ok := s.nextJobOf(now, jobCache); ok {
+		t.Fatal("cache worker reclaimed its own miss and starved peer lookup")
+	}
+	job, ok := s.nextJobOf(now, jobPeer)
+	if !ok || job.hash != h {
+		t.Fatal("cache miss did not reach peer worker")
+	}
+}

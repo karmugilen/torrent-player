@@ -16,8 +16,10 @@ import (
 // source. DHT sampling still discovers live hashes and geography; this fills
 // names at a rate mirrors and peers alone cannot.
 const catalogEndpoint = "https://torrents-csv.com/service/search"
+
 // Public API caps pages around 25 rows.
 const catalogPageSize = 25
+
 // Catalog HTTP fills names the local dump has not seeded yet.
 const catalogWorkers = 16
 const catalogTargetPerMin = 1500
@@ -174,7 +176,6 @@ func (d *dashboard) applyCatalogTorrents(items []catalogTorrent, latency time.Du
 			Seeds: seeds, PeerBump: peerBump, Kind: catalogKind(name),
 			ResolutionMS: latency.Milliseconds(),
 		}, now) {
-			d.totalLookupTime += latency
 			added++
 		}
 	}

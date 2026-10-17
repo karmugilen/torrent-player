@@ -6,12 +6,21 @@ package main
 #cgo CFLAGS: -I${SRCDIR}/../../../engine-rust/discovery
 #cgo LDFLAGS: ${SRCDIR}/../../../engine-rust/discovery/target/release/libwebtor_discovery.a -ldl -lm -lpthread
 #include "discovery.h"
+#include "search.h"
 #include <stdlib.h>
 
 extern int goWebtorSeedCb(char* hash, WebtorDumpRow* row, void* ctx);
 
 static int webtor_seed_trampoline(const char* hash, const WebtorDumpRow* row, void* ctx) {
 	return goWebtorSeedCb((char*)hash, (WebtorDumpRow*)row, ctx);
+}
+
+extern int goWebtorLookupCb(char* hash, WebtorDumpRow* row, uintptr_t ctx);
+static int webtor_lookup_trampoline(const char *hash, const WebtorDumpRow *row, void *ctx) {
+ return goWebtorLookupCb((char*)hash, (WebtorDumpRow*)row, (uintptr_t)ctx);
+}
+static int webtor_call_lookup_many(const uint8_t *hashes, uintptr_t count, uintptr_t handle) {
+ return webtor_dump_lookup_many(hashes,count,webtor_lookup_trampoline,(void*)handle);
 }
 
 static int webtor_call_seed_all(void* ctx) {
@@ -23,6 +32,7 @@ import "C"
 import (
 	"encoding/json"
 	"errors"
+	"runtime/cgo"
 	"sync/atomic"
 	"unsafe"
 )
@@ -146,4 +156,28 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+//export goWebtorLookupCb
+func goWebtorLookupCb(hash *C.char, row *C.WebtorDumpRow, handle C.uintptr_t) C.int {
+	items := cgo.Handle(handle).Value().(*[]dumpMatch)
+	*items = append(*items, dumpMatch{hash: C.GoString(hash), row: dumpRow{Name: C.GoString(&row.name[0]), Size: int64(row.size), Seeders: int(row.seeders), Leechers: int(row.leechers)}})
+	return 1
+}
+
+func rustLookupMany(hashes []string) []dumpMatch {
+	packed := make([]byte, 0, len(hashes)*40)
+	for _, hash := range hashes {
+		if validHash(hash) {
+			packed = append(packed, hash...)
+		}
+	}
+	if len(packed) == 0 {
+		return nil
+	}
+	items := []dumpMatch{}
+	handle := cgo.NewHandle(&items)
+	defer handle.Delete()
+	C.webtor_call_lookup_many((*C.uint8_t)(unsafe.Pointer(&packed[0])), C.uintptr_t(len(packed)/40), C.uintptr_t(handle))
+	return items
 }

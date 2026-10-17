@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // namePatch is the small interface for naming an observation. Dump, catalog,
 // cache, and peer adapters produce patches; applyNameLocked owns merge policy.
@@ -72,12 +75,12 @@ func (d *dashboard) applyNameLocked(p namePatch, now time.Time) bool {
 	}
 	d.records[p.Hash] = rec
 	d.markResolvedLocked(p.Hash)
-	d.indexNameLocked(p.Hash, rec.Name)
+	d.indexNameLocked(p.Hash, rec.Name+" "+strings.Join(rec.Files, " "))
 	if wasResolved {
 		return false
 	}
 	d.state.Successes++
-	d.state.Completed++
+	d.recordNameRateLocked(p.Source, exists && rec.SampleHits > 0, now)
 	switch p.Source {
 	case "dump":
 		d.state.DumpHits++

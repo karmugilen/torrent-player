@@ -6,7 +6,9 @@ Fast torrents.csv dump index and catalog HTTP for Torrent Atlas (`engine-go/cmd/
 
 - **mmap + binary search** on the sorted `torrents.csv` dump (~1.16M rows). Load is ~8× faster than the Go `encoding/csv` HashMap path and keeps names in the mapped file instead of duplicating them in a Go map.
 - **Dump download** when the local file is missing or older than 24h.
-- **Catalog page fetch** against `torrents-csv.com` (JSON), used when built with the `rustdump` tag.
+- **Compact search postings**: batched normalized names, numeric document IDs and ordered prefix lookup. Go receives candidate hashes, then applies filters/ranking.
+- **Parallel batch dump matching**: one FFI call for pending hashes, up to four mmap lookup workers, with Go-owned merge callbacks.
+- **Catalog page fetch** with a reused HTTP agent against `torrents-csv.com` (JSON), used when built with the `rustdump` tag.
 
 DHT / peer metadata (anacrolix) stays in Go.
 
@@ -28,3 +30,7 @@ Produces `target/release/libwebtor_discovery.a` (and `.so`).
 | Rust mmap | ~180 ms | ~74 ms (binary search) |
 
 Startup and daily refresh dominate; resolve correctness is unchanged.
+
+The load figures above measure the mmap/hash index alone, excluding JSON store
+restore and full-text indexing. Search handles are independent per dashboard;
+FFI buffers contain only byte arrays and numeric handles.

@@ -53,44 +53,48 @@ type observation struct {
 	ResolutionMS    int64          `json:"resolutionMs"`
 }
 type state struct {
-	Started         time.Time     `json:"started"`
-	Updated         time.Time     `json:"updated"`
-	Running         bool          `json:"running"`
-	Status          string        `json:"status"`
-	Queries         int           `json:"queries"`
-	Responses       int           `json:"responses"`
-	SamplingNodes   int           `json:"samplingNodes"`
-	Hashes          int           `json:"hashes"`
-	RetentionLimit  int           `json:"retentionLimit"`
-	ActiveSamplers  int           `json:"activeSamplers"`
-	HashSamples     int64         `json:"hashSamples"`
-	Attempts        int           `json:"attempts"`
-	Resolved        int           `json:"resolved"`
-	Unresolved      int           `json:"unresolved"`
-	Active          int           `json:"active"`
-	Pending         int           `json:"pending"`
-	Workers         int           `json:"workers"`
-	Completed       int           `json:"completed"`
-	Successes       int           `json:"successes"`
-	CacheHits       int           `json:"cacheHits"`
-	CatalogHits     int           `json:"catalogHits"`
-	DumpHits        int           `json:"dumpHits"`
-	DumpLookups     int           `json:"dumpLookups"`
-	PeerHintUses    int           `json:"peerHintUses"`
-	EmptyLookups    int           `json:"emptyLookups"`
-	PeerHits        int           `json:"peerHits"`
-	AverageLookupMS int64         `json:"averageLookupMs"`
-	PayloadBytes    int64         `json:"payloadBytes"`
-	DumpReady       bool           `json:"dumpReady"`
-	DumpRows        int            `json:"dumpRows"`
-	MatchCount      int            `json:"matchCount"`
-	CountryTotals   map[string]int `json:"countryTotals"`
-	Records         []observation  `json:"records"`
+	Started                time.Time      `json:"started"`
+	Updated                time.Time      `json:"updated"`
+	Running                bool           `json:"running"`
+	Status                 string         `json:"status"`
+	Queries                int            `json:"queries"`
+	Responses              int            `json:"responses"`
+	SamplingNodes          int            `json:"samplingNodes"`
+	Hashes                 int            `json:"hashes"`
+	RetentionLimit         int            `json:"retentionLimit"`
+	ActiveSamplers         int            `json:"activeSamplers"`
+	HashSamples            int64          `json:"hashSamples"`
+	Attempts               int            `json:"attempts"`
+	Resolved               int            `json:"resolved"`
+	Unresolved             int            `json:"unresolved"`
+	Active                 int            `json:"active"`
+	Pending                int            `json:"pending"`
+	Workers                int            `json:"workers"`
+	Completed              int            `json:"completed"`
+	LookupsPerMinute       int            `json:"lookupsPerMinute"`
+	LiveNamesPerMinute     int            `json:"liveNamesPerMinute"`
+	IndexNamesPerMinute    int            `json:"indexNamesPerMinute"`
+	VerifiedNamesPerMinute int            `json:"verifiedNamesPerMinute"`
+	Successes              int            `json:"successes"`
+	CacheHits              int            `json:"cacheHits"`
+	CatalogHits            int            `json:"catalogHits"`
+	DumpHits               int            `json:"dumpHits"`
+	DumpLookups            int            `json:"dumpLookups"`
+	PeerHintUses           int            `json:"peerHintUses"`
+	EmptyLookups           int            `json:"emptyLookups"`
+	PeerHits               int            `json:"peerHits"`
+	AverageLookupMS        int64          `json:"averageLookupMs"`
+	PayloadBytes           int64          `json:"payloadBytes"`
+	DumpReady              bool           `json:"dumpReady"`
+	DumpRows               int            `json:"dumpRows"`
+	MatchCount             int            `json:"matchCount"`
+	CountryTotals          map[string]int `json:"countryTotals"`
+	Records                []observation  `json:"records"`
 }
 type dashboard struct {
-	mu              sync.RWMutex
-	state           state
-	records         map[string]observation
+	mu      sync.RWMutex
+	state   state
+	records map[string]observation
 	// pendingSet holds unresolved hashes for O(pending) job picks instead of
 	// scanning every named row in the unlimited store.
 	pendingSet      map[string]struct{}
@@ -105,6 +109,9 @@ type dashboard struct {
 	done            chan struct{}
 	control         sync.Mutex
 	totalLookupTime time.Duration
+	nativeSearch    nativeSearchIndex
+	nameRates       [60]nameRateBucket
+	persistMu       sync.Mutex
 }
 
 const namedRetention = 30 * 24 * time.Hour
@@ -116,6 +123,7 @@ func newDashboard(cachePath string, geo *maxminddb.Reader) *dashboard {
 		pendingSet:   map[string]struct{}{},
 		searchTok:    map[string][]string{},
 		searchCommon: map[string]bool{},
+		nativeSearch: newNativeSearch(),
 		cachePath:    cachePath,
 		dumpPath:     filepath.Join(filepath.Dir(cachePath), "torrents.csv"),
 		geo:          geo,
@@ -143,7 +151,7 @@ func newDashboard(cachePath string, geo *maxminddb.Reader) *dashboard {
 					if !r.Resolved {
 						d.pendingSet[r.Hash] = struct{}{}
 					} else if strings.TrimSpace(r.Name) != "" {
-						d.indexNameLocked(r.Hash, r.Name)
+						d.indexNameLocked(r.Hash, r.Name+" "+strings.Join(r.Files, " "))
 					}
 				}
 			}
@@ -192,7 +200,7 @@ func (d *dashboard) pruneLocked() {
 func (d *dashboard) snapshot() state {
 	return d.snapshotForAPI(viewQuery{Limit: apiDefaultLimit, Sort: "trending"})
 }
-func (d *dashboard) persist() { d.persistAll() }
+func (d *dashboard) persist()           { d.persistAll() }
 func (d *dashboard) setStatus(s string) { d.mu.Lock(); d.state.Status = s; d.mu.Unlock() }
 func (d *dashboard) setRunning(parent context.Context, on bool) {
 	d.control.Lock()
@@ -261,7 +269,7 @@ func (d *dashboard) handler(world []byte) http.Handler {
 			w.WriteHeader(405)
 			return
 		}
-		b, _ := json.Marshal(d.snapshotForAPI(viewQuery{Limit: apiDefaultLimit, Sort: "trending"}))
+		b, _ := json.Marshal(d.snapshotForAPI(parseViewQuery(r.URL.Query())))
 		html := strings.ReplaceAll(page, "__WORLD_MAP__", string(world))
 		html = strings.ReplaceAll(html, "__INITIAL_STATE__", string(b))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

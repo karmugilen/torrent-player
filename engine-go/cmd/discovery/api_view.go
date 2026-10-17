@@ -17,6 +17,8 @@ const apiDefaultLimit = 150
 const apiMaxLimit = 600
 
 type viewQuery struct {
+	Source  string
+	terms   []string
 	Q       string
 	Sort    string
 	Kind    string
@@ -46,6 +48,7 @@ func parseViewQuery(values url.Values) viewQuery {
 	}
 	return viewQuery{
 		Q:       strings.TrimSpace(values.Get("q")),
+		Source:  values.Get("source"),
 		Sort:    strings.TrimSpace(values.Get("sort")),
 		Kind:    strings.TrimSpace(values.Get("kind")),
 		Trend:   strings.TrimSpace(values.Get("trend")),
@@ -150,18 +153,38 @@ func matchesView(r observation, q viewQuery, now time.Time) bool {
 			return false
 		}
 	}
-	if q.Q != "" {
-		needle := strings.ToLower(q.Q)
-		if strings.Contains(strings.ToLower(r.Name), needle) || strings.Contains(strings.ToLower(r.Hash), needle) {
-			return true
-		}
-		for _, f := range r.Files {
-			if strings.Contains(strings.ToLower(f), needle) {
-				return true
+	if q.Source != "" && q.Source != "all" {
+		switch q.Source {
+		case "observed":
+			if r.SampleHits == 0 {
+				return false
+			}
+		case "verified":
+			if r.Source != "peer" && r.Source != "cache" {
+				return false
+			}
+		case "indexed":
+			if r.Source != "dump" && r.Source != "catalog" {
+				return false
+			}
+		default:
+			if r.Source != q.Source {
+				return false
 			}
 		}
-		return false
 	}
+	if q.Q != "" {
+		if validHash(q.Q) {
+			return r.Hash == q.Q
+		}
+		text := normalizeSearchText(r.Name + " " + strings.Join(r.Files, " "))
+		for _, term := range q.terms {
+			if !strings.Contains(text, term) {
+				return false
+			}
+		}
+	}
+
 	return true
 }
 
@@ -229,7 +252,10 @@ func viewLess(a, b observation, q viewQuery, now time.Time) bool {
 	if ta != tb {
 		return ta > tb
 	}
-	return a.LastSeen.After(b.LastSeen)
+	if !a.LastSeen.Equal(b.LastSeen) {
+		return a.LastSeen.After(b.LastSeen)
+	}
+	return a.Hash < b.Hash
 }
 
 type rankedHeap struct {
@@ -241,7 +267,7 @@ type rankedHeap struct {
 func (h rankedHeap) Len() int { return len(h.items) }
 func (h rankedHeap) Less(i, j int) bool {
 	// Min-heap of the best items: root is the worst of the current best set.
-	return !viewLess(h.items[i], h.items[j], h.q, h.now)
+	return viewLess(h.items[j], h.items[i], h.q, h.now)
 }
 func (h rankedHeap) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
 func (h *rankedHeap) Push(x any)   { h.items = append(h.items, x.(observation)) }
@@ -255,6 +281,10 @@ func (h *rankedHeap) Pop() any {
 func copyObservation(r observation) observation {
 	copy := r
 	copy.Files = append([]string(nil), r.Files...)
+	if r.Seeds != nil {
+		seeds := *r.Seeds
+		copy.Seeds = &seeds
+	}
 	if r.Countries != nil {
 		countryCopy := map[string]int{}
 		for c, n := range r.Countries {
@@ -270,11 +300,17 @@ func copyObservation(r observation) observation {
 func (d *dashboard) snapshotForAPI(q viewQuery) state {
 	// Readers share the store via RLock so dump seed / resolvers can still write
 	// between polls without waiting on a full exclusive scan.
+	q.Q = normalizeSearchQuery(q.Q)
+	q.terms = strings.Fields(normalizeSearchText(q.Q))
+	if q.Limit <= 0 {
+		q.Limit = apiDefaultLimit
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	now := time.Now().UTC()
 	s := d.state
 	s.Updated = now
+	d.applyNameRatesLocked(&s, now)
 	s.Hashes = len(d.records)
 	s.RetentionLimit = retainedTorrentLimit
 	if s.Completed > 0 {
@@ -314,7 +350,9 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 			return
 		}
 		matchCount++
-		item := copyObservation(r)
+		// Store shallow candidates while holding the read lock. Deep-copy
+		// only the chosen window, not every matching row in the catalog.
+		item := r
 		if h.Len() < need {
 			heap.Push(h, item)
 			return
@@ -354,7 +392,9 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 		if end > len(h.items) {
 			end = len(h.items)
 		}
-		s.Records = h.items[q.Offset:end]
+		for _, r := range h.items[q.Offset:end] {
+			s.Records = append(s.Records, copyObservation(r))
+		}
 	}
 	return s
 }
@@ -362,6 +402,8 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 // persistAll writes the full observation map to discovery.json without building
 // a browser-sized API payload.
 func (d *dashboard) persistAll() {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
 	d.mu.Lock()
 	records := make([]observation, 0, len(d.records))
 	for _, r := range d.records {

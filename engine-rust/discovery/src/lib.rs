@@ -5,6 +5,7 @@
 mod dump;
 mod fetch;
 mod ffi;
+mod search;
 
 pub use dump::{DumpIndex, DumpRow};
 pub use fetch::{ensure_dump, fetch_catalog_page, CatalogPage, CatalogTorrent};

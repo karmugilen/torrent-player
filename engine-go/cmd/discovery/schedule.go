@@ -131,15 +131,10 @@ func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 		tried := s.cacheTried[r.Hash]
 		switch kind {
 		case jobCache:
-			// After a miss the hash is marked tried so peer workers continue
-			// without a hot cache loop. When its retry becomes due, mirrors get
-			// another chance.
+			// A completed miss belongs to the peer pool until that attempt
+			// finishes. Cache workers must never reclaim their own handoff.
 			if tried {
-				if now.Before(dueAt(r)) {
-					continue
-				}
-				delete(s.cacheTried, r.Hash)
-				tried = false
+				continue
 			}
 		case jobPeer:
 			// Peer workers handle cache misses and reachable unresolved swarms.

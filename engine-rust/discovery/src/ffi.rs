@@ -2,11 +2,12 @@
 
 use crate::dump::{DumpIndex, DumpRow};
 use crate::fetch::{self, CatalogPage};
+use crate::search::SearchIndex;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::Path;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 static DUMP: Mutex<Option<Arc<DumpIndex>>> = Mutex::new(None);
 
@@ -24,7 +25,10 @@ fn fill_row(dst: &mut WebtorDumpRow, row: &DumpRow) {
     dst.leechers = row.leechers;
     dst.name = [0; 512];
     let bytes = row.name.as_bytes();
-    let n = bytes.len().min(511);
+    let mut n = bytes.len().min(511);
+    while !row.name.is_char_boundary(n) {
+        n -= 1;
+    }
     for (i, &b) in bytes[..n].iter().enumerate() {
         dst.name[i] = b as c_char;
     }
@@ -112,7 +116,10 @@ pub type WebtorDumpIter = Option<
 /// Iterate rows with seeders > 0. Lock is released before callbacks so Go can
 /// look up / apply without deadlocking the dump mutex.
 #[no_mangle]
-pub unsafe extern "C" fn webtor_dump_for_each_seeded(cb: WebtorDumpIter, ctx: *mut c_void) -> c_int {
+pub unsafe extern "C" fn webtor_dump_for_each_seeded(
+    cb: WebtorDumpIter,
+    ctx: *mut c_void,
+) -> c_int {
     let Some(cb) = cb else {
         return -1;
     };
@@ -243,4 +250,120 @@ fn json_escape(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Search handles are independent per dashboard (including Go tests).
+#[no_mangle]
+pub extern "C" fn webtor_search_new() -> *mut c_void {
+    Box::into_raw(Box::new(RwLock::new(SearchIndex::default()))) as *mut c_void
+}
+#[no_mangle]
+pub unsafe extern "C" fn webtor_search_free(handle: *mut c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle as *mut RwLock<SearchIndex>));
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn webtor_search_add(
+    handle: *mut c_void,
+    data: *const u8,
+    length: usize,
+) -> c_int {
+    if handle.is_null() || data.is_null() || length > 8 * 1024 * 1024 {
+        return -1;
+    }
+    let index = &*(handle as *const RwLock<SearchIndex>);
+    match index.write() {
+        Ok(mut index) => index.add_batch(std::slice::from_raw_parts(data, length)) as c_int,
+        Err(_) => -1,
+    }
+}
+/// Return total matches; copy at most capacity packed 20-byte hashes.
+#[no_mangle]
+pub unsafe extern "C" fn webtor_search_query(
+    handle: *mut c_void,
+    query: *const c_char,
+    out: *mut u8,
+    capacity: usize,
+) -> c_int {
+    if handle.is_null() || query.is_null() || (capacity > 0 && out.is_null()) {
+        return -1;
+    }
+    let Ok(query) = CStr::from_ptr(query).to_str() else {
+        return -1;
+    };
+    let index = &*(handle as *const RwLock<SearchIndex>);
+    let Ok(index) = index.read() else {
+        return -1;
+    };
+    let Some(matches) = index.candidates(query) else {
+        return -1;
+    };
+    for (i, hash) in matches.iter().take(capacity).enumerate() {
+        ptr::copy_nonoverlapping(hash.as_ptr(), out.add(i * 20), 20);
+    }
+    matches.len() as c_int
+}
+
+/// One call for all pending hashes. Workers only read the mmap; callbacks run
+/// sequentially after joining so Go owns all observation mutation.
+#[no_mangle]
+pub unsafe extern "C" fn webtor_dump_lookup_many(
+    hashes: *const u8,
+    count: usize,
+    cb: WebtorDumpIter,
+    ctx: *mut c_void,
+) -> c_int {
+    if hashes.is_null() || count > 100_000 {
+        return -1;
+    }
+    let Some(cb) = cb else {
+        return -1;
+    };
+    let Some(index) = dump_arc() else {
+        return -1;
+    };
+    let input = std::slice::from_raw_parts(hashes, count * 40);
+    let workers = if count >= 4096 {
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
+    } else {
+        1
+    };
+    let chunk_bytes = count.div_ceil(workers).max(1) * 40;
+    let hits = std::thread::scope(|scope| {
+        let mut jobs = Vec::new();
+        for chunk in input.chunks(chunk_bytes) {
+            let index = &index;
+            jobs.push(scope.spawn(move || {
+                chunk
+                    .chunks_exact(40)
+                    .filter_map(|hash| {
+                        index.lookup(hash).map(|row| {
+                            let mut key = [0u8; 41];
+                            key[..40].copy_from_slice(hash);
+                            (key, row)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+        jobs.into_iter()
+            .flat_map(|job| job.join().unwrap_or_default())
+            .collect::<Vec<_>>()
+    });
+    let mut applied = 0;
+    for (hash, row) in hits {
+        let mut out = WebtorDumpRow {
+            name: [0; 512],
+            size: 0,
+            seeders: 0,
+            leechers: 0,
+        };
+        fill_row(&mut out, &row);
+        applied += 1;
+        if cb(hash.as_ptr() as *const c_char, &out, ctx) == 0 {
+            break;
+        }
+    }
+    applied
 }

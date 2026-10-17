@@ -23,3 +23,5 @@ var errRustUnavailable = errString("rust dump not linked")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func rustLookupMany(hashes []string) []dumpMatch { return nil }

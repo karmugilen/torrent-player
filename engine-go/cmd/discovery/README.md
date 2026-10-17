@@ -137,3 +137,19 @@ target 1,000 names/minute and to stop filling beyond 70% of the 10,000-slot
 retention so DHT samples still fit. Cache and peer resolvers remain active for
 hashes the catalog does not name. Catalog ingest unit tests cover naming,
 seed/peer counts, video kind detection and duplicate suppression.
+
+
+The current webpage uses fixed-size Next/Previous pages, source filters, shared
+URL state, and cancellation of stale search requests. Searches accept words in
+any order, accents, punctuation, hashes and magnets. Live names, index additions,
+verified metadata and completed checks are measured over the last 60 seconds.
+The 1,000/minute goal counts fresh names, never a replay of the stored catalog.
+
+Rust now provides compact token/prefix search postings and parallel pending-hash
+lookup in batches. The Go fallback remains supported. A 100,000-row browse test
+reduced request allocations from 27.3MB/300,157 allocations to 0.25MB/616 and
+elapsed time from 100ms to 54ms. A live unknown-title search on the million-row
+store fell from about 1,014ms to 21ms; loaded/active-state timings vary. Only
+selected result rows are deep-copied. Cache misses hand directly to peer workers
+instead of being reclaimed by the cache pool. Full-store persistence runs every
+two minutes plus explicit saves, with one writer at a time.

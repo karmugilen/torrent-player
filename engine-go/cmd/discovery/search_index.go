@@ -1,6 +1,8 @@
 package main
 
 import (
+	"golang.org/x/text/unicode/norm"
+	"net/url"
 	"strings"
 	"unicode"
 )
@@ -9,8 +11,13 @@ import (
 // Over-cap tokens fall back to a scanned match for that query.
 const searchPostingCap = 40_000
 
+type nativeSearchIndex interface {
+	add(hash, name string)
+	candidates(query string) ([]string, bool)
+}
+
 func tokenizeName(name string) []string {
-	name = strings.ToLower(strings.TrimSpace(name))
+	name = normalizeSearchText(name)
 	if name == "" {
 		return nil
 	}
@@ -44,6 +51,10 @@ func (d *dashboard) ensureSearchIndexLocked() {
 }
 
 func (d *dashboard) indexNameLocked(hash, name string) {
+	if d.nativeSearch != nil {
+		d.nativeSearch.add(hash, name)
+		return
+	}
 	d.ensureSearchIndexLocked()
 	for _, tok := range tokenizeName(name) {
 		if d.searchCommon[tok] {
@@ -62,7 +73,7 @@ func (d *dashboard) indexNameLocked(hash, name string) {
 // searchCandidateHashes returns hashes likely matching q via the token index.
 // ok=false means fall back to a full store scan for this query.
 func (d *dashboard) searchCandidateHashes(q string) (hashes []string, ok bool) {
-	q = strings.TrimSpace(strings.ToLower(q))
+	q = normalizeSearchQuery(q)
 	if q == "" {
 		return nil, false
 	}
@@ -70,17 +81,36 @@ func (d *dashboard) searchCandidateHashes(q string) (hashes []string, ok bool) {
 	if validHash(q) {
 		return []string{q}, true
 	}
+	if d.nativeSearch != nil {
+		if hashes, ready := d.nativeSearch.candidates(q); ready {
+			return hashes, true
+		}
+	}
 	tokens := tokenizeName(q)
 	if len(tokens) == 0 {
-		return nil, false
+		if text := strings.TrimSpace(normalizeSearchText(q)); text != "" {
+			tokens = []string{text}
+		} else {
+			return nil, true
+		}
 	}
-	d.ensureSearchIndexLocked()
 	// Prefer the rarest token that still has a posting list (common tokens keep
 	// a capped list so queries like "1080" stay indexed instead of full-scan).
 	bestTok := ""
 	bestLen := int(^uint(0) >> 1)
 	for _, tok := range tokens {
 		list := d.searchTok[tok]
+		if len(list) == 0 {
+			// Prefix matches use the vocabulary, never a million-row scan.
+			for word, postings := range d.searchTok {
+				if strings.HasPrefix(word, tok) {
+					list = append(list, postings...)
+					if len(list) >= searchPostingCap {
+						break
+					}
+				}
+			}
+		}
 		if len(list) == 0 {
 			continue
 		}
@@ -92,9 +122,18 @@ func (d *dashboard) searchCandidateHashes(q string) (hashes []string, ok bool) {
 	}
 	if bestTok == "" {
 		// No posting lists (unknown token or empty index) — scan the store.
-		return nil, false
+		return nil, len(d.searchTok) > 0
 	}
-	return hashes, true
+	// Prefix postings can overlap; return each hash exactly once.
+	seen := make(map[string]bool, len(hashes))
+	unique := make([]string, 0, len(hashes))
+	for _, hash := range hashes {
+		if !seen[hash] {
+			seen[hash] = true
+			unique = append(unique, hash)
+		}
+	}
+	return unique, true
 }
 
 func rebuildSearchIndex(d *dashboard) {
@@ -102,9 +141,35 @@ func rebuildSearchIndex(d *dashboard) {
 	defer d.mu.Unlock()
 	d.searchTok = map[string][]string{}
 	d.searchCommon = map[string]bool{}
+	d.nativeSearch = newNativeSearch()
 	for hash, rec := range d.records {
 		if rec.Resolved && rec.Name != "" {
 			d.indexNameLocked(hash, rec.Name)
 		}
 	}
+}
+
+func normalizeSearchText(text string) string {
+	text = norm.NFD.String(strings.ToLower(text))
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return ' '
+		}
+		return r
+	}, text))
+}
+func normalizeSearchQuery(query string) string {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if strings.HasPrefix(query, "magnet:?") {
+		if magnet, err := url.Parse(query); err == nil {
+			hash := strings.TrimPrefix(magnet.Query().Get("xt"), "urn:btih:")
+			if validHash(hash) {
+				return hash
+			}
+		}
+	}
+	return query
 }

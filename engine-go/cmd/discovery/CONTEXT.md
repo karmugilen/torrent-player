@@ -45,9 +45,10 @@ Already-**Resolved** hashes are never re-scheduled for cache/peer. New DHT sampl
 | `catalog.go` | Remote catalog workers |
 | `cache.go` / `collect.go` / `sampling.go` / `schedule.go` | DHT sample, cache/peer workers, job priority |
 | `api_view.go` | Windowed `/api/state`, sort/filter, search candidates |
-| `search_index.go` | Token posting lists for fast `q=` |
-| `ui.html` | Map, search, trending, Load more, magnet copy |
-| `../../../../engine-rust/discovery/` | Rust mmap index + dump download + catalog fetch |
+| `rates.go` | Rolling lookup/live/import/verification rates |
+| `search_index.go` / `search_rust.go` | Native compact postings with Go fallback for fast `q=` |
+| `ui.html` | Map, search, trending, paging, shareable filters, magnet copy |
+| `../../../engine-rust/discovery/` | Rust mmap index + dump download + catalog fetch |
 
 ## Build
 
@@ -72,7 +73,7 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - **Retention**: count unlimited (`retainedTorrentLimit = 0`). Age: named ~30d, unresolved ~24h on load.
 - **Persist**: full map → `discovery.json` (can be hundreds of MB). Startup load can take tens of seconds; script waits up to ~90s on `/api/state?limit=1`.
 - **`GET /api/state`**: query `q`, `sort`, `kind`, `trend`, `pending`, `located`, `country`, `top`, `limit`, `offset`. Returns stats for the **full** store + a **window** of `records` + `matchCount`.
-- Default window 150, max 600. UI **Load more** bumps `pageLimit` by 150.
+- Default window 150, max 600. UI **Next/Previous** requests a fixed 150-row window using `offset`, with shareable URL filters.
 - Search uses token index when possible; ultra-common tokens keep a **capped** posting list (no full-scan fallback for those). Exact 40-hex `q` is a direct hash lookup.
 
 ## Rust dump (when `rustdump`)
@@ -107,3 +108,26 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - Android app / `engine-go` playback / piece FFI (`engine-rust` pieces crate).
 - Closed Rust engine A/B tree (`torrent-player-rust` / librqbit).
 - Publishing the atlas beyond localhost.
+
+## Current performance and UI paths
+
+- Rust owns compact document IDs and token/prefix postings. Go submits normalized
+  names in ~128KB batches; native queries return only candidate hashes. Pure-Go
+  builds retain the Go token index.
+- Pending dump matching crosses FFI once per batch, with up to four Rust mmap
+  lookup workers. Go owns the common name-apply merge. Catalog TLS connections
+  are reused in the native adapter.
+- API ranking deep-copies only the selected window. Stable hash tie-breaks keep
+  pagination consistent; phrase punctuation, reordered terms, accents, and
+  magnets work through the server search path.
+- Per-minute rates use a rolling 60-second window: completed network lookups,
+  fresh/live names, index imports, and peer/cache verified names are separate.
+  Disk restores and repeated imports do not inflate live naming volume.
+- A missed cache lookup hands off to the peer pool; cache workers cannot reclaim
+  that hash until the peer attempt finishes. Peer jobs reuse the miss rather than
+  repeating the same HTTP work. Resolved rows are never re-scheduled.
+- Full JSON persistence is serialized and runs every two minutes plus explicit
+  pause/shutdown/seed completion; it previously ran every ten seconds.
+- Search/filter requests abort older requests and ignore stale responses. Source
+  filters, paging, and URL state are handled on the server; geography refreshes
+  on country selection. Adult-name hiding redacts titles without dropping rows.
