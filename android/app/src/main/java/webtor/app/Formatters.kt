@@ -6,9 +6,11 @@ import webtor.core.TorrentStatus
 
 private val VIDEO_EXT = Regex("\\.(mp4|m4v|mkv|webm|mov|avi)$", RegexOption.IGNORE_CASE)
 private val AUDIO_EXT = Regex("\\.(mp3|m4a|aac|flac|ogg|wav|opus)$", RegexOption.IGNORE_CASE)
+private val SUBTITLE_EXT = Regex("\\.(srt|vtt|ass|ssa|sub)$", RegexOption.IGNORE_CASE)
 
 fun String.isVideoName(): Boolean = VIDEO_EXT.containsMatchIn(this)
 fun String.isAudioName(): Boolean = AUDIO_EXT.containsMatchIn(this)
+fun String.isSubtitleName(): Boolean = SUBTITLE_EXT.containsMatchIn(this)
 
 fun formatBytes(n: Long): String {
     if (n < 1024) return "$n B"
@@ -83,8 +85,17 @@ fun TorrentStatus.timeRemainingMs(): Long? {
 }
 
 fun defaultVideoSelection(files: List<webtor.core.TorrentFile>): Set<Int> {
-    val videos = files.filter { it.name.isVideoName() }.map { it.index }.toSet()
-    if (videos.isNotEmpty()) return videos
+    val videos = files.filter { it.name.isVideoName() }
+    if (videos.isNotEmpty()) {
+        val videoStems = videos.map { it.path.substringBeforeLast('.').lowercase(Locale.ROOT) }.toSet()
+        val matchingSubs = files.filter { file ->
+            file.name.isSubtitleName() && videoStems.any { stem ->
+                val path = file.path.lowercase(Locale.ROOT)
+                path == stem || path.startsWith("$stem.") || path.startsWith("$stem/")
+            }
+        }
+        return (videos + matchingSubs).map { it.index }.toSet()
+    }
     return files.map { it.index }.toSet()
 }
 

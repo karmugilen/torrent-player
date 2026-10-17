@@ -11,10 +11,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,10 +31,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import webtor.core.PieceTelemetry
+
+enum class DetailFileFilter { ALL, VIDEOS, SUBTITLES }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -117,6 +123,40 @@ fun TorrentFilesScreen(
     val files = entry.files
     val status = entry.status
     val busy = entry.controlsBusy()
+
+    var fileQuery by rememberSaveable(entry.key) { mutableStateOf("") }
+    var naturalOrder by rememberSaveable(entry.key) { mutableStateOf(true) }
+    var fileFilter by rememberSaveable(entry.key) { mutableStateOf(DetailFileFilter.ALL) }
+
+    val subtitleMap = remember(entry.files) {
+        val videos = entry.files.filter { it.name.isVideoName() || it.path.isVideoName() }
+        val videoStems = videos.map { it.path.substringBeforeLast('.').lowercase(Locale.ROOT) }
+        val subs = entry.files.filter { it.name.isSubtitleName() || it.path.isSubtitleName() }
+        videoStems.associateWith { stem ->
+            subs.filter { sub ->
+                val p = sub.path.lowercase(Locale.ROOT)
+                p == stem || p.startsWith("$stem.") || p.startsWith("$stem/")
+            }.map { it.name }
+        }
+    }
+
+    val displayedFiles = remember(entry.files, fileQuery, naturalOrder, fileFilter) {
+        var list = entry.files
+        when (fileFilter) {
+            DetailFileFilter.VIDEOS -> list = list.filter { it.name.isVideoName() || it.path.isVideoName() }
+            DetailFileFilter.SUBTITLES -> list = list.filter { it.name.isSubtitleName() || it.path.isSubtitleName() }
+            DetailFileFilter.ALL -> Unit
+        }
+        if (fileQuery.isNotBlank()) {
+            val q = fileQuery.trim()
+            list = list.filter { it.name.contains(q, ignoreCase = true) || it.path.contains(q, ignoreCase = true) }
+        }
+        if (naturalOrder) {
+            list = list.sortedWith(compareBy<SavedFile> { naturalMediaKey(it.name) }.thenBy { it.index })
+        }
+        list
+    }
+
     Scaffold(
         containerColor = colors.background,
         topBar = {
@@ -175,18 +215,66 @@ fun TorrentFilesScreen(
                     },
                 )
             }
-            item { TransferSection(entry) }
-            item { ConnectionMapSection(entry, client) }
-            item { TrackerDetailsSection(status) }
+            // UI-03: Playable files and episode playback precede diagnostics
             item {
-                PieceHeatGridSection(
-                    map = telemetry,
-                    frozen = entry.paused || entry.complete,
-                    files = entry.files,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionTitle("Files", "${entry.selected.size} of ${files.size} selected")
+                    OutlinedTextField(
+                        value = fileQuery,
+                        onValueChange = { fileQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("Search files & episodes", style = MaterialTheme.typography.bodyMedium) },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        trailingIcon = if (fileQuery.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { fileQuery = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                                }
+                            }
+                        } else null,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FilterChip(
+                            selected = fileFilter == DetailFileFilter.ALL,
+                            onClick = { fileFilter = DetailFileFilter.ALL },
+                            label = { Text("All") },
+                        )
+                        FilterChip(
+                            selected = fileFilter == DetailFileFilter.VIDEOS,
+                            onClick = { fileFilter = DetailFileFilter.VIDEOS },
+                            label = { Text("Videos") },
+                        )
+                        FilterChip(
+                            selected = fileFilter == DetailFileFilter.SUBTITLES,
+                            onClick = { fileFilter = DetailFileFilter.SUBTITLES },
+                            label = { Text("Subtitles") },
+                        )
+                        Spacer(Modifier.weight(1f))
+                        FilterChip(
+                            selected = naturalOrder,
+                            onClick = { naturalOrder = !naturalOrder },
+                            label = { Text(if (naturalOrder) "Episode order" else "Torrent order") },
+                        )
+                    }
+                }
             }
-            item { SectionTitle("Files", "${entry.selected.size} of ${files.size} selected") }
-            items(files, key = { it.index }) { file ->
+            if (displayedFiles.isEmpty()) {
+                item {
+                    Text(
+                        "No files match your search or filter.",
+                        modifier = Modifier.padding(vertical = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+            }
+            items(displayedFiles, key = { it.index }) { file ->
+                val stem = file.path.substringBeforeLast('.').lowercase(Locale.ROOT)
                 TorrentFileRow(
                     file = file,
                     isSelected = file.index in entry.selected,
@@ -200,6 +288,18 @@ fun TorrentFilesScreen(
                     onFocus = { onFocus(file.index) },
                     onClearFocus = onClearFocus,
                     canToggle = !busy && !entry.checking && entry.metadataReady,
+                    pairedSubtitles = subtitleMap[stem].orEmpty(),
+                )
+            }
+            // Diagnostics follow files
+            item { TransferSection(entry) }
+            item { ConnectionMapSection(entry, client) }
+            item { TrackerDetailsSection(status) }
+            item {
+                PieceHeatGridSection(
+                    map = telemetry,
+                    frozen = entry.paused || entry.complete,
+                    files = entry.files,
                 )
             }
             item { TechnicalSection(entry, status, telemetry, entry.selected.size) }
@@ -474,9 +574,11 @@ private fun TorrentFileRow(
     onClearFocus: () -> Unit = {},
     directPlay: Boolean = false,
     onStartOver: () -> Unit = {},
+    pairedSubtitles: List<String> = emptyList(),
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
+    val isSub = file.name.isSubtitleName() || file.path.isSubtitleName()
     val complete = !directPlay && file.isVerifiedComplete
     val canPlayVideo = isVideo && (directPlay || !file.uri.isNullOrBlank()) && (isSelected || complete)
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
@@ -515,6 +617,21 @@ private fun TorrentFileRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant,
                 )
+                if (pairedSubtitles.isNotEmpty()) {
+                    Text(
+                        "Subtitles: ${pairedSubtitles.joinToString(", ")}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else if (isSub) {
+                    Text(
+                        "External subtitle",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.tertiary,
+                    )
+                }
             }
             if (isSelected && !directPlay) {
                 FilledTonalButton(

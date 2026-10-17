@@ -62,6 +62,31 @@ class DownloadEntryTest {
     }
 
     @Test
+    fun naturalEpisodeOrderingSortsEpisodesProperly() {
+        val ep1 = file(0, 100, 1.0, "Show.S01E01.mkv")
+        val ep2 = file(1, 100, 1.0, "Show.S01E02.mkv")
+        val ep10 = file(2, 100, 1.0, "Show.S01E10.mkv")
+        val ep9 = file(3, 100, 1.0, "Show.S01E9.mkv")
+
+        val sorted = listOf(ep10, ep2, ep9, ep1).sortedWith(compareBy<SavedFile> { naturalMediaKey(it.name) }.thenBy { it.index })
+        assertEquals(listOf("Show.S01E01.mkv", "Show.S01E02.mkv", "Show.S01E9.mkv", "Show.S01E10.mkv"), sorted.map { it.name })
+    }
+
+    @Test
+    fun defaultVideoSelectionIncludesPairedSubtitles() {
+        val files = listOf(
+            webtor.core.TorrentFile(0, "Movie.mp4", "Movie.mp4", 1_000_000L, 0.0, "video"),
+            webtor.core.TorrentFile(1, "Movie.en.srt", "Movie.en.srt", 20_000L, 0.0, "text"),
+            webtor.core.TorrentFile(2, "Unrelated.txt", "Unrelated.txt", 500L, 0.0, "text"),
+        )
+        val selected = defaultVideoSelection(files)
+        assertTrue(0 in selected)
+        assertTrue(1 in selected)
+        assertFalse(2 in selected)
+        assertTrue("Movie.en.srt".isSubtitleName())
+    }
+
+    @Test
     fun checkingDoesNotMarkCachedProgressCompleteOrDisablePause() {
         val status = webtor.core.EngineClient.parseTorrent(org.json.JSONObject(
             """{"id":"e1","checking":true,"checkedPieces":3,"checkTotal":10}""",
