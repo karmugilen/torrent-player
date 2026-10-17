@@ -43,6 +43,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,7 +63,6 @@ fun LibraryScreen(
     onResumeBatch: ((Set<String>) -> Unit)? = null,
     onDeleteBatch: ((Set<String>, Boolean) -> Unit)? = null,
 ) {
-    val repository = (LocalContext.current.applicationContext as WebtorApp).thumbnails
     val snackbar = remember { SnackbarHostState() }
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf(LibraryFilter.ALL) }
@@ -86,6 +87,11 @@ fun LibraryScreen(
     }
 
     val colors = MaterialTheme.colorScheme
+    val visible by produceState(state.library, state.library, sort, filter, query) {
+        value = withContext(Dispatchers.Default) {
+            state.library.stableLibrarySort(sort).applyFilter(filter).filterLibrary(query)
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -273,11 +279,6 @@ fun LibraryScreen(
                 }
             }
 
-            val visible = state.library
-                .stableLibrarySort(sort)
-                .applyFilter(filter)
-                .filterLibrary(query)
-
             // Distinct empty states
             if (visible.isEmpty()) {
                 item {
@@ -341,7 +342,6 @@ fun LibraryScreen(
                 val isSelected = entry.key in selectedKeys
                 TorrentRow(
                     entry = entry,
-                    repository = repository,
                     isSelected = isSelected,
                     inSelectionMode = inSelectionMode,
                     onToggleSelect = {
@@ -414,7 +414,6 @@ private fun LibraryNotice(message: String, error: Boolean = false) = Text(
 @Composable
 private fun TorrentRow(
     entry: DownloadEntry,
-    repository: ThumbnailRepository,
     isSelected: Boolean,
     inSelectionMode: Boolean,
     onToggleSelect: () -> Unit,
@@ -427,10 +426,6 @@ private fun TorrentRow(
 ) {
     val busy = entry.controlsBusy()
     val progress by animateFloatAsState(entry.progress, tween(200), label = "downloadProgress")
-    val previewVideo = firstPreviewVideo(entry)
-    val previewUri = previewVideo?.uri
-    val latestEntry by rememberUpdatedState(entry)
-    val frames = rememberVideoPreviews(entry)
 
     ThemedCard(
         modifier = Modifier
@@ -458,9 +453,8 @@ private fun TorrentRow(
                 }
 
                 if (entry.files.any { it.index in entry.selected && it.name.isVideoName() }) {
-                    VideoPreviewPager(
+                    EpisodeVideoPreview(
                         entry = entry,
-                        frames = frames,
                         modifier = Modifier
                             .width(128.dp)
                             .aspectRatio(16f / 9f),

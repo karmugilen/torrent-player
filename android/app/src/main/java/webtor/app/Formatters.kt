@@ -116,9 +116,35 @@ fun DownloadEntry.canPlay(): Boolean =
 fun DownloadEntry.selectedVideoCount(): Int =
     files.count { it.index in selected && it.name.isVideoName() }
 
-/** First selected video by index (episode 1 of a pack), not the most-downloaded file. */
-fun firstPreviewVideo(entry: DownloadEntry): SavedFile? =
-    entry.files.filter { it.index in entry.selected && it.name.isVideoName() }.minByOrNull { it.index }
+/** Each selected episode owns its preview identity, independent of download progress. */
+fun previewVideos(entry: DownloadEntry): List<SavedFile> =
+    entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
+        .sortedWith(compareBy<SavedFile> { naturalMediaKey(it.path) }.thenBy { it.index })
+
+fun firstPreviewVideo(entry: DownloadEntry): SavedFile? {
+    val videos = previewVideos(entry)
+    return videos.find { it.index == entry.focusedFile } ?: videos.firstOrNull()
+}
+
+/** An explicit episode must never fall back to another episode's image. */
+fun previewVideo(entry: DownloadEntry, fileIndex: Int?): SavedFile? =
+    if (fileIndex == null) firstPreviewVideo(entry)
+    else entry.files.find {
+        it.index == fileIndex && it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName())
+    }
+
+/** Compare small RGB samples; nearby seeks often decode the same key frame. */
+internal fun previewFramesDiffer(first: IntArray, second: IntArray): Boolean {
+    if (first.size != second.size) return true
+    if (first.isEmpty()) return false
+    var difference = 0L
+    for (i in first.indices) {
+        for (shift in 0..16 step 8) {
+            difference += kotlin.math.abs(((first[i] shr shift) and 255) - ((second[i] shr shift) and 255))
+        }
+    }
+    return difference > first.size * 3L * 6L
+}
 
 /** Complete: 20/50/80 of full duration. Live: up to 3 spots inside downloaded span. */
 fun previewRatios(progress: Double, complete: Boolean): List<Double> {

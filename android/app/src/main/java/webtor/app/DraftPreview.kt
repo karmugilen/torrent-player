@@ -21,8 +21,7 @@ fun DraftVideoPreview(draft: PrepareDraft) {
         directPlay = true,
     )
     if (firstPreviewVideo(entry) == null) return
-    val frames = rememberVideoPreviews(entry)
     ThemedCard(Modifier.fillMaxWidth()) {
-        VideoPreviewPager(entry, frames, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+        EpisodeVideoPreview(entry, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
     }
 }

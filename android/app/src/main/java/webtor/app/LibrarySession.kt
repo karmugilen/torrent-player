@@ -371,7 +371,7 @@ class LibrarySession(
                         if (saved.index == fileIndex) saved.copy(uri = newUri.toString(), progress = 0.0, verifiedBytes = 0L) else saved
                     }, error = null,
                 ) }
-                (app as? WebtorApp)?.thumbnails?.invalidateEntryKey(key)
+                withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidateEntryKey(key) }
                 persist()
                 syncService(force = true)
                 _ui.update { it.copy(message = "File linked. Resume to verify the saved data before downloading.") }
@@ -886,7 +886,7 @@ class LibrarySession(
                             if (current.directPlay) storage.deleteStartupCache(current.key)
                         }
                     }
-                    (app as? WebtorApp)?.thumbnails?.invalidate(current)
+                    withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(current) }
                     withContext(io) { storage.retireTorrent(current.key, targetGen) }
                     _ui.update { state ->
                         val latest = state.library.find { it.key == current.key }
@@ -1198,7 +1198,7 @@ class LibrarySession(
                     withContext(io) { client.remove(id, false) }
                     engineRemoved = true
                 }
-                (app as? WebtorApp)?.thumbnails?.invalidate(target)
+                withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(target) }
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
@@ -1262,7 +1262,7 @@ class LibrarySession(
                     engineRemoved = true
                 }
                 withContext(io) { storage.deleteFiles(target.files); if (target.directPlay) storage.deleteStartupCache(target.key) }
-                (app as? WebtorApp)?.thumbnails?.invalidate(target)
+                withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(target) }
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
@@ -1302,7 +1302,7 @@ class LibrarySession(
                     }
                     patch(entry.key) { it.copy(engineId = null, paused = true, status = null) }
                     withContext(io) { storage.deleteFiles(entry.files) }
-                    (app as? WebtorApp)?.thumbnails?.invalidate(entry)
+                    withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(entry) }
                     entry.copy(
                         files = entry.files.map { it.copy(uri = null, progress = 0.0) },
                         engineId = null,

@@ -19,7 +19,7 @@
 
 ## Local redesign
 
-See [the 2.1.1 UI, playback and improvement notes](README_REDESIGN.md) for dynamic Material UI, live cached thumbnails, playback continuity, the branching peer view, caches, storage repair and the optimized local release.
+See [the 2.1.2 UI, playback and improvement notes](README_REDESIGN.md) for dynamic Material UI, live cached thumbnails, playback continuity, the branching peer view, caches, storage repair and the optimized local release.
 
 ## Screenshots
 

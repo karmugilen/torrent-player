@@ -55,7 +55,7 @@ class ThumbnailLifecycleTest {
         val key2 = ThumbnailRepository.cacheKey(entry, videoWithoutUri)
 
         assertEquals(key1, key2)
-        assertEquals("v9-torrent-key-123-1-50000000", key1)
+        assertEquals("v10-torrent-key-123-1-50000000", key1)
     }
 
     @Test
@@ -105,7 +105,7 @@ class ThumbnailLifecycleTest {
 
     @Test
     fun mediaFactsPersistenceAndParsing() {
-        val key = "v9-testkey-0-1000"
+        val key = "v10-testkey-0-1000"
         val cacheDir = File(tempDir, "video-previews").apply { mkdirs() }
         val factsFile = File(cacheDir, "$key.facts")
 

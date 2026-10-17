@@ -1,8 +1,23 @@
-# Torrent Player 2.1.1 — Material UI and playback fixes
+# Torrent Player 2.1.2 — Episode previews and responsiveness
 
 This update combines the Android redesign and native engine improvements. Work,
 tickets, commits and APKs remain local. External Android players are still the
 required playback path.
+
+## Episode previews and responsiveness (2.1.2)
+
+- Multi-episode downloads show a swipeable preview per selected episode in natural
+  order, with the filename and episode count. Each page decodes and caches that
+  file; an unavailable episode never borrows another episode’s image.
+- Repeated and near-identical decoded stills are filtered, including live refreshes.
+  Thumbnail cache version 10 regenerates older previews lazily.
+- Only the settled episode page starts extraction. Decoding remains bounded and
+  runs in the background. Bitmap preparation queues GPU uploads before drawing;
+  Android hardware rendering is explicitly enabled.
+- Library/file filtering, sorting and subtitle pairing run on the CPU coroutine
+  dispatcher. Thumbnail invalidation and disk cleanup run on the I/O dispatcher.
+- A failing two-episode regression reproduced the old first-episode selection;
+  episode identity, ordering and duplicate-frame regressions now pass.
 
 ## Appearance and UI consistency
 

@@ -65,7 +65,6 @@ fun TorrentFilesScreen(
     val clipboardManager = LocalClipboardManager.current
     val app = context.applicationContext as WebtorApp
     val client = app.engineClient
-    val thumbnails = app.thumbnails
     var telemetry by remember(entry.key) { mutableStateOf<PieceTelemetry?>(null) }
     var copiedMagnet by remember(entry.key) { mutableStateOf(false) }
     val magnetUri = resolveMagnetUri(entry)
@@ -75,9 +74,7 @@ fun TorrentFilesScreen(
             copiedMagnet = false
         }
     }
-    val previewVideo = firstPreviewVideo(entry)
     val latestEntry by rememberUpdatedState(entry)
-    val frames = rememberVideoPreviews(entry)
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(entry.key, entry.engineId, lifecycleOwner) {
         val engineId = entry.engineId
@@ -119,33 +116,38 @@ fun TorrentFilesScreen(
     var naturalOrder by rememberSaveable(entry.key) { mutableStateOf(true) }
     var fileFilter by rememberSaveable(entry.key) { mutableStateOf(DetailFileFilter.ALL) }
 
-    val subtitleMap = remember(entry.files) {
-        val videos = entry.files.filter { it.name.isVideoName() || it.path.isVideoName() }
-        val videoStems = videos.map { it.path.substringBeforeLast('.').lowercase(Locale.ROOT) }
-        val subs = entry.files.filter { it.name.isSubtitleName() || it.path.isSubtitleName() }
-        videoStems.associateWith { stem ->
-            subs.filter { sub ->
-                val p = sub.path.lowercase(Locale.ROOT)
-                p == stem || p.startsWith("$stem.") || p.startsWith("$stem/")
-            }.map { it.name }
+    var subtitleMap by remember(entry.key) { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
+    LaunchedEffect(entry.files) {
+        subtitleMap = withContext(Dispatchers.Default) {
+            val videos = entry.files.filter { it.name.isVideoName() || it.path.isVideoName() }
+            val videoStems = videos.map { it.path.substringBeforeLast('.').lowercase(Locale.ROOT) }
+            val subs = entry.files.filter { it.name.isSubtitleName() || it.path.isSubtitleName() }
+            videoStems.associateWith { stem ->
+                subs.filter { sub ->
+                    val p = sub.path.lowercase(Locale.ROOT)
+                    p == stem || p.startsWith("$stem.") || p.startsWith("$stem/")
+                }.map { it.name }
+            }
         }
     }
 
-    val displayedFiles = remember(entry.files, fileQuery, naturalOrder, fileFilter) {
-        var list = entry.files
-        when (fileFilter) {
-            DetailFileFilter.VIDEOS -> list = list.filter { it.name.isVideoName() || it.path.isVideoName() }
-            DetailFileFilter.SUBTITLES -> list = list.filter { it.name.isSubtitleName() || it.path.isSubtitleName() }
-            DetailFileFilter.ALL -> Unit
+    val displayedFiles by produceState(entry.files, entry.files, fileQuery, naturalOrder, fileFilter) {
+        value = withContext(Dispatchers.Default) {
+            var list = entry.files
+            when (fileFilter) {
+                DetailFileFilter.VIDEOS -> list = list.filter { it.name.isVideoName() || it.path.isVideoName() }
+                DetailFileFilter.SUBTITLES -> list = list.filter { it.name.isSubtitleName() || it.path.isSubtitleName() }
+                DetailFileFilter.ALL -> Unit
+            }
+            if (fileQuery.isNotBlank()) {
+                val q = fileQuery.trim()
+                list = list.filter { it.name.contains(q, ignoreCase = true) || it.path.contains(q, ignoreCase = true) }
+            }
+            if (naturalOrder) {
+                list = list.sortedWith(compareBy<SavedFile> { naturalMediaKey(it.name) }.thenBy { it.index })
+            }
+            list
         }
-        if (fileQuery.isNotBlank()) {
-            val q = fileQuery.trim()
-            list = list.filter { it.name.contains(q, ignoreCase = true) || it.path.contains(q, ignoreCase = true) }
-        }
-        if (naturalOrder) {
-            list = list.sortedWith(compareBy<SavedFile> { naturalMediaKey(it.name) }.thenBy { it.index })
-        }
-        list
     }
 
     Scaffold(
@@ -194,7 +196,7 @@ fun TorrentFilesScreen(
         ) {
             item {
                 DownloadSummary(
-                    entry, error, frames,
+                    entry, error,
                     magnetAvailable = magnetUri != null,
                     copiedMagnet = copiedMagnet,
                     onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
@@ -304,7 +306,6 @@ fun TorrentFilesScreen(
 private fun DownloadSummary(
     entry: DownloadEntry,
     error: String?,
-    frames: List<android.graphics.Bitmap>?,
     magnetAvailable: Boolean,
     copiedMagnet: Boolean,
     onShareMagnet: () -> Unit,
@@ -323,7 +324,7 @@ private fun DownloadSummary(
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
     ThemedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (video) VideoPreviewPager(entry, frames, Modifier.fillMaxWidth().aspectRatio(16f / 9f), large = false)
+            if (video) EpisodeVideoPreview(entry, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
             Text(
                 entry.title,
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),

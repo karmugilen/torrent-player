@@ -83,8 +83,8 @@ class ThumbnailRepository(
      * Synchronous lookup for UI composables: STRICTLY memory-only.
      * Never performs disk IO or bitmap decoding on the calling thread.
      */
-    fun cached(entry: DownloadEntry): List<Bitmap>? {
-        val video = firstPreviewVideo(entry) ?: return null
+    fun cached(entry: DownloadEntry, fileIndex: Int? = null): List<Bitmap>? {
+        val video = previewVideo(entry, fileIndex) ?: return null
         val key = cacheKey(entry, video)
         return synchronized(memory) {
             memory[key]?.frames?.takeIf { it.isNotEmpty() }
@@ -100,14 +100,14 @@ class ThumbnailRepository(
     private fun isStale(capturedGlobal: Long, capturedEntry: Long, entryKey: String): Boolean =
         capturedGlobal != globalEpoch.get() || capturedEntry != (entryEpochs[entryKey]?.get() ?: 1L)
 
-    suspend fun previews(entry: DownloadEntry): List<Bitmap> = withContext(Dispatchers.IO) {
-        previewsOnIo(entry)
+    suspend fun previews(entry: DownloadEntry, fileIndex: Int? = null): List<Bitmap> = withContext(Dispatchers.IO) {
+        previewsOnIo(entry, fileIndex)
     }
 
-    private suspend fun previewsOnIo(entry: DownloadEntry): List<Bitmap> {
+    private suspend fun previewsOnIo(entry: DownloadEntry, fileIndex: Int?): List<Bitmap> {
         val capturedGlobal = globalEpoch.get()
         val capturedEntry = getEntryEpoch(entry.key)
-        val video = firstPreviewVideo(entry) ?: return emptyList()
+        val video = previewVideo(entry, fileIndex) ?: return emptyList()
         val complete = !entry.directPlay && (entry.complete || video.isVerifiedComplete)
         val key = cacheKey(entry, video)
         val previewClient = engineHost?.let { webtor.core.EngineClient(it) }
@@ -172,7 +172,7 @@ class ThumbnailRepository(
         return try {
             deferred.await()
         } catch (cancelled: CancellationException) {
-            activePreviews.remove(entry.key)?.invoke()
+            activePreviews.remove(key)?.invoke()
             deferred.cancel()
             throw cancelled
         } finally {
@@ -189,8 +189,8 @@ class ThumbnailRepository(
     fun invalidateEntryKey(entryKey: String) {
         if (entryKey.isBlank()) return
         synchronized(publicationLock) { bumpEntryEpoch(entryKey) }
-        activePreviews.remove(entryKey)?.invoke()
         val prefix = "$ALGORITHM-${sanitize(entryKey)}-"
+        activePreviews.keys.filter { it.startsWith(prefix) }.forEach { activePreviews.remove(it)?.invoke() }
         val removed = ArrayList<String>()
         synchronized(memory) {
             memory.keys.filter { it.startsWith(prefix) }.forEach {
@@ -252,10 +252,9 @@ class ThumbnailRepository(
             return fallback
         }
 
-        if (liveState?.active == true && fallback.isNotEmpty()) {
-            val newest = result.lastOrNull()
-            result = (listOf(fallback.first()) + fallback.drop(1).takeLast(1) + listOfNotNull(newest)).take(3)
-        }
+        result = distinctFrames(if (liveState?.active == true && fallback.isNotEmpty()) {
+            listOf(fallback.first()) + fallback.drop(1).takeLast(1) + listOfNotNull(result.lastOrNull())
+        } else result)
         return synchronized(publicationLock) {
             if (isStale(capturedGlobal, capturedEntry, entry.key)) return@synchronized emptyList()
             attemptHistory.remove(key)
@@ -283,7 +282,7 @@ class ThumbnailRepository(
 
         val closed = java.util.concurrent.atomic.AtomicBoolean(false)
         val closeHandle = { if (closed.compareAndSet(false, true)) { runCatching { host.closePreview(handle) }; Unit }; Unit }
-        activePreviews[entryKey] = closeHandle
+        activePreviews[key] = closeHandle
         val timeout = previewDeadlines.schedule(closeHandle, EXTRACT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         val retriever = MediaMetadataRetriever()
         return try {
@@ -331,7 +330,7 @@ class ThumbnailRepository(
                 val frame = grabNonDark(retriever, candidate, actualDuration, tried)
                 if (frame != null) {
                     if (frames.isEmpty()) firstOffsetUs = candidate
-                    frames.add(frame)
+                    if (distinctFrames(frames + frame).size > frames.size) frames.add(frame)
                     if (!video.isVerifiedComplete || frames.size >= 3) break
                 }
             }
@@ -344,7 +343,7 @@ class ThumbnailRepository(
             emptyList()
         } finally {
             timeout.cancel(false)
-            activePreviews.remove(entryKey, closeHandle)
+            activePreviews.remove(key, closeHandle)
             closeHandle()
             runCatching { retriever.release() }
         }
@@ -356,7 +355,10 @@ class ThumbnailRepository(
             val file = File(cache, "$key-$i.jpg")
             if (file.exists() && file.length() > 0) {
                 val bmp = runCatching { BitmapFactory.decodeFile(file.path) }.getOrNull()
-                if (bmp != null) frames.add(bmp)
+                if (bmp != null) {
+                    bmp.prepareToDraw()
+                    frames.add(bmp)
+                }
             }
         }
         return frames
@@ -401,6 +403,8 @@ class ThumbnailRepository(
     }
 
     private fun putMemory(key: String, value: CachedPreview) {
+        // Queue GPU texture preparation on this background worker before Compose draws.
+        value.frames.forEach { it.prepareToDraw() }
         synchronized(memory) {
             memory[key] = value
             while (memoryBytes() > MAX_MEMORY_BYTES && memory.isNotEmpty()) {
@@ -467,6 +471,7 @@ class ThumbnailRepository(
                 if (frames.size >= 3) return false
                 val bmp = grabNonDark(retriever, timeUs, actualDuration, tried) ?: return false
                 if (firstOffsetUs < 0) firstOffsetUs = timeUs
+                if (distinctFrames(frames + bmp).size == frames.size) return false
                 frames.add(bmp)
                 return true
             }
@@ -510,6 +515,7 @@ class ThumbnailRepository(
                 if (frames.size >= 3) return false
                 val bmp = grabNonDark(retriever, timeUs, actualDuration, tried) ?: return false
                 if (firstOffsetUs < 0) firstOffsetUs = timeUs
+                if (distinctFrames(frames + bmp).size == frames.size) return false
                 frames.add(bmp)
                 return true
             }
@@ -630,6 +636,26 @@ class ThumbnailRepository(
         }
     }.getOrDefault(false)
 
+    private fun distinctFrames(frames: List<Bitmap>): List<Bitmap> {
+        val accepted = ArrayList<Bitmap>(3)
+        val samples = ArrayList<IntArray>(3)
+        for (frame in frames) {
+            val sample = Bitmap.createScaledBitmap(frame, 16, 9, true)
+            val pixels = IntArray(16 * 9)
+            try {
+                sample.getPixels(pixels, 0, 16, 0, 0, 16, 9)
+            } finally {
+                if (sample !== frame) sample.recycleQuietly()
+            }
+            if (samples.all { previewFramesDiffer(it, pixels) }) {
+                accepted.add(frame)
+                samples.add(pixels)
+                if (accepted.size == 3) break
+            }
+        }
+        return accepted
+    }
+
     private fun frameAt(retriever: MediaMetadataRetriever, timeUs: Long, option: Int): Bitmap? =
         if (Build.VERSION.SDK_INT >= 27) {
             retriever.getScaledFrameAtTime(timeUs, option, 720, 405)
@@ -702,7 +728,7 @@ class ThumbnailRepository(
     companion object {
         private const val LIVE_REFRESH_MS = 12_000L
         private const val EXTRACT_TIMEOUT_MS = 10_000L
-        private const val ALGORITHM = "v9"
+        private const val ALGORITHM = "v10"
         private const val COMPLETE_BUCKET = 101
         private const val MAX_MEMORY_BYTES = 32L * 1024L * 1024L
         private const val MAX_RETRY_ATTEMPTS = 3

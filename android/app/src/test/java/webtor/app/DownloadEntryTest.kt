@@ -409,8 +409,50 @@ class DownloadEntryTest {
     fun thumbnailCacheKeyUsesStableIdentityNotHashCode() {
         val video = file(2, 12345, 0.5, "ep.mkv")
         val e = entry(listOf(video), setOf(2)).copy(key = "AbCDef")
-        assertEquals("v9-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
+        assertEquals("v10-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
         assertEquals("safe_name", ThumbnailRepository.sanitize("Safe/Name"))
+    }
+
+    @Test
+    fun episodePreviewFollowsFocusedFileInsteadOfRepeatingFirstEpisode() {
+        val pack = entry(listOf(
+            file(0, 100, 0.7, "Show.S01E01.mkv"),
+            file(1, 100, 0.6, "Show.S01E02.mkv"),
+        ), setOf(0, 1))
+        val first = firstPreviewVideo(pack.copy(focusedFile = 0))!!
+        val second = firstPreviewVideo(pack.copy(focusedFile = 1))!!
+        assertEquals(0, first.index)
+        assertEquals("Episode two must not reuse episode one's preview", 1, second.index)
+        assertTrue(ThumbnailRepository.cacheKey(pack, first) != ThumbnailRepository.cacheKey(pack, second))
+    }
+
+    @Test
+    fun episodePreviewPagesUseNaturalOrderAndDistinctFileIdentities() {
+        val pack = entry(listOf(
+            file(0, 100, 0.7, "Show.S01E10.mkv"),
+            file(1, 100, 0.6, "Show.S01E02.mkv"),
+            file(2, 100, 0.5, "Show.S01E01.mkv"),
+            file(3, 100, 0.5, "Show.S01E03.mkv"),
+            file(4, 100, 0.5, "Show.S01E01.srt"),
+        ), setOf(0, 1, 2, 4))
+        val pages = previewVideos(pack)
+        assertEquals(listOf(2, 1, 0), pages.map { it.index })
+        assertEquals(3, pages.map { ThumbnailRepository.cacheKey(pack, it) }.toSet().size)
+        for (page in pages) assertEquals(page, previewVideo(pack, page.index))
+        assertNull(previewVideo(pack, 3)) // Deselected: never reuse episode one's image.
+        assertNull(previewVideo(pack, 4)) // Subtitle: never show a video image for it.
+        assertNull(previewVideo(pack, 999))
+        assertEquals(2, firstPreviewVideo(pack.copy(focusedFile = 999))?.index)
+    }
+
+    @Test
+    fun repeatedOrNearIdenticalFramesAreNotSeparatePreviews() {
+        val scene = IntArray(144) { i -> if (i % 2 == 0) 0xff204080.toInt() else 0xff80a020.toInt() }
+        assertFalse(previewFramesDiffer(scene, scene.copyOf()))
+        val noise = scene.map { it + 0x010101 }.toIntArray()
+        assertFalse(previewFramesDiffer(scene, noise))
+        assertTrue(previewFramesDiffer(scene, IntArray(144) { 0xfff0d0a0.toInt() }))
+        assertFalse(previewFramesDiffer(intArrayOf(), intArrayOf()))
     }
 
     @Test
