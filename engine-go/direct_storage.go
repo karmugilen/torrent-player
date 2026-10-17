@@ -550,7 +550,7 @@ func (st *DocumentTorrentStorage) readStartupPiece(index int) ([]byte, error) {
 func (st *DocumentTorrentStorage) injectVerifiedBytes(abs int64, data []byte) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.closed || !st.attached || st.info == nil || st.chunkLength <= 0 || len(data) == 0 {
+	if st.closed || !st.attached || !st.stream || st.info == nil || st.chunkLength <= 0 || len(data) == 0 || abs < 0 || abs+int64(len(data)) > st.info.TotalLength() {
 		return false
 	}
 	installed := false
@@ -569,6 +569,11 @@ func (st *DocumentTorrentStorage) injectVerifiedBytes(abs int64, data []byte) bo
 		off := int(pieceStart - abs)
 		buf := make([]byte, int(pieceLen))
 		copy(buf, data[off:off+int(pieceLen)])
+		// Cache checksums detect torn files; torrent hashes establish byte trust.
+		expected := piece.V1Hash()
+		if !expected.Ok || sha1.Sum(buf) != expected.Value {
+			continue
+		}
 		if st.stream {
 			if _, err := st.ensureStreamSlotLocked(index, pieceLen); err != nil {
 				continue

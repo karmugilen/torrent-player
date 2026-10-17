@@ -157,11 +157,7 @@ class LibrarySession(
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
                     runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
-                    val antiDpi = settings.getBoolean("antiDpiEnabled", false)
-                    val bypass = runCatching { withContext(io) { client.setBypass(antiDpi) } }.getOrNull()
-                    if (bypass != null) {
-                        _ui.update { it.copy(bypassStatus = bypass) }
-                    }
+                    setAntiDpi(_ui.value.antiDpiEnabled)
                     val nativeCache = runCatching { withContext(io) { client.getCache() } }.getOrNull()
                     if (nativeCache != null) {
                         _ui.update { it.copy(nativeCacheSummary = nativeCache) }
@@ -210,6 +206,8 @@ class LibrarySession(
         _ui.update { it.copy(addSheetOpen = false, error = null) }
         dropUncommittedPrefetch()
     }
+    suspend fun awaitInitialization() { initialized.await() }
+
     fun openSettings() {
         refreshStorageStats()
         _ui.update { it.copy(screen = Screen.Settings, error = null) }
@@ -258,12 +256,17 @@ class LibrarySession(
     }
 
     fun clearNativeCache(categories: List<String>) {
-        if (_ui.value.engineReady) {
-            scope.launch {
-                val res = runCatching { withContext(io) { client.clearCache(categories) } }.getOrNull()
-                if (res != null) {
-                    _ui.update { it.copy(nativeCacheSummary = res) }
-                }
+        if (!_ui.value.engineReady) return
+        scope.launchCommand {
+            try {
+                val before = withContext(io) { client.getCache() }
+                val after = withContext(io) { client.clearCache(categories) }
+                val reclaimed = (before.categories.sumOf { it.bytes } - after.categories.sumOf { it.bytes }).coerceAtLeast(0L)
+                _ui.update { it.copy(nativeCacheSummary = after,
+                    message = "${formatBytes(reclaimed)} cleared. Active playback data is retained.", error = null) }
+            } catch (t: Exception) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
             }
         }
     }
@@ -339,32 +342,37 @@ class LibrarySession(
     }
 
     fun repairFileUri(key: String, fileIndex: Int, newUri: android.net.Uri) {
+        cancelRetry(key)
         scope.launchCommand {
             val entry = _ui.value.library.find { it.key == key } ?: return@launchCommand
+            if (entry.isDeleting || entry.directPlay) return@launchCommand
             val file = entry.files.find { it.index == fileIndex } ?: return@launchCommand
-            runCatching {
-                app.contentResolver.takePersistableUriPermission(
-                    newUri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                )
+            try {
+                withContext(io) {
+                    app.contentResolver.takePersistableUriPermission(newUri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    val size = app.contentResolver.openFileDescriptor(newUri, "rw")?.use { it.statSize }
+                        ?: error("Cannot access this file. Choose a writable document.")
+                    check(size < 0L || size == file.length) { "Choose the original file (${formatBytes(file.length)}). Selected size: ${formatBytes(size)}." }
+                    entry.engineId?.let { client.remove(it, false) }
+                }
+                entry.engineId?.let { recentlyInvalidatedIds.add(it) }
+                patch(key) { current -> current.copy(
+                    generation = current.generation + 1L,
+                    engineId = null, status = null, paused = true,
+                    lifecycleState = EntryLifecycleState.STOPPED,
+                    files = current.files.map { saved ->
+                        if (saved.index == fileIndex) saved.copy(uri = newUri.toString(), progress = 0.0, verifiedBytes = 0L) else saved
+                    }, error = null,
+                ) }
+                (app as? WebtorApp)?.thumbnails?.invalidateEntryKey(key)
+                persist()
+                syncService(force = true)
+                _ui.update { it.copy(message = "File linked. Resume to verify the saved data before downloading.") }
+            } catch (t: Exception) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
             }
-            val statSize = runCatching {
-                app.contentResolver.openFileDescriptor(newUri, "r")?.use { it.statSize }
-            }.getOrNull() ?: -1L
-            if (statSize > 0L && statSize < file.length) {
-                _ui.update { it.copy(error = "Selected file size (${formatBytes(statSize)}) is smaller than required (${formatBytes(file.length)}).") }
-                return@launchCommand
-            }
-            patch(key) { e ->
-                e.copy(
-                    files = e.files.map { f ->
-                        if (f.index == fileIndex) f.copy(uri = newUri.toString()) else f
-                    },
-                    error = null,
-                )
-            }
-            persist()
-            _ui.update { it.copy(message = "Repaired file destination for ${file.name}") }
         }
     }
 
@@ -642,6 +650,7 @@ class LibrarySession(
                     }
                     val pending = DownloadEntry(
                         key = key,
+                        generation = withContext(io) { storage.nextGeneration(key) },
                         title = source.substringAfter("dn=", "").substringBefore('&')
                             .ifBlank { key.take(12) },
                         source = source,
@@ -691,6 +700,7 @@ class LibrarySession(
                 val provisional = DownloadEntry(
                     directPlay = directPlay,
                     key = key,
+                    generation = withContext(io) { storage.nextGeneration(key) },
                     title = torrent.name ?: key,
                     source = torrent.magnetURI ?: draft.source,
                     metadata = "",
@@ -1328,8 +1338,9 @@ class LibrarySession(
                     storage.clearCache()
                     (app as? WebtorApp)?.thumbnails?.clearDiskCache()
                     if (_ui.value.engineReady) {
-                        val res = client.clearCache(listOf("startup", "resume", "peers", "dht"))
-                        reclaimedNative = res.categories.sumOf { it.reclaimableBytes }
+                        val before = client.getCache().categories.sumOf { it.bytes }
+                        val after = client.clearCache(listOf("startup", "resume", "peers", "dht"))
+                        reclaimedNative = (before - after.categories.sumOf { it.bytes }).coerceAtLeast(0L)
                     }
                 }
                 refreshStorageStats()
@@ -1621,7 +1632,7 @@ class LibrarySession(
             val free = withContext(io) { storage.freeBytes }
             val cache = withContext(io) { storage.cacheBytes }
             val legacy = withContext(io) { storage.legacyBytes }
-            val folderName = withContext(io) { storage.folderName }
+            val folderName = withContext(io) { if (storage.folder == null) "Downloads/Webtor" else storage.folderName }
             val hasCustom = withContext(io) { storage.folder != null }
             val warning = withContext(io) { storage.storageAccessWarning() }
             _ui.update {

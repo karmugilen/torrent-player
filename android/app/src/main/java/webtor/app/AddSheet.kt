@@ -15,6 +15,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
@@ -59,7 +60,7 @@ fun AddSheet(
     val canDownload = !busy && (ready && selection.isNotEmpty() && !insufficientSpace || canAddPending) && existingEntry == null && onDownload != null
     Scaffold(
         modifier = Modifier.imePadding(),
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Add download", style = MaterialTheme.typography.titleLarge) },
@@ -69,7 +70,7 @@ fun AddSheet(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
                     titleContentColor = MaterialTheme.colorScheme.onBackground,
                     actionIconContentColor = MaterialTheme.colorScheme.onBackground,
                 ),
@@ -95,7 +96,7 @@ fun AddSheet(
                         Button(
                             onClick = { onOpenExisting?.invoke() },
                             enabled = !busy && onOpenExisting != null,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).themedControl(),
                         ) {
                             Text("Open existing torrent")
                         }
@@ -103,7 +104,7 @@ fun AddSheet(
                         Button(
                             onClick = { if (directPlayDefault && ready) onDirectPlay?.invoke() else onDownload?.invoke() },
                             enabled = if (directPlayDefault && ready) selection.isNotEmpty() && !busy else canDownload,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).themedControl(),
                         ) {
                             Text(if (canAddPending) "Save and wait for peers" else if (directPlayDefault) "Watch now (Direct Play)" else "Save for offline (Download)", maxLines = 1)
                         }
@@ -131,6 +132,7 @@ fun AddSheet(
                 }
             } }
             if (ready) {
+                item { draft?.let { DraftVideoPreview(it) } }
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(torrent?.name ?: "Choose files", style = MaterialTheme.typography.titleMedium)
@@ -251,9 +253,9 @@ private fun SourceInput(
         }
         if (!ready && !alreadyAdded) Button(
             onClick = onAdd, enabled = engineReady && looksLikeTorrentSource(magnet) && !connecting && !busy,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).themedControl(),
         ) { Text(if (connecting) "Reading torrent…" else "Find files") }
-        OutlinedButton(onClick = onOpenFile, enabled = engineReady && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+        OutlinedButton(onClick = onOpenFile, enabled = engineReady && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).themedControl()) {
             Text(if (ready) "Choose another torrent file" else "Open torrent file")
         }
     }

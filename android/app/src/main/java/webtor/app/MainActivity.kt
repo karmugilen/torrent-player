@@ -18,6 +18,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -86,7 +87,7 @@ class MainActivity : ComponentActivity() {
             session.openSettings()
         }
         lifecycleScope.launch {
-            session.initialized.await()
+            session.awaitInitialization()
             if (savedScreen == Screen.Files.name && savedOpenKey != null) {
                 if (session.ui.value.library.any { it.key == savedOpenKey }) {
                     session.openDetails(savedOpenKey)
@@ -101,6 +102,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) handleIncoming(intent)
         setContent {
             val state by session.ui.collectAsState()
+            val screenStates = rememberSaveableStateHolder()
             GaleTheme(
                 dark = state.darkTheme,
                 theme = state.appTheme,
@@ -108,6 +110,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 ThemedScreenContainer {
                     Surface(Modifier.fillMaxSize(), color = Color.Transparent) {
+                        if (!state.addSheetOpen) screenStates.SaveableStateProvider(if (state.screen == Screen.Files) "files:${state.openTorrentKey}" else state.screen.name) {
                         when (state.screen) {
                             Screen.Prepare -> {
                                 val draft = state.prepare
@@ -165,6 +168,7 @@ class MainActivity : ComponentActivity() {
                             }
                             Screen.Library -> LibraryLayer(state)
                         }
+                        }
                     if (state.addSheetOpen) {
                         val prefetch = state.prepare?.takeIf {
                             it.source == state.magnetDraft.trim() ||
@@ -185,6 +189,7 @@ class MainActivity : ComponentActivity() {
                             onDismiss = session::closeAddSheet,
                             draft = prefetch,
                             freeBytes = state.freeBytes,
+                            destination = state.storageFolderName,
                             onToggle = session::toggleFile,
                             onSelectAll = session::selectAllFiles,
                             onSelectNone = session::selectNoFiles,
@@ -217,6 +222,7 @@ class MainActivity : ComponentActivity() {
                     state.diagnosticsPreview?.let { report ->
                         AlertDialog(onDismissRequest = session::closeDiagnostics, title = { androidx.compose.material3.Text("Diagnostics preview") }, text = { androidx.compose.material3.Text(report) }, confirmButton = { androidx.compose.material3.TextButton(onClick = session::shareDiagnostics) { androidx.compose.material3.Text("Share") } }, dismissButton = { androidx.compose.material3.TextButton(onClick = session::closeDiagnostics) { androidx.compose.material3.Text("Close") } })
                     }
+                }
                 }
             }
             LaunchedEffect(Unit) {

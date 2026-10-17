@@ -7,6 +7,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +25,11 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.composed
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -442,66 +448,98 @@ fun ThemedScreenContainer(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val theme = LocalAppTheme.current
-    val reducedEffects = LocalReducedEffects.current
-    val dark = MaterialTheme.colorScheme.background.red < 0.5f
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .drawBehind {
-                when (theme) {
-                    AppTheme.AERO -> {
-                        val waterBrush = Brush.verticalGradient(
-                            colors = if (dark) listOf(
-                                Color(0xFF07111A),
-                                Color(0xFF0E2233),
-                                Color(0xFF091622),
-                                Color(0xFF040A0F),
-                            ) else listOf(
-                                Color(0xFFE4F1FB),
-                                Color(0xFFD0E7F9),
-                                Color(0xFFE8F4FC),
-                                Color(0xFFF7FBFE),
-                            )
-                        )
-                        drawRect(brush = waterBrush)
-                        if (!reducedEffects) {
-                            val causticColor = if (dark) Color(0x1838BDF8) else Color(0x200078D7)
-                            drawCircle(causticColor, radius = size.width * 0.75f, center = Offset(size.width * 0.2f, size.height * 0.15f))
-                            drawCircle(causticColor, radius = size.width * 0.6f, center = Offset(size.width * 0.9f, size.height * 0.6f))
+    val reduced = LocalReducedEffects.current
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.background.red < 0.5f
+    Box(modifier.fillMaxSize().drawWithCache {
+        val water = Brush.verticalGradient(if (dark)
+            listOf(Color(0xFF061424), Color(0xFF103C50), Color(0xFF071724))
+            else listOf(Color(0xFFC5E8F8), Color(0xFFE6F5F2), Color(0xFFB7DCEB)))
+        val parchment = Brush.verticalGradient(if (dark)
+            listOf(Color(0xFF211B17), Color(0xFF151B18), Color(0xFF251F19))
+            else listOf(Color(0xFFF6EACC), Color(0xFFFFF7E5), Color(0xFFEBD9B3)))
+        val waves = (0..3).map { i -> Path().apply {
+            val y = size.height * (0.18f + i * 0.23f)
+            moveTo(-size.width * .1f, y)
+            cubicTo(size.width*.28f, y-size.height*.18f, size.width*.65f, y+size.height*.15f, size.width*1.1f, y-size.height*.08f)
+        } }
+        val stars = listOf(.74f to .09f, .87f to .15f, .68f to .22f, .90f to .30f, .79f to .39f)
+            .map { Offset(size.width*it.first, size.height*it.second) }
+        val stem = Path().apply {
+            moveTo(18.dp.toPx(), size.height*.9f)
+            cubicTo(55.dp.toPx(), size.height*.76f, 13.dp.toPx(), size.height*.64f, 62.dp.toPx(), size.height*.5f)
+        }
+        onDrawBehind {
+            when (theme) {
+                AppTheme.AERO -> {
+                    drawRect(water)
+                    if (!reduced) {
+                        waves.forEachIndexed { i, wave ->
+                            drawPath(wave, Color.White.copy(alpha = if (dark) .07f else .26f), style = Stroke((18+i*7).dp.toPx()))
+                            drawPath(wave, colors.primary.copy(alpha=.12f), style = Stroke(1.dp.toPx()))
                         }
+                        drawCircle(Brush.radialGradient(listOf(Color.White.copy(alpha=.22f), Color.Transparent), center=Offset(size.width*.8f,size.height*.1f), radius=size.width*.8f), size.width*.8f, Offset(size.width*.8f,size.height*.1f))
                     }
-                    AppTheme.ANTIQUITY -> {
-                        val parchmentBrush = Brush.verticalGradient(
-                            colors = if (dark) listOf(
-                                Color(0xFF161412),
-                                Color(0xFF1A1714),
-                                Color(0xFF141210),
-                            ) else listOf(
-                                Color(0xFFFBF8F1),
-                                Color(0xFFF3ECE0),
-                                Color(0xFFFAF5ED),
-                            )
-                        )
-                        drawRect(brush = parchmentBrush)
-                        if (!reducedEffects) {
-                            val ornamentColor = if (dark) Color(0x15D4A054) else Color(0x188B5A2B)
-                            drawCircle(ornamentColor, radius = 70.dp.toPx(), center = Offset(size.width - 40.dp.toPx(), 60.dp.toPx()))
-                            drawCircle(ornamentColor, radius = 110.dp.toPx(), center = Offset(30.dp.toPx(), size.height - 100.dp.toPx()))
+                }
+                AppTheme.ANTIQUITY -> {
+                    drawRect(parchment)
+                    if (!reduced) {
+                        val ink = colors.secondary.copy(alpha=if(dark) .20f else .19f)
+                        // Fine paper fibres and a botanical plate at the page edge.
+                        for (i in 0..75) {
+                            val y=size.height*i/75f
+                            drawLine(colors.primary.copy(alpha=.035f),Offset(0f,y),Offset(size.width,y+(i%3-1)*2f))
                         }
+                        drawPath(stem,ink,style=Stroke(1.3.dp.toPx()))
+                        for (i in 0..7) {
+                            val y=size.height*(.55f+i*.044f)
+                            val x=(25+i%3*8).dp.toPx()
+                            val leaf=Path().apply { moveTo(x,y); quadraticTo(x+35.dp.toPx(),y-24.dp.toPx(),x+28.dp.toPx(),y-6.dp.toPx()); quadraticTo(x+14.dp.toPx(),y+7.dp.toPx(),x,y) }
+                            drawPath(leaf,ink)
+                        }
+                        stars.zipWithNext().forEach { (a,b) -> drawLine(colors.tertiary.copy(alpha=.23f),a,b,1.dp.toPx()) }
+                        stars.forEach { star ->
+                            drawCircle(colors.tertiary.copy(alpha=.40f),2.dp.toPx(),star)
+                            drawLine(colors.tertiary.copy(alpha=.35f),star-Offset(5.dp.toPx(),0f),star+Offset(5.dp.toPx(),0f))
+                            drawLine(colors.tertiary.copy(alpha=.35f),star-Offset(0f,5.dp.toPx()),star+Offset(0f,5.dp.toPx()))
+                        }
+                        drawCircle(colors.tertiary.copy(alpha=.12f),size.width*.27f,Offset(size.width*.86f,size.height*.18f),style=Stroke(1.dp.toPx()))
                     }
-                    AppTheme.RETRO -> {
-                        val retroBg = if (dark) Color(0xFF14171C) else Color(0xFFECE9D8)
-                        drawRect(color = retroBg)
-                        if (!reducedEffects && !dark) {
-                            val stippleColor = Color(0x0C000000)
-                            drawLine(stippleColor, Offset(0f, 0f), Offset(size.width, size.height), strokeWidth = 1f)
+                }
+                AppTheme.RETRO -> {
+                    drawRect(if(dark) Color(0xFF142824) else Color(0xFF97B6AD))
+                    if (!reduced) {
+                        val step=12.dp.toPx()
+                        for (x in 0..(size.width/step).toInt()) for (y in 0..(size.height/step).toInt()) {
+                            if((x+y)%2==0) drawRect(Color.Black.copy(alpha=.05f),Offset(x*step,y*step),Size(2.dp.toPx(),2.dp.toPx()))
                         }
+                        drawRect(colors.primary.copy(alpha=.12f),Offset(size.width*.82f,size.height*.12f),Size(24.dp.toPx(),24.dp.toPx()))
                     }
                 }
             }
-    ) {
-        content()
+        }
+    }, content=content)
+}
+
+/** Shared tactile edge for the primary controls in every screen. */
+fun Modifier.themedControl(): Modifier = composed {
+    val theme=LocalAppTheme.current
+    val colors=MaterialTheme.colorScheme
+    val reduced=LocalReducedEffects.current
+    this.drawWithCache {
+        onDrawWithContent {
+            drawContent()
+            if (!reduced) when(theme) {
+                AppTheme.AERO -> drawRoundRect(Brush.verticalGradient(listOf(Color.White.copy(alpha=.22f),Color.Transparent),endY=size.height*.55f),cornerRadius=androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()))
+                AppTheme.ANTIQUITY -> {
+                    drawLine(colors.tertiary.copy(alpha=.6f),Offset(10.dp.toPx(),3.dp.toPx()),Offset(size.width-10.dp.toPx(),3.dp.toPx()),1.dp.toPx())
+                }
+                AppTheme.RETRO -> {
+                    drawLine(Color.White.copy(alpha=.65f),Offset.Zero,Offset(size.width,0f),2.dp.toPx())
+                    drawLine(Color.Black.copy(alpha=.45f),Offset(0f,size.height),Offset(size.width,size.height),2.dp.toPx())
+                }
+            }
+        }
     }
 }
 

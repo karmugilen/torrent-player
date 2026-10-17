@@ -222,6 +222,7 @@ class DownloadStorage(private val context: Context) {
     private val tombstonesFile get() = File(snapshotsDir, "tombstones.txt")
     private val metaDir get() = File(context.filesDir, "torrent_meta").apply { mkdirs() }
 
+    @Synchronized
     fun retireTorrent(key: String, generation: Long = 0L) {
         if (key.isBlank()) return
         val current = loadTombstoneMap().toMutableMap()
@@ -250,6 +251,9 @@ class DownloadStorage(private val context: Context) {
             }
         }
     }.getOrDefault(emptyMap())
+
+    @Synchronized
+    fun nextGeneration(key: String): Long = loadTombstoneMap()[key]?.plus(1L) ?: 0L
 
     fun loadTombstones(): Set<String> = loadTombstoneMap().keys
 
@@ -305,18 +309,13 @@ class DownloadStorage(private val context: Context) {
         } else null
     }
 
+    @Synchronized
     fun save(entries: List<DownloadEntry>) {
         val encoded = encodeLibrary(entries)
         check(prefs.edit().putString("library", encoded).commit()) { "Could not save download library" }
-        // Clear tombstones for active entries so explicit re-adds are never suppressed
+        // Deletion generations also protect fallback snapshots. Explicit re-adds
+        // receive a newer generation at the user action, never from a stale save.
         val activeKeys = entries.map { it.key }.toSet()
-        if (activeKeys.isNotEmpty()) {
-            val currentMap = loadTombstoneMap()
-            val filtered = currentMap.filterKeys { it !in activeKeys }
-            if (filtered.size != currentMap.size) {
-                writeTombstones(filtered)
-            }
-        }
         // Bounded snapshots with atomic replacement
         runCatching {
             val snapshotFile = File(snapshotsDir, "snapshot-${System.currentTimeMillis()}.json")

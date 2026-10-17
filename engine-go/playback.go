@@ -346,10 +346,8 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	}
 	// CACHE-04: reuse a bounded validated resume window before scheduling demand.
 	resumeOffset := p.priorityOwner.resumePosition(file)
-	if warmed, ok := s.applyResumeWindowToStorage(rec, index); ok {
-		resumeOffset = warmed
-		p.priorityOwner.prepareResume(file, &warmed)
-	}
+	// Warm bytes without replacing the current external-player seek intent.
+	s.applyResumeWindowToStorage(rec, index)
 	headBytes, tailBytes := videoStartupHeadBytes, videoStartupTailBytes
 	if p.refreshCompletion {
 		headBytes, tailBytes = directStartupHead, directStartupTail

@@ -1949,3 +1949,16 @@ func (c *PeerConn) reconcileHandshakeStats() {
 	})
 	c.reconciledHandshakeStats = true
 }
+
+// CacheDialAddr exposes a usable outbound endpoint. Incoming source ports are
+// ephemeral unless the peer advertised a listening port.
+func (c *PeerConn) CacheDialAddr() (PeerRemoteAddr, bool) {
+	if c.t != nil {
+		c.t.cl.rLock()
+		defer c.t.cl.rUnlock()
+	}
+	if c.RemoteAddr == nil || (!c.outgoing && c.PeerListenPort == 0) {
+		return nil, false
+	}
+	return c.dialAddr(), true
+}

@@ -52,6 +52,7 @@ type splitConn struct {
 	remaining int
 	delay     time.Duration
 	disabled  atomic.Bool
+	policy    func() bool
 }
 
 func newSplitConn(c net.Conn) net.Conn {
@@ -62,7 +63,7 @@ func newSplitConn(c net.Conn) net.Conn {
 }
 
 func (c *splitConn) Write(b []byte) (int, error) {
-	if c.disabled.Load() {
+	if c.disabled.Load() || (c.policy != nil && !c.policy()) {
 		return c.Conn.Write(b)
 	}
 	c.mu.Lock()
@@ -72,6 +73,9 @@ func (c *splitConn) Write(b []byte) (int, error) {
 	}
 	total := 0
 	for len(b) > 0 {
+		if c.policy != nil && !c.policy() {
+			c.remaining = 0
+		}
 		n := 1
 		if c.remaining <= 0 {
 			n = len(b)
@@ -175,7 +179,9 @@ func (s *EngineServer) activateBypassLocked() error {
 		if ra := c.RemoteAddr(); ra != nil && isLoopbackAddr(ra.String()) {
 			return c
 		}
-		return newSplitConn(c)
+		wrapped := newSplitConn(c).(*splitConn)
+		wrapped.policy = func() bool { return s.bypass.epoch.Load() == epoch }
+		return wrapped
 	})
 	if s.trackerSockets != nil {
 		s.trackerSockets.setSplit(true)

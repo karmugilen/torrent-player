@@ -2,9 +2,11 @@ package main
 
 import (
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -215,6 +217,8 @@ func (s *EngineServer) activeCacheProtection() (startup, resume int64) {
 }
 
 func (s *EngineServer) clearCacheCategories(categories []string) error {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
 	if len(categories) == 0 {
 		return fmt.Errorf("no categories")
 	}
@@ -452,6 +456,13 @@ func (s *EngineServer) loadPeerHints() {
 			if err != nil || p <= 0 || p > 65535 {
 				continue
 			}
+			ip := net.ParseIP(host)
+			if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || (h.Transport != "tcp" && h.Transport != "utp") {
+				continue
+			}
+			if h.Expires.After(now.Add(peerHintTTL)) {
+				h.Expires = now.Add(peerHintTTL)
+			}
 			if h.Expires.After(now) && len(kept) < peerHintMaxPerTorrent {
 				kept = append(kept, h)
 			}
@@ -495,11 +506,21 @@ func (s *EngineServer) applyPeerHints(rec *TorrentRecord) {
 		if !h.Expires.After(now) {
 			continue
 		}
-		addr, err := net.ResolveTCPAddr("tcp", h.Addr)
-		if err != nil {
-			continue
+		var addr net.Addr
+		if h.Transport == "utp" {
+			a, err := net.ResolveUDPAddr("udp", h.Addr)
+			if err != nil {
+				continue
+			}
+			addr = a
+		} else {
+			a, err := net.ResolveTCPAddr("tcp", h.Addr)
+			if err != nil {
+				continue
+			}
+			addr = a
 		}
-		peers = append(peers, torrent.PeerInfo{Addr: addr, Source: torrent.PeerSourceTracker})
+		peers = append(peers, torrent.PeerInfo{Addr: addr, Source: torrent.PeerSource(h.Source)})
 	}
 	if len(peers) > 0 {
 		rec.Torrent.AddPeers(peers)
@@ -634,6 +655,27 @@ func (s *EngineServer) loadDHTContacts() {
 		if err != nil || p <= 0 || p > 65535 {
 			continue
 		}
+		ip := net.ParseIP(host)
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() {
+			continue
+		}
+		family := "ipv4"
+		if ip.To4() == nil {
+			family = "ipv6"
+		}
+		count := 0
+		for _, existing := range kept {
+			if existing.Family == family {
+				count++
+			}
+		}
+		if count >= dhtContactMaxPerFamily {
+			continue
+		}
+		c.Family = family
+		if c.Expires.After(now.Add(dhtContactTTL)) {
+			c.Expires = now.Add(dhtContactTTL)
+		}
 		if c.Expires.After(now) {
 			kept = append(kept, c)
 		}
@@ -702,20 +744,19 @@ func (s *EngineServer) saveResumeWindowDetailed(
 	fileLength, pieceLength, offset, length int64,
 	data []byte,
 	generation uint64,
+	expectedClearGen ...uint64,
 ) {
 	if rec == nil || length <= 0 || int64(len(data)) != length || length > resumeWindowMaxBytes {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if len(expectedClearGen) > 0 && expectedClearGen[0] != s.cacheClearGen {
 		return
 	}
 	dir := resumeWindowDir(s.downloadDir, rec.InfoHash)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return
-	}
-	// Bound total resume cache size.
-	if dirBytes(filepath.Join(s.downloadDir, ".cache", "resume"))+length > resumeWindowTotalMax {
-		_ = s.clearInactiveResumeWindows(0)
-		if dirBytes(filepath.Join(s.downloadDir, ".cache", "resume"))+length > resumeWindowTotalMax {
-			return
-		}
 	}
 	if fileName == "" && rec.Torrent != nil {
 		files := rec.Torrent.Files()
@@ -745,69 +786,88 @@ func (s *EngineServer) saveResumeWindowDetailed(
 	if err != nil {
 		return
 	}
-	tmpDir, err := os.MkdirTemp(dir, "write-*")
+	// Metadata and bytes are one atomic generation. A failed publication leaves
+	// the previous file intact, and concurrent writers/clear share cacheMu.
+	final := filepath.Join(dir, "window.bin")
+	needed := int64(4 + len(raw) + len(data))
+	root := filepath.Join(s.downloadDir, ".cache", "resume")
+	if dirBytes(root)-fileSize(final)+needed > resumeWindowTotalMax {
+		if err := s.clearInactiveResumeWindows(0); err != nil {
+			return
+		}
+		if dirBytes(root)-fileSize(final)+needed > resumeWindowTotalMax {
+			return
+		}
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return
+		}
+	}
+	f, err := os.CreateTemp(dir, ".window-*")
 	if err != nil {
 		return
 	}
-	defer os.RemoveAll(tmpDir)
-	tmpData := filepath.Join(tmpDir, "window.bin")
-	tmpMeta := filepath.Join(tmpDir, "window.json")
-	if err := os.WriteFile(tmpData, data, 0600); err != nil {
+	defer os.Remove(f.Name())
+	defer f.Close()
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(raw)))
+	if _, err = f.Write(header[:]); err != nil {
 		return
 	}
-	if err := os.WriteFile(tmpMeta, raw, 0600); err != nil {
+	if _, err = f.Write(raw); err != nil {
 		return
 	}
-	finalData := filepath.Join(dir, "window.bin")
-	finalMeta := filepath.Join(dir, "window.json")
-	if err := os.Rename(tmpData, finalData); err != nil {
+	if _, err = f.Write(data); err != nil {
 		return
 	}
-	if err := os.Rename(tmpMeta, finalMeta); err != nil {
-		// Keep previous good meta if present; drop inconsistent data.
-		_ = os.Remove(finalData)
+	if err = f.Sync(); err != nil {
 		return
 	}
+	if err = f.Close(); err != nil {
+		return
+	}
+	if err = os.Rename(f.Name(), final); err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, "window.json"))
 }
 
 func (s *EngineServer) loadResumeWindow(infoHash string) (resumeWindowMeta, []byte, bool) {
-	dir := resumeWindowDir(s.downloadDir, infoHash)
-	metaPath := filepath.Join(dir, "window.json")
-	info, err := os.Stat(metaPath)
-	if err != nil || info.Size() > 64<<10 {
-		return resumeWindowMeta{}, nil, false
-	}
-	raw, err := os.ReadFile(metaPath)
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	f, err := os.Open(filepath.Join(resumeWindowDir(s.downloadDir, infoHash), "window.bin"))
 	if err != nil {
 		return resumeWindowMeta{}, nil, false
 	}
+	defer f.Close()
+	var header [4]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return resumeWindowMeta{}, nil, false
+	}
+	metaLen := binary.BigEndian.Uint32(header[:])
+	if metaLen == 0 || metaLen > 64<<10 {
+		return resumeWindowMeta{}, nil, false
+	}
+	raw := make([]byte, metaLen)
+	if _, err := io.ReadFull(f, raw); err != nil {
+		return resumeWindowMeta{}, nil, false
+	}
 	var meta resumeWindowMeta
-	if json.Unmarshal(raw, &meta) != nil || meta.InfoHash != infoHash || meta.Length <= 0 || meta.Length > resumeWindowMaxBytes {
+	if json.Unmarshal(raw, &meta) != nil || meta.Version != resumeWindowVersion || meta.InfoHash != infoHash ||
+		meta.Length <= 0 || meta.Length > resumeWindowMaxBytes || len(meta.Checksum) != 40 ||
+		!meta.Expires.After(time.Now()) {
 		return resumeWindowMeta{}, nil, false
 	}
-	if meta.Version != 0 && meta.Version != resumeWindowVersion {
-		return resumeWindowMeta{}, nil, false
-	}
-	if !meta.Expires.After(time.Now()) {
-		_ = os.RemoveAll(dir)
-		return resumeWindowMeta{}, nil, false
-	}
-	binPath := filepath.Join(dir, "window.bin")
-	binInfo, err := os.Stat(binPath)
-	if err != nil || binInfo.Size() != meta.Length || binInfo.Size() > resumeWindowMaxBytes {
-		return resumeWindowMeta{}, nil, false
-	}
-	data, err := os.ReadFile(binPath)
-	if err != nil || int64(len(data)) != meta.Length {
-		return resumeWindowMeta{}, nil, false
-	}
-	if meta.Checksum != "" && resumeChecksum(data) != meta.Checksum {
+	data, err := io.ReadAll(io.LimitReader(f, meta.Length+1))
+	if err != nil || int64(len(data)) != meta.Length || resumeChecksum(data) != meta.Checksum {
 		return resumeWindowMeta{}, nil, false
 	}
 	return meta, data, true
 }
 
 func (s *EngineServer) deleteResumeWindow(infoHash string) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.cacheClearGen++
 	_ = os.RemoveAll(resumeWindowDir(s.downloadDir, infoHash))
 }
 
@@ -853,10 +913,14 @@ func (s *EngineServer) applyResumeWindowToStorage(rec *TorrentRecord, fileIndex 
 // peerDialEndpoint returns a validated dial/listen address for caching.
 // Inbound RemoteAddr may be a transient source port; prefer PeerListenPort.
 func peerDialEndpoint(pc *torrent.PeerConn) net.Addr {
-	if pc == nil || pc.RemoteAddr == nil {
+	if pc == nil {
 		return nil
 	}
-	host, portStr, err := net.SplitHostPort(pc.RemoteAddr.String())
+	endpoint, ok := pc.CacheDialAddr()
+	if !ok || endpoint == nil {
+		return nil
+	}
+	host, portStr, err := net.SplitHostPort(endpoint.String())
 	if err != nil {
 		return nil
 	}
@@ -867,11 +931,6 @@ func peerDialEndpoint(pc *torrent.PeerConn) net.Addr {
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		return nil
-	}
-	// Prefer the peer's advertised listen port when present (inbound source
-	// ports are not dialable endpoints).
-	if pc.PeerListenPort > 0 && pc.PeerListenPort <= 65535 {
-		port = pc.PeerListenPort
 	}
 	network := strings.ToLower(pc.Network)
 	if strings.Contains(network, "udp") || strings.Contains(network, "utp") {

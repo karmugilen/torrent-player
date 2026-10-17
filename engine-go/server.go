@@ -135,7 +135,6 @@ type EngineServer struct {
 	geoMu             sync.RWMutex
 	geoIP             *maxminddb.Reader
 	previewActive     *previewReader
-	previewReserveGen uint64
 	bypass            bypassController
 	peerHintMu        sync.Mutex
 	peerHints         map[string][]peerHint
@@ -143,6 +142,7 @@ type EngineServer struct {
 	dhtMu             sync.Mutex
 	dhtContacts       []dhtContact
 	dhtGen            uint64
+	cacheMu           sync.Mutex
 	cacheClearGen     uint64
 }
 

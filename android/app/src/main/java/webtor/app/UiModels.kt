@@ -117,11 +117,13 @@ fun List<DownloadEntry>.findContinueWatchingTarget(): ContinueWatchingTarget? {
     var bestAddedAt: Long = -1L
 
     for (entry in this) {
-        if (entry.isDeleting) continue
+        if (entry.controlsBusy() || !entry.metadataReady) continue
         for (file in entry.files) {
             // Must be a playable video file
             if (!file.name.isVideoName() && !file.path.isVideoName()) continue
             if (file.playbackPositionMs <= 0L) continue
+            if (file.index !in entry.selected && !file.isVerifiedComplete) continue
+            if (!entry.directPlay && file.uri.isNullOrBlank()) continue
             if (file.playbackDurationMs > 0L && file.playbackPositionMs >= file.playbackDurationMs - 3000L) {
                 continue
             }

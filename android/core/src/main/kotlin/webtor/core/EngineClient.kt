@@ -67,6 +67,7 @@ data class TorrentStatus(
     val checkedPieces: Int = 0,
     val checkTotal: Int = 0,
     val focusedFile: Int? = null,
+    val warning: String? = null,
     val verifiedBytes: Long = 0L,
 )
 
@@ -429,6 +430,7 @@ class EngineClient(
                 checkedPieces = json.optInt("checkedPieces"),
                 checkTotal = json.optInt("checkTotal"),
                 focusedFile = if (json.has("focusedFile") && !json.isNull("focusedFile")) json.optInt("focusedFile") else null,
+                warning = json.nullableString("warning"),
                 verifiedBytes = json.optLong("verifiedBytes", 0L),
             )
         }

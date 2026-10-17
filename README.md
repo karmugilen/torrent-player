@@ -17,6 +17,10 @@
 
 ---
 
+## Local redesign
+
+See [the 2.1.0 redesign and improvement notes](README_REDESIGN.md) for themes, thumbnails, the branching peer view, caches, storage repair and the optimized local release.
+
 ## Screenshots
 
 <p align="center">
@@ -40,10 +44,10 @@
   - Native Go engine with bounded preparation and piece-boundary storage. Direct Play prioritizes opening/container pieces, adapts forward buffering to reader consumption, parks idle probes, and retries stalled reads through the existing peer scheduler.
   - CPU-sized background workers validate startup caches and hash independent pieces, capped at four workers per torrent. Direct Play entries stay paused on app startup. See [playback and cache behavior](docs/DIRECT_PLAY.md).
   - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's existing one-second sampling clock.
-- **Modern Material 3 Design**: Built with Jetpack Compose featuring dynamic colors, light and dark themes, interactive piece bitfield visualizer, and animated video preview frames.
+- **Three visual themes**: Aero glass and water, Antiquity parchment/botanical/celestial ornament, and Retro bevelled window styling. Light/dark appearance, reduced effects, watch-first library controls and persistent real video previews.
 - **Cached Public Trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled. See [tracker discovery details](docs/RELEASE_1.4.4.md).
 - **Full Swarm Connectivity**: Connects to seeds and peers via DHT, UDP trackers (OpenTrackr and more), and WebTorrent WebSocket trackers, transferring data over TCP, native uTP, and WebRTC data channels.
-- **Live Connection Maps**: Download details offers a world map of approximate peer countries and a reactor-style phone-to-peer diagram. A HUD follows the app’s Material theme and dynamic colors, shows TCP/uTP/WebRTC counts and animates links only when peer payload counters change. Country lookup uses a bundled offline DB-IP database; unknown and local addresses remain unlocated. Maps refresh once per second while details is visible, and pause clears peer connections.
+- **Live Connection Maps**: Download details offers a world map of approximate peer countries and an expandable branching device/protocol/peer diagram. The view follows the selected Aero, Antiquity or Retro theme, shows TCP/uTP/WebRTC counts and animates links only when peer payload counters change. Country lookup uses a bundled offline DB-IP database; unknown and local addresses remain unlocated. Maps refresh once per second while details is visible, and pause clears peer connections.
 
 ---
 

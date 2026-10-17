@@ -14,8 +14,7 @@ import (
 
 const (
 	previewBudgetBytes    = int64(8 << 20)
-	previewSessionTimeout = 30 * time.Second
-	previewOverfetchBytes = int64(256 << 10) // optional slack within the same session budget
+	previewSessionTimeout = 10 * time.Second
 )
 
 var errPreviewBudget = fmt.Errorf("preview byte budget exceeded")
@@ -48,8 +47,6 @@ type previewReader struct {
 	closed     bool
 	temp       bool
 	waitCancel context.CancelFunc
-	readSeq    uint64
-	reserveGen uint64
 }
 
 func previewDir(baseDir, infoHashHex string) string {
@@ -59,7 +56,6 @@ func previewDir(baseDir, infoHashHex string) string {
 func (s *EngineServer) closeActivePreview() {
 	s.mu.Lock()
 	p := s.previewActive
-	s.previewActive = nil
 	s.mu.Unlock()
 	if p != nil {
 		_ = p.Close()
@@ -77,73 +73,56 @@ func (s *EngineServer) closePreviewFor(rec *TorrentRecord) {
 		s.mu.Unlock()
 		return
 	}
-	s.previewActive = nil
 	s.mu.Unlock()
-	_ = p.Close()
+	_ = p.closeWithRecordLocked()
 }
 
 func (s *EngineServer) OpenPreview(id string, index int) (PreviewReader, error) {
-	// Atomically reserve the single preview slot before any setup work so
-	// concurrent opens cannot both proceed and leak priority/storage.
 	s.mu.Lock()
 	if s.previewActive != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("preview already active")
 	}
-	s.previewReserveGen++
-	reserveGen := s.previewReserveGen
-	placeholder := &previewReader{reserveGen: reserveGen}
-	s.previewActive = placeholder
 	rec := s.records[id]
-	s.mu.Unlock()
-
-	rollback := func() {
-		s.mu.Lock()
-		if s.previewActive == placeholder {
-			s.previewActive = nil
-		}
-		s.mu.Unlock()
-	}
-
 	if rec == nil {
-		rollback()
+		s.mu.Unlock()
 		return nil, fmt.Errorf("torrent not found")
 	}
+	// Reserve the actual object, including its record identity. Configuration,
+	// pause and shutdown can cancel setup as well as an established reader.
+	p := &previewReader{server: s, rec: rec}
+	s.previewActive = p
+	s.mu.Unlock()
 	rec.mu.Lock()
-	if rec.removed || s.shuttingDown.Load() || rec.Paused {
-		rec.mu.Unlock()
-		rollback()
-		return nil, fmt.Errorf("torrent unavailable for preview")
+	defer rec.mu.Unlock()
+	fail := func(err error) (PreviewReader, error) {
+		_ = p.closeWithRecordLocked()
+		return nil, err
+	}
+	if p.closed || rec.removed || s.shuttingDown.Load() || rec.Paused {
+		return fail(fmt.Errorf("torrent unavailable for preview"))
 	}
 	if rec.Torrent.Info() == nil {
-		rec.mu.Unlock()
-		rollback()
-		return nil, fmt.Errorf("metadata not ready")
+		return fail(fmt.Errorf("metadata not ready"))
 	}
 	files := rec.Torrent.Files()
 	if index < 0 || index >= len(files) {
-		rec.mu.Unlock()
-		rollback()
-		return nil, fmt.Errorf("invalid file index")
+		return fail(fmt.Errorf("invalid file index"))
 	}
 	file := files[index]
 	st := s.storage.GetStorage(rec.InfoHash)
 	if st == nil {
-		rec.mu.Unlock()
-		rollback()
-		return nil, fmt.Errorf("storage unavailable")
+		return fail(fmt.Errorf("storage unavailable"))
 	}
-
-	temp := false
+	p.storage, p.torrent = st, rec.Torrent
 	if !rec.Configured {
 		if err := st.attachPreviewTemp(index); err != nil {
-			rec.mu.Unlock()
-			rollback()
-			return nil, err
+			return fail(err)
 		}
-		temp = true
-		// Allow bounded payload only for this preview; do not mark Configured.
-		rec.Torrent.AllowDataDownload()
+		p.temp = true
+		if s.payloadTransfersAllowed.Load() {
+			rec.Torrent.AllowDataDownload()
+		}
 	} else {
 		selected := false
 		for _, i := range rec.Selected {
@@ -152,63 +131,23 @@ func (s *EngineServer) OpenPreview(id string, index int) (PreviewReader, error) 
 				break
 			}
 		}
-		if !selected && !fileIsVerified(rec.Torrent, file) && !rec.DirectPlay {
-			rec.mu.Unlock()
-			rollback()
-			return nil, fmt.Errorf("file is not selected for preview")
+		if !selected && !fileIsVerified(rec.Torrent, file) {
+			return fail(fmt.Errorf("file is not selected for preview"))
 		}
 	}
-	rec.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), previewSessionTimeout)
-	reader := file.NewReader()
-	reader.SetReadaheadFunc(nil)
-	reader.SetReadahead(0) // demand is coordinator-driven within the session budget
-	owner := s.ensurePlaybackCoordinator(rec.Torrent)
-	p := &previewReader{
-		server:     s,
-		rec:        rec,
-		torrent:    rec.Torrent,
-		file:       file,
-		fileIndex:  index,
-		reader:     reader,
-		storage:    st,
-		owner:      owner,
-		ctx:        ctx,
-		cancel:     cancel,
-		length:     file.Length(),
-		budget:     previewBudgetBytes,
-		admitted:   make(map[int]bool),
-		temp:       temp,
-		reserveGen: reserveGen,
+	p.ctx, p.cancel = context.WithTimeout(context.Background(), previewSessionTimeout)
+	p.file, p.fileIndex, p.length = file, index, file.Length()
+	p.budget, p.admitted = previewBudgetBytes, make(map[int]bool)
+	p.reader = file.NewReader()
+	p.reader.SetReadaheadFunc(nil)
+	p.reader.SetReadahead(0)
+	p.owner = s.ensurePlaybackCoordinator(rec.Torrent)
+	if s.shuttingDown.Load() {
+		return fail(fmt.Errorf("engine is closing"))
 	}
-	// Seed the head window within budget so the first metadata probe has demand.
-	if err := p.admitRange(0, min(file.Length(), previewBudgetBytes)); err != nil {
-		cancel()
-		_ = reader.Close()
-		if temp {
-			st.releasePreviewTemp()
-			rec.Torrent.DisallowDataDownload()
-		}
-		rollback()
-		return nil, err
-	}
-	p.publishDemand()
-
-	s.mu.Lock()
-	if s.previewActive != placeholder {
-		s.mu.Unlock()
-		cancel()
-		_ = reader.Close()
-		owner.setPreviewDemand(nil)
-		if temp {
-			st.releasePreviewTemp()
-			rec.Torrent.DisallowDataDownload()
-		}
-		return nil, fmt.Errorf("preview reservation lost")
-	}
-	s.previewActive = p
-	s.mu.Unlock()
+	// Admit only actual decoder requests. Pre-admitting an entire head window
+	// consumes the budget before MP4 tail metadata can be requested.
+	context.AfterFunc(p.ctx, func() { _ = p.Close() })
 	return p, nil
 }
 
@@ -233,15 +172,11 @@ func (p *previewReader) admitRange(offset, length int64) error {
 			continue
 		}
 		if p.storage != nil && p.storage.PieceComplete(i) {
-			// Verified bytes already present: count toward admitted union so
-			// readahead cannot expand past the session budget, but do not fetch.
-			n := info.Piece(i).Length()
-			if p.admittedN+need+n > p.budget+previewOverfetchBytes {
-				return errPreviewBudget
-			}
-			p.admitted[i] = true
-			p.admittedN += n
+			// Cached verified bytes require no network admission.
 			continue
+		}
+		if p.server != nil && !p.server.payloadTransfersAllowed.Load() {
+			return fmt.Errorf("payload transfers are paused")
 		}
 		n := info.Piece(i).Length()
 		if p.admittedN+need+n > p.budget {
@@ -272,6 +207,8 @@ func (p *previewReader) publishDemand() {
 }
 
 func (p *previewReader) ReadAt(data []byte, offset int64) (int, error) {
+	p.readIO.Lock()
+	defer p.readIO.Unlock()
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -279,7 +216,7 @@ func (p *previewReader) ReadAt(data []byte, offset int64) (int, error) {
 	}
 	if err := p.ctx.Err(); err != nil {
 		p.mu.Unlock()
-		return -1, fmt.Errorf("preview session expired: %w", err)
+		return -1, err
 	}
 	if offset < 0 {
 		p.mu.Unlock()
@@ -295,64 +232,29 @@ func (p *previewReader) ReadAt(data []byte, offset int64) (int, error) {
 		return -1, err
 	}
 	p.publishDemand()
-	if p.waitCancel != nil {
-		p.waitCancel()
-		p.waitCancel = nil
-	}
-	p.readSeq++
-	seq := p.readSeq
-	abs := p.file.Offset() + offset
-	st := p.storage
-	sessionCtx := p.ctx
+	ctx, cancel := context.WithCancel(p.ctx)
+	p.waitCancel = cancel
+	abs, st := p.file.Offset()+offset, p.storage
 	p.mu.Unlock()
-
+	defer func() {
+		cancel()
+		p.mu.Lock()
+		p.waitCancel = nil
+		p.mu.Unlock()
+	}()
 	if st != nil && st.RangeComplete(abs, int64(len(data))) {
 		if spans, ok := st.byteSpans(abs, int64(len(data))); ok {
-			n, err := preadFileSpans(spans, data)
-			if err != nil {
-				return -1, err
-			}
-			return n, nil
+			return preadFileSpans(spans, data)
 		}
-		// Stream/RAM path: copy from verified cache without torrent.Reader.
 		if n, ok := st.readVerifiedPreview(data, abs); ok {
 			return n, nil
 		}
 	}
-
-	p.readIO.Lock()
-	defer p.readIO.Unlock()
-	p.mu.Lock()
-	if p.closed || p.readSeq != seq {
-		p.mu.Unlock()
-		return -1, fmt.Errorf("preview closed")
-	}
-	if err := sessionCtx.Err(); err != nil {
-		p.mu.Unlock()
-		return -1, fmt.Errorf("preview session expired: %w", err)
-	}
-	ctx, cancel := context.WithCancel(sessionCtx)
-	p.waitCancel = cancel
 	p.reader.SetContext(ctx)
 	if _, err := p.reader.Seek(offset, io.SeekStart); err != nil {
-		cancel()
-		p.waitCancel = nil
-		p.mu.Unlock()
 		return -1, err
 	}
-	p.mu.Unlock()
-
 	n, err := io.ReadFull(p.reader, data)
-	p.mu.Lock()
-	if p.waitCancel != nil {
-		p.waitCancel()
-		p.waitCancel = nil
-	}
-	closed := p.closed || p.readSeq != seq
-	p.mu.Unlock()
-	if closed {
-		return -1, fmt.Errorf("preview closed")
-	}
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return n, nil
 	}
@@ -363,6 +265,15 @@ func (p *previewReader) ReadAt(data []byte, offset int64) (int, error) {
 }
 
 func (p *previewReader) Close() error {
+	if p.rec != nil {
+		p.rec.mu.Lock()
+		defer p.rec.mu.Unlock()
+	}
+	return p.closeWithRecordLocked()
+}
+
+// Configuration/pause/remove already hold rec.mu; exported Close acquires it.
+func (p *previewReader) closeWithRecordLocked() error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -396,7 +307,20 @@ func (p *previewReader) Close() error {
 		owner.setPreviewDemand(nil)
 	}
 	if temp && st != nil {
+		st.mu.Lock()
+		complete := make([]int, 0, len(st.completed))
+		for index, verified := range st.completed {
+			if verified {
+				complete = append(complete, index)
+			}
+		}
+		st.mu.Unlock()
 		st.releasePreviewTemp()
+		// The library caches completion independently of storage. Discarding the
+		// draft's RAM must invalidate those flags before a later configuration.
+		for _, index := range complete {
+			p.torrent.Piece(index).UpdateCompletion()
+		}
 		// Only revoke the temporary allow when the torrent is still a draft.
 		// Configure/pause hold rec.mu and restore transfer policy themselves;
 		// do not DisallowDataDownload over a newly configured Direct Play session.

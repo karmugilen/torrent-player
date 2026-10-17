@@ -17,6 +17,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -30,7 +34,8 @@ data class MediaFacts(
     val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
 ) {
     fun isValid(): Boolean =
-        schemaVersion == CURRENT_SCHEMA_VERSION && durationMs > 0L && width > 0 && height > 0
+        schemaVersion == CURRENT_SCHEMA_VERSION && durationMs > 0L && width in 1..32768 && height in 1..32768 &&
+            successfulOffsetUs >= 0L && successfulOffsetUs / 1000 <= durationMs
 
     companion object {
         const val CURRENT_SCHEMA_VERSION = 1
@@ -62,6 +67,11 @@ class ThumbnailRepository(
     private val extractionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inFlight = HashMap<String, Deferred<List<Bitmap>>>()
 
+    private val publicationLock = Any()
+    private val activePreviews = ConcurrentHashMap<String, () -> Unit>()
+    private val previewDeadlines = Executors.newSingleThreadScheduledExecutor { task ->
+        Thread(task, "preview-deadline").apply { isDaemon = true }
+    }
     private val globalEpoch = AtomicLong(1L)
     private val entryEpochs = ConcurrentHashMap<String, AtomicLong>()
     private val attemptHistory = ConcurrentHashMap<String, Pair<Int, Long>>()
@@ -89,7 +99,13 @@ class ThumbnailRepository(
     private fun isStale(capturedGlobal: Long, capturedEntry: Long, entryKey: String): Boolean =
         capturedGlobal != globalEpoch.get() || capturedEntry != (entryEpochs[entryKey]?.get() ?: 1L)
 
-    suspend fun previews(entry: DownloadEntry): List<Bitmap> {
+    suspend fun previews(entry: DownloadEntry): List<Bitmap> = withContext(Dispatchers.IO) {
+        previewsOnIo(entry)
+    }
+
+    private suspend fun previewsOnIo(entry: DownloadEntry): List<Bitmap> {
+        val capturedGlobal = globalEpoch.get()
+        val capturedEntry = getEntryEpoch(entry.key)
         val video = firstPreviewVideo(entry) ?: return emptyList()
         val complete = entry.complete || video.isVerifiedComplete
         val key = cacheKey(entry, video)
@@ -108,7 +124,10 @@ class ThumbnailRepository(
         val diskDone = File(cache, "$key.done").exists()
         if (disk.isNotEmpty()) {
             if (diskDone || !complete) {
-                putMemory(key, CachedPreview(disk, diskDone, if (diskDone) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
+                synchronized(publicationLock) {
+                    if (isStale(capturedGlobal, capturedEntry, entry.key)) return emptyList()
+                    putMemory(key, CachedPreview(disk, diskDone, if (diskDone) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
+                }
                 if (diskDone || !complete) return disk
             }
         }
@@ -119,9 +138,6 @@ class ThumbnailRepository(
         if (attempts != null && attempts.first >= MAX_RETRY_ATTEMPTS && (now - attempts.second) < RETRY_BACKOFF_MS) {
             return disk
         }
-
-        val capturedGlobal = globalEpoch.get()
-        val capturedEntry = getEntryEpoch(entry.key)
 
         val operationKey = "$key:${if (complete) "complete" else "live"}"
         val deferred = synchronized(inFlight) {
@@ -146,6 +162,10 @@ class ThumbnailRepository(
 
         return try {
             deferred.await()
+        } catch (cancelled: CancellationException) {
+            activePreviews.remove(entry.key)?.invoke()
+            deferred.cancel()
+            throw cancelled
         } finally {
             if (deferred.isCompleted) synchronized(inFlight) {
                 if (inFlight[operationKey] === deferred) inFlight.remove(operationKey)
@@ -159,7 +179,8 @@ class ThumbnailRepository(
 
     fun invalidateEntryKey(entryKey: String) {
         if (entryKey.isBlank()) return
-        bumpEntryEpoch(entryKey)
+        synchronized(publicationLock) { bumpEntryEpoch(entryKey) }
+        activePreviews.remove(entryKey)?.invoke()
         val prefix = "$ALGORITHM-${sanitize(entryKey)}-"
         val removed = ArrayList<String>()
         synchronized(memory) {
@@ -220,27 +241,15 @@ class ThumbnailRepository(
             return fallback
         }
 
-        // Check staleness before publication
-        if (isStale(capturedGlobal, capturedEntry, entry.key)) {
-            result.forEach { it.recycleQuietly() }
-            return emptyList()
+        return synchronized(publicationLock) {
+            if (isStale(capturedGlobal, capturedEntry, entry.key)) return@synchronized emptyList()
+            attemptHistory.remove(key)
+            val persisted = persistFramesAtomically(key, result, complete)
+            trimCache()
+            val finalComplete = complete && persisted
+            putMemory(key, CachedPreview(result, finalComplete, if (finalComplete) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
+            result
         }
-
-        attemptHistory.remove(key)
-
-        // Persist frames atomically
-        val persisted = persistFramesAtomically(key, result, complete)
-        trimCache()
-
-        if (isStale(capturedGlobal, capturedEntry, entry.key)) {
-            deleteDiskFrames(key)
-            result.forEach { it.recycleQuietly() }
-            return emptyList()
-        }
-
-        val finalComplete = complete && persisted
-        putMemory(key, CachedPreview(result, finalComplete, if (finalComplete) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
-        return result
     }
 
     private fun extractNativePreview(
@@ -256,29 +265,29 @@ class ThumbnailRepository(
         val handle = runCatching { host.openPreview(engineId, video.index) }.getOrDefault(0L)
         if (handle == 0L) return emptyList()
 
+        val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val closeHandle = { if (closed.compareAndSet(false, true)) { runCatching { host.closePreview(handle) }; Unit }; Unit }
+        activePreviews[entryKey] = closeHandle
+        val timeout = previewDeadlines.schedule(closeHandle, EXTRACT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         val retriever = MediaMetadataRetriever()
         return try {
-            val totalBudget = 8L * 1024 * 1024L // 8 MiB max reads
-            var bytesRead = 0L
             val startMs = SystemClock.elapsedRealtime()
 
             val dataSource = object : MediaDataSource() {
                 override fun getSize(): Long = if (video.length > 0L) video.length else -1L
 
                 override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-                    if (isStale(capturedGlobal, capturedEntry, entryKey) ||
-                        SystemClock.elapsedRealtime() - startMs > 10_000L ||
-                        bytesRead >= totalBudget
+                    if (closed.get() || isStale(capturedGlobal, capturedEntry, entryKey) ||
+                        SystemClock.elapsedRealtime() - startMs > 10_000L
                     ) {
                         return -1
                     }
-                    val toRead = minOf(size.toLong(), totalBudget - bytesRead).toInt()
+                    val toRead = minOf(size, 1024 * 1024)
                     if (toRead <= 0) return -1
                     val temp = ByteArray(toRead)
                     val read = host.readPreview(handle, position, toRead, temp)
                     if (read <= 0) return read
                     System.arraycopy(temp, 0, buffer, offset, read)
-                    bytesRead += read
                     return read
                 }
 
@@ -310,14 +319,16 @@ class ThumbnailRepository(
             }
 
             if (frames.isNotEmpty() && !isStale(capturedGlobal, capturedEntry, entryKey)) {
-                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L))
+                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L), capturedGlobal, capturedEntry, entryKey)
             }
             frames
         } catch (_: Throwable) {
             emptyList()
         } finally {
-            retriever.release()
-            runCatching { host.closePreview(handle) }
+            timeout.cancel(false)
+            activePreviews.remove(entryKey, closeHandle)
+            closeHandle()
+            runCatching { retriever.release() }
         }
     }
 
@@ -340,12 +351,10 @@ class ThumbnailRepository(
             val target = File(cache, "$key-$i.jpg")
             val temp = File(cache, "$key-$i.jpg.tmp")
             try {
-                temp.outputStream().use { frames[i].compress(Bitmap.CompressFormat.JPEG, 82, it) }
+                val compressed = temp.outputStream().use { frames[i].compress(Bitmap.CompressFormat.JPEG, 82, it) }
+                check(compressed) { "Preview encoding failed" }
                 if (temp.exists() && temp.length() > 0) {
-                    if (!temp.renameTo(target)) {
-                        target.delete()
-                        if (!temp.renameTo(target)) allWritten = false
-                    }
+                    if (!temp.renameTo(target)) { temp.delete(); allWritten = false }
                 } else {
                     allWritten = false
                 }
@@ -395,23 +404,28 @@ class ThumbnailRepository(
      * Cancels running jobs without cancelling extractionScope.
      */
     fun clear() {
-        globalEpoch.incrementAndGet()
-        synchronized(inFlight) {
-            inFlight.values.forEach { it.cancel() }
-            inFlight.clear()
+        synchronized(publicationLock) {
+            globalEpoch.incrementAndGet()
+            synchronized(inFlight) {
+                inFlight.values.forEach { it.cancel() }
+                inFlight.clear()
+            }
+            synchronized(memory) { memory.clear() }
+            attemptHistory.clear()
         }
-        synchronized(memory) { memory.clear() }
-        attemptHistory.clear()
+        activePreviews.values.toList().forEach { it.invoke() }
+        activePreviews.clear()
     }
 
-    fun clearDiskCache(): Long {
+    fun clearDiskCache(): Long = synchronized(publicationLock) {
         clear()
         var reclaimed = 0L
         cache.listFiles()?.forEach { file ->
             val len = file.length()
-            if (file.delete()) reclaimed += len
+            check(file.delete() || !file.exists()) { "Some preview cache files could not be removed" }
+            reclaimed += len
         }
-        return reclaimed
+        reclaimed
     }
 
     fun cacheSizeBytes(): Long = cache.listFiles()?.sumOf { it.length() } ?: 0L
@@ -452,7 +466,7 @@ class ThumbnailRepository(
             }
 
             if (frames.isNotEmpty() && actualDuration > 0L && !isStale(capturedGlobal, capturedEntry, entryKey)) {
-                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L))
+                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L), capturedGlobal, capturedEntry, entryKey)
             }
             frames
         }
@@ -493,7 +507,7 @@ class ThumbnailRepository(
             }
 
             if (frames.isNotEmpty() && !isStale(capturedGlobal, capturedEntry, entryKey)) {
-                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L))
+                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L), capturedGlobal, capturedEntry, entryKey)
             }
             frames
         }
@@ -581,8 +595,8 @@ class ThumbnailRepository(
         } catch (_: Exception) {
             emptyList()
         } finally {
-            retriever.release()
-            pfd?.close()
+            runCatching { retriever.release() }
+            runCatching { pfd?.close() }
         }
     }
 
@@ -622,20 +636,19 @@ class ThumbnailRepository(
         runCatching { recycle() }
     }
 
-    private fun saveMediaFacts(key: String, retriever: MediaMetadataRetriever, durationMs: Long, offsetUs: Long) {
+    private fun saveMediaFacts(key: String, retriever: MediaMetadataRetriever, durationMs: Long, offsetUs: Long,
+        capturedGlobal: Long, capturedEntry: Long, entryKey: String) = synchronized(publicationLock) {
+        if (isStale(capturedGlobal, capturedEntry, entryKey)) return@synchronized
         val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
         val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
         val facts = MediaFacts(durationMs, width, height, offsetUs)
-        if (!facts.isValid()) return
+        if (!facts.isValid()) return@synchronized
 
         val file = File(cache, "$key.facts")
         val tmp = File(cache, "$key.facts.tmp")
         runCatching {
             tmp.writeText("${facts.durationMs},${facts.width},${facts.height},${facts.successfulOffsetUs},${facts.schemaVersion}")
-            if (!tmp.renameTo(file)) {
-                file.delete()
-                tmp.renameTo(file)
-            }
+            if (!tmp.renameTo(file)) tmp.delete()
         }
     }
 

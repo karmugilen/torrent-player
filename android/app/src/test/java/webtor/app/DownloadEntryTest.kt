@@ -53,10 +53,10 @@ class DownloadEntryTest {
         assertNull(listOf(noBookmark).findContinueWatchingTarget())
 
         // Non-video files with bookmark positions must be ignored
-        val nonVideoBookmarked = file(0, 100, 1.0, "notes.txt").copy(playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
+        val nonVideoBookmarked = file(0, 100, 1.0, "notes.txt").copy(uri = "content://downloads/episode", playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
         assertNull(listOf(entry(listOf(nonVideoBookmarked), setOf(0))).findContinueWatchingTarget())
 
-        val bookmarkedFile = file(1, 100, 1.0, "ep1.mkv").copy(playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
+        val bookmarkedFile = file(1, 100, 1.0, "ep1.mkv").copy(uri = "content://downloads/episode", playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
         val withBookmark = entry(listOf(file(0, 100, 1.0, "ep0.mkv"), bookmarkedFile), setOf(0, 1)).copy(key = "series", title = "Show S01")
         val target = listOf(withBookmark).findContinueWatchingTarget()
         assertTrue(target != null)
@@ -68,11 +68,13 @@ class DownloadEntryTest {
     @Test
     fun continueWatchingTargetsMostRecentlyBookmarkedEpisodeAndIgnoresFinishedEpisodes() {
         val ep1 = file(0, 100, 1.0, "Show.S01E01.mkv").copy(
+            uri = "content://downloads/episode",
             playbackPositionMs = 45_000L,
             playbackDurationMs = 120_000L,
             bookmarkUpdatedAt = 1000L,
         )
         val ep2 = file(1, 100, 1.0, "Show.S01E02.mkv").copy(
+            uri = "content://downloads/episode",
             playbackPositionMs = 30_000L,
             playbackDurationMs = 120_000L,
             bookmarkUpdatedAt = 2000L,
@@ -84,7 +86,7 @@ class DownloadEntryTest {
         assertEquals(1, targetEp2?.file?.index)
 
         // If Ep 2 is finished (within 3 seconds of duration), it should fall back to Ep 1
-        val ep2Finished = ep2.copy(playbackPositionMs = 118_000L, bookmarkUpdatedAt = 3000L)
+        val ep2Finished = ep2.copy(uri = "content://downloads/episode", playbackPositionMs = 118_000L, bookmarkUpdatedAt = 3000L)
         val seriesWithFinishedEp2 = series.copy(files = listOf(ep1, ep2Finished))
         val targetEp1 = listOf(seriesWithFinishedEp2).findContinueWatchingTarget()
         assertEquals(0, targetEp1?.file?.index)

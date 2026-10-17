@@ -5,6 +5,9 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,6 +22,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -53,6 +57,7 @@ fun TorrentFilesScreen(
     onFocus: (Int) -> Unit = {},
     onClearFocus: () -> Unit = {},
     onStartOver: (Int) -> Unit = {},
+    onLocateFile: (Int) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -157,7 +162,7 @@ fun TorrentFilesScreen(
     }
 
     Scaffold(
-        containerColor = colors.background,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Download details", style = MaterialTheme.typography.titleLarge) },
@@ -186,7 +191,7 @@ fun TorrentFilesScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.background,
+                    containerColor = colors.surface.copy(alpha = 0.90f),
                     titleContentColor = colors.onBackground,
                     navigationIconContentColor = colors.onBackground,
                     actionIconContentColor = colors.onBackground,
@@ -195,7 +200,8 @@ fun TorrentFilesScreen(
         },
     ) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize().padding(padding),
+            state = rememberLazyListState(),
+            modifier = Modifier.fillMaxSize().padding(padding),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -234,7 +240,7 @@ fun TorrentFilesScreen(
                         } else null,
                     )
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -253,7 +259,7 @@ fun TorrentFilesScreen(
                             onClick = { fileFilter = DetailFileFilter.SUBTITLES },
                             label = { Text("Subtitles") },
                         )
-                        Spacer(Modifier.weight(1f))
+                        Spacer(Modifier.width(8.dp))
                         FilterChip(
                             selected = naturalOrder,
                             onClick = { naturalOrder = !naturalOrder },
@@ -288,6 +294,7 @@ fun TorrentFilesScreen(
                     onClearFocus = onClearFocus,
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
+                    onLocate = { onLocateFile(file.index) },
                 )
             }
             // Diagnostics follow files
@@ -327,11 +334,7 @@ private fun DownloadSummary(
     val label = downloadSummaryLabel(entry, error)
     val video = entry.files.any { it.index in entry.selected && it.name.isVideoName() }
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
-    ElevatedCard(
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.elevatedCardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+    ThemedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (video) VideoPreviewPager(entry, frames, Modifier.fillMaxWidth().aspectRatio(16f / 9f), large = false)
             Text(
@@ -372,6 +375,7 @@ private fun DownloadSummary(
                 )
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+            entry.status?.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.tertiary) }
             Row(
                 Modifier.fillMaxWidth().padding(top = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -380,7 +384,7 @@ private fun DownloadSummary(
                 FilledTonalButton(
                     onClick = onShareMagnet,
                     enabled = magnetAvailable,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).themedControl(),
                     shape = RoundedCornerShape(12.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 ) {
@@ -391,7 +395,7 @@ private fun DownloadSummary(
                 OutlinedButton(
                     onClick = onCopyMagnet,
                     enabled = magnetAvailable,
-                    modifier = Modifier.heightIn(min = 48.dp),
+                    modifier = Modifier.heightIn(min = 48.dp).themedControl(),
                     shape = RoundedCornerShape(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                 ) {
@@ -574,6 +578,7 @@ private fun TorrentFileRow(
     directPlay: Boolean = false,
     onStartOver: () -> Unit = {},
     pairedSubtitles: List<String> = emptyList(),
+    onLocate: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -638,7 +643,7 @@ private fun TorrentFileRow(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .width(88.dp)
-                        .height(30.dp),
+                        .heightIn(min = 48.dp).themedControl(),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     colors = if (focused) {
                         ButtonDefaults.filledTonalButtonColors(
@@ -661,7 +666,7 @@ private fun TorrentFileRow(
                     onClick = onPlay,
                     enabled = canPlay,
                     shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.height(30.dp),
+                    modifier = Modifier.heightIn(min = 48.dp).themedControl(),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 ) {
                     Text(
@@ -682,6 +687,7 @@ private fun TorrentFileRow(
                 trackColor = colors.surface,
             )
         }
+        if (!directPlay) TextButton(onClick = onLocate, enabled = canToggle) { Text("Locate existing file") }
         if (canPlayVideo && file.playbackPositionMs > 0) TextButton(onClick = onStartOver, enabled = canPlay) { Text("Play from start") }
         HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(top = 2.dp))
     }

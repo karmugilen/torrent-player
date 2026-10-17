@@ -32,6 +32,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,7 +61,7 @@ fun PrepareScreen(
     val canChoose = ready && !draft.busy && draft.selected.isNotEmpty()
     val canStart = canChoose && (directPlayDefault || !insufficientSpace)
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Choose files", style = MaterialTheme.typography.titleLarge) },
@@ -70,7 +71,7 @@ fun PrepareScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
                     titleContentColor = MaterialTheme.colorScheme.onBackground,
                     navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
                 ),
@@ -100,7 +101,7 @@ fun PrepareScreen(
                         enabled = canStart,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 48.dp),
+                            .heightIn(min = 48.dp).themedControl(),
                     ) {
                         Text(if (directPlayDefault) "Watch now (Direct Play)" else "Save for offline (Download)", maxLines = 1)
                     }
@@ -142,6 +143,7 @@ fun PrepareScreen(
                 .padding(padding),
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
         ) {
+            item { DraftVideoPreview(draft) }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(torrent.name ?: "Torrent", style = MaterialTheme.typography.titleLarge)

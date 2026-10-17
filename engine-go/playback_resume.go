@@ -109,6 +109,9 @@ func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex
 	if rec == nil || s == nil || rec.Torrent == nil {
 		return
 	}
+	s.cacheMu.Lock()
+	clearGen := s.cacheClearGen
+	s.cacheMu.Unlock()
 	files := rec.Torrent.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {
 		return
@@ -124,16 +127,24 @@ func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex
 		return
 	}
 	pieceLen := info.PieceLength
-	aligned := offset - (offset % pieceLen)
-	if aligned < 0 {
-		aligned = 0
+	abs := ((file.Offset() + max(offset, 0)) / pieceLen) * pieceLen
+	if abs < file.Offset() {
+		abs += pieceLen
 	}
-	length := min(resumeWindowMaxBytes, file.Length()-aligned)
-	length -= length % pieceLen
+	aligned := abs - file.Offset()
+	var length int64
+	end := min(file.Offset()+file.Length(), abs+resumeWindowMaxBytes)
+	for at := abs; at < end; {
+		piece := info.Piece(int(at / pieceLen))
+		if at+piece.Length() > end || !st.PieceComplete(piece.Index()) {
+			break
+		}
+		length += piece.Length()
+		at += piece.Length()
+	}
 	if length <= 0 {
 		return
 	}
-	abs := file.Offset() + aligned
 	buf, ok := st.copyVerifiedRange(abs, length)
 	if !ok {
 		return
@@ -144,5 +155,5 @@ func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex
 		generation = c.resumeGeneration
 		c.mu.Unlock()
 	}
-	s.saveResumeWindowDetailed(rec, fileIndex, file.DisplayPath(), file.Length(), pieceLen, aligned, length, buf, generation)
+	s.saveResumeWindowDetailed(rec, fileIndex, file.DisplayPath(), file.Length(), pieceLen, aligned, length, buf, generation, clearGen)
 }

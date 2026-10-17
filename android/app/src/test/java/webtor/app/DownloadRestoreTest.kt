@@ -90,7 +90,7 @@ class DownloadRestoreTest {
     }
 
     @Test
-    fun explicitReAddClearsTombstoneAndSurvivesRestart() {
+    fun explicitReAddUsesNewGenerationAndKeepsOlderSnapshotsDeleted() {
         val tempDir = java.nio.file.Files.createTempDirectory("storage-test-tomb").toFile()
         try {
             val (storage, _) = createTestStorage(tempDir)
@@ -101,8 +101,9 @@ class DownloadRestoreTest {
             assertTrue(e1.key in storage.loadTombstones())
 
             // Explicitly re-add/save entry
-            storage.save(listOf(e1))
-            assertFalse(e1.key in storage.loadTombstones())
+            storage.save(listOf(e1.copy(generation = storage.nextGeneration(e1.key))))
+            assertTrue(e1.key in storage.loadTombstones())
+            assertTrue(parseLibrarySnapshot(DownloadStorage.encodeLibrary(listOf(e1)), storage.loadTombstones(), storage.loadTombstoneMap()).isEmpty())
 
             // On reload, entry is restored and not filtered out
             val loaded = storage.load()

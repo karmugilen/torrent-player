@@ -67,7 +67,7 @@ fun SettingsScreen(
     val colors = MaterialTheme.colorScheme
 
     Scaffold(
-        containerColor = colors.background,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Settings", style = MaterialTheme.typography.titleLarge) },
@@ -77,7 +77,7 @@ fun SettingsScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.background,
+                    containerColor = colors.surface.copy(alpha = 0.90f),
                     titleContentColor = colors.onBackground,
                     navigationIconContentColor = colors.onBackground,
                 ),
@@ -92,7 +92,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item {
-                Card(Modifier.fillMaxWidth()) {
+                ThemedCard(Modifier.fillMaxWidth()) {
                     ListItem(
                         headlineContent = { Text("Prefer Direct Play") },
                         supportingContent = { Text("On: video stays in RAM; only a small startup cache is saved. Off: download selected files for offline use. Both choices remain available when adding a torrent.") },
@@ -299,7 +299,7 @@ fun SettingsScreen(
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text("Anti-DPI (experimental)", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                                     Text(
-                                        "Adaptive connection routing to resist SNI/packet inspection. Experimental feature for your network trials.",
+                                        "Try splitting new TCP connections to peers and supported trackers. Effectiveness varies by network.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = colors.onSurfaceVariant,
                                     )

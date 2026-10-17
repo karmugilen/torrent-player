@@ -54,8 +54,8 @@ func TestOpenPreviewReadsVerifiedBytesWithoutFocusChange(t *testing.T) {
 	owner.mu.Lock()
 	hasPreview := len(owner.previewDemand) > 0
 	owner.mu.Unlock()
-	if !hasPreview {
-		t.Fatal("preview demand missing")
+	if hasPreview {
+		t.Fatal("verified preview read must not fetch unrelated pieces")
 	}
 	_ = preview.Close()
 	owner.mu.Lock()
@@ -213,7 +213,7 @@ func TestPreviewBudgetEnforcedAcrossSeeks(t *testing.T) {
 	defer preview.Close()
 	pr := preview.(*previewReader)
 	pr.mu.Lock()
-	pr.budget = rec.Torrent.Info().PieceLength
+	pr.budget = 0
 	pr.admitted = map[int]bool{}
 	pr.admittedN = 0
 	pr.mu.Unlock()

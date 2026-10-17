@@ -711,7 +711,11 @@ fun VideoPreviewPager(
             modifier = modifier
                 .clip(shape)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
-        )
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(if (!entry.metadataReady) "Waiting for file information" else if (entry.engineId != null && !entry.paused) "Preparing preview…" else "No preview yet",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         return
     }
     val pager = rememberPagerState(pageCount = { ready.size })
