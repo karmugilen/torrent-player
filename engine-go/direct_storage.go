@@ -29,7 +29,13 @@ const (
 func (st *DocumentTorrentStorage) attachDirectPlay(descriptors []*int, selected []int) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.closed || st.attached || st.info == nil {
+	if st.closed || st.info == nil {
+		return fmt.Errorf("storage is closed, configured, or missing metadata")
+	}
+	if st.previewTemp {
+		st.releasePreviewTempLocked()
+	}
+	if st.attached {
 		return fmt.Errorf("storage is closed, configured, or missing metadata")
 	}
 	if len(descriptors) != len(st.files) {

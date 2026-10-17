@@ -126,6 +126,7 @@ type DocumentTorrentStorage struct {
 	streamReady               chan struct{}
 	lastReadOffset            int64
 	completed                 map[int]bool
+	previewTemp               bool
 	checkpointDirty           bool
 	checkpointFlushing        bool
 	checkpointFlushScheduled  bool
@@ -161,7 +162,12 @@ func engineOwnedPartPath(baseDir, infoHashHex string, fileIndex int, streamSelec
 // for one info-hash. Safe when the directories do not exist.
 func DeleteEngineOwnedStorage(baseDir, infoHashHex string) error {
 	var first error
-	for _, dir := range []string{streamDir(baseDir, infoHashHex), boundaryDir(baseDir, infoHashHex), filepath.Join(baseDir, ".startup", infoHashHex)} {
+	for _, dir := range []string{
+		streamDir(baseDir, infoHashHex),
+		boundaryDir(baseDir, infoHashHex),
+		filepath.Join(baseDir, ".startup", infoHashHex),
+		previewDir(baseDir, infoHashHex),
+	} {
 		if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
 		}
@@ -235,6 +241,9 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 	}
 	if st.info == nil {
 		return fmt.Errorf("metadata not ready")
+	}
+	if st.previewTemp {
+		st.releasePreviewTempLocked()
 	}
 	if st.attached {
 		return fmt.Errorf("storage already configured")

@@ -134,6 +134,7 @@ type EngineServer struct {
 	trackerSockets    *networkDialer
 	geoMu             sync.RWMutex
 	geoIP             *maxminddb.Reader
+	previewActive     *previewReader
 }
 
 func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServer, error) {
@@ -1171,6 +1172,8 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "torrent is closing"})
 		return
 	}
+	// Configuration replaces any temporary preview storage for this torrent.
+	s.closeActivePreview()
 
 	t := rec.Torrent
 	if err := waitForInfo(r, t); err != nil {
@@ -1333,6 +1336,9 @@ func (s *EngineServer) handlePauseResume(w http.ResponseWriter, r *http.Request,
 	// applyTransferState still requires Configured before enabling file bytes.
 	rec.Generation++
 	rec.Paused = pause
+	if pause {
+		s.closeActivePreview()
+	}
 	if !pause && rec.Error != nil {
 		// A failed saved-data check is recoverable: resume clears the visible
 		// error and starts a fresh check before allowing payload transfer. This
@@ -1384,6 +1390,7 @@ func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if st := s.storage.GetStorage(rec.InfoHash); st != nil {
 		_ = st.DeleteCheckpoint()
 	}
+	s.closeActivePreview()
 	s.closePlaybackReaders(rec.Torrent)
 	rec.Torrent.Drop()
 	_ = s.storage.DeleteCheckpoint(rec.InfoHash)

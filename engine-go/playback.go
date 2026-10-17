@@ -67,6 +67,7 @@ type playbackPriorityCoordinator struct {
 	resumeDemand     map[int]torrent.PiecePriority
 	resumeTimer      *time.Timer
 	resumeGeneration uint64
+	previewDemand    map[int]torrent.PiecePriority
 	closed           bool
 	resumeSuspended  bool
 }
@@ -166,6 +167,7 @@ func (c *playbackPriorityCoordinator) applyLocked() {
 	}
 	raiseDemand(next, c.focus)
 	raiseDemand(next, c.resumeDemand)
+	raiseDemand(next, c.previewDemand)
 	for index := range c.effective {
 		if _, ok := next[index]; !ok {
 			// Clear the override; the selected file's base priority remains.
