@@ -3,6 +3,7 @@ package webtor.app
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
@@ -19,14 +20,22 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 data class MediaFacts(
     val durationMs: Long,
     val width: Int,
     val height: Int,
     val successfulOffsetUs: Long,
-    val schemaVersion: Int = 1,
-)
+    val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+) {
+    fun isValid(): Boolean =
+        schemaVersion == CURRENT_SCHEMA_VERSION && durationMs > 0L && width > 0 && height > 0
+
+    companion object {
+        const val CURRENT_SCHEMA_VERSION = 1
+    }
+}
 
 /**
  * MEDIA-01, MEDIA-02, CACHE-05, CACHE-07: Unified Thumbnail Lifecycle & Cache Repository.
@@ -35,9 +44,10 @@ data class MediaFacts(
  * - Single extraction at a time, automatic on Wi-Fi and mobile, no manual gate.
  * - Survives process restart: incomplete & Direct Play first frames are persisted to disk.
  * - Stable cache key independent of provider URI or engine availability.
- * - Reusable clear(): clears caches without cancelling the extraction scope.
- * - Native preview JNI support for incomplete pieces without full destination file creation.
- * - Media facts (duration, dimensions, preview timestamp) cached with versioned keys.
+ * - Reusable clear(): increments monotonic epochs, cancels in-flight work without destroying scope.
+ * - Native preview JNI support backed by seekable MediaDataSource (full logical file length).
+ * - Media facts (duration, dimensions, preview timestamp) validated and reused across extractions.
+ * - Synchronous cached() lookup is strictly memory-only; disk IO happens asynchronously on IO dispatcher.
  */
 class ThumbnailRepository(
     private val context: Context,
@@ -51,58 +61,67 @@ class ThumbnailRepository(
     private val extractSlots = Semaphore(1)
     private val extractionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inFlight = HashMap<String, Deferred<List<Bitmap>>>()
-    private val invalidation = ConcurrentHashMap<String, Long>()
+
+    private val globalEpoch = AtomicLong(1L)
+    private val entryEpochs = ConcurrentHashMap<String, AtomicLong>()
     private val attemptHistory = ConcurrentHashMap<String, Pair<Int, Long>>()
 
     private data class CachedPreview(val frames: List<Bitmap>, val complete: Boolean, val progressBucket: Int)
 
+    /**
+     * Synchronous lookup for UI composables: STRICTLY memory-only.
+     * Never performs disk IO or bitmap decoding on the calling thread.
+     */
     fun cached(entry: DownloadEntry): List<Bitmap>? {
         val video = firstPreviewVideo(entry) ?: return null
         val key = cacheKey(entry, video)
-        synchronized(memory) {
-            val mem = memory[key]
-            if (mem != null && mem.frames.isNotEmpty()) return mem.frames
+        return synchronized(memory) {
+            memory[key]?.frames?.takeIf { it.isNotEmpty() }
         }
-        // Check disk cache hit for offline / paused / restored items
-        val disk = loadFramesFromDisk(key)
-        if (disk.isNotEmpty()) {
-            val complete = entry.complete || video.isVerifiedComplete
-            putMemory(key, CachedPreview(disk, complete, if (complete) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
-            return disk
-        }
-        return null
     }
+
+    private fun getEntryEpoch(key: String): Long =
+        entryEpochs.computeIfAbsent(key) { AtomicLong(1L) }.get()
+
+    private fun bumpEntryEpoch(key: String): Long =
+        entryEpochs.computeIfAbsent(key) { AtomicLong(1L) }.incrementAndGet()
+
+    private fun isStale(capturedGlobal: Long, capturedEntry: Long, entryKey: String): Boolean =
+        capturedGlobal != globalEpoch.get() || capturedEntry != (entryEpochs[entryKey]?.get() ?: 1L)
 
     suspend fun previews(entry: DownloadEntry): List<Bitmap> {
         val video = firstPreviewVideo(entry) ?: return emptyList()
         val complete = entry.complete || video.isVerifiedComplete
         val key = cacheKey(entry, video)
 
-        // Memory cache check
+        // 1. Memory cache check
         synchronized(memory) {
             val mem = memory[key]
             if (mem != null && mem.complete && mem.frames.isNotEmpty()) return mem.frames
             if (mem != null && !mem.complete && mem.frames.isNotEmpty() &&
-                mem.progressBucket == liveProgressBucket(video.progress)
+                mem.progressBucket == liveProgressBucket(video.progress) && !complete
             ) return mem.frames
         }
 
-        // Disk cache check (survives process restart)
+        // 2. Disk cache check (performed on IO thread)
         val disk = loadFramesFromDisk(key)
+        val diskDone = File(cache, "$key.done").exists()
         if (disk.isNotEmpty()) {
-            val isDone = File(cache, "$key.done").exists()
-            if (isDone || !complete || disk.size >= 3) {
-                putMemory(key, CachedPreview(disk, isDone || complete, if (isDone || complete) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
-                return disk
+            if (diskDone || !complete) {
+                putMemory(key, CachedPreview(disk, diskDone, if (diskDone) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
+                if (diskDone || !complete) return disk
             }
         }
 
-        // Bounded automatic retry check
+        // 3. Bounded automatic retry check
         val now = SystemClock.elapsedRealtime()
         val attempts = attemptHistory[key]
         if (attempts != null && attempts.first >= MAX_RETRY_ATTEMPTS && (now - attempts.second) < RETRY_BACKOFF_MS) {
             return disk
         }
+
+        val capturedGlobal = globalEpoch.get()
+        val capturedEntry = getEntryEpoch(entry.key)
 
         val operationKey = "$key:${if (complete) "complete" else "live"}"
         val deferred = synchronized(inFlight) {
@@ -110,9 +129,9 @@ class ThumbnailRepository(
                 extractSlots.withPermit {
                     withTimeoutOrNull(EXTRACT_TIMEOUT_MS) {
                         val lock = synchronized(keyLocks) { keyLocks.getOrPut(key) { Any() } }
-                        val version = invalidation[entry.key] ?: 0L
                         synchronized(lock) {
-                            loadOrExtract(key, entry, video, complete, version)
+                            if (isStale(capturedGlobal, capturedEntry, entry.key)) emptyList()
+                            else loadOrExtract(key, entry, video, complete, capturedGlobal, capturedEntry)
                         }
                     } ?: disk
                 }
@@ -140,7 +159,7 @@ class ThumbnailRepository(
 
     fun invalidateEntryKey(entryKey: String) {
         if (entryKey.isBlank()) return
-        invalidation.compute(entryKey) { _, previous -> (previous ?: 0L) + 1L }
+        bumpEntryEpoch(entryKey)
         val prefix = "$ALGORITHM-${sanitize(entryKey)}-"
         val removed = ArrayList<String>()
         synchronized(memory) {
@@ -163,7 +182,8 @@ class ThumbnailRepository(
         entry: DownloadEntry,
         video: SavedFile,
         complete: Boolean,
-        version: Long,
+        capturedGlobal: Long,
+        capturedEntry: Long,
     ): List<Bitmap> {
         val mem = synchronized(memory) { memory[key] }
         if (mem != null && mem.complete && mem.frames.isNotEmpty()) return mem.frames
@@ -171,92 +191,133 @@ class ThumbnailRepository(
         val disk = loadFramesFromDisk(key)
         val diskComplete = File(cache, "$key.done").exists()
         if (diskComplete && disk.isNotEmpty()) {
-            if (isInvalidated(entry.key, version)) return emptyList()
+            if (isStale(capturedGlobal, capturedEntry, entry.key)) return emptyList()
             putMemory(key, CachedPreview(disk, true, COMPLETE_BUCKET))
             return disk
         }
 
+        // Live frame acts as fallback while complete extraction is attempted
         val fallback = if (disk.isNotEmpty()) disk else mem?.frames.orEmpty()
         val facts = readMediaFacts(key)
 
         var result: List<Bitmap> = emptyList()
 
-        // Attempt 1: Local file / MediaStore URI extraction
+        // Path A: Local MediaStore / file URI extraction
         val uri = video.uri?.takeIf { it.isNotBlank() }
         if (uri != null) {
-            result = if (complete) extractCompleteFrames(uri, facts, key) else extractLiveFrames(uri, video.progress, facts, key)
+            result = if (complete) extractCompleteFrames(uri, facts, key, capturedGlobal, capturedEntry, entry.key)
+            else extractLiveFrames(uri, video.progress, facts, key, capturedGlobal, capturedEntry, entry.key)
         }
 
-        // Attempt 2: Native Preview JNI for missing/incomplete data
+        // Path B: Native Preview JNI with seekable MediaDataSource for missing/incomplete data
         if (result.isEmpty() && entry.engineId != null && engineHost != null) {
-            result = extractNativePreview(entry.engineId, video.index, key)
+            result = extractNativePreview(entry.engineId, video, facts, key, capturedGlobal, capturedEntry, entry.key)
         }
 
         if (result.isEmpty()) {
-            // Record failure for bounded retry (never permanently poison cache)
             val currentAttempts = attemptHistory[key]?.first ?: 0
             attemptHistory[key] = (currentAttempts + 1) to SystemClock.elapsedRealtime()
             return fallback
         }
 
-        // Successful extraction clears failure history
-        attemptHistory.remove(key)
-
-        if (isInvalidated(entry.key, version)) {
+        // Check staleness before publication
+        if (isStale(capturedGlobal, capturedEntry, entry.key)) {
             result.forEach { it.recycleQuietly() }
             return emptyList()
         }
 
-        // Atomically persist frames to disk
-        // Even for live/incomplete, persist the first real frame so restart/pause retains it!
-        persistFrames(key, result, complete)
+        attemptHistory.remove(key)
+
+        // Persist frames atomically
+        val persisted = persistFramesAtomically(key, result, complete)
         trimCache()
 
-        if (isInvalidated(entry.key, version)) {
+        if (isStale(capturedGlobal, capturedEntry, entry.key)) {
             deleteDiskFrames(key)
             result.forEach { it.recycleQuietly() }
             return emptyList()
         }
 
-        putMemory(key, CachedPreview(result, complete, if (complete) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
+        val finalComplete = complete && persisted
+        putMemory(key, CachedPreview(result, finalComplete, if (finalComplete) COMPLETE_BUCKET else liveProgressBucket(video.progress)))
         return result
     }
 
-    private fun extractNativePreview(engineId: String, fileIndex: Int, key: String): List<Bitmap> {
+    private fun extractNativePreview(
+        engineId: String,
+        video: SavedFile,
+        facts: MediaFacts?,
+        key: String,
+        capturedGlobal: Long,
+        capturedEntry: Long,
+        entryKey: String,
+    ): List<Bitmap> {
         val host = engineHost ?: return emptyList()
-        val handle = runCatching { host.openPreview(engineId, fileIndex) }.getOrDefault(0L)
+        val handle = runCatching { host.openPreview(engineId, video.index) }.getOrDefault(0L)
         if (handle == 0L) return emptyList()
 
-        val tempFile = File(cache, "preview_tmp_${key}_${System.currentTimeMillis()}.bin")
+        val retriever = MediaMetadataRetriever()
         return try {
-            val buffer = ByteArray(64 * 1024)
-            var totalBytesRead = 0L
-            val maxBudget = 8L * 1024L * 1024L // 8 MiB budget
-            val startTime = SystemClock.elapsedRealtime()
+            val totalBudget = 8L * 1024 * 1024L // 8 MiB max reads
+            var bytesRead = 0L
+            val startMs = SystemClock.elapsedRealtime()
 
-            tempFile.outputStream().use { out ->
-                while (totalBytesRead < maxBudget && (SystemClock.elapsedRealtime() - startTime) < 10_000L) {
-                    val readSize = minOf(buffer.size.toLong(), maxBudget - totalBytesRead).toInt()
-                    val count = host.readPreview(handle, totalBytesRead, readSize, buffer)
-                    if (count <= 0) break
-                    out.write(buffer, 0, count)
-                    totalBytesRead += count
+            val dataSource = object : MediaDataSource() {
+                override fun getSize(): Long = if (video.length > 0L) video.length else -1L
+
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+                    if (isStale(capturedGlobal, capturedEntry, entryKey) ||
+                        SystemClock.elapsedRealtime() - startMs > 10_000L ||
+                        bytesRead >= totalBudget
+                    ) {
+                        return -1
+                    }
+                    val toRead = minOf(size.toLong(), totalBudget - bytesRead).toInt()
+                    if (toRead <= 0) return -1
+                    val temp = ByteArray(toRead)
+                    val read = host.readPreview(handle, position, toRead, temp)
+                    if (read <= 0) return read
+                    System.arraycopy(temp, 0, buffer, offset, read)
+                    bytesRead += read
+                    return read
+                }
+
+                override fun close() {
+                    // Closed in finally block
                 }
             }
 
-            if (totalBytesRead > 0 && tempFile.exists() && tempFile.length() > 0) {
-                withRetriever(tempFile.absolutePath) { retriever, duration ->
-                    val frame = grabNonDark(retriever, 0L, duration, HashSet())
-                    if (frame != null) listOf(frame) else emptyList()
-                }
-            } else {
-                emptyList()
+            retriever.setDataSource(dataSource)
+            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
+
+            val frames = ArrayList<Bitmap>(3)
+            val tried = HashSet<Long>()
+            var firstOffsetUs = facts?.successfulOffsetUs ?: -1L
+
+            // Try cached successful offset first if available
+            if (firstOffsetUs >= 0L) {
+                val frame = grabNonDark(retriever, firstOffsetUs, actualDuration, tried)
+                if (frame != null) frames.add(frame)
             }
+
+            if (frames.isEmpty()) {
+                val frame = grabNonDark(retriever, 0L, actualDuration, tried)
+                if (frame != null) {
+                    firstOffsetUs = 0L
+                    frames.add(frame)
+                }
+            }
+
+            if (frames.isNotEmpty() && !isStale(capturedGlobal, capturedEntry, entryKey)) {
+                saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L))
+            }
+            frames
         } catch (_: Throwable) {
             emptyList()
         } finally {
+            retriever.release()
             runCatching { host.closePreview(handle) }
-            runCatching { tempFile.delete() }
         }
     }
 
@@ -272,29 +333,36 @@ class ThumbnailRepository(
         return frames
     }
 
-    private fun persistFrames(key: String, frames: List<Bitmap>, complete: Boolean) {
-        val limit = if (complete) frames.size.coerceAtMost(3) else 1 // Persist first real frame for live/incomplete
+    private fun persistFramesAtomically(key: String, frames: List<Bitmap>, complete: Boolean): Boolean {
+        val limit = if (complete) frames.size.coerceAtMost(3) else 1
+        var allWritten = true
         for (i in 0 until limit) {
             val target = File(cache, "$key-$i.jpg")
             val temp = File(cache, "$key-$i.jpg.tmp")
             try {
                 temp.outputStream().use { frames[i].compress(Bitmap.CompressFormat.JPEG, 82, it) }
-                if (temp.renameTo(target)) {
-                    // Success
+                if (temp.exists() && temp.length() > 0) {
+                    if (!temp.renameTo(target)) {
+                        target.delete()
+                        if (!temp.renameTo(target)) allWritten = false
+                    }
                 } else {
-                    target.delete()
-                    temp.renameTo(target)
+                    allWritten = false
                 }
             } catch (_: Throwable) {
                 temp.delete()
+                allWritten = false
             }
         }
-        if (complete) {
-            runCatching { File(cache, "$key.done").writeText("1") }
-            runCatching { File(cache, "$key.live").delete() }
-        } else {
-            runCatching { File(cache, "$key.live").writeText("1") }
+        if (allWritten) {
+            if (complete) {
+                runCatching { File(cache, "$key.done").writeText("1") }
+                runCatching { File(cache, "$key.live").delete() }
+            } else {
+                runCatching { File(cache, "$key.live").writeText("1") }
+            }
         }
+        return allWritten
     }
 
     private fun deleteDiskFrames(key: String) {
@@ -303,9 +371,6 @@ class ThumbnailRepository(
         File(cache, "$key.live").delete()
         File(cache, "$key.facts").delete()
     }
-
-    private fun isInvalidated(entryKey: String, version: Long): Boolean =
-        (invalidation[entryKey] ?: 0L) != version
 
     private fun putMemory(key: String, value: CachedPreview) {
         synchronized(memory) {
@@ -326,22 +391,19 @@ class ThumbnailRepository(
 
     /**
      * CACHE-07: Reusable cache clearing.
-     * Does NOT cancel extractionScope, allowing future extraction requests to succeed.
+     * Increments global epoch to reject late writes.
+     * Cancels running jobs without cancelling extractionScope.
      */
     fun clear() {
+        globalEpoch.incrementAndGet()
         synchronized(inFlight) {
             inFlight.values.forEach { it.cancel() }
             inFlight.clear()
         }
         synchronized(memory) { memory.clear() }
-        synchronized(keyLocks) { keyLocks.clear() }
-        invalidation.clear()
         attemptHistory.clear()
     }
 
-    /**
-     * Delete disk cache files and return reclaimed bytes.
-     */
     fun clearDiskCache(): Long {
         clear()
         var reclaimed = 0L
@@ -354,7 +416,14 @@ class ThumbnailRepository(
 
     fun cacheSizeBytes(): Long = cache.listFiles()?.sumOf { it.length() } ?: 0L
 
-    private fun extractCompleteFrames(uri: String, facts: MediaFacts?, key: String): List<Bitmap> {
+    private fun extractCompleteFrames(
+        uri: String,
+        facts: MediaFacts?,
+        key: String,
+        capturedGlobal: Long,
+        capturedEntry: Long,
+        entryKey: String,
+    ): List<Bitmap> {
         return withRetriever(uri) { retriever, duration ->
             val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
             val frames = ArrayList<Bitmap>(3)
@@ -368,6 +437,9 @@ class ThumbnailRepository(
                 frames.add(bmp)
                 return true
             }
+
+            // Probe facts offset first if valid
+            if (firstOffsetUs >= 0L) take(firstOffsetUs)
 
             if (actualDuration > 0L) {
                 for (ratio in COMPLETE_RATIOS) {
@@ -379,14 +451,22 @@ class ThumbnailRepository(
                 if (frames.isEmpty()) take(0L)
             }
 
-            if (frames.isNotEmpty() && actualDuration > 0L) {
+            if (frames.isNotEmpty() && actualDuration > 0L && !isStale(capturedGlobal, capturedEntry, entryKey)) {
                 saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L))
             }
             frames
         }
     }
 
-    private fun extractLiveFrames(uri: String, progress: Double, facts: MediaFacts?, key: String): List<Bitmap> {
+    private fun extractLiveFrames(
+        uri: String,
+        progress: Double,
+        facts: MediaFacts?,
+        key: String,
+        capturedGlobal: Long,
+        capturedEntry: Long,
+        entryKey: String,
+    ): List<Bitmap> {
         return withRetriever(uri) { retriever, duration ->
             val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
             val frames = ArrayList<Bitmap>(3)
@@ -401,6 +481,8 @@ class ThumbnailRepository(
                 return true
             }
 
+            if (firstOffsetUs >= 0L) take(firstOffsetUs)
+
             if (actualDuration > 0L) {
                 for (ratio in livePreviewRatios(progress)) {
                     take((actualDuration * ratio * 1000.0).toLong())
@@ -410,16 +492,13 @@ class ThumbnailRepository(
                 for (t in listOf(500_000L, 1_500_000L, 3_000_000L, 0L)) take(t)
             }
 
-            if (frames.isNotEmpty()) {
+            if (frames.isNotEmpty() && !isStale(capturedGlobal, capturedEntry, entryKey)) {
                 saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L))
             }
             frames
         }
     }
 
-    /**
-     * Independent decoder fallbacks and accepting a dark real frame as the last successful fallback.
-     */
     private fun grabNonDark(
         retriever: MediaMetadataRetriever,
         timeUs: Long,
@@ -460,24 +539,20 @@ class ThumbnailRepository(
             }
         }
 
-        // Accept real dark frame as the last fallback if non-dark frame was not found
         return darkFallbackFrame
     }
 
     private fun grabRawFrame(retriever: MediaMetadataRetriever, timeUs: Long): Bitmap? {
-        // Fallback 1: CLOSEST_SYNC
         val frameSync = runCatching {
             frameAt(retriever, timeUs.coerceAtLeast(0L), MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         }.getOrNull()
         if (frameSync != null) return frameSync
 
-        // Fallback 2: CLOSEST
         val frameClosest = runCatching {
             frameAt(retriever, timeUs.coerceAtLeast(0L), MediaMetadataRetriever.OPTION_CLOSEST)
         }.getOrNull()
         if (frameClosest != null) return frameClosest
 
-        // Fallback 3: Frame at index 0
         if (timeUs <= 0L) {
             val index0 = frameAtIndex0(retriever)
             if (index0 != null) return index0
@@ -551,6 +626,8 @@ class ThumbnailRepository(
         val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
         val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
         val facts = MediaFacts(durationMs, width, height, offsetUs)
+        if (!facts.isValid()) return
+
         val file = File(cache, "$key.facts")
         val tmp = File(cache, "$key.facts.tmp")
         runCatching {
@@ -567,14 +644,15 @@ class ThumbnailRepository(
         if (!file.exists()) return null
         return runCatching {
             val parts = file.readText().trim().split(',')
-            if (parts.size >= 4) {
-                MediaFacts(
+            if (parts.size >= 5) {
+                val facts = MediaFacts(
                     durationMs = parts[0].toLong(),
                     width = parts[1].toInt(),
                     height = parts[2].toInt(),
                     successfulOffsetUs = parts[3].toLong(),
-                    schemaVersion = parts.getOrNull(4)?.toIntOrNull() ?: 1,
+                    schemaVersion = parts[4].toInt(),
                 )
+                if (facts.isValid()) facts else null
             } else null
         }.getOrNull()
     }

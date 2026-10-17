@@ -59,6 +59,21 @@ class ThumbnailLifecycleTest {
     }
 
     @Test
+    fun cachedLookupIsMemoryOnlyAndNeverReadsDiskSynchronously() {
+        val video = testFile(0, 100_000_000L, 0.2)
+        val entry = testEntry("offline-key", listOf(video), setOf(0))
+
+        val key = ThumbnailRepository.cacheKey(entry, video)
+        val cacheDir = File(tempDir, "video-previews").apply { mkdirs() }
+        val frameFile = File(cacheDir, "$key-0.jpg")
+        frameFile.writeBytes(byteArrayOf(1, 2, 3))
+        File(cacheDir, "$key.live").writeText("1")
+
+        // cached() must be strictly memory-only; does not decode disk on UI thread
+        assertNull(repository.cached(entry))
+    }
+
+    @Test
     fun clearDoesNotCancelExtractionScopeAndIsReusable() {
         // Clear caches
         repository.clear()
@@ -71,6 +86,21 @@ class ThumbnailLifecycleTest {
         val reclaimed = repository.clearDiskCache()
         assertTrue(reclaimed >= 0)
         assertEquals(0L, repository.cacheSizeBytes())
+    }
+
+    @Test
+    fun mediaFactsValidationRejectsUnsupportedSchemaAndNonPositiveValues() {
+        val valid = MediaFacts(120_000L, 1920, 1080, 5_000_000L, MediaFacts.CURRENT_SCHEMA_VERSION)
+        assertTrue(valid.isValid())
+
+        val oldSchema = MediaFacts(120_000L, 1920, 1080, 5_000_000L, 999)
+        assertFalse(oldSchema.isValid())
+
+        val zeroDuration = MediaFacts(0L, 1920, 1080, 0L, MediaFacts.CURRENT_SCHEMA_VERSION)
+        assertFalse(zeroDuration.isValid())
+
+        val invalidDim = MediaFacts(120_000L, -1, 1080, 0L, MediaFacts.CURRENT_SCHEMA_VERSION)
+        assertFalse(invalidDim.isValid())
     }
 
     @Test
@@ -96,25 +126,6 @@ class ThumbnailLifecycleTest {
         assertEquals(1080, facts.height)
         assertEquals(5000000L, facts.successfulOffsetUs)
         assertEquals(1, facts.schemaVersion)
-    }
-
-    @Test
-    fun diskFramesCanBeLoadedForOfflineEntries() {
-        val video = testFile(0, 100_000_000L, 0.2)
-        val entry = testEntry("offline-key", listOf(video), setOf(0))
-
-        val key = ThumbnailRepository.cacheKey(entry, video)
-        val cacheDir = File(tempDir, "video-previews").apply { mkdirs() }
-        val frameFile = File(cacheDir, "$key-0.jpg")
-
-        // Without frame file, cached() is null
-        assertNull(repository.cached(entry))
-
-        // Create empty frame file
-        frameFile.writeBytes(byteArrayOf(1, 2, 3))
-        File(cacheDir, "$key.live").writeText("1")
-
-        // File exists on disk
-        assertTrue(frameFile.exists())
+        assertTrue(facts.isValid())
     }
 }

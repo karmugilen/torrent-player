@@ -71,11 +71,10 @@ fun TorrentFilesScreen(
         }
     }
     val previewVideo = firstPreviewVideo(entry)
-    val previewUri = previewVideo?.uri
     val latestEntry by rememberUpdatedState(entry)
     var frames by remember(entry.key) { mutableStateOf(thumbnails.cached(entry)) }
-    LaunchedEffect(entry.key, previewUri, entry.complete, entry.paused, entry.engineId) {
-        if (previewUri.isNullOrBlank()) return@LaunchedEffect
+    LaunchedEffect(entry.key, previewVideo?.index, entry.complete, entry.paused, entry.engineId) {
+        if (previewVideo == null) return@LaunchedEffect
         while (true) {
             val current = latestEntry
             val next = thumbnails.previews(current)
