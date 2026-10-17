@@ -149,7 +149,7 @@ fun restoreStillApplies(
 class DownloadStorage(private val context: Context) {
     fun selectedFolderName(): String = folderName
     private val prefs = context.getSharedPreferences("downloads", Context.MODE_PRIVATE)
-    private val resolver = context.contentResolver
+    private val resolver by lazy { context.contentResolver }
     var folder: String?
         get() = prefs.getString("folder", null)
         set(value) { prefs.edit().putString("folder", value).commit() }
@@ -222,22 +222,79 @@ class DownloadStorage(private val context: Context) {
     private val tombstonesFile get() = File(snapshotsDir, "tombstones.txt")
     private val metaDir get() = File(context.filesDir, "torrent_meta").apply { mkdirs() }
 
-    fun retireTorrent(key: String) {
+    fun retireTorrent(key: String, generation: Long = 0L) {
         if (key.isBlank()) return
-        runCatching {
-            val set = loadTombstones().toMutableSet()
-            set.add(key)
-            val tmp = File(snapshotsDir, "tombstones.tmp")
-            tmp.writeText(set.joinToString("\n"))
-            tmp.renameTo(tombstonesFile)
-            File(metaDir, "$key.json").delete()
+        val current = loadTombstoneMap().toMutableMap()
+        current[key] = maxOf(current[key] ?: 0L, generation)
+        writeTombstones(current)
+        val metaFile = File(metaDir, "$key.json")
+        if (metaFile.exists()) {
+            metaFile.delete()
         }
     }
 
-    fun loadTombstones(): Set<String> = runCatching {
-        if (!tombstonesFile.exists()) emptySet()
-        else tombstonesFile.readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-    }.getOrDefault(emptySet())
+    private fun writeTombstones(map: Map<String, Long>) {
+        val tmp = File(snapshotsDir, "tombstones.tmp")
+        tmp.writeText(map.entries.joinToString("\n") { "${it.key}:${it.value}" })
+        check(tmp.renameTo(tombstonesFile)) { "Failed to update tombstones file" }
+    }
+
+    fun loadTombstoneMap(): Map<String, Long> = runCatching {
+        if (!tombstonesFile.exists()) emptyMap()
+        else tombstonesFile.readLines().map { it.trim() }.filter { it.isNotEmpty() }.associate { line ->
+            if (line.contains(':')) {
+                val parts = line.split(':', limit = 2)
+                parts[0] to (parts[1].toLongOrNull() ?: 0L)
+            } else {
+                line to 0L
+            }
+        }
+    }.getOrDefault(emptyMap())
+
+    fun loadTombstones(): Set<String> = loadTombstoneMap().keys
+
+    fun recoverFromMeta(key: String): DownloadEntry? {
+        val metaFile = File(metaDir, "$key.json")
+        if (!metaFile.exists()) return null
+        return runCatching {
+            val metaJson = JSONObject(metaFile.readText())
+            val k = metaJson.getString("key")
+            val title = metaJson.optString("title", "Recovered download")
+            val source = metaJson.optString("source", "")
+            val metadata = metaJson.optString("metadata", "")
+            val ready = metaJson.optBoolean("metadataReady", false)
+            val gen = metaJson.optLong("generation", 0L)
+            val added = metaJson.optLong("addedAt", System.currentTimeMillis())
+            DownloadEntry(
+                key = k,
+                title = title,
+                source = source,
+                metadata = metadata,
+                engineId = null,
+                destination = "Downloads/Webtor",
+                files = emptyList(),
+                selected = emptySet(),
+                paused = true,
+                metadataReady = ready,
+                addedAt = added,
+                generation = gen,
+                lifecycleState = EntryLifecycleState.STOPPED,
+                error = "Recovered metadata after library damage. Resume or re-check to restore files.",
+            )
+        }.getOrNull()
+    }
+
+    fun recoverAllFromMeta(tombstones: Map<String, Long>): List<DownloadEntry> {
+        val metaFiles = metaDir.listFiles { _, name -> name.endsWith(".json") }.orEmpty()
+        return metaFiles.mapNotNull { f ->
+            val key = f.name.removeSuffix(".json")
+            val tombGen = tombstones[key]
+            val entry = recoverFromMeta(key)
+            if (entry != null && (tombGen == null || entry.generation > tombGen)) {
+                entry
+            } else null
+        }
+    }
 
     fun storageAccessWarning(): String? {
         val current = folder ?: return null
@@ -251,6 +308,15 @@ class DownloadStorage(private val context: Context) {
     fun save(entries: List<DownloadEntry>) {
         val encoded = encodeLibrary(entries)
         check(prefs.edit().putString("library", encoded).commit()) { "Could not save download library" }
+        // Clear tombstones for active entries so explicit re-adds are never suppressed
+        val activeKeys = entries.map { it.key }.toSet()
+        if (activeKeys.isNotEmpty()) {
+            val currentMap = loadTombstoneMap()
+            val filtered = currentMap.filterKeys { it !in activeKeys }
+            if (filtered.size != currentMap.size) {
+                writeTombstones(filtered)
+            }
+        }
         // Bounded snapshots with atomic replacement
         runCatching {
             val snapshotFile = File(snapshotsDir, "snapshot-${System.currentTimeMillis()}.json")
@@ -267,7 +333,6 @@ class DownloadStorage(private val context: Context) {
         }
         // Versioned per-torrent metadata isolation
         runCatching {
-            val activeKeys = entries.map { it.key }.toSet()
             entries.forEach { e ->
                 if (e.metadata.isNotBlank() || e.metadataReady) {
                     val metaObj = JSONObject().apply {
@@ -318,19 +383,25 @@ class DownloadStorage(private val context: Context) {
             }
             loadWarning = "Some saved downloads could not be restored. Their library records were preserved for recovery; files have not been deleted."
         }
+        val tombstones = loadTombstoneMap()
         fun trySnapshotFallback(): List<DownloadEntry> {
-            val tombstones = loadTombstones()
-            val latestSnapshot = snapshotsDir.listFiles { _, name -> name.startsWith("snapshot-") && name.endsWith(".json") }
-                ?.maxByOrNull { it.lastModified() }
-            if (latestSnapshot != null && latestSnapshot.exists()) {
-                val snapshotRaw = runCatching { latestSnapshot.readText() }.getOrNull()
-                if (!snapshotRaw.isNullOrBlank()) {
-                    val fallback = parseLibrarySnapshot(snapshotRaw, tombstones)
+            val allSnapshots = snapshotsDir.listFiles { _, name -> name.startsWith("snapshot-") && name.endsWith(".json") }
+                ?.sortedByDescending { it.lastModified() }
+                .orEmpty()
+            for (snapshotFile in allSnapshots) {
+                val snapshotRaw = runCatching { snapshotFile.readText() }.getOrNull() ?: continue
+                if (snapshotRaw.isNotBlank()) {
+                    val fallback = parseLibrarySnapshot(snapshotRaw, tombstones.keys, tombstones)
                     if (fallback.isNotEmpty()) {
-                        loadWarning = "Recovered library from backup snapshot. Damaged records were preserved for diagnosis."
+                        loadWarning = "Recovered library from backup snapshot (${snapshotFile.name}). Damaged records were preserved for diagnosis."
                         return fallback
                     }
                 }
+            }
+            val fromMeta = recoverAllFromMeta(tombstones)
+            if (fromMeta.isNotEmpty()) {
+                loadWarning = "Recovered library from saved torrent metadata. Damaged records were preserved for diagnosis."
+                return fromMeta
             }
             return emptyList()
         }
@@ -341,14 +412,31 @@ class DownloadStorage(private val context: Context) {
             return fallback
         }
         var damaged = false
-        val tombstones = loadTombstones()
-        val result = (0 until array.length()).mapNotNull { i ->
-            try {
-                val entry = parseEntry(array.getJSONObject(i))
-                if (entry.key in tombstones) null else entry
-            } catch (_: Exception) {
+        val result = mutableListOf<DownloadEntry>()
+        val seenKeys = mutableSetOf<String>()
+        for (i in 0 until array.length()) {
+            val obj = runCatching { array.getJSONObject(i) }.getOrNull()
+            if (obj != null) {
+                val key = obj.optString("key")
+                val tombGen = tombstones[key]
+                val entryGen = obj.optLong("generation", 0L)
+                if (tombGen != null && entryGen <= tombGen) {
+                    continue
+                }
+                try {
+                    val entry = parseEntry(obj)
+                    result.add(entry)
+                    seenKeys.add(entry.key)
+                } catch (_: Exception) {
+                    damaged = true
+                    val metaEntry = if (key.isNotBlank()) recoverFromMeta(key) else null
+                    if (metaEntry != null && (tombGen == null || metaEntry.generation > tombGen)) {
+                        result.add(metaEntry)
+                        seenKeys.add(metaEntry.key)
+                    }
+                }
+            } else {
                 damaged = true
-                null
             }
         }
         if (damaged) {

@@ -27,7 +27,11 @@ fun needsDiscoveryStatusRefresh(entry: DownloadEntry): Boolean =
     entry.engineId != null && !entry.paused && !entry.controlsBusy() && !entry.complete &&
         (!entry.metadataReady || entry.liveStatus() == null)
 
-fun parseLibrarySnapshot(rawJson: String, tombstones: Set<String> = emptySet()): List<DownloadEntry> {
+fun parseLibrarySnapshot(
+    rawJson: String,
+    tombstones: Set<String> = emptySet(),
+    tombstoneGens: Map<String, Long> = emptyMap(),
+): List<DownloadEntry> {
     val array = try {
         org.json.JSONArray(rawJson)
     } catch (_: Exception) {
@@ -38,7 +42,10 @@ fun parseLibrarySnapshot(rawJson: String, tombstones: Set<String> = emptySet()):
         try {
             val obj = array.getJSONObject(i)
             val entry = DownloadStorage.parseEntry(obj)
-            if (entry.key !in tombstones) {
+            val tombGen = tombstoneGens[entry.key]
+            val isTombstoned = (entry.key in tombstones && tombGen == null) ||
+                (tombGen != null && entry.generation <= tombGen)
+            if (!isTombstoned) {
                 result.add(entry)
             }
         } catch (_: Exception) {

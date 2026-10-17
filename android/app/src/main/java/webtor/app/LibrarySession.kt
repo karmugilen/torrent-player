@@ -63,6 +63,8 @@ class LibrarySession(
     private var networkSnapshot = NetworkSnapshot()
     private val networkUpdates = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var shutdownComplete = false
+    private val antiDpiMutex = Mutex()
+    private var pendingAntiDpiTarget: Boolean? = null
 
     private val _ui = MutableStateFlow(UiState(networkPolicy = savedNetworkPolicy(), networkAllowed = false))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -231,10 +233,26 @@ class LibrarySession(
     fun setAntiDpi(enabled: Boolean) {
         settings.edit().putBoolean("antiDpiEnabled", enabled).apply()
         _ui.update { it.copy(antiDpiEnabled = enabled) }
+        pendingAntiDpiTarget = enabled
         if (_ui.value.engineReady) {
             scope.launch {
-                val status = runCatching { withContext(io) { client.setBypass(enabled) } }.getOrNull()
-                _ui.update { it.copy(bypassStatus = status) }
+                antiDpiMutex.withLock {
+                    while (true) {
+                        val target = pendingAntiDpiTarget ?: break
+                        pendingAntiDpiTarget = null
+                        try {
+                            val status = withContext(io) { client.setBypass(target) }
+                            if (pendingAntiDpiTarget == null) {
+                                _ui.update { it.copy(bypassStatus = status, error = null) }
+                            }
+                        } catch (t: Throwable) {
+                            if (t is CancellationException) throw t
+                            if (pendingAntiDpiTarget == null) {
+                                _ui.update { it.copy(error = readableError(t)) }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -767,37 +785,78 @@ class LibrarySession(
     }
 
     fun deleteBatch(keys: Set<String>, eraseFiles: Boolean) {
+        if (isShuttingDown.get()) return
+        val targets = _ui.value.library.filter { it.key in keys }
+        if (targets.isEmpty()) return
+        targets.forEach { cancelRetry(it.key) }
+        val nextGens = targets.associate { it.key to (it.generation + 1) }
+
+        _ui.update { state ->
+            state.copy(
+                library = state.library.map { entry ->
+                    val nextGen = nextGens[entry.key]
+                    if (nextGen != null) {
+                        entry.copy(
+                            isDeleting = true,
+                            lifecycleState = EntryLifecycleState.DELETING,
+                            generation = nextGen,
+                        )
+                    } else entry
+                }
+            )
+        }
+        syncService()
+
         scope.launchCommand {
             var failureCount = 0
-            keys.forEach { key ->
-                val target = _ui.value.library.find { it.key == key } ?: return@forEach
+            targets.forEach { target ->
+                val current = _ui.value.library.find { it.key == target.key } ?: return@forEach
+                val targetGen = nextGens[target.key] ?: (target.generation + 1)
+                if (current.generation != targetGen) return@forEach
+
+                var engineRemoved = current.engineId == null
+                val id = current.engineId
                 try {
-                    val id = target.engineId
                     if (id != null) {
                         recentlyInvalidatedIds.add(id)
                         withContext(io) { client.remove(id, destroyStore = eraseFiles) }
+                        engineRemoved = true
                     }
                     if (eraseFiles) {
-                        withContext(io) { storage.deleteFiles(target.files); if (target.directPlay) storage.deleteStartupCache(target.key) }
+                        withContext(io) {
+                            storage.deleteFiles(current.files)
+                            if (current.directPlay) storage.deleteStartupCache(current.key)
+                        }
                     }
-                    (app as? WebtorApp)?.thumbnails?.invalidate(target)
-                    withContext(io) { storage.retireTorrent(target.key) }
+                    (app as? WebtorApp)?.thumbnails?.invalidate(current)
+                    withContext(io) { storage.retireTorrent(current.key, targetGen) }
                     _ui.update { state ->
-                        state.copy(
-                            library = state.library.filter { it.key != target.key },
-                            screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
-                            openTorrentKey = state.openTorrentKey.takeUnless { it == target.key },
-                        )
+                        val latest = state.library.find { it.key == current.key }
+                        if (latest?.generation == targetGen) {
+                            state.copy(
+                                library = state.library.filter { it.key != current.key },
+                                screen = if (state.openTorrentKey == current.key) Screen.Library else state.screen,
+                                openTorrentKey = state.openTorrentKey.takeUnless { it == current.key },
+                            )
+                        } else state
                     }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
                     failureCount++
-                    patch(target.key) {
-                        it.copy(
-                            isDeleting = false,
-                            lifecycleState = EntryLifecycleState.ERROR,
-                            error = readableError(t),
-                        )
+                    if (!engineRemoved && id != null) {
+                        recentlyInvalidatedIds.remove(id)
+                    }
+                    patch(current.key) { e ->
+                        if (e.generation == targetGen) {
+                            e.copy(
+                                isDeleting = false,
+                                lifecycleState = EntryLifecycleState.ERROR,
+                                engineId = if (engineRemoved) null else e.engineId,
+                                paused = if (engineRemoved) true else e.paused,
+                                status = if (engineRemoved) null else e.status,
+                                error = readableError(t),
+                            )
+                        } else e
                     }
                 }
             }
@@ -1074,12 +1133,14 @@ class LibrarySession(
         syncService()
 
         scope.launchCommand {
+            var engineRemoved = target.engineId == null
             try {
                 val id = target.engineId
                 if (id != null) {
                     recentlyInvalidatedIds.add(id)
                     // Stream cache has nothing useful to keep in Downloads; always wipe it.
                     withContext(io) { client.remove(id, false) }
+                    engineRemoved = true
                 }
                 (app as? WebtorApp)?.thumbnails?.invalidate(target)
                 _ui.update { state ->
@@ -1087,17 +1148,20 @@ class LibrarySession(
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
-                withContext(io) { storage.retireTorrent(target.key) }
+                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 persist()
                 refreshStorageStats()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                target.engineId?.let { recentlyInvalidatedIds.remove(it) }
+                if (!engineRemoved) target.engineId?.let { recentlyInvalidatedIds.remove(it) }
                 patch(target.key) {
                     it.copy(
                         isDeleting = false,
                         lifecycleState = EntryLifecycleState.ERROR,
+                        engineId = if (engineRemoved) null else target.engineId,
+                        paused = if (engineRemoved) true else target.paused,
+                        status = if (engineRemoved) null else target.status,
                         error = readableError(t),
                     )
                 }
@@ -1148,7 +1212,7 @@ class LibrarySession(
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
-                withContext(io) { storage.retireTorrent(target.key) }
+                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 persist()
                 refreshStorageStats()
                 syncService()
@@ -1206,19 +1270,30 @@ class LibrarySession(
     fun cleanupCache() {
         scope.launchCommand {
             try {
+                var reclaimedNative = 0L
                 withContext(io) {
                     storage.clearCache()
-                    storage.clearStartupCaches(_ui.value.library.filter { it.engineId != null && it.directPlay }.map { it.key }.toSet())
                     (app as? WebtorApp)?.thumbnails?.clearDiskCache()
-                    runCatching { client.clearCache(listOf("startup", "resume", "peers", "dht")) }
+                    if (_ui.value.engineReady) {
+                        val res = client.clearCache(listOf("startup", "resume", "peers", "dht"))
+                        reclaimedNative = res.categories.sumOf { it.reclaimableBytes }
+                    }
                 }
                 refreshStorageStats()
-                runCatching {
+                if (_ui.value.engineReady) {
                     val summary = withContext(io) { client.getCache() }
                     _ui.update { it.copy(nativeCacheSummary = summary) }
                 }
-                _ui.update { it.copy(message = "Temporary files were removed.") }
+                _ui.update {
+                    val msg = if (reclaimedNative > 0L) {
+                        "Cache cleared: ${formatBytes(reclaimedNative)} reclaimed."
+                    } else {
+                        "Temporary files were removed."
+                    }
+                    it.copy(message = msg, error = null)
+                }
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 _ui.update { it.copy(error = readableError(t)) }
             }
         }
