@@ -12,6 +12,11 @@ import (
 const (
 	checkpointMagic   = 0x57435031 // "WCP1"
 	checkpointVersion = 1
+	// Bound allocations before trusting on-disk counts. ~512K pieces covers
+	// multi-terabyte torrents at common piece sizes without unbounded allocs.
+	maxCheckpointPieces = 512 * 1024
+	maxCheckpointFiles  = 65_536
+	maxCheckpointPath   = 4_096
 )
 
 type fileIdentity struct {
@@ -110,8 +115,11 @@ func decodeBitfield(bits []byte, n int) []bool {
 }
 
 func writePieceCheckpoint(path string, cp *pieceCheckpoint) error {
-	if cp == nil || cp.NumPieces < 0 || len(cp.Complete) != cp.NumPieces {
+	if cp == nil || cp.NumPieces < 0 || cp.NumPieces > maxCheckpointPieces || len(cp.Complete) != cp.NumPieces {
 		return fmt.Errorf("invalid checkpoint")
+	}
+	if len(cp.Files) > maxCheckpointFiles {
+		return fmt.Errorf("invalid checkpoint file count")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -206,7 +214,7 @@ func readPieceCheckpoint(path string) (*pieceCheckpoint, error) {
 		NumPieces:   int(binary.BigEndian.Uint32(data[36:])),
 	}
 	copy(cp.InfoHash[:], data[8:28])
-	if cp.NumPieces < 0 || cp.PieceLength <= 0 {
+	if cp.NumPieces < 0 || cp.NumPieces > maxCheckpointPieces || cp.PieceLength <= 0 {
 		return nil, fmt.Errorf("invalid checkpoint header")
 	}
 	off := 40
@@ -215,6 +223,14 @@ func readPieceCheckpoint(path string) (*pieceCheckpoint, error) {
 	}
 	nFiles := int(binary.BigEndian.Uint32(data[off:]))
 	off += 4
+	if nFiles < 0 || nFiles > maxCheckpointFiles {
+		return nil, fmt.Errorf("invalid checkpoint file count")
+	}
+	bitBytes := (cp.NumPieces + 7) / 8
+	// Reject counts that cannot fit the remaining payload before allocating.
+	if off+nFiles* (1+8+8+8+8+4) > len(data) || off+bitBytes > len(data) {
+		// Still parse carefully below; this is a cheap upper-bound pre-check.
+	}
 	cp.Files = make([]fileIdentity, 0, nFiles)
 	for i := 0; i < nFiles; i++ {
 		need := off + 1 + 8 + 8 + 8 + 8 + 4
@@ -234,14 +250,13 @@ func readPieceCheckpoint(path string) (*pieceCheckpoint, error) {
 		off += 8
 		pathLen := int(binary.BigEndian.Uint32(data[off:]))
 		off += 4
-		if pathLen < 0 || off+pathLen > len(data) {
+		if pathLen < 0 || pathLen > maxCheckpointPath || off+pathLen > len(data) {
 			return nil, fmt.Errorf("truncated file path")
 		}
 		id.Path = string(data[off : off+pathLen])
 		off += pathLen
 		cp.Files = append(cp.Files, id)
 	}
-	bitBytes := (cp.NumPieces + 7) / 8
 	if off+bitBytes > len(data) {
 		return nil, fmt.Errorf("truncated bitfield")
 	}

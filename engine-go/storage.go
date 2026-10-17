@@ -128,10 +128,17 @@ type DocumentTorrentStorage struct {
 	completed                 map[int]bool
 	checkpointDirty           bool
 	checkpointFlushing        bool
+	checkpointFlushScheduled  bool
 	checkpointGen             uint64
 	pendingSync               map[*os.File]struct{}
 	diskFlushing              bool
 	identities                []fileIdentity
+	checkpointFailures        int
+	checkpointRetry           time.Duration
+	checkpointLastErr         error
+	// Test seams for fault injection through the public drain path.
+	fileSyncFn        func(*os.File) error
+	writeCheckpointFn func(string, *pieceCheckpoint) error
 }
 
 func streamDir(baseDir, infoHashHex string) string {
@@ -632,8 +639,40 @@ func (st *DocumentTorrentStorage) DeleteCheckpoint() error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.checkpointDirty = false
+	st.checkpointGen++
+	st.checkpointFailures = 0
+	st.checkpointRetry = 0
+	st.checkpointLastErr = nil
 	st.identities = nil
 	return deletePieceCheckpoint(st.baseDir, st.infoHash.HexString())
+}
+
+// CheckpointPersistError returns the last failed sync/checkpoint write, if any.
+func (st *DocumentTorrentStorage) CheckpointPersistError() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.checkpointLastErr
+}
+
+// CheckpointDirty reports whether a durable checkpoint write is still pending.
+func (st *DocumentTorrentStorage) CheckpointDirty() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.checkpointDirty || len(st.pendingSync) > 0
+}
+
+func (st *DocumentTorrentStorage) syncFile(f *os.File) error {
+	if st.fileSyncFn != nil {
+		return st.fileSyncFn(f)
+	}
+	return f.Sync()
+}
+
+func (st *DocumentTorrentStorage) persistCheckpoint(path string, cp *pieceCheckpoint) error {
+	if st.writeCheckpointFn != nil {
+		return st.writeCheckpointFn(path, cp)
+	}
+	return writePieceCheckpoint(path, cp)
 }
 
 func (c *DocumentStorageClient) DeleteCheckpoint(infoHashHex string) error {
@@ -1368,15 +1407,31 @@ func (st *DocumentTorrentStorage) scheduleCheckpointFlushLocked() {
 	if st.stream {
 		return
 	}
-	if st.checkpointFlushing || st.closed || !st.attached {
+	if st.checkpointFlushing || st.checkpointFlushScheduled || st.closed || !st.attached {
 		return
 	}
 	if !st.checkpointDirty && len(st.pendingSync) == 0 {
 		return
 	}
-	st.checkpointFlushing = true
+	st.checkpointFlushScheduled = true
+	delay := coalesceFlushDelay() + st.checkpointRetry
 	go func() {
-		time.Sleep(coalesceFlushDelay())
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			<-timer.C
+		}
+		st.mu.Lock()
+		st.checkpointFlushScheduled = false
+		if st.closed || !st.attached || st.checkpointFlushing {
+			st.mu.Unlock()
+			return
+		}
+		if !st.checkpointDirty && len(st.pendingSync) == 0 {
+			st.mu.Unlock()
+			return
+		}
+		st.checkpointFlushing = true
+		st.mu.Unlock()
 		st.drainSyncAndCheckpoint()
 	}()
 }
@@ -1384,6 +1439,7 @@ func (st *DocumentTorrentStorage) scheduleCheckpointFlushLocked() {
 // drainSyncAndCheckpoint fsyncs pending files off-lock, refreshes file
 // identities after Sync (mtime), then writes the checkpoint. checkpointFlushing
 // stays set until this returns so Close/tests cannot race .chk writers.
+// Sync or checkpoint-write failures preserve pending work and dirty state.
 func (st *DocumentTorrentStorage) drainSyncAndCheckpoint() {
 	st.mu.Lock()
 	if st.closed || !st.attached {
@@ -1397,15 +1453,23 @@ func (st *DocumentTorrentStorage) drainSyncAndCheckpoint() {
 	hashHex := st.infoHash.HexString()
 	st.mu.Unlock()
 
+	var syncErr error
+	failedSync := make([]*os.File, 0, len(syncFiles))
 	for _, f := range syncFiles {
-		_ = f.Sync()
+		if err := st.syncFile(f); err != nil {
+			syncErr = err
+			failedSync = append(failedSync, f)
+		}
 	}
 
 	var cp *pieceCheckpoint
 	var path string
-	if needCP {
+	var writeErr error
+	// Never publish a durable checkpoint after a failed prerequisite data sync.
+	if syncErr == nil && needCP {
 		st.mu.Lock()
-		if !st.closed && st.attached && st.info != nil {
+		stillValid := !st.closed && st.attached && st.info != nil && st.checkpointGen == gen
+		if stillValid {
 			// Capture identities after Sync so ModNano matches resume checks.
 			st.captureIdentitiesLocked()
 			if len(st.identities) == len(st.files) {
@@ -1428,9 +1492,14 @@ func (st *DocumentTorrentStorage) drainSyncAndCheckpoint() {
 			}
 		}
 		st.mu.Unlock()
-	}
-	if cp != nil && path != "" {
-		_ = writePieceCheckpoint(path, cp)
+		if cp != nil && path != "" {
+			st.mu.Lock()
+			stillValid = !st.closed && st.attached && st.checkpointGen == gen
+			st.mu.Unlock()
+			if stillValid {
+				writeErr = st.persistCheckpoint(path, cp)
+			}
+		}
 	}
 
 	st.mu.Lock()
@@ -1439,6 +1508,36 @@ func (st *DocumentTorrentStorage) drainSyncAndCheckpoint() {
 	if st.closed {
 		return
 	}
+	for _, f := range failedSync {
+		if st.pendingSync == nil {
+			st.pendingSync = make(map[*os.File]struct{})
+		}
+		st.pendingSync[f] = struct{}{}
+	}
+	if syncErr != nil || writeErr != nil {
+		if syncErr != nil {
+			st.checkpointLastErr = fmt.Errorf("checkpoint file sync: %w", syncErr)
+		} else {
+			st.checkpointLastErr = fmt.Errorf("checkpoint write: %w", writeErr)
+		}
+		st.checkpointFailures++
+		shift := st.checkpointFailures - 1
+		if shift > 5 {
+			shift = 5
+		}
+		st.checkpointRetry = time.Duration(1<<shift) * 100 * time.Millisecond
+		if st.checkpointRetry > 30*time.Second {
+			st.checkpointRetry = 30 * time.Second
+		}
+		if needCP && st.checkpointGen == gen {
+			st.checkpointDirty = true
+		}
+		st.scheduleCheckpointFlushLocked()
+		return
+	}
+	st.checkpointFailures = 0
+	st.checkpointRetry = 0
+	st.checkpointLastErr = nil
 	if cp != nil && st.checkpointGen == gen {
 		st.checkpointDirty = false
 	}
@@ -1450,7 +1549,7 @@ func (st *DocumentTorrentStorage) drainSyncAndCheckpoint() {
 // Caller holds st.mu. Used by tests that force an immediate checkpoint write.
 func (st *DocumentTorrentStorage) flushCheckpointLocked() error {
 	for _, f := range st.takePendingSyncLocked() {
-		if err := f.Sync(); err != nil {
+		if err := st.syncFile(f); err != nil {
 			if st.pendingSync == nil {
 				st.pendingSync = make(map[*os.File]struct{})
 			}
@@ -1482,9 +1581,12 @@ func (st *DocumentTorrentStorage) flushCheckpointLocked() error {
 		Files:       append([]fileIdentity(nil), st.identities...),
 		Complete:    complete,
 	}
-	if err := writePieceCheckpoint(checkpointPath(st.baseDir, st.infoHash.HexString()), cp); err != nil {
+	if err := st.persistCheckpoint(checkpointPath(st.baseDir, st.infoHash.HexString()), cp); err != nil {
 		return err
 	}
 	st.checkpointDirty = false
+	st.checkpointLastErr = nil
+	st.checkpointFailures = 0
+	st.checkpointRetry = 0
 	return nil
 }
