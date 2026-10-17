@@ -88,3 +88,42 @@ fun List<DownloadEntry>.filterLibrary(query: String): List<DownloadEntry> {
     val q = query.trim()
     return if (q.isEmpty()) this else filter { it.title.contains(q, ignoreCase = true) || it.files.any { file -> file.name.contains(q, ignoreCase = true) } }
 }
+
+enum class LibraryFilter { ALL, ACTIVE, READY, NEEDS_ATTENTION }
+
+fun DownloadEntry.matchesFilter(filter: LibraryFilter): Boolean = when (filter) {
+    LibraryFilter.ALL -> true
+    LibraryFilter.ACTIVE -> !paused && !complete && (lifecycleState == EntryLifecycleState.DOWNLOADING || lifecycleState == EntryLifecycleState.PREPARING || checking)
+    LibraryFilter.READY -> complete || (directPlay && files.any { it.isVerifiedComplete || it.verifiedBytes > 0L })
+    LibraryFilter.NEEDS_ATTENTION -> error != null || status?.error != null || lifecycleState == EntryLifecycleState.ERROR
+}
+
+fun List<DownloadEntry>.applyFilter(filter: LibraryFilter): List<DownloadEntry> =
+    if (filter == LibraryFilter.ALL) this else filter { it.matchesFilter(filter) }
+
+data class ContinueWatchingTarget(
+    val entry: DownloadEntry,
+    val file: SavedFile,
+)
+
+fun List<DownloadEntry>.findContinueWatchingTarget(): ContinueWatchingTarget? {
+    var bestTarget: ContinueWatchingTarget? = null
+    var bestTimestamp: Long = -1L
+
+    for (entry in this) {
+        if (entry.isDeleting) continue
+        for (file in entry.files) {
+            if (file.playbackPositionMs > 0L) {
+                if (file.playbackDurationMs > 0 && file.playbackPositionMs >= file.playbackDurationMs - 3000) {
+                    continue
+                }
+                val ts = entry.addedAt
+                if (ts >= bestTimestamp) {
+                    bestTimestamp = ts
+                    bestTarget = ContinueWatchingTarget(entry, file)
+                }
+            }
+        }
+    }
+    return bestTarget
+}

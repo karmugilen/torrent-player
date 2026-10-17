@@ -754,6 +754,62 @@ class LibrarySession(
     /** Applies a batch command independently so one bad entry does not block the rest. */
     fun pauseAll(entries: List<DownloadEntry>) = entries.forEach { pause(it) }
 
+    fun pauseBatch(keys: Set<String>) {
+        keys.forEach { key ->
+            _ui.value.library.find { it.key == key }?.let { pause(it) }
+        }
+    }
+
+    fun resumeBatch(keys: Set<String>) {
+        keys.forEach { key ->
+            _ui.value.library.find { it.key == key }?.let { resume(it) }
+        }
+    }
+
+    fun deleteBatch(keys: Set<String>, eraseFiles: Boolean) {
+        scope.launchCommand {
+            var failureCount = 0
+            keys.forEach { key ->
+                val target = _ui.value.library.find { it.key == key } ?: return@forEach
+                try {
+                    val id = target.engineId
+                    if (id != null) {
+                        recentlyInvalidatedIds.add(id)
+                        withContext(io) { client.remove(id, destroyStore = eraseFiles) }
+                    }
+                    if (eraseFiles) {
+                        withContext(io) { storage.deleteFiles(target.files); if (target.directPlay) storage.deleteStartupCache(target.key) }
+                    }
+                    (app as? WebtorApp)?.thumbnails?.invalidate(target)
+                    withContext(io) { storage.retireTorrent(target.key) }
+                    _ui.update { state ->
+                        state.copy(
+                            library = state.library.filter { it.key != target.key },
+                            screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
+                            openTorrentKey = state.openTorrentKey.takeUnless { it == target.key },
+                        )
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    failureCount++
+                    patch(target.key) {
+                        it.copy(
+                            isDeleting = false,
+                            lifecycleState = EntryLifecycleState.ERROR,
+                            error = readableError(t),
+                        )
+                    }
+                }
+            }
+            persist()
+            refreshStorageStats()
+            syncService()
+            if (failureCount > 0) {
+                _ui.update { it.copy(message = "Could not remove $failureCount item(s)") }
+            }
+        }
+    }
+
     fun resume(entry: DownloadEntry) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand

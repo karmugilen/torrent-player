@@ -2,6 +2,7 @@ package webtor.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,6 +31,34 @@ class DownloadEntryTest {
         val second = entry(listOf(file(0, 1, 0.0, "notes.txt")), setOf(0)).copy(key = "b", title = "Same", addedAt = 10)
         assertEquals(listOf("a", "b"), listOf(first, second).stableLibrarySort(LibrarySort.NAME).map { it.key })
         assertEquals(listOf(first), listOf(first, second).filterLibrary("episode"))
+    }
+
+    @Test
+    fun libraryFiltersDistinguishActiveReadyAndNeedsAttention() {
+        val active = entry(listOf(file(0, 100, 0.5)), setOf(0)).copy(key = "active", lifecycleState = EntryLifecycleState.DOWNLOADING)
+        val ready = entry(listOf(file(0, 100, 1.0, verifiedBytes = 100)), setOf(0)).copy(key = "ready", lifecycleState = EntryLifecycleState.COMPLETED)
+        val directPlay = entry(listOf(file(0, 100, 0.5, verifiedBytes = 50)), setOf(0)).copy(key = "dp", directPlay = true, lifecycleState = EntryLifecycleState.PAUSED)
+        val error = entry(listOf(file(0, 100, 0.0)), setOf(0)).copy(key = "err", error = "Storage full", lifecycleState = EntryLifecycleState.ERROR)
+        val all = listOf(active, ready, directPlay, error)
+
+        assertEquals(listOf("active"), all.applyFilter(LibraryFilter.ACTIVE).map { it.key })
+        assertEquals(listOf("ready", "dp"), all.applyFilter(LibraryFilter.READY).map { it.key })
+        assertEquals(listOf("err"), all.applyFilter(LibraryFilter.NEEDS_ATTENTION).map { it.key })
+        assertEquals(4, all.applyFilter(LibraryFilter.ALL).size)
+    }
+
+    @Test
+    fun continueWatchingFindsRealBookmarkAndIgnoresEmptyPositions() {
+        val noBookmark = entry(listOf(file(0, 100, 1.0)), setOf(0))
+        assertNull(listOf(noBookmark).findContinueWatchingTarget())
+
+        val bookmarkedFile = file(1, 100, 1.0).copy(playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
+        val withBookmark = entry(listOf(file(0, 100, 1.0), bookmarkedFile), setOf(0, 1)).copy(key = "series", title = "Show S01")
+        val target = listOf(withBookmark).findContinueWatchingTarget()
+        assertTrue(target != null)
+        assertEquals("series", target?.entry?.key)
+        assertEquals(1, target?.file?.index)
+        assertEquals(45_000L, target?.file?.playbackPositionMs)
     }
 
     @Test

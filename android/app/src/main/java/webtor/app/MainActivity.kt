@@ -214,6 +214,9 @@ class MainActivity : ComponentActivity() {
             onDelete = session::requestDelete,
             onRetry = session::retry,
             onMessageShown = session::consumeMessage,
+            onPauseBatch = session::pauseBatch,
+            onResumeBatch = session::resumeBatch,
+            onDeleteBatch = session::deleteBatch,
         )
     }
 
