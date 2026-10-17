@@ -17,6 +17,9 @@ board are planning artifacts only. Wait for an explicit instruction to implement
   existing scheduler, transfer intent, verification, storage, and playback behavior.
 - A separately planned built-in anti-DPI switch is included for the user's own
   network trials. This does not reopen the rejected adaptive/evolutionary work.
+- The user also requested all eight reviewed cache/recovery improvements and the
+  checkpoint persistence fix. These are planned in the local board; the start
+  instruction is still required before any implementation.
 
 ## Visual direction
 
@@ -70,6 +73,39 @@ Large swarms are summarized and expandable. Reduced effects disables flow motion
 - Try independent decode fallbacks and accept a dark real frame as a last resort.
 - Missing metadata/peers, unsupported codecs or corrupt media cannot guarantee a
   decoded image. Show an honest themed loading/unavailable state in those cases.
+
+## Cache and recovery improvements
+
+All eight reviewed areas are included. Persistent thumbnail work extends
+MEDIA-01; CACHE-01–07 cover the remaining areas, and REL-01 covers checkpoint
+durability. See the board for dependencies and acceptance criteria.
+
+1. Persist successful incomplete/Direct Play thumbnails and load them independently
+   of current engine/URI availability; retain bounded automatic retry.
+2. Keep bounded last-known-good library recovery snapshots and versioned per-torrent
+   metadata, preserving migration, explicit removal and user intent.
+3. Persist short-lived, bounded recently successful public-torrent peer hints.
+   Revalidate them through the current route; never count them as connected peers.
+4. Keep bounded responsive DHT bootstrap contacts with aging, revalidation and
+   normal bootstrap fallback, preserving private-torrent restrictions.
+5. Add a small verified persistent startup/resume window, after durability and
+   cache accounting are reliable. Do not retune buffering or create full videos.
+6. Cache valid duration/dimensions and successful preview timestamps by immutable
+   media identity; never treat preview positions as external-player bookmarks.
+7. Restore useful navigation state and reuse static theme decoration with correct
+   invalidation, bounded memory and reduced-effects support.
+8. Unify cache sizes/limits and clearing by category while protecting active
+   playback, downloaded files and durable library/bookmark state.
+
+Prioritize checkpoint save reliability: a code-review finding showed ignored
+sync/write errors followed by clearing dirty state. Investigate and fix that
+path without claiming an observed failure or broadening checkpoint trust.
+
+Critical user state belongs in durable storage. Regenerable caches may be evicted;
+missing, corrupt or expired entries must fall back safely. Existing tracker-list,
+metadata and startup caches remain starting points, not duplicate new layers.
+No additional Rust migration, evolutionary/adaptive controller or peer scheduler
+is selected by this cache scope.
 
 ## Built-in anti-DPI: user trial
 
