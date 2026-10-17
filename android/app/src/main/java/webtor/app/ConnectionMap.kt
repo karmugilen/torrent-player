@@ -131,9 +131,6 @@ fun ConnectionMapSection(entry: DownloadEntry, client: EngineClient) {
                     download = entry.liveDownloadSpeed()?.let(::formatSpeed) ?: "—",
                     upload = entry.liveUploadSpeed()?.let(::formatSpeed) ?: "—",
                 )
-                if (peers.size > REACTOR_MAX_PEERS) {
-                    Text("${REACTOR_MAX_PEERS} of ${peers.size} links shown", style = MaterialTheme.typography.labelSmall, color = hud.muted)
-                }
             }
             if (connected) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
