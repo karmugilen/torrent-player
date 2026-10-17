@@ -3,30 +3,31 @@
 Agreement: [REDESIGN_SPEC.md](REDESIGN_SPEC.md). Baseline: `a226754`.
 All delivery is local; no GitHub push or remote tickets.
 
-**Implementation gate: wait for the user to explicitly say to start.**
-No ticket below has been implemented. Documentation and local planning commits
-are the only changes so far. "Planned" indicates dependency order, not permission
-to begin coding, building an APK, installing, or deploying.
+**Implementation authorized on 2026-10-17.** The user invoked Herdr and implement,
+requested agy and grok in parallel, and asked not to poll their progress. The
+previous hold is superseded. Assignment is not completion: acceptance remains
+pending implementation evidence and integration review. See
+[REDESIGN_EXECUTION.md](REDESIGN_EXECUTION.md).
 
 | Ticket | State | Dependencies | Deliverable |
 | --- | --- | --- | --- |
-| UI-01 | Planned | — | Shared Aero, Antiquity and Retro design system; saved theme/effects preferences. |
-| UI-02 | Planned | UI-01 | Watch-first library, Continue watching, filters/sort, safe batch controls and useful empty states. |
-| UI-03 | Planned | UI-01 | Friendlier Add, episode/file browsing, and playback-first details with themed controls. |
-| UI-04 | Planned | UI-01 | Replace circular reactor with expandable branching peer view; keep world map. |
-| MEDIA-01 | Planned | — | Automatic persistent thumbnails, decoder fallbacks and truthful preview states. |
-| MEDIA-02 | Planned | MEDIA-01 | Bounded verified preview reads for Direct Play/incomplete media without external-player side effects. |
-| NET-01 | Planned; user trial | — | Built-in experimental anti-DPI On/Off switch in Settings; off by default; user tests effectiveness. |
-| REL-01 | Planned; reliability priority | — | Handle checkpoint sync/write failures without losing pending recovery state. |
-| CACHE-01 | Planned | — | Per-torrent metadata and bounded last-known-good library recovery snapshots. |
-| CACHE-02 | Planned | — | Persistent, expiring hints for recently successful public-torrent peers. |
-| CACHE-03 | Planned | — | Warm DHT bootstrap using bounded, revalidated node contacts. |
-| CACHE-04 | Planned | REL-01, CACHE-07 | Small verified persistent resume window within explicit disk limits. |
-| CACHE-05 | Planned | MEDIA-01 | Reusable video information and successful thumbnail timestamps. |
-| CACHE-06 | Planned | UI-01, UI-02 | Saved navigation state and cached static theme decoration. |
-| CACHE-07 | Planned | MEDIA-01 | Consistent cache accounting, limits, cleanup and active-reader protection. |
-| QA-01 | Planned | UI-01–04, MEDIA-01–02 | Focused regressions, existing suites, local APK and visual verification where available. |
-| STORAGE-01 | Backlog | First redesign | Non-destructive moved-file/folder-access repair and clearer storage recovery. |
+| UI-01 | Assigned: agy | — | Shared Aero, Antiquity and Retro design system; saved theme/effects preferences. |
+| UI-02 | Assigned: agy | UI-01 | Watch-first library, Continue watching, filters/sort, safe batch controls and useful empty states. |
+| UI-03 | Assigned: agy | UI-01 | Friendlier Add, episode/file browsing, and playback-first details with themed controls. |
+| UI-04 | Assigned: agy | UI-01 | Replace circular reactor with expandable branching peer view; keep world map. |
+| MEDIA-01 | Assigned: agy | — | Automatic persistent thumbnails, decoder fallbacks and truthful preview states. |
+| MEDIA-02 | Assigned: grok native / agy Android | MEDIA-01 | Bounded verified preview reads for Direct Play/incomplete media without external-player side effects. |
+| NET-01 | Assigned: grok native / agy Settings | — | Built-in experimental anti-DPI On/Off switch in Settings; off by default; user tests effectiveness. |
+| REL-01 | Assigned: grok; priority | — | Handle checkpoint sync/write failures without losing pending recovery state. |
+| CACHE-01 | Assigned: agy | — | Per-torrent metadata and bounded last-known-good library recovery snapshots. |
+| CACHE-02 | Assigned: grok | — | Persistent, expiring hints for recently successful public-torrent peers. |
+| CACHE-03 | Assigned: grok | — | Warm DHT bootstrap using bounded, revalidated node contacts. |
+| CACHE-04 | Assigned: grok | REL-01, CACHE-07 | Small verified persistent resume window within explicit disk limits. |
+| CACHE-05 | Assigned: agy | MEDIA-01 | Reusable video information and successful thumbnail timestamps. |
+| CACHE-06 | Assigned: agy | UI-01, UI-02 | Saved navigation state and cached static theme decoration. |
+| CACHE-07 | Assigned: agy Android / grok native | MEDIA-01 | Consistent cache accounting, limits, cleanup and active-reader protection. |
+| QA-01 | Pending integration: lead | UI-01–04, MEDIA-01–02 | Focused regressions, existing suites, local APK and visual verification where available. |
+| STORAGE-01 | Assigned: agy; later slice | First redesign | Non-destructive moved-file/folder-access repair and clearer storage recovery. |
 
 ## Rules shared by all tickets
 
@@ -256,7 +257,7 @@ playback, and cleanup before storage configuration/episode changes.
 **User request:** "no need to test just add in turn off on put in setting for me
 so i can test and tell you." This settles delivery as a functional experimental
 setting with user-run effectiveness trials; it does not require proving ISP
-filtering before implementation. The standing implementation-start gate remains.
+filtering before implementation. Implementation is now authorized.
 
 **Likely files:** `SettingsScreen.kt`, `UiModels.kt`, `LibrarySession.kt`,
 `EngineClient.kt`, `engine-go/network.go`, client configuration/dialing helpers
@@ -594,3 +595,6 @@ repeated clear/use cycles, entry deletion, accounting, low space and absent file
 - User requested all eight cache improvements discussed in review. Extended
   MEDIA-01 and added CACHE-01–07 plus REL-01, including dependencies, invalidation,
   cleanup and recovery acceptance criteria. Implementation remains on hold.
+- Subsequent instruction supersedes that hold: implement the full board with
+  agy and grok in parallel using Herdr. Isolated write ownership and integration
+  contracts are recorded in REDESIGN_EXECUTION.md. No work is accepted as complete yet.

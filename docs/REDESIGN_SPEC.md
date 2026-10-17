@@ -2,9 +2,11 @@
 
 Baseline: `a226754`. Decisions agreed in the local design conversation on 2026-10-17.
 
-**Implementation is not authorized to start yet.** The user's standing instruction
-is: "implementation will start when I tell you." This document and the ticket
-board are planning artifacts only. Wait for an explicit instruction to implement.
+**Implementation is now authorized.** On 2026-10-17 the user explicitly invoked
+Herdr and implement and requested agy and grok to complete the work in parallel.
+This supersedes the earlier instruction to wait. Keep delivery local and use
+completion reports/callbacks instead of repeated status polling. See
+[REDESIGN_EXECUTION.md](REDESIGN_EXECUTION.md) for ownership and integration.
 
 ## Delivery and scope
 
@@ -18,8 +20,7 @@ board are planning artifacts only. Wait for an explicit instruction to implement
 - A separately planned built-in anti-DPI switch is included for the user's own
   network trials. This does not reopen the rejected adaptive/evolutionary work.
 - The user also requested all eight reviewed cache/recovery improvements and the
-  checkpoint persistence fix. These are planned in the local board; the start
-  instruction is still required before any implementation.
+  checkpoint persistence fix. These are included in the authorized work.
 
 ## Visual direction
 
@@ -137,7 +138,7 @@ is selected by this cache scope.
 - Adaptive/evolutionary architecture work, genetic optimization, a new peer
   scoring/scheduling layer, and connection or buffering retuning.
 - An embedded player, replacing the geographic map, GitHub issues, pushing or
-  publishing, and starting implementation before the user requests it.
+  publishing. The previous implementation-start hold has been superseded.
 
 ## Validation
 
