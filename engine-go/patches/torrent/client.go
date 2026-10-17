@@ -743,6 +743,16 @@ func DialFirst(ctx context.Context, addr string, dialers []Dialer) (res DialResu
 	return pool.getFirst()
 }
 
+// OutgoingTCPConnHook, when set, wraps successfully dialed TCP peer
+// connections. Webtor uses this for experimental anti-DPI stream adapters.
+// The hook must not be used to race an untreated dialer alongside the default.
+var OutgoingTCPConnHook func(net.Conn) net.Conn
+
+// SetOutgoingTCPConnHook installs or clears the outgoing TCP connection wrapper.
+func SetOutgoingTCPConnHook(hook func(net.Conn) net.Conn) {
+	OutgoingTCPConnHook = hook
+}
+
 func dialFromSocket(ctx context.Context, s Dialer, addr string) net.Conn {
 	c, err := s.Dial(ctx, addr)
 	if err != nil {
@@ -753,6 +763,11 @@ func dialFromSocket(ctx context.Context, s Dialer, addr string) net.Conn {
 	// code to increase the chance it's done.
 	if tc, ok := c.(*net.TCPConn); ok {
 		tc.SetLinger(0)
+	}
+	if c != nil && err == nil && OutgoingTCPConnHook != nil {
+		if network := s.DialerNetwork(); len(network) >= 3 && (network[:3] == "tcp") {
+			c = OutgoingTCPConnHook(c)
+		}
 	}
 	countDialResult(err)
 	return c

@@ -728,7 +728,7 @@ func (st *DocumentTorrentStorage) SelectionCanUseExistingFiles(selected []int) b
 func (st *DocumentTorrentStorage) StreamMode() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.stream
+	return st.stream && st.attached && !st.previewTemp
 }
 
 // UnfreezeTrusted allows MarkNotComplete to clear pieces again after restore

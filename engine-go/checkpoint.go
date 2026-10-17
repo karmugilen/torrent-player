@@ -228,7 +228,7 @@ func readPieceCheckpoint(path string) (*pieceCheckpoint, error) {
 	}
 	bitBytes := (cp.NumPieces + 7) / 8
 	// Reject counts that cannot fit the remaining payload before allocating.
-	if off+nFiles* (1+8+8+8+8+4) > len(data) || off+bitBytes > len(data) {
+	if off+nFiles*(1+8+8+8+8+4) > len(data) || off+bitBytes > len(data) {
 		// Still parse carefully below; this is a cheap upper-bound pre-check.
 	}
 	cp.Files = make([]fileIdentity, 0, nFiles)

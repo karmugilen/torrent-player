@@ -26,24 +26,24 @@ type PreviewReader interface {
 }
 
 type previewReader struct {
-	mu       sync.Mutex
-	readIO   sync.Mutex
-	server   *EngineServer
-	rec      *TorrentRecord
-	torrent  *torrent.Torrent
-	file     *torrent.File
-	reader   torrent.Reader
-	storage  *DocumentTorrentStorage
-	owner    *playbackPriorityCoordinator
-	ctx      context.Context
-	cancel   context.CancelFunc
-	length   int64
-	budget   int64
-	admitted map[int]bool
-	closed   bool
-	temp     bool
+	mu         sync.Mutex
+	readIO     sync.Mutex
+	server     *EngineServer
+	rec        *TorrentRecord
+	torrent    *torrent.Torrent
+	file       *torrent.File
+	reader     torrent.Reader
+	storage    *DocumentTorrentStorage
+	owner      *playbackPriorityCoordinator
+	ctx        context.Context
+	cancel     context.CancelFunc
+	length     int64
+	budget     int64
+	admitted   map[int]bool
+	closed     bool
+	temp       bool
 	waitCancel context.CancelFunc
-	readSeq  uint64
+	readSeq    uint64
 }
 
 func previewDir(baseDir, infoHashHex string) string {

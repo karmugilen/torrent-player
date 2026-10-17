@@ -9,9 +9,17 @@ with one upstream fix backported:
   the upstream regression test. A concurrent request update otherwise loses
   its wakeup, leaving urgent playback pieces unrequested until another message.
 
-All other upstream source files are unchanged. This avoids an unrelated engine
-upgrade. The original LICENSE is included. The parent module's local replacement
-ensures both Android builds and ordinary `go test` use the same fix.
+Additional local hook for experimental anti-DPI:
+
+- `OutgoingTCPConnHook` / `SetOutgoingTCPConnHook` in `client.go` wraps
+  successfully dialed TCP peer connections. Webtor installs a write-split
+  stream adapter here so outgoing TCP peers are adapted without racing an
+  untreated dialer. UDP/uTP dialers are unchanged.
+
+All other upstream source files are unchanged aside from the items above. This
+avoids an unrelated engine upgrade. The original LICENSE is included. The parent
+module's local replacement ensures both Android builds and ordinary `go test`
+use the same fix.
 
 Validate the backport with `go test -race -run TestMsgWriterBroadcastDuringFillWakesWriter`
 in this directory. The app's engine suite also exercises real peer transfers,

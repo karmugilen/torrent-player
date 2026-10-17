@@ -101,3 +101,38 @@ func (p *playbackReader) noteResumeReadLocked(offset int64) {
 		c.applyLocked()
 	}
 }
+
+// persistVerifiedResumeWindow stores already-verified bytes near a useful
+// resume offset. It never starts background fetching.
+func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex int, offset int64) {
+	if rec == nil || s == nil {
+		return
+	}
+	files := rec.Torrent.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		return
+	}
+	file := files[fileIndex]
+	st := s.storage.GetStorage(rec.InfoHash)
+	if st == nil {
+		return
+	}
+	length := min(resumeWindowMaxBytes, file.Length()-offset)
+	if length <= 0 {
+		return
+	}
+	abs := file.Offset() + offset
+	if !st.RangeComplete(abs, length) {
+		return
+	}
+	spans, ok := st.byteSpans(abs, length)
+	if !ok {
+		return
+	}
+	buf := make([]byte, int(length))
+	n, err := preadFileSpans(spans, buf)
+	if err != nil || int64(n) != length {
+		return
+	}
+	s.saveResumeWindow(rec, fileIndex, offset, length, buf)
+}
