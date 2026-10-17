@@ -349,4 +349,64 @@ class EngineClientTest {
         assertEquals(0, t.buckets[1].selectedVerified)
         assertEquals(0, t.buckets[1].selectedReceiving)
     }
+
+    @Test
+    fun bypassStatusReadsAndParsesFields() {
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"enabled":true,"active":true,"mode":"stream-adapt","coverage":["outgoing-tcp-peers","http-trackers"],"error":null}"""
+            )
+        )
+        val status = client.getBypass()
+        assertEquals("/bypass", transport.takeRequest().path)
+        assertTrue(status.enabled)
+        assertTrue(status.active)
+        assertEquals("stream-adapt", status.mode)
+        assertEquals(listOf("outgoing-tcp-peers", "http-trackers"), status.coverage)
+        assertNull(status.error)
+    }
+
+    @Test
+    fun setBypassPostsEnabledAndReturnsStatus() {
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"enabled":false,"active":false,"mode":"off","coverage":[],"error":null}"""
+            )
+        )
+        val status = client.setBypass(false)
+        val req = transport.takeRequest()
+        assertEquals("/bypass", req.path)
+        assertEquals("{\"enabled\":false}", req.body.readUtf8())
+        assertFalse(status.enabled)
+        assertFalse(status.active)
+        assertEquals("off", status.mode)
+    }
+
+    @Test
+    fun cacheEndpointsParseCategoriesAndMemory() {
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"categories":[{"id":"startup","bytes":1024,"reclaimableBytes":512},{"id":"peers","bytes":2048,"reclaimableBytes":2048}],"memoryBytes":4096}"""
+            )
+        )
+        val cache = client.getCache()
+        assertEquals("/cache", transport.takeRequest().path)
+        assertEquals(2, cache.categories.size)
+        assertEquals("startup", cache.categories[0].id)
+        assertEquals(1024L, cache.categories[0].bytes)
+        assertEquals(512L, cache.categories[0].reclaimableBytes)
+        assertEquals(4096L, cache.memoryBytes)
+
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"categories":[{"id":"startup","bytes":0,"reclaimableBytes":0}],"memoryBytes":0}"""
+            )
+        )
+        val cleared = client.clearCache(listOf("startup", "resume"))
+        val req = transport.takeRequest()
+        assertEquals("/cache/clear", req.path)
+        assertEquals("{\"categories\":[\"startup\",\"resume\"]}", req.body.readUtf8())
+        assertEquals(1, cleared.categories.size)
+        assertEquals(0L, cleared.categories[0].bytes)
+    }
 }

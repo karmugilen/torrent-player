@@ -18,6 +18,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,6 +32,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -49,11 +51,15 @@ fun SettingsScreen(
     onMaxPeers: (Int) -> Unit,
     onMaxPeersCommit: () -> Unit,
     onDarkTheme: (Boolean) -> Unit,
+    onAppTheme: (AppTheme) -> Unit,
+    onReducedEffects: (Boolean) -> Unit,
     onDirectPlayDefault: (Boolean) -> Unit,
+    onAntiDpi: (Boolean) -> Unit,
     onCleanup: () -> Unit,
     onClearAll: () -> Unit,
     onStopAll: () -> Unit,
     onStopAllAndExit: () -> Unit,
+    onClearNativeCategory: ((String) -> Unit)? = null,
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -95,7 +101,7 @@ fun SettingsScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Appearance",
+                        text = "Appearance & Theme",
                         style = MaterialTheme.typography.titleMedium,
                         color = colors.onBackground,
                         modifier = Modifier.padding(start = 4.dp),
@@ -105,17 +111,51 @@ fun SettingsScreen(
                         colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
                         shape = MaterialTheme.shapes.medium,
                     ) {
-                        ListItem(
-                            headlineContent = { Text("Dark theme", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface) },
-                            supportingContent = { Text("Use dark appearance across the app", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant) },
-                            trailingContent = {
-                                Switch(
-                                    checked = state.darkTheme,
-                                    onCheckedChange = onDarkTheme,
-                                )
-                            },
-                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        )
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("Theme style", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = colors.onSurface)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                listOf(
+                                    AppTheme.AERO to "Aero",
+                                    AppTheme.ANTIQUITY to "Antiquity",
+                                    AppTheme.RETRO to "Retro",
+                                ).forEach { (theme, label) ->
+                                    val isSelected = state.appTheme == theme
+                                    FilterChip(
+                                        selected = isSelected,
+                                        onClick = { onAppTheme(theme) },
+                                        label = { Text(label) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Dark appearance", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                    Text("Use dark styling for the active theme", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                }
+                                Switch(checked = state.darkTheme, onCheckedChange = onDarkTheme)
+                            }
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Reduced effects", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                    Text("Suppress motion, glows, and complex continuous shaders", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                }
+                                Switch(checked = state.reducedEffects, onCheckedChange = onReducedEffects)
+                            }
+                        }
                     }
                 }
             }
@@ -210,9 +250,71 @@ fun SettingsScreen(
                                     thumbColor = colors.primary,
                                     activeTrackColor = colors.primary,
                                     inactiveTrackColor = colors.outlineVariant,
-                                ),
+                                    ),
                                 modifier = Modifier.fillMaxWidth(),
                             )
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("Anti-DPI (experimental)", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                    Text(
+                                        "Adaptive connection routing to resist SNI/packet inspection. Experimental feature for your network trials.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = state.antiDpiEnabled,
+                                    onCheckedChange = onAntiDpi,
+                                )
+                            }
+                            if (state.antiDpiEnabled) {
+                                val status = state.bypassStatus
+                                if (status == null) {
+                                    Text(
+                                        if (state.engineReady) "Connecting to backend…" else "Engine starting…",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.secondary,
+                                    )
+                                } else if (status.error != null) {
+                                    Text(
+                                        "Backend error: ${status.error}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.error,
+                                    )
+                                } else {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            if (status.active) "Active (mode: ${status.mode})" else "Inactive (mode: ${status.mode})",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (status.active) colors.primary else colors.error,
+                                        )
+                                    }
+                                    if (status.coverage.isNotEmpty()) {
+                                        Text(
+                                            "Adapted paths: ${status.coverage.joinToString(", ")}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                    } else if (status.active) {
+                                        Text(
+                                            "Adapted paths: active stream routing",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                Text(
+                                    "Note: Active indicates the local backend is enabled; test with your ISP to observe actual swarm connectivity.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.outline,
+                                )
+                            }
                         }
                     }
                 }
@@ -281,9 +383,22 @@ fun SettingsScreen(
                         shape = MaterialTheme.shapes.medium,
                     ) {
                         ListItem(
-                            headlineContent = { Text("Temporary cache", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface) },
+                            headlineContent = {
+                                Text("Temporary cache · ${formatBytes(state.cacheBytes)}", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                            },
                             supportingContent = {
-                                Text("Free up transient metadata and piece buffers", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("Free up thumbnails, temporary imports, and engine caches", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                                    state.nativeCacheSummary?.let { summary ->
+                                        if (summary.categories.isNotEmpty()) {
+                                            Text(
+                                                "Engine categories: " + summary.categories.joinToString(" · ") { "${it.id}: ${formatBytes(it.bytes)}" },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = colors.outline,
+                                            )
+                                        }
+                                    }
+                                }
                             },
                             trailingContent = {
                                 OutlinedButton(
@@ -291,11 +406,25 @@ fun SettingsScreen(
                                     modifier = Modifier.heightIn(min = 36.dp),
                                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                                 ) {
-                                    Text("Clear cache")
+                                    Text("Clear all cache")
                                 }
                             },
                             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                         )
+                        state.nativeCacheSummary?.categories?.filter { it.reclaimableBytes > 0 }?.forEach { cat ->
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.3f))
+                            ListItem(
+                                headlineContent = { Text("Reclaim ${cat.id} (${formatBytes(cat.reclaimableBytes)})", style = MaterialTheme.typography.bodyMedium) },
+                                trailingContent = {
+                                    if (onClearNativeCategory != null) {
+                                        TextButton(onClick = { onClearNativeCategory(cat.id) }) {
+                                            Text("Clear")
+                                        }
+                                    }
+                                },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            )
+                        }
                         HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.5f))
                         ListItem(
                             headlineContent = {

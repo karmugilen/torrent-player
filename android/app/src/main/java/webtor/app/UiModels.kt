@@ -20,6 +20,8 @@ data class DeleteRequest(
     val title: String,
 )
 
+enum class AppTheme { AERO, ANTIQUITY, RETRO }
+
 data class UiState(
     val screen: Screen = Screen.Library,
     val openTorrentKey: String? = null,
@@ -41,11 +43,16 @@ data class UiState(
     val restoring: Boolean = false,
     val maxPeers: Int = 55,
     val darkTheme: Boolean = true,
+    val appTheme: AppTheme = AppTheme.AERO,
+    val reducedEffects: Boolean = false,
     val directPlayDefault: Boolean = false,
     val diagnosticsPreview: String? = null,
     val networkPolicy: TransferNetworkPolicy = TransferNetworkPolicy.ANY,
     val networkAllowed: Boolean = true,
     val networkReason: String? = null,
+    val antiDpiEnabled: Boolean = false,
+    val bypassStatus: webtor.core.BypassStatus? = null,
+    val nativeCacheSummary: webtor.core.CacheSummary? = null,
 )
 
 /** User-facing library ordering. Kept pure so it is deterministic across restore/recomposition. */

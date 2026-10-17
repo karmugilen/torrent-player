@@ -92,11 +92,15 @@ class MainActivity : ComponentActivity() {
                             onMaxPeers = session::setMaxPeers,
                             onMaxPeersCommit = session::commitMaxPeers,
                             onDarkTheme = session::setDarkTheme,
+                            onAppTheme = session::setAppTheme,
+                            onReducedEffects = session::setReducedEffects,
                             onDirectPlayDefault = session::setDirectPlayDefault,
+                            onAntiDpi = session::setAntiDpi,
                             onCleanup = session::cleanupCache,
                             onClearAll = session::requestClearAll,
                             onStopAll = session::stopAll,
                             onStopAllAndExit = { session.stopAllAndExit() },
+                            onClearNativeCategory = { session.clearNativeCache(listOf(it)) },
                         )
                         Screen.Files -> {
                             val entry = state.library.find { it.key == state.openTorrentKey }

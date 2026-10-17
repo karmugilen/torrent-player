@@ -135,7 +135,10 @@ class LibrarySession(
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
+                        appTheme = parseSavedTheme(settings.getString("appTheme", "AERO")),
+                        reducedEffects = settings.getBoolean("reducedEffects", false),
                         directPlayDefault = settings.getBoolean("directPlayDefault", false),
+                        antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
                     )
                 }
@@ -152,6 +155,15 @@ class LibrarySession(
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
                     runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
+                    val antiDpi = settings.getBoolean("antiDpiEnabled", false)
+                    val bypass = runCatching { withContext(io) { client.setBypass(antiDpi) } }.getOrNull()
+                    if (bypass != null) {
+                        _ui.update { it.copy(bypassStatus = bypass) }
+                    }
+                    val nativeCache = runCatching { withContext(io) { client.getCache() } }.getOrNull()
+                    if (nativeCache != null) {
+                        _ui.update { it.copy(nativeCacheSummary = nativeCache) }
+                    }
                     restoreAll(loaded)
                 }
                 mutex.withLock { reconcileTransferState() }
@@ -204,6 +216,38 @@ class LibrarySession(
     fun setDarkTheme(dark: Boolean) {
         settings.edit().putBoolean("darkTheme", dark).apply()
         _ui.update { it.copy(darkTheme = dark) }
+    }
+
+    fun setAppTheme(theme: AppTheme) {
+        settings.edit().putString("appTheme", theme.name).apply()
+        _ui.update { it.copy(appTheme = theme) }
+    }
+
+    fun setReducedEffects(enabled: Boolean) {
+        settings.edit().putBoolean("reducedEffects", enabled).apply()
+        _ui.update { it.copy(reducedEffects = enabled) }
+    }
+
+    fun setAntiDpi(enabled: Boolean) {
+        settings.edit().putBoolean("antiDpiEnabled", enabled).apply()
+        _ui.update { it.copy(antiDpiEnabled = enabled) }
+        if (_ui.value.engineReady) {
+            scope.launch {
+                val status = runCatching { withContext(io) { client.setBypass(enabled) } }.getOrNull()
+                _ui.update { it.copy(bypassStatus = status) }
+            }
+        }
+    }
+
+    fun clearNativeCache(categories: List<String>) {
+        if (_ui.value.engineReady) {
+            scope.launch {
+                val res = runCatching { withContext(io) { client.clearCache(categories) } }.getOrNull()
+                if (res != null) {
+                    _ui.update { it.copy(nativeCacheSummary = res) }
+                }
+            }
+        }
     }
     fun setNetworkPolicy(policy: TransferNetworkPolicy) {
         settings.edit().putString("networkPolicy", policy.name).apply()
@@ -2163,4 +2207,10 @@ class LibrarySession(
             )
         }
     }
+}
+
+internal fun parseSavedTheme(name: String?): AppTheme = when (name?.uppercase()) {
+    "ANTIQUITY" -> AppTheme.ANTIQUITY
+    "RETRO" -> AppTheme.RETRO
+    else -> AppTheme.AERO
 }
