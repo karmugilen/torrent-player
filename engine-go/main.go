@@ -242,4 +242,54 @@ func Java_webtor_app_EngineHost_closePlayback(env *C.JNIEnv, host C.jobject, han
 	}
 }
 
+var androidPreviewReaders sync.Map
+
+//export Java_webtor_app_EngineHost_openPreview
+func Java_webtor_app_EngineHost_openPreview(env *C.JNIEnv, host C.jobject, id C.jstring, index C.jint) C.jlong {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	s := currentAndroidEngine()
+	if s == nil {
+		return 0
+	}
+	reader, err := s.OpenPreview(javaString(env, id), int(index))
+	if err != nil {
+		androidLogE(err.Error())
+		return 0
+	}
+	handle := nextReaderID.Add(1)
+	androidPreviewReaders.Store(handle, reader)
+	return C.jlong(handle)
+}
+
+//export Java_webtor_app_EngineHost_readPreview
+func Java_webtor_app_EngineHost_readPreview(env *C.JNIEnv, host C.jobject, handle C.jlong, offset C.jlong, size C.jint, target C.jbyteArray) C.jint {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	value, ok := androidPreviewReaders.Load(int64(handle))
+	if !ok || size < 0 || size > 1024*1024 || size > C.jint(C.byte_array_length(env, target)) {
+		return -1
+	}
+	data := make([]byte, int(size))
+	n, err := value.(PreviewReader).ReadAt(data, int64(offset))
+	if err != nil {
+		androidLogE(fmt.Sprintf("preview read: %v", err))
+		return -1
+	}
+	if n < 0 {
+		return -1
+	}
+	if n > 0 {
+		C.fill_byte_array(env, target, (*C.char)(unsafe.Pointer(&data[0])), C.int(n))
+	}
+	return C.jint(n)
+}
+
+//export Java_webtor_app_EngineHost_closePreview
+func Java_webtor_app_EngineHost_closePreview(env *C.JNIEnv, host C.jobject, handle C.jlong) {
+	if value, ok := androidPreviewReaders.LoadAndDelete(int64(handle)); ok {
+		_ = value.(PreviewReader).Close()
+	}
+}
+
 func main() {}

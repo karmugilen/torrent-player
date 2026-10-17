@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/RoaringBitmap/roaring"
@@ -122,6 +123,9 @@ type Client struct {
 	clientWebseedState
 
 	activePieceHashers int
+
+	// Per-client outgoing TCP wrapper. Stored as hookBox; nil fn clears.
+	outgoingTCPHook atomic.Value
 }
 
 type clientWebseedState struct {
@@ -738,12 +742,38 @@ func DialFirst(ctx context.Context, addr string, dialers []Dialer) (res DialResu
 	}
 	defer pool.startDrainer()
 	for _, _s := range dialers {
-		pool.add(ctx, _s)
+		pool.add(ctx, _s, nil)
 	}
 	return pool.getFirst()
 }
 
-func dialFromSocket(ctx context.Context, s Dialer, addr string) net.Conn {
+// hookBox wraps an optional outgoing TCP conn hook for atomic.Value storage.
+type hookBox struct {
+	fn func(net.Conn) net.Conn
+}
+
+// SetOutgoingTCPConnHook installs or clears this client's outgoing TCP wrapper.
+// Hooks are per-client so concurrent EngineServer instances cannot race a
+// process-global function pointer.
+func (cl *Client) SetOutgoingTCPConnHook(hook func(net.Conn) net.Conn) {
+	if cl == nil {
+		return
+	}
+	cl.outgoingTCPHook.Store(hookBox{fn: hook})
+}
+
+func (cl *Client) outgoingTCPConnHook() func(net.Conn) net.Conn {
+	if cl == nil {
+		return nil
+	}
+	v := cl.outgoingTCPHook.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(hookBox).fn
+}
+
+func dialFromSocket(ctx context.Context, s Dialer, addr string, hook func(net.Conn) net.Conn) net.Conn {
 	c, err := s.Dial(ctx, addr)
 	if err != nil {
 		log.ContextLogger(ctx).Levelf(log.Debug, "error dialing %q: %v", addr, err)
@@ -753,6 +783,11 @@ func dialFromSocket(ctx context.Context, s Dialer, addr string) net.Conn {
 	// code to increase the chance it's done.
 	if tc, ok := c.(*net.TCPConn); ok {
 		tc.SetLinger(0)
+	}
+	if c != nil && err == nil && hook != nil {
+		if network := s.DialerNetwork(); len(network) >= 3 && (network[:3] == "tcp") {
+			c = hook(c)
+		}
 	}
 	countDialResult(err)
 	return c
@@ -845,9 +880,11 @@ func (cl *Client) dialAndCompleteHandshake(opts outgoingConnOpts) (c *PeerConn, 
 	}
 	torrent.Add("establish outgoing connection", 1)
 	addr := opts.peerInfo.Addr
+	hook := cl.outgoingTCPConnHook()
 	dialPool := dialPool{
 		resCh: make(chan DialResult),
 		addr:  addr.String(),
+		hook:  hook,
 	}
 	defer dialPool.startDrainer()
 	dialTimeout := opts.t.getDialTimeoutUnlocked()
@@ -855,7 +892,7 @@ func (cl *Client) dialAndCompleteHandshake(opts outgoingConnOpts) (c *PeerConn, 
 		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 		defer cancel()
 		for _, d := range cl.dialers {
-			dialPool.add(ctx, d)
+			dialPool.add(ctx, d, hook)
 		}
 	}
 	holepunchAddr, holepunchAddrErr := addrPortFromPeerRemoteAddr(addr)
@@ -910,7 +947,7 @@ func (cl *Client) dialAndCompleteHandshake(opts outgoingConnOpts) (c *PeerConn, 
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 		defer cancel()
-		dialPool.add(ctx, firstDialResult.Dialer)
+		dialPool.add(ctx, firstDialResult.Dialer, hook)
 	}
 	secondDialResult := dialPool.getFirst()
 	if secondDialResult.Conn == nil {

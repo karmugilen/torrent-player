@@ -29,7 +29,13 @@ const (
 func (st *DocumentTorrentStorage) attachDirectPlay(descriptors []*int, selected []int) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.closed || st.attached || st.info == nil {
+	if st.closed || st.info == nil {
+		return fmt.Errorf("storage is closed, configured, or missing metadata")
+	}
+	if st.previewTemp {
+		st.releasePreviewTempLocked()
+	}
+	if st.attached {
 		return fmt.Errorf("storage is closed, configured, or missing metadata")
 	}
 	if len(descriptors) != len(st.files) {
@@ -534,4 +540,91 @@ func (st *DocumentTorrentStorage) readStartupPiece(index int) ([]byte, error) {
 	data := make([]byte, int(expected))
 	_, err = io.ReadFull(file, data)
 	return data, err
+}
+
+// injectVerifiedBytes places already-validated resume bytes into the RAM/stream
+// cache as complete whole-piece spans. Partial edge pieces are copied only when
+// the injected range covers them entirely within the provided buffer; pieces
+// that are only partially covered are left incomplete so completion is never
+// invented. Returns false when nothing usable could be installed.
+func (st *DocumentTorrentStorage) injectVerifiedBytes(abs int64, data []byte) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.closed || !st.attached || st.info == nil || st.chunkLength <= 0 || len(data) == 0 {
+		return false
+	}
+	installed := false
+	end := abs + int64(len(data))
+	begin := int(abs / st.chunkLength)
+	last := int((end - 1) / st.chunkLength)
+	for index := begin; index <= last; index++ {
+		piece := st.info.Piece(index)
+		pieceStart := int64(index) * st.chunkLength
+		pieceLen := piece.Length()
+		pieceEnd := pieceStart + pieceLen
+		if abs > pieceStart || end < pieceEnd {
+			// Only install fully covered pieces to avoid inventing completion.
+			continue
+		}
+		off := int(pieceStart - abs)
+		buf := make([]byte, int(pieceLen))
+		copy(buf, data[off:off+int(pieceLen)])
+		if st.stream {
+			if _, err := st.ensureStreamSlotLocked(index, pieceLen); err != nil {
+				continue
+			}
+		} else {
+			if _, err := st.ensureCacheSlotLocked(index, pieceLen); err != nil {
+				continue
+			}
+		}
+		if st.cache[index] == nil || int64(len(st.cache[index])) < pieceLen {
+			continue
+		}
+		copy(st.cache[index], buf)
+		st.cacheDirty[index] = false
+		st.completed[index] = true
+		if st.stream {
+			st.streamWhole[index] = true
+			st.streamRanges[index] = []streamByteRange{{start: 0, end: pieceLen}}
+		}
+		st.touchCacheLocked(index)
+		installed = true
+	}
+	if installed && st.streamReady != nil {
+		st.notifyStreamReadyLocked()
+	}
+	return installed
+}
+
+// copyVerifiedRange returns a durable snapshot of already-complete bytes from
+// RAM cache and/or attached files. It never starts fetching.
+func (st *DocumentTorrentStorage) copyVerifiedRange(abs, length int64) ([]byte, bool) {
+	if length <= 0 || length > resumeWindowMaxBytes {
+		return nil, false
+	}
+	if !st.RangeComplete(abs, length) {
+		return nil, false
+	}
+	buf := make([]byte, int(length))
+	if spans, ok := st.byteSpans(abs, length); ok {
+		n, err := preadFileSpans(spans, buf)
+		if err == nil && int64(n) == length {
+			return buf, true
+		}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	n := 0
+	for n < len(buf) {
+		index := int((abs + int64(n)) / st.chunkLength)
+		if !st.completed[index] || st.cache[index] == nil {
+			return nil, false
+		}
+		pieceOff := (abs + int64(n)) % st.chunkLength
+		want := min(int64(len(buf)-n), st.info.Piece(index).Length()-pieceOff)
+		copy(buf[n:n+int(want)], st.cache[index][pieceOff:pieceOff+want])
+		n += int(want)
+	}
+	return buf, true
 }

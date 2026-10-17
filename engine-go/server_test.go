@@ -32,7 +32,11 @@ func testEngine(t *testing.T, configure ...func(*torrent.ClientConfig)) *EngineS
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &EngineServer{client: client, storage: store, records: make(map[string]*TorrentRecord), recordsByHash: make(map[string]*TorrentRecord), done: make(chan struct{})}
+	s := &EngineServer{
+		client: client, storage: store, downloadDir: cfg.DataDir,
+		records: make(map[string]*TorrentRecord), recordsByHash: make(map[string]*TorrentRecord),
+		done: make(chan struct{}), bypass: bypassController{mode: bypassModeOff},
+	}
 	// NewEngineServer enables payload traffic by default. Unit tests build the
 	// server directly so they mirror that production default explicitly.
 	s.payloadTransfersAllowed.Store(true)

@@ -2,12 +2,14 @@ package torrent
 
 import (
 	"context"
+	"net"
 )
 
 type dialPool struct {
 	resCh chan DialResult
 	addr  string
 	left  int
+	hook  func(net.Conn) net.Conn
 }
 
 func (me *dialPool) getFirst() (res DialResult) {
@@ -18,11 +20,14 @@ func (me *dialPool) getFirst() (res DialResult) {
 	return
 }
 
-func (me *dialPool) add(ctx context.Context, dialer Dialer) {
+func (me *dialPool) add(ctx context.Context, dialer Dialer, hook func(net.Conn) net.Conn) {
 	me.left++
+	if hook == nil {
+		hook = me.hook
+	}
 	go func() {
 		me.resCh <- DialResult{
-			dialFromSocket(ctx, dialer, me.addr),
+			dialFromSocket(ctx, dialer, me.addr, hook),
 			dialer,
 		}
 	}()

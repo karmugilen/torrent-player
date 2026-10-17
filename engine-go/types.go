@@ -67,6 +67,7 @@ type TorrentView struct {
 	Checking      bool          `json:"checking"`
 	CheckedPieces int           `json:"checkedPieces"`
 	CheckTotal    int           `json:"checkTotal"`
+	Warning       *string       `json:"warning,omitempty"`
 }
 
 type PlayRequest struct {

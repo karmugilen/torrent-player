@@ -75,7 +75,11 @@ func testEngineAt(t *testing.T, dataDir string, configure ...func(*torrent.Clien
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &EngineServer{client: client, storage: store, records: make(map[string]*TorrentRecord), recordsByHash: make(map[string]*TorrentRecord), done: make(chan struct{})}
+	s := &EngineServer{
+		client: client, storage: store, downloadDir: dataDir,
+		records: make(map[string]*TorrentRecord), recordsByHash: make(map[string]*TorrentRecord),
+		done: make(chan struct{}), bypass: bypassController{mode: bypassModeOff},
+	}
 	s.payloadTransfersAllowed.Store(true)
 	t.Cleanup(s.Close)
 	return s

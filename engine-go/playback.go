@@ -55,6 +55,7 @@ func (s pieceSpan) overlaps(o pieceSpan) bool {
 type playbackPriorityCoordinator struct {
 	mu               sync.Mutex
 	torrent          *torrent.Torrent
+	server           *EngineServer
 	owners           map[*playbackReader]map[int]torrent.PiecePriority
 	hints            map[int]torrent.PiecePriority
 	focus            map[int]torrent.PiecePriority
@@ -67,6 +68,7 @@ type playbackPriorityCoordinator struct {
 	resumeDemand     map[int]torrent.PiecePriority
 	resumeTimer      *time.Timer
 	resumeGeneration uint64
+	previewDemand    map[int]torrent.PiecePriority
 	closed           bool
 	resumeSuspended  bool
 }
@@ -166,6 +168,7 @@ func (c *playbackPriorityCoordinator) applyLocked() {
 	}
 	raiseDemand(next, c.focus)
 	raiseDemand(next, c.resumeDemand)
+	raiseDemand(next, c.previewDemand)
 	for index := range c.effective {
 		if _, ok := next[index]; !ok {
 			// Clear the override; the selected file's base priority remains.
@@ -260,7 +263,10 @@ func (s *EngineServer) ensurePlaybackCoordinator(t *torrent.Torrent) *playbackPr
 	coordinator := s.playbackOwners[t]
 	if coordinator == nil {
 		coordinator = newPlaybackPriorityCoordinator(t)
+		coordinator.server = s
 		s.playbackOwners[t] = coordinator
+	} else if coordinator.server == nil {
+		coordinator.server = s
 	}
 	return coordinator
 }
@@ -338,6 +344,12 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	if rec.DirectPlay {
 		s.applyVideoStartupHints(rec)
 	}
+	// CACHE-04: reuse a bounded validated resume window before scheduling demand.
+	resumeOffset := p.priorityOwner.resumePosition(file)
+	if warmed, ok := s.applyResumeWindowToStorage(rec, index); ok {
+		resumeOffset = warmed
+		p.priorityOwner.prepareResume(file, &warmed)
+	}
 	headBytes, tailBytes := videoStartupHeadBytes, videoStartupTailBytes
 	if p.refreshCompletion {
 		headBytes, tailBytes = directStartupHead, directStartupTail
@@ -349,7 +361,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 		p.tailBoostActive = p.tailBegin < p.tailEnd
 	}
 	p.openPhase = true
-	p.updateWindowLocked(p.priorityOwner.resumePosition(file))
+	p.updateWindowLocked(resumeOffset)
 	p.armIdleLocked()
 	return p, nil
 }
@@ -626,13 +638,40 @@ func (p *playbackReader) Close() {
 		p.idleTimer.Stop()
 	}
 	p.clearPrioritiesLocked()
+	var resumeServer *EngineServer
+	var resumeFileIndex int
+	var resumeOffset int64
 	if p.priorityOwner != nil {
 		p.priorityOwner.holdReaderResume(p)
 		p.priorityOwner.mu.Lock()
 		delete(p.priorityOwner.readers, p)
+		resumeServer = p.priorityOwner.server
+		if p.priorityOwner.resumeFile == p.file && p.priorityOwner.resumeOffset > 0 {
+			resumeOffset = p.priorityOwner.resumeOffset
+			for i, f := range p.torrent.Files() {
+				if f == p.file {
+					resumeFileIndex = i
+					break
+				}
+			}
+		}
 		p.priorityOwner.mu.Unlock()
 	}
 	p.mu.Unlock()
+	if resumeServer != nil && resumeOffset > 0 {
+		resumeServer.mu.RLock()
+		var resumeRec *TorrentRecord
+		for _, rec := range resumeServer.records {
+			if rec.Torrent == p.torrent {
+				resumeRec = rec
+				break
+			}
+		}
+		resumeServer.mu.RUnlock()
+		if resumeRec != nil {
+			resumeServer.persistVerifiedResumeWindow(resumeRec, resumeFileIndex, resumeOffset)
+		}
+	}
 	// torrent.Reader.Close does not synchronize its storage cursor with Read.
 	// Cancellation must unwind active I/O before closing that cursor.
 	p.readIO.Lock()

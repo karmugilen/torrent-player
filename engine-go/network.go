@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -22,6 +21,7 @@ import (
 type networkDialer struct {
 	mu          sync.Mutex
 	epoch       uint64
+	split       bool
 	connections map[*networkConn]struct{}
 }
 
@@ -35,28 +35,6 @@ func (c *networkConn) Close() error {
 	delete(c.owner.connections, c)
 	c.owner.mu.Unlock()
 	return c.Conn.Close()
-}
-
-func (d *networkDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	d.mu.Lock()
-	epoch := d.epoch
-	d.mu.Unlock()
-	c, err := (&net.Dialer{Timeout: 6 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, address)
-	if err != nil {
-		return nil, err
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if epoch != d.epoch {
-		_ = c.Close()
-		return nil, fmt.Errorf("network changed during tracker dial")
-	}
-	if d.connections == nil {
-		d.connections = make(map[*networkConn]struct{})
-	}
-	wrapped := &networkConn{Conn: c, owner: d}
-	d.connections[wrapped] = struct{}{}
-	return wrapped, nil
 }
 
 func (d *networkDialer) reset() {
