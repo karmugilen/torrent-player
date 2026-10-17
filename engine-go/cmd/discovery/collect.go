@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/krpc"
@@ -67,8 +68,8 @@ func countBloom(b *krpc.ScrapeBloomFilter) *int {
 }
 
 type discoveryJob struct {
-	hash   string
-	source krpc.NodeInfo
+	hash    string
+	sources []krpc.NodeInfo
 }
 type sampler struct {
 	d          *dashboard
@@ -77,8 +78,10 @@ type sampler struct {
 	mu         sync.Mutex
 	nodes      map[string]krpc.NodeInfo
 	nextSample map[string]time.Time
-	attempted  map[string]time.Time
-	jobs       chan discoveryJob
+	sources    map[string][]krpc.NodeInfo
+	inflight   map[string]bool
+	turn       int
+	caches     *metadataCaches
 }
 
 func (d *dashboard) collect(ctx context.Context) error {
@@ -89,7 +92,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	cfg := dht.NewDefaultServerConfig()
 	cfg.Conn = conn
 	cfg.Passive = true
-	cfg.SendLimiter = rate.NewLimiter(12, 4)
+	cfg.SendLimiter = rate.NewLimiter(32, 8)
 	server, e := dht.NewServer(cfg)
 	if e != nil {
 		conn.Close()
@@ -107,10 +110,10 @@ func (d *dashboard) collect(ctx context.Context) error {
 	tc.ListenPort = 0
 	tc.NoUpload = true
 	tc.AcceptPeerConnections = false
-	tc.EstablishedConnsPerTorrent = 8
-	tc.HalfOpenConnsPerTorrent = 4
-	tc.TotalHalfOpenConns = 12
-	tc.DialRateLimiter = rate.NewLimiter(8, 4)
+	tc.EstablishedConnsPerTorrent = 12
+	tc.HalfOpenConnsPerTorrent = 6
+	tc.TotalHalfOpenConns = 36
+	tc.DialRateLimiter = rate.NewLimiter(32, 8)
 	tc.NominalDialTimeout = 4 * time.Second
 	tc.MinDialTimeout = 2 * time.Second
 	tc.HandshakesTimeout = 4 * time.Second
@@ -119,18 +122,28 @@ func (d *dashboard) collect(ctx context.Context) error {
 		return e
 	}
 	defer client.Close()
-	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, attempted: map[string]time.Time{}, jobs: make(chan discoveryJob, 48)}
+	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches)}
+	defer s.caches.close()
+	d.mu.Lock()
+	d.state.Workers = resolverWorkers
+	d.mu.Unlock()
 	var work sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for i := 0; i < resolverWorkers; i++ {
 		work.Add(1)
 		go func() {
 			defer work.Done()
-			for {
+			idle := time.NewTicker(200 * time.Millisecond)
+			defer idle.Stop()
+			for ctx.Err() == nil {
+				if j, ok := s.nextJob(time.Now()); ok {
+					s.resolve(ctx, j)
+					s.releaseJob(j.hash)
+					continue
+				}
 				select {
 				case <-ctx.Done():
 					return
-				case j := <-s.jobs:
-					s.resolve(ctx, j)
+				case <-idle.C:
 				}
 			}
 		}()
@@ -255,85 +268,141 @@ func (s *sampler) sampleBatch(ctx context.Context) {
 			s.d.pruneLocked()
 			s.d.mu.Unlock()
 			for _, h := range *r.Samples {
-				s.enqueue(discoveryJob{hash: hex.EncodeToString(h[:]), source: n})
+				s.rememberSource(hex.EncodeToString(h[:]), n)
 			}
 		}(n)
 	}
 	work.Wait()
 }
-func (s *sampler) enqueue(j discoveryJob) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if time.Since(s.attempted[j.hash]) < 3*time.Minute {
-		return
+
+func cleanMetadataText(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "�")
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit])
 	}
-	select {
-	case s.jobs <- j:
-		s.attempted[j.hash] = time.Now()
-	default:
+	return strings.TrimSpace(value)
+}
+
+func applyMetadata(rec *observation, info *metainfo.Info, source string, latency time.Duration) bool {
+	if (info.Private != nil && *info.Private) || strings.TrimSpace(info.BestName()) == "" {
+		return false
 	}
-	if len(s.attempted) > 2400 {
-		for k, t := range s.attempted {
-			if time.Since(t) > 10*time.Minute {
-				delete(s.attempted, k)
+	rec.Name = cleanMetadataText(info.BestName(), 512)
+	if rec.Name == "" {
+		return false
+	}
+	rec.Resolved = true
+	rec.Source = source
+	rec.ResolutionMS = latency.Milliseconds()
+	rec.Size = info.TotalLength()
+	rec.Kind = "Other"
+	rec.Files = nil
+	for file := range info.UpvertedFilesIter() {
+		name := cleanMetadataText(file.DisplayPath(info), 1024)
+		lower := strings.ToLower(name)
+		for _, ext := range []string{".mkv", ".mp4", ".avi", ".webm", ".mov", ".m4v", ".ts"} {
+			if strings.HasSuffix(lower, ext) {
+				rec.Kind = "Video"
+				break
 			}
 		}
+		if len(rec.Files) < 20 {
+			rec.Files = append(rec.Files, name)
+		}
 	}
+	return true
 }
+
 func (s *sampler) resolve(parent context.Context, j discoveryJob) {
-	ctx, cancel := context.WithTimeout(parent, 14*time.Second)
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
 	var hash metainfo.Hash
-	raw, e := hex.DecodeString(j.hash)
-	if e != nil {
+	raw, err := hex.DecodeString(j.hash)
+	if err != nil || len(raw) != len(hash) {
 		return
 	}
 	copy(hash[:], raw)
-	t, _, e := s.client.AddTorrentSpec(&torrent.TorrentSpec{AddTorrentOpts: torrent.AddTorrentOpts{InfoHash: hash, DisallowDataDownload: true, DisallowDataUpload: true, DisableInitialPieceCheck: true}})
-	if e != nil {
+	s.d.mu.Lock()
+	rec, exists := s.d.records[j.hash]
+	if exists {
+		s.d.state.Attempts++
+	}
+	s.d.mu.Unlock()
+	if !exists {
+		return
+	}
+	wasResolved := rec.Resolved
+	t, _, err := s.client.AddTorrentSpec(&torrent.TorrentSpec{AddTorrentOpts: torrent.AddTorrentOpts{InfoHash: hash, DisallowDataDownload: true, DisallowDataUpload: true, DisableInitialPieceCheck: true}})
+	if err != nil {
 		return
 	}
 	defer t.Drop()
-	s.d.mu.Lock()
-	rec, ok := s.d.records[j.hash]
-	if !ok {
-		s.d.mu.Unlock()
+
+	// All work for this hash is joined before its slot is released or collection
+	// is paused. Winning metadata immediately cancels its HTTP competitors.
+	var work sync.WaitGroup
+	defer func() { cancel(); work.Wait() }()
+	cacheCtx, cancelCache := context.WithCancel(ctx)
+	defer cancelCache()
+	cacheEvents := make(chan *metainfo.Info, 1)
+	if !wasResolved {
+		work.Add(1)
+		go func() {
+			defer work.Done()
+			if info := s.caches.fetch(cacheCtx, hash); info != nil {
+				cacheEvents <- info
+			}
+		}()
+	}
+	initialReplies := make(chan *krpc.Return, len(j.sources))
+	for _, source := range j.sources {
+		work.Add(1)
+		go func(source krpc.NodeInfo) {
+			defer work.Done()
+			if reply := s.query(ctx, &net.UDPAddr{IP: source.Addr.IP, Port: source.Addr.Port}, "get_peers", krpc.MsgArgs{InfoHash: krpc.ID(hash), Scrape: 1}); reply != nil {
+				initialReplies <- reply
+			}
+		}(source)
+	}
+	ann, err := s.server.AnnounceTraversal(hash, dht.Scrape())
+	if err != nil {
 		return
 	}
-	s.d.state.Attempts++
-	s.d.mu.Unlock()
+	defer ann.Close()
+	peerEvents := ann.Peers
+	got := t.GotInfo()
+	if wasResolved {
+		got = nil
+	}
 	uniqueIPs := map[string]bool{}
 	countries := map[string]int{}
 	var seeds krpc.ScrapeBloomFilter
 	hasSeedEstimate := false
 	addPeers := func(peers []krpc.NodeAddr) {
+		connections := make([]torrent.PeerInfo, 0, len(peers))
 		for _, p := range peers {
 			if publicIP(p.IP) && p.Port > 0 {
 				if !uniqueIPs[p.IP.String()] {
 					uniqueIPs[p.IP.String()] = true
 					countries[s.d.country(p.IP)]++
 				}
-				t.AddPeers([]torrent.PeerInfo{{Addr: &net.TCPAddr{IP: p.IP, Port: p.Port}}})
+				if !rec.Resolved {
+					connections = append(connections, torrent.PeerInfo{Addr: &net.TCPAddr{IP: p.IP, Port: p.Port}})
+				}
 			}
 		}
-	}
-	// Sampled hashes are known to this source node. Ask it first rather than
-	// waiting for an entire lookup to finish before opening metadata connections.
-	reply := s.query(ctx, &net.UDPAddr{IP: j.source.Addr.IP, Port: j.source.Addr.Port}, "get_peers", krpc.MsgArgs{InfoHash: krpc.ID(hash), Scrape: 1})
-	if reply != nil {
-		addPeers(reply.Values)
-		if reply.BFsd != nil {
-			hasSeedEstimate = true
-			mergeBloom(&seeds, reply.BFsd)
+		if len(connections) > 0 {
+			t.AddPeers(connections)
 		}
 	}
-	ann, e := s.server.AnnounceTraversal(hash, dht.Scrape())
-	if e != nil {
-		return
-	}
-	defer ann.Close()
-	peerEvents := ann.Peers
-	got := t.GotInfo()
 	var settle <-chan time.Time
 	var settleTimer *time.Timer
 	defer func() {
@@ -341,6 +410,36 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			settleTimer.Stop()
 		}
 	}()
+	startSettling := func() {
+		if settleTimer == nil {
+			settleTimer = time.NewTimer(1200 * time.Millisecond)
+			settle = settleTimer.C
+		}
+	}
+	if wasResolved {
+		startSettling()
+	}
+	accept := func(info *metainfo.Info, source string) bool {
+		if rec.Resolved {
+			return true
+		}
+		if !applyMetadata(&rec, info, source, time.Since(started)) {
+			return false
+		}
+		cancelCache()
+		got = nil
+		startSettling()
+		// Show a name as soon as it arrives, while counts finish settling.
+		s.d.mu.Lock()
+		latest, retained := s.d.records[j.hash]
+		if retained {
+			rec.LastSeen = latest.LastSeen
+		}
+		s.d.records[j.hash] = rec
+		s.d.pruneLocked()
+		s.d.mu.Unlock()
+		return true
+	}
 loop:
 	for {
 		select {
@@ -348,12 +447,15 @@ loop:
 			break loop
 		case <-settle:
 			break loop
+		case reply := <-initialReplies:
+			addPeers(reply.Values)
+			if reply.BFsd != nil {
+				hasSeedEstimate = true
+				mergeBloom(&seeds, reply.BFsd)
+			}
 		case peers, ok := <-peerEvents:
 			if !ok {
 				peerEvents = nil
-				if rec.Resolved || len(uniqueIPs) == 0 {
-					break loop
-				}
 				continue
 			}
 			addPeers(peers.Peers)
@@ -361,36 +463,15 @@ loop:
 				hasSeedEstimate = true
 				mergeBloom(&seeds, peers.BFsd)
 			}
-		case <-got:
-			got = nil
-			info := t.Info()
-			if info.Private != nil && *info.Private {
+		case info := <-cacheEvents:
+			if !accept(info, "cache") {
 				return
 			}
-			rec.Name = info.BestName()
-			rec.Resolved = true
-			rec.Size = t.Length()
-			rec.Kind = "Other"
-			rec.Files = nil
-			for _, f := range t.Files() {
-				name := f.Path()
-				lower := strings.ToLower(name)
-				video := false
-				for _, ext := range []string{".mkv", ".mp4", ".avi", ".webm", ".mov", ".m4v", ".ts"} {
-					if strings.HasSuffix(lower, ext) {
-						video = true
-						break
-					}
-				}
-				if video {
-					rec.Kind = "Video"
-				}
-				if len(rec.Files) < 20 {
-					rec.Files = append(rec.Files, name)
-				}
+		case <-got:
+			got = nil
+			if !accept(t.Info(), "peer") {
+				return
 			}
-			settleTimer = time.NewTimer(1500 * time.Millisecond)
-			settle = settleTimer.C
 		}
 	}
 	if parent.Err() != nil {
@@ -399,18 +480,36 @@ loop:
 	rec.Peers = len(uniqueIPs)
 	rec.Countries = countries
 	rec.CheckedAt = time.Now().UTC()
+	rec.NextAttempt = rec.CheckedAt.Add(retryDelay(rec.ResolveAttempts))
+	if rec.Resolved {
+		rec.NextAttempt = rec.CheckedAt.Add(30 * time.Minute)
+	}
 	if hasSeedEstimate {
 		rec.Seeds = countBloom(&seeds)
 	} else {
 		rec.Seeds = nil
 	}
 	stats := t.Stats()
-	payload := stats.BytesReadData.Int64()
 	s.d.mu.Lock()
 	if latest, exists := s.d.records[j.hash]; exists {
 		rec.LastSeen = latest.LastSeen
-		s.d.records[j.hash] = rec
 	}
-	s.d.state.PayloadBytes += payload
+	// A slow successful job must survive a newer sample evicting its unresolved
+	// row. Failed evicted jobs need no further retention.
+	if _, exists := s.d.records[j.hash]; exists || rec.Resolved {
+		s.d.records[j.hash] = rec
+		s.d.pruneLocked()
+	}
+	s.d.state.PayloadBytes += stats.BytesReadData.Int64()
+	s.d.state.Completed++
+	s.d.totalLookupTime += time.Since(started)
+	if !wasResolved && rec.Resolved {
+		s.d.state.Successes++
+		if rec.Source == "cache" {
+			s.d.state.CacheHits++
+		} else {
+			s.d.state.PeerHits++
+		}
+	}
 	s.d.mu.Unlock()
 }

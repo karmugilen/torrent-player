@@ -27,42 +27,55 @@ import (
 var page string
 
 type observation struct {
-	Hash      string         `json:"hash"`
-	Name      string         `json:"name"`
-	Kind      string         `json:"kind"`
-	Size      int64          `json:"size"`
-	Files     []string       `json:"files"`
-	Peers     int            `json:"peers"`
-	Seeds     *int           `json:"seeds"`
-	Countries map[string]int `json:"countries"`
-	FirstSeen time.Time      `json:"firstSeen"`
-	LastSeen  time.Time      `json:"lastSeen"`
-	CheckedAt time.Time      `json:"checkedAt"`
-	Resolved  bool           `json:"resolved"`
+	Hash            string         `json:"hash"`
+	Name            string         `json:"name"`
+	Kind            string         `json:"kind"`
+	Size            int64          `json:"size"`
+	Files           []string       `json:"files"`
+	Peers           int            `json:"peers"`
+	Seeds           *int           `json:"seeds"`
+	Countries       map[string]int `json:"countries"`
+	FirstSeen       time.Time      `json:"firstSeen"`
+	LastSeen        time.Time      `json:"lastSeen"`
+	CheckedAt       time.Time      `json:"checkedAt"`
+	Resolved        bool           `json:"resolved"`
+	ResolveAttempts int            `json:"resolveAttempts"`
+	NextAttempt     time.Time      `json:"nextAttempt"`
+	Source          string         `json:"source"`
+	ResolutionMS    int64          `json:"resolutionMs"`
 }
 type state struct {
-	Started       time.Time     `json:"started"`
-	Updated       time.Time     `json:"updated"`
-	Running       bool          `json:"running"`
-	Status        string        `json:"status"`
-	Queries       int           `json:"queries"`
-	Responses     int           `json:"responses"`
-	SamplingNodes int           `json:"samplingNodes"`
-	Hashes        int           `json:"hashes"`
-	Attempts      int           `json:"attempts"`
-	Resolved      int           `json:"resolved"`
-	PayloadBytes  int64         `json:"payloadBytes"`
-	Records       []observation `json:"records"`
+	Started         time.Time     `json:"started"`
+	Updated         time.Time     `json:"updated"`
+	Running         bool          `json:"running"`
+	Status          string        `json:"status"`
+	Queries         int           `json:"queries"`
+	Responses       int           `json:"responses"`
+	SamplingNodes   int           `json:"samplingNodes"`
+	Hashes          int           `json:"hashes"`
+	Attempts        int           `json:"attempts"`
+	Resolved        int           `json:"resolved"`
+	Active          int           `json:"active"`
+	Pending         int           `json:"pending"`
+	Workers         int           `json:"workers"`
+	Completed       int           `json:"completed"`
+	Successes       int           `json:"successes"`
+	CacheHits       int           `json:"cacheHits"`
+	PeerHits        int           `json:"peerHits"`
+	AverageLookupMS int64         `json:"averageLookupMs"`
+	PayloadBytes    int64         `json:"payloadBytes"`
+	Records         []observation `json:"records"`
 }
 type dashboard struct {
-	mu        sync.Mutex
-	state     state
-	records   map[string]observation
-	cachePath string
-	geo       *maxminddb.Reader
-	cancel    context.CancelFunc
-	done      chan struct{}
-	control   sync.Mutex
+	mu              sync.Mutex
+	state           state
+	records         map[string]observation
+	cachePath       string
+	geo             *maxminddb.Reader
+	cancel          context.CancelFunc
+	done            chan struct{}
+	control         sync.Mutex
+	totalLookupTime time.Duration
 }
 
 func newDashboard(cachePath string, geo *maxminddb.Reader) *dashboard {
@@ -104,6 +117,11 @@ func (d *dashboard) pruneLocked() {
 		if all[i].Resolved != all[j].Resolved {
 			return all[i].Resolved
 		}
+		// Preserve useful unresolved swarms for their next retry instead of
+		// letting a burst of untested hashes discard every reachable candidate.
+		if (all[i].Peers > 0) != (all[j].Peers > 0) {
+			return all[i].Peers > 0
+		}
 		return all[i].LastSeen.After(all[j].LastSeen)
 	})
 	for _, r := range all[600:] {
@@ -116,6 +134,9 @@ func (d *dashboard) snapshot() state {
 	s := d.state
 	s.Updated = time.Now().UTC()
 	s.Hashes = len(d.records)
+	if s.Completed > 0 {
+		s.AverageLookupMS = d.totalLookupTime.Milliseconds() / int64(s.Completed)
+	}
 	s.Records = make([]observation, 0, len(d.records))
 	s.Resolved = 0
 	for _, r := range d.records {
