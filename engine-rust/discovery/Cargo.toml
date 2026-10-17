@@ -1,0 +1,20 @@
+[package]
+name = "webtor-discovery"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "webtor_discovery"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+libc = "0.2"
+memmap2 = "0.9"
+ureq = { version = "2.12", default-features = true, features = ["tls"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

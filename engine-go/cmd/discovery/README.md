@@ -31,23 +31,33 @@ hashes. It races up to three recently observed source nodes with the broader
 DHT traversal, so a slow source cannot block peer discovery. BEP 9 metadata and
 public HTTPS `.torrent` caches race to supply names. Cache replies must match the
 exact SHA-1 infohash; private torrents, HTML responses, oversized metadata and
-invalid sizes are rejected. Movie payload requests remain disabled.
+invalid sizes are rejected. A local `torrents.csv` dump (~175MB, from the torrents-csv project) is the main
+fast name path: hash→name lookup with no peer upload. It refreshes about once a
+day. A paced remote catalog API still adds browseable names. Already-resolved
+hashes are never re-checked. Name-resolve scheduling scores unresolved hashes by
+seeds, peers, repeated DHT samples, and real retry overdue time so quiet noise
+does not starve hot swarms. The live names/min metric counts only catalog, cache,
+and peer wins (dump fills of already-sampled hashes are shown separately). DHT
+sampling stays quiet for peer geography only. Movie payload download and upload
+stay disabled. The JSON store has no count cap. The detail drawer can copy a
+magnet link for download in another client.
 
 The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
-Twenty-four asynchronous jobs run at once across the Go runtime's available CPU cores.
-Sixteen sampling slots refill independently of slow nodes. Random routing lookups
-refresh discovery every three seconds, and responsive nodes without BEP 51 can
-still supply new routes. Advertised sampling intervals remain respected.
-Repeatedly sampled hashes and reachable peers receive priority for name lookup.
-A shared DHT limit of 128 sends/second and peer dial limit of 48/second bound network
-work. HTTP connections are reused, with at most three requests per cache source.
-Names appear immediately; availability counts finish settling afterward. Deadlines
-are twelve seconds for a job and four seconds for HTTP cache races. Losing HTTP
-requests are canceled and joined before a job finishes. Completed empty lookups
-release their slot as soon as cache and source checks finish. Lookups with no
-peer sightings or active connections stop after eight seconds and remain eligible
-for scheduled retries; live peer lookups retain the twelve-second deadline.
+Twenty-four cache workers and six peer workers stay small on purpose so the
+uplink is not clogged. Cache workers only query HTTPS `.torrent` mirrors and
+release immediately on a miss. Peer workers handle BEP 9 for cache misses only.
+Four sampling slots refill independently of slow nodes. Random routing lookups
+refresh discovery every three seconds. Advertised sampling intervals remain
+respected. A DHT limit of 24 sends/second and peer dial limit of 12/second keep
+traffic light. HTTP connections are reused, with up to 12 requests per cache
+source. Challenge HTML and ordinary misses leave mirrors healthy; only transport
+failures and rate limits back them off. Names appear immediately from catalog or
+cache hits. Cache deadlines are 2.5 seconds. Losing HTTP requests are canceled
+and joined before a peer job finishes. Completed empty lookups release their
+slot as soon as cache and source checks finish. Lookups with no peer sightings
+or active connections stop after eight seconds and remain eligible for scheduled
+retries; live peer lookups retain the twelve-second deadline.
 
 A bounded RAM cache retains up to 24 peer addresses for each of 2,048 swarms for
 five minutes. Retries can dial these hints immediately while DHT checks run.
@@ -59,9 +69,9 @@ Unresolved hashes retry automatically after 30 seconds, doubling to at most 15
 minutes; retries do not require another sample. One in four dispatches is reserved
 for due retries. Reachable unresolved swarms survive pruning ahead of untested
 hashes. Cached names are reused and their availability is checked every 30 minutes.
-The page shows active/due jobs, new names per minute, cache/peer wins, successful
-names versus completed jobs, and mean lookup time. These counters describe the
-current process; retained names can include earlier sessions.
+The page shows active/due jobs, new names per minute, catalog/cache/peer wins,
+successful names versus completed jobs, and mean lookup time. These counters
+describe the current process; retained names can include earlier sessions.
 
 This is primarily network-bound work. Go goroutines already run concurrently and
 use multiple CPU cores. A Rust rewrite, GPU compute or deep packet inspection is
@@ -69,16 +79,16 @@ not required for this resolver. Payload download/upload is disabled and the
 storage implementation independently rejects movie-data reads and writes. The
 page reports the actual torrent payload counter.
 
-Observations are bounded to 10,000 retained hashes, favoring resolved names.
-The page labels this as retained torrents and displays its capacity separately
-from incoming hash samples (which can contain repeats), so reaching the retention
-limit is not confused with discovery stopping. Only
-torrent metadata and aggregate country counts are cached, under
-`~/.cache/torrent-player/discovery.json` (or `$XDG_CACHE_HOME`). Raw peer addresses
-are transient and are not exposed by the page or saved in that cache. Cache
-loading discards observations older than 24 hours. Restarting the collector
-retains names; fresh network checks update availability. An observation is not
-proof that someone downloaded or watched a file.
+The JSON store has no count cap: every named and pending observation is retained
+until age expiry. Named rows reload for 30 days; unresolved DHT noise expires
+after 24 hours. Storage is a plain JSON file only (no SQL) under
+`~/.cache/torrent-player/discovery.json` (or `$XDG_CACHE_HOME`). A local copy of
+the collaborative `torrents.csv` dump (~175MB, refreshed about monthly) lives
+beside it as `torrents.csv` and resolves DHT hashes to names with no peer upload.
+The remote torrents-csv search API still seeds browseable names. Raw peer
+addresses are transient and are not exposed or saved. The page can search stored
+titles, show today/week trending, rank by seeding, and hide unlocated countries.
+An observation is not proof that someone downloaded or watched a file.
 
 “Top 10 observed” ranks the matching local observations by distinct peer IPs
 found per torrent. A peer can occur in multiple torrents. DHT samples do not
@@ -120,3 +130,10 @@ throughput and actual named results are measured separately. Tests additionally
 cover prompt completion of an empty real local DHT lookup and hint-cache bounds,
 expiry, deduplication and address isolation. Browser checks include unknown
 country labels so an unlocated peer cannot blank the result table.
+
+After adding the paced torrents-csv catalog seeder, a 60-second live window
+recorded about 14,000 new catalog names/minute before pacing was corrected to
+target 1,000 names/minute and to stop filling beyond 70% of the 10,000-slot
+retention so DHT samples still fit. Cache and peer resolvers remain active for
+hashes the catalog does not name. Catalog ingest unit tests cover naming,
+seed/peer counts, video kind detection and duplicate suppression.

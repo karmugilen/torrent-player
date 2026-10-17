@@ -6,7 +6,20 @@ import (
 	"github.com/anacrolix/dht/v2/krpc"
 )
 
-const resolverWorkers = 24
+// Cache workers only hit HTTP .torrent mirrors. Peer workers finish BEP 9 for
+// hashes the mirrors miss. Keep both pools small so naming leans on
+// torrents-csv and does not flood the uplink with peer handshakes.
+const cacheWorkers = 48
+const peerWorkers = 8
+const resolverWorkers = cacheWorkers + peerWorkers
+
+type jobKind int
+
+const (
+	// Zero-value jobs keep the full peer path so unit tests remain valid.
+	jobPeer jobKind = iota
+	jobCache
+)
 
 // Keep source hints separate from persistent observations. Peer/node addresses
 // never enter the webpage or its JSON cache.
@@ -16,11 +29,11 @@ func (s *sampler) rememberSource(hash string, node krpc.NodeInfo) {
 	if s.sources == nil {
 		s.sources = make(map[string][]krpc.NodeInfo)
 	}
-	if len(s.sources) >= retainedTorrentLimit*2 {
+	if len(s.sources) >= sourceHintLimit {
 		// Hints are opportunistic; full DHT traversal works without them.
 		for key := range s.sources {
 			delete(s.sources, key)
-			if len(s.sources) < retainedTorrentLimit*3/2 {
+			if len(s.sources) < sourceHintLimit*3/4 {
 				break
 			}
 		}
@@ -41,41 +54,102 @@ func dueAt(r observation) time.Time {
 		return r.NextAttempt
 	}
 	if !r.CheckedAt.IsZero() {
-		if r.Resolved {
-			return r.CheckedAt.Add(30 * time.Minute)
-		}
 		return r.CheckedAt.Add(30 * time.Second)
 	}
 	return r.FirstSeen
 }
 
+// resolvePriority ranks unresolved hashes for naming. Higher scores go first:
+// seed/peer signal, repeated DHT samples, fewer failed attempts, and overdue retries.
+func resolvePriority(r observation, now time.Time) int64 {
+	score := int64(0)
+	if r.Seeds != nil && *r.Seeds > 0 {
+		score += int64(*r.Seeds) * 100
+	}
+	if r.Peers > 0 {
+		score += int64(r.Peers) * 40
+	}
+	hits := r.SampleHits
+	if hits > 20 {
+		hits = 20
+	}
+	score += int64(hits) * 25
+	score -= int64(r.ResolveAttempts) * 20
+	// Overdue bonus only for real retries. Fresh rows use FirstSeen as dueAt, and
+	// aging that would wrongly beat peer-rich newer samples.
+	if r.ResolveAttempts > 0 || !r.CheckedAt.IsZero() {
+		if overdue := now.Sub(dueAt(r)); overdue > 0 {
+			secs := int(overdue / time.Second)
+			if secs > 3600 {
+				secs = 3600
+			}
+			score += int64(secs)
+		}
+	}
+	return score
+}
+
+func betterResolveCandidate(a, b observation, now time.Time) bool {
+	pa, pb := resolvePriority(a, now), resolvePriority(b, now)
+	if pa != pb {
+		return pa > pb
+	}
+	da, db := dueAt(a), dueAt(b)
+	if !da.Equal(db) {
+		return da.Before(db)
+	}
+	return a.Hash < b.Hash
+}
+
 func (s *sampler) nextJob(now time.Time) (discoveryJob, bool) {
+	return s.nextJobOf(now, jobPeer)
+}
+
+func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 	s.d.mu.Lock()
 	defer s.d.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.cacheTried == nil {
+		s.cacheTried = map[string]bool{}
+	}
 	var fresh, retry *observation
 	pending := 0
 	better := func(a, b observation) bool {
-		if (a.Peers > 0) != (b.Peers > 0) {
-			return a.Peers > 0
-		}
-		// Repeatedly sampled hashes are useful candidates, without implying a
-		// worldwide popularity estimate.
-		if (a.SampleHits > 1) != (b.SampleHits > 1) {
-			return a.SampleHits > 1
-		}
-		if !dueAt(a).Equal(dueAt(b)) {
-			return dueAt(a).Before(dueAt(b))
-		}
-		return a.Hash < b.Hash
+		return betterResolveCandidate(a, b, now)
 	}
-	for _, r := range s.d.records {
+	// Only walk unresolved hashes — named dump/catalog rows stay out of the queue.
+	for hash := range s.d.pendingSet {
+		r, ok := s.d.records[hash]
+		if !ok || r.Resolved {
+			delete(s.d.pendingSet, hash)
+			continue
+		}
 		if s.inflight[r.Hash] || now.Before(dueAt(r)) {
 			continue
 		}
+		tried := s.cacheTried[r.Hash]
+		switch kind {
+		case jobCache:
+			// After a miss the hash is marked tried so peer workers continue
+			// without a hot cache loop. When its retry becomes due, mirrors get
+			// another chance.
+			if tried {
+				if now.Before(dueAt(r)) {
+					continue
+				}
+				delete(s.cacheTried, r.Hash)
+				tried = false
+			}
+		case jobPeer:
+			// Peer workers handle cache misses and reachable unresolved swarms.
+			// Untested hashes stay with the cache pool first.
+			if !tried && r.Peers == 0 && r.ResolveAttempts == 0 {
+				continue
+			}
+		}
 		pending++
-		if r.ResolveAttempts == 0 && !r.Resolved && r.CheckedAt.IsZero() {
+		if r.ResolveAttempts == 0 && r.CheckedAt.IsZero() {
 			if fresh == nil || better(r, *fresh) {
 				copy := r
 				fresh = &copy
@@ -85,7 +159,9 @@ func (s *sampler) nextJob(now time.Time) (discoveryJob, bool) {
 			retry = &copy
 		}
 	}
-	s.d.state.Pending = pending
+	if kind == jobPeer {
+		s.d.state.Pending = pending
+	}
 	chosen := fresh
 	// Reserve one out of four dispatches for retries so a steady flow of new
 	// samples cannot starve previously observed torrents with available peers.
@@ -106,8 +182,10 @@ func (s *sampler) nextJob(now time.Time) (discoveryJob, bool) {
 	chosen.NextAttempt = now.Add(retryDelay(chosen.ResolveAttempts))
 	s.d.records[chosen.Hash] = *chosen
 	s.d.state.Active++
-	s.d.state.Pending--
-	return discoveryJob{hash: chosen.Hash, sources: append([]krpc.NodeInfo(nil), s.sources[chosen.Hash]...)}, true
+	if kind == jobPeer {
+		s.d.state.Pending--
+	}
+	return discoveryJob{hash: chosen.Hash, sources: append([]krpc.NodeInfo(nil), s.sources[chosen.Hash]...), kind: kind}, true
 }
 
 func (s *sampler) releaseJob(hash string) {

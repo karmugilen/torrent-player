@@ -104,11 +104,56 @@ func TestCacheMissDoesNotDisableSourceAndOutageBacksOff(t *testing.T) {
 	}
 }
 
+func TestHTMLCacheBodyIsHealthyMiss(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte("<!DOCTYPE html><html><body>challenge</body></html>"))
+	}))
+	defer server.Close()
+	c := newMetadataCaches([]string{server.URL + "/{hash}"})
+	defer c.close()
+	_, hash := torrentFixture(t, false)
+	if c.fetch(context.Background(), hash) != nil {
+		t.Fatal("HTML body accepted as metadata")
+	}
+	if c.fetch(context.Background(), hash) != nil {
+		t.Fatal("HTML body accepted on retry")
+	}
+	if calls != 2 {
+		t.Fatal("challenge page disabled the mirror")
+	}
+}
+
+func TestCacheWorkerResolvesWithoutPeerPath(t *testing.T) {
+	blob, hash := torrentFixture(t, false)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(blob) }))
+	defer server.Close()
+	d := testDashboard(t)
+	h := hash.HexString()
+	d.records[h] = observation{Hash: h, FirstSeen: time.Now(), LastSeen: time.Now()}
+	s := &sampler{d: d, caches: newMetadataCaches([]string{server.URL + "/{hash}"}), cacheTried: map[string]bool{}}
+	defer s.caches.close()
+	start := time.Now()
+	s.resolve(context.Background(), discoveryJob{hash: h, kind: jobCache})
+	if time.Since(start) > time.Second {
+		t.Fatal("cache worker waited on peer path")
+	}
+	snap := d.snapshot()
+	if snap.Successes != 1 || snap.CacheHits != 1 || snap.Resolved != 1 {
+		t.Fatalf("cache worker missed the name: %+v", snap)
+	}
+	if !s.cacheTried[h] {
+		t.Fatal("cache attempt was not recorded")
+	}
+}
+
 func TestRetryRunsWithoutNewSampleAndNeverDuplicatesActiveHash(t *testing.T) {
 	d := testDashboard(t)
 	h := strings.Repeat("e", 40)
 	now := time.Now()
 	d.records[h] = observation{Hash: h, FirstSeen: now.Add(-time.Hour), LastSeen: now, ResolveAttempts: 1, NextAttempt: now.Add(-time.Second)}
+	d.pendingSet[h] = struct{}{}
 	s := &sampler{d: d, inflight: map[string]bool{}}
 	j, ok := s.nextJob(now)
 	if !ok || j.hash != h {
@@ -124,6 +169,32 @@ func TestRetryRunsWithoutNewSampleAndNeverDuplicatesActiveHash(t *testing.T) {
 	}
 }
 
+func TestResolvedHashesAreNeverRescheduled(t *testing.T) {
+	d := testDashboard(t)
+	now := time.Now()
+	named := strings.Repeat("c", 40)
+	pending := strings.Repeat("d", 40)
+	d.records[named] = observation{
+		Hash: named, Name: "Already named.mkv", Resolved: true, Source: "catalog",
+		Peers: 40, Seeds: intPtr(30), CheckedAt: now.Add(-time.Hour),
+		NextAttempt: now.Add(-time.Second), FirstSeen: now.Add(-2 * time.Hour), LastSeen: now,
+	}
+	d.records[pending] = observation{Hash: pending, FirstSeen: now.Add(-time.Minute), LastSeen: now}
+	d.pendingSet[pending] = struct{}{}
+	s := &sampler{d: d, cacheTried: map[string]bool{}}
+	job, ok := s.nextJobOf(now, jobCache)
+	if !ok || job.hash != pending {
+		t.Fatalf("cache workers should only take unresolved hashes, got %#v ok=%v", job, ok)
+	}
+	s.releaseJob(job.hash)
+	job, ok = s.nextJobOf(now, jobPeer)
+	if ok {
+		t.Fatalf("peer workers must not recheck named torrents, got %s", job.hash)
+	}
+}
+
+func intPtr(n int) *int { return &n }
+
 func TestRetryReservationSurvivesEarlyFailureAndFreshWorkCannotStarveRetries(t *testing.T) {
 	d := testDashboard(t)
 	now := time.Now()
@@ -131,18 +202,20 @@ func TestRetryReservationSurvivesEarlyFailureAndFreshWorkCannotStarveRetries(t *
 	freshHash := strings.Repeat("b", 40)
 	d.records[retryHash] = observation{Hash: retryHash, ResolveAttempts: 1, FirstSeen: now.Add(-time.Hour), NextAttempt: now.Add(-time.Second)}
 	d.records[freshHash] = observation{Hash: freshHash, FirstSeen: now.Add(-time.Minute)}
-	s := &sampler{d: d}
-	j, ok := s.nextJob(now)
+	d.pendingSet[retryHash] = struct{}{}
+	d.pendingSet[freshHash] = struct{}{}
+	s := &sampler{d: d, cacheTried: map[string]bool{}}
+	j, ok := s.nextJobOf(now, jobPeer)
 	if !ok || j.hash != retryHash {
 		t.Fatal("new samples starved a due retry")
 	}
 	s.releaseJob(j.hash) // Simulate network/client failure before publishing.
-	j, ok = s.nextJob(now)
+	j, ok = s.nextJobOf(now, jobCache)
 	if !ok || j.hash != freshHash {
 		t.Fatal("early failure caused immediate retry instead of fresh work")
 	}
 	s.releaseJob(j.hash)
-	if _, ok := s.nextJob(now); ok {
+	if _, ok := s.nextJobOf(now, jobPeer); ok {
 		t.Fatal("failed jobs ignored their reserved backoff")
 	}
 	if d.state.Active != 0 {
@@ -152,15 +225,29 @@ func TestRetryReservationSurvivesEarlyFailureAndFreshWorkCannotStarveRetries(t *
 
 func TestRetentionKeepsReachableUnresolvedSwarmsForRetry(t *testing.T) {
 	d := testDashboard(t)
-	for i := 0; i < retainedTorrentLimit; i++ {
-		h := strings.Repeat("0", 36) + fmt.Sprintf("%04x", i)
+	for i := 0; i < 1000; i++ {
+		h := fmt.Sprintf("%040x", i)
 		d.records[h] = observation{Hash: h, LastSeen: time.Now()}
 	}
 	h := strings.Repeat("d", 40)
 	d.records[h] = observation{Hash: h, Peers: 3, LastSeen: time.Now().Add(-time.Hour)}
 	d.pruneLocked()
 	if _, ok := d.records[h]; !ok {
-		t.Fatal("new sample evicted a reachable pending torrent before its retry")
+		t.Fatal("reachable pending torrent was dropped")
+	}
+}
+
+func TestResolvePriorityPrefersSeedsPeersAndRepeatedSamples(t *testing.T) {
+	now := time.Now()
+	low := observation{Hash: strings.Repeat("1", 40), FirstSeen: now.Add(-time.Hour), SampleHits: 1}
+	high := observation{Hash: strings.Repeat("2", 40), FirstSeen: now.Add(-time.Minute), SampleHits: 5, Peers: 20}
+	seeds := 50
+	hot := observation{Hash: strings.Repeat("3", 40), FirstSeen: now.Add(-time.Minute), SampleHits: 2, Peers: 5, Seeds: &seeds}
+	if !betterResolveCandidate(high, low, now) {
+		t.Fatal("repeated/peer-rich hash should outrank a quiet sample")
+	}
+	if !betterResolveCandidate(hot, high, now) {
+		t.Fatal("seed-rich hash should outrank peer-only signal")
 	}
 }
 
@@ -170,8 +257,10 @@ func TestRepeatedSamplesReceiveNameLookupPriority(t *testing.T) {
 	single, repeated := strings.Repeat("1", 40), strings.Repeat("2", 40)
 	d.records[single] = observation{Hash: single, FirstSeen: now.Add(-time.Hour), SampleHits: 1}
 	d.records[repeated] = observation{Hash: repeated, FirstSeen: now.Add(-time.Minute), SampleHits: 3}
-	s := &sampler{d: d}
-	job, ok := s.nextJob(now)
+	d.pendingSet[single] = struct{}{}
+	d.pendingSet[repeated] = struct{}{}
+	s := &sampler{d: d, cacheTried: map[string]bool{}}
+	job, ok := s.nextJobOf(now, jobCache)
 	if !ok || job.hash != repeated {
 		t.Fatal("repeatedly observed candidate lost priority to an older single sample")
 	}

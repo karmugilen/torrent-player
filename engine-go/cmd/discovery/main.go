@@ -26,7 +26,12 @@ import (
 //go:embed ui.html
 var page string
 
-const retainedTorrentLimit = 10_000
+// retainedTorrentLimit 0 means the JSON store keeps every observation (no count cap).
+// Age expiry on load still drops stale unresolved rows and old named rows.
+const retainedTorrentLimit = 0
+
+// Bound opportunistic DHT source hints so they cannot grow without limit.
+const sourceHintLimit = 20_000
 
 type observation struct {
 	Hash            string         `json:"hash"`
@@ -61,24 +66,40 @@ type state struct {
 	HashSamples     int64         `json:"hashSamples"`
 	Attempts        int           `json:"attempts"`
 	Resolved        int           `json:"resolved"`
+	Unresolved      int           `json:"unresolved"`
 	Active          int           `json:"active"`
 	Pending         int           `json:"pending"`
 	Workers         int           `json:"workers"`
 	Completed       int           `json:"completed"`
 	Successes       int           `json:"successes"`
 	CacheHits       int           `json:"cacheHits"`
+	CatalogHits     int           `json:"catalogHits"`
+	DumpHits        int           `json:"dumpHits"`
+	DumpLookups     int           `json:"dumpLookups"`
 	PeerHintUses    int           `json:"peerHintUses"`
 	EmptyLookups    int           `json:"emptyLookups"`
 	PeerHits        int           `json:"peerHits"`
 	AverageLookupMS int64         `json:"averageLookupMs"`
 	PayloadBytes    int64         `json:"payloadBytes"`
-	Records         []observation `json:"records"`
+	DumpReady       bool           `json:"dumpReady"`
+	DumpRows        int            `json:"dumpRows"`
+	MatchCount      int            `json:"matchCount"`
+	CountryTotals   map[string]int `json:"countryTotals"`
+	Records         []observation  `json:"records"`
 }
 type dashboard struct {
-	mu              sync.Mutex
+	mu              sync.RWMutex
 	state           state
 	records         map[string]observation
+	// pendingSet holds unresolved hashes for O(pending) job picks instead of
+	// scanning every named row in the unlimited store.
+	pendingSet      map[string]struct{}
+	searchTok       map[string][]string
+	searchCommon    map[string]bool
 	cachePath       string
+	dumpPath        string
+	dumpMu          sync.RWMutex
+	dump            *dumpIndex
 	geo             *maxminddb.Reader
 	cancel          context.CancelFunc
 	done            chan struct{}
@@ -86,15 +107,44 @@ type dashboard struct {
 	totalLookupTime time.Duration
 }
 
+const namedRetention = 30 * 24 * time.Hour
+const unresolvedRetention = 24 * time.Hour
+
 func newDashboard(cachePath string, geo *maxminddb.Reader) *dashboard {
-	d := &dashboard{records: map[string]observation{}, cachePath: cachePath, geo: geo, state: state{Started: time.Now().UTC(), Status: "Starting discovery"}}
+	d := &dashboard{
+		records:      map[string]observation{},
+		pendingSet:   map[string]struct{}{},
+		searchTok:    map[string][]string{},
+		searchCommon: map[string]bool{},
+		cachePath:    cachePath,
+		dumpPath:     filepath.Join(filepath.Dir(cachePath), "torrents.csv"),
+		geo:          geo,
+		state:        state{Started: time.Now().UTC(), Status: "Starting discovery"},
+	}
 	if b, e := os.ReadFile(cachePath); e == nil {
 		var saved []observation
 		if json.Unmarshal(b, &saved) == nil {
 			now := time.Now()
 			for _, r := range saved {
-				if validHash(r.Hash) && now.Sub(r.LastSeen) < 24*time.Hour {
+				if !validHash(r.Hash) {
+					continue
+				}
+				// Named rows stay in the JSON store for weeks so search and
+				// trending survive restarts. Unresolved DHT noise expires sooner.
+				keepFor := unresolvedRetention
+				if r.Resolved && strings.TrimSpace(r.Name) != "" {
+					keepFor = namedRetention
+				}
+				if now.Sub(r.LastSeen) < keepFor {
+					if r.Countries == nil {
+						r.Countries = map[string]int{}
+					}
 					d.records[r.Hash] = r
+					if !r.Resolved {
+						d.pendingSet[r.Hash] = struct{}{}
+					} else if strings.TrimSpace(r.Name) != "" {
+						d.indexNameLocked(r.Hash, r.Name)
+					}
 				}
 			}
 		}
@@ -114,6 +164,11 @@ func validHash(h string) bool {
 	return true
 }
 func (d *dashboard) pruneLocked() {
+	// No count cap: the store grows with discovered and catalog/dump names.
+	// Invalid hashes are rejected on load; age expiry runs in newDashboard.
+	if retainedTorrentLimit <= 0 {
+		return
+	}
 	if len(d.records) <= retainedTorrentLimit {
 		return
 	}
@@ -125,8 +180,6 @@ func (d *dashboard) pruneLocked() {
 		if all[i].Resolved != all[j].Resolved {
 			return all[i].Resolved
 		}
-		// Preserve useful unresolved swarms for their next retry instead of
-		// letting a burst of untested hashes discard every reachable candidate.
 		if (all[i].Peers > 0) != (all[j].Peers > 0) {
 			return all[i].Peers > 0
 		}
@@ -137,55 +190,9 @@ func (d *dashboard) pruneLocked() {
 	}
 }
 func (d *dashboard) snapshot() state {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	s := d.state
-	s.Updated = time.Now().UTC()
-	s.Hashes = len(d.records)
-	s.RetentionLimit = retainedTorrentLimit
-	if s.Completed > 0 {
-		s.AverageLookupMS = d.totalLookupTime.Milliseconds() / int64(s.Completed)
-	}
-	s.Records = make([]observation, 0, len(d.records))
-	s.Resolved = 0
-	for _, r := range d.records {
-		if r.Resolved {
-			s.Resolved++
-		}
-		r.Files = append([]string(nil), r.Files...)
-		countryCopy := map[string]int{}
-		for c, n := range r.Countries {
-			countryCopy[c] = n
-		}
-		r.Countries = countryCopy
-		s.Records = append(s.Records, r)
-	}
-	sort.Slice(s.Records, func(i, j int) bool {
-		a, b := s.Records[i], s.Records[j]
-		if a.Peers != b.Peers {
-			return a.Peers > b.Peers
-		}
-		if a.Resolved != b.Resolved {
-			return a.Resolved
-		}
-		return a.LastSeen.After(b.LastSeen)
-	})
-	return s
+	return d.snapshotForAPI(viewQuery{Limit: apiDefaultLimit, Sort: "trending"})
 }
-func (d *dashboard) persist() {
-	s := d.snapshot()
-	b, e := json.Marshal(s.Records)
-	if e != nil {
-		return
-	}
-	if os.MkdirAll(filepath.Dir(d.cachePath), 0700) != nil {
-		return
-	}
-	tmp := d.cachePath + ".tmp"
-	if os.WriteFile(tmp, b, 0600) == nil {
-		_ = os.Rename(tmp, d.cachePath)
-	}
-}
+func (d *dashboard) persist() { d.persistAll() }
 func (d *dashboard) setStatus(s string) { d.mu.Lock(); d.state.Status = s; d.mu.Unlock() }
 func (d *dashboard) setRunning(parent context.Context, on bool) {
 	d.control.Lock()
@@ -254,7 +261,7 @@ func (d *dashboard) handler(world []byte) http.Handler {
 			w.WriteHeader(405)
 			return
 		}
-		b, _ := json.Marshal(d.snapshot())
+		b, _ := json.Marshal(d.snapshotForAPI(viewQuery{Limit: apiDefaultLimit, Sort: "trending"}))
 		html := strings.ReplaceAll(page, "__WORLD_MAP__", string(world))
 		html = strings.ReplaceAll(html, "__INITIAL_STATE__", string(b))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -268,7 +275,7 @@ func (d *dashboard) handler(world []byte) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(d.snapshot())
+		_ = json.NewEncoder(w).Encode(d.snapshotForAPI(parseViewQuery(r.URL.Query())))
 	})
 	mux.HandleFunc("/api/control", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -293,7 +300,7 @@ func (d *dashboard) handler(world []byte) http.Handler {
 		}
 		d.setRunning(context.Background(), *body.Running)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(d.snapshot())
+		_ = json.NewEncoder(w).Encode(d.snapshotForAPI(viewQuery{Limit: apiDefaultLimit, Sort: "trending"}))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")

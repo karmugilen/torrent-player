@@ -85,22 +85,49 @@ func TestStateEndpointAndInvalidControl(t *testing.T) {
 		}
 	}
 }
-func TestBoundedCacheRetainsResolvedNamesAndDropsInvalidHashes(t *testing.T) {
+func TestJSONStoreDropsInvalidHashesAndKeepsNamedRows(t *testing.T) {
 	d := testDashboard(t)
 	old := time.Now().Add(-time.Hour)
-	for i := 0; i < retainedTorrentLimit+200; i++ {
+	for i := 0; i < 200; i++ {
 		h := fmt.Sprintf("%040x", i)
 		d.records[h] = observation{Hash: h, LastSeen: time.Now()}
 	}
 	h := strings.Repeat("c", 40)
 	d.records[h] = observation{Hash: h, Name: "Known video", Resolved: true, LastSeen: old}
+	d.records["not-a-hash"] = observation{Hash: "not-a-hash", Name: "bad", Resolved: true, LastSeen: time.Now()}
 	d.pruneLocked()
-	if len(d.records) != retainedTorrentLimit || !d.records[h].Resolved {
-		t.Fatal("cache evicted useful names or exceeded bound")
+	if !d.records[h].Resolved {
+		t.Fatal("named row was dropped")
 	}
 	d.persist()
-	if len(newDashboard(d.cachePath, nil).records) != retainedTorrentLimit {
-		t.Fatal("persisted cache changed")
+	restored := newDashboard(d.cachePath, nil)
+	if _, ok := restored.records[h]; !ok {
+		t.Fatal("named row missing after reload")
+	}
+	if _, ok := restored.records["not-a-hash"]; ok {
+		t.Fatal("invalid hash survived reload")
+	}
+}
+
+func TestJSONStoreKeepsNamedRowsLongerThanUnresolved(t *testing.T) {
+	d := testDashboard(t)
+	named := strings.Repeat("d", 40)
+	stale := strings.Repeat("e", 40)
+	freshUnresolved := strings.Repeat("f", 40)
+	now := time.Now()
+	d.records[named] = observation{Hash: named, Name: "Stored show", Resolved: true, Source: "catalog", FirstSeen: now.Add(-10 * 24 * time.Hour), LastSeen: now.Add(-10 * 24 * time.Hour)}
+	d.records[stale] = observation{Hash: stale, FirstSeen: now.Add(-48 * time.Hour), LastSeen: now.Add(-48 * time.Hour)}
+	d.records[freshUnresolved] = observation{Hash: freshUnresolved, FirstSeen: now.Add(-time.Hour), LastSeen: now.Add(-time.Hour)}
+	d.persist()
+	restored := newDashboard(d.cachePath, nil)
+	if _, ok := restored.records[named]; !ok {
+		t.Fatal("named JSON row was discarded before thirty days")
+	}
+	if _, ok := restored.records[stale]; ok {
+		t.Fatal("unresolved JSON noise survived beyond a day")
+	}
+	if _, ok := restored.records[freshUnresolved]; !ok {
+		t.Fatal("fresh unresolved row should remain for a day")
 	}
 }
 func TestEmptyBloomIsZeroAndUnsupportedLocationsRemainUnknown(t *testing.T) {
@@ -115,7 +142,7 @@ func TestEmptyBloomIsZeroAndUnsupportedLocationsRemainUnknown(t *testing.T) {
 	}
 }
 
-func TestDiscoveryGrowsPastSixHundredAndReportsCapacity(t *testing.T) {
+func TestDiscoveryGrowsPastSixHundredAndReportsUnlimited(t *testing.T) {
 	d := testDashboard(t)
 	for i := 0; i < 1000; i++ {
 		h := fmt.Sprintf("%040x", i)
@@ -125,7 +152,7 @@ func TestDiscoveryGrowsPastSixHundredAndReportsCapacity(t *testing.T) {
 	if d.snapshot().Hashes != 1000 {
 		t.Fatal("discovery count is still capped at 600")
 	}
-	if d.snapshot().RetentionLimit != retainedTorrentLimit {
-		t.Fatal("page cannot explain its retention capacity")
+	if d.snapshot().RetentionLimit != 0 {
+		t.Fatal("page should report unlimited retention as 0")
 	}
 }

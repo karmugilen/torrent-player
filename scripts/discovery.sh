@@ -16,7 +16,17 @@ running() {
 case "${1:-start}" in
   start)
     if running; then echo "$local_url"; exit 0; fi
-    (cd "$repo_dir/engine-go" && go build -tags=nosqlite,noboltdb -o "$bin_file" ./cmd/discovery)
+    # Fast dump/catalog path: Rust mmap index + HTTP (rustdump tag). Falls back
+    # to pure Go when the staticlib is missing.
+    rust_lib="$repo_dir/engine-rust/discovery/target/release/libwebtor_discovery.a"
+    build_tags="nosqlite,noboltdb"
+    if command -v cargo >/dev/null; then
+      (cd "$repo_dir/engine-rust/discovery" && cargo build --release)
+      if [[ -f "$rust_lib" ]]; then
+        build_tags="nosqlite,noboltdb,rustdump"
+      fi
+    fi
+    (cd "$repo_dir/engine-go" && go build -tags="$build_tags" -o "$bin_file" ./cmd/discovery)
     if command -v systemd-run > /dev/null && systemd-run --user --quiet --collect \
       --unit=torrent-player-discovery \
       --property=Restart=on-failure --property=RestartSec=3 \
@@ -28,9 +38,10 @@ case "${1:-start}" in
       nohup setsid "$bin_file" --assets "$repo_dir/android/app/src/main/assets" --cache "$cache_dir/discovery.json" < /dev/null > "$cache_dir/discovery.log" 2>&1 &
       echo "$!" > "$pid_file"
     fi
-    for attempt in {1..30}; do
-      if curl --silent --fail "$local_url/api/state" > /dev/null; then echo "$local_url"; exit 0; fi
-      sleep 0.2
+    # Large discovery.json can take tens of seconds to load before /api/state answers.
+    for attempt in {1..90}; do
+      if curl --silent --fail --max-time 5 "$local_url/api/state?limit=1" > /dev/null; then echo "$local_url"; exit 0; fi
+      sleep 1
     done
     echo "Dashboard has not become ready. See $cache_dir/discovery.log" >&2; exit 1
     ;;

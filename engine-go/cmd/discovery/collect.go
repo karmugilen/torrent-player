@@ -70,6 +70,7 @@ func countBloom(b *krpc.ScrapeBloomFilter) *int {
 type discoveryJob struct {
 	hash    string
 	sources []krpc.NodeInfo
+	kind    jobKind
 }
 type sampler struct {
 	d             *dashboard
@@ -80,6 +81,7 @@ type sampler struct {
 	nextSample    map[string]time.Time
 	sources       map[string][]krpc.NodeInfo
 	inflight      map[string]bool
+	cacheTried    map[string]bool
 	turn          int
 	caches        *metadataCaches
 	samplingSlots chan struct{}
@@ -97,7 +99,8 @@ func (d *dashboard) collect(ctx context.Context) error {
 	cfg := dht.NewDefaultServerConfig()
 	cfg.Conn = conn
 	cfg.Passive = true
-	cfg.SendLimiter = rate.NewLimiter(128, 32)
+	// Quiet DHT: enough for sampling geography, far below a swarm client.
+	cfg.SendLimiter = rate.NewLimiter(24, 8)
 	server, e := dht.NewServer(cfg)
 	if e != nil {
 		conn.Close()
@@ -115,19 +118,20 @@ func (d *dashboard) collect(ctx context.Context) error {
 	tc.ListenPort = 0
 	tc.NoUpload = true
 	tc.AcceptPeerConnections = false
-	tc.EstablishedConnsPerTorrent = 12
-	tc.HalfOpenConnsPerTorrent = 6
-	tc.TotalHalfOpenConns = 72
-	tc.DialRateLimiter = rate.NewLimiter(48, 12)
-	tc.NominalDialTimeout = 4 * time.Second
-	tc.MinDialTimeout = 2 * time.Second
-	tc.HandshakesTimeout = 4 * time.Second
+	// Metadata-only peer dials stay rare; torrents-csv supplies most names.
+	tc.EstablishedConnsPerTorrent = 3
+	tc.HalfOpenConnsPerTorrent = 2
+	tc.TotalHalfOpenConns = 24
+	tc.DialRateLimiter = rate.NewLimiter(12, 4)
+	tc.NominalDialTimeout = 3 * time.Second
+	tc.MinDialTimeout = 1500 * time.Millisecond
+	tc.HandshakesTimeout = 3 * time.Second
 	client, e := torrent.NewClient(tc)
 	if e != nil {
 		return e
 	}
 	defer client.Close()
-	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: &peerHintCache{}}
+	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, cacheTried: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: &peerHintCache{}}
 	s.lookup = s.query
 	defer s.caches.close()
 	d.mu.Lock()
@@ -135,26 +139,40 @@ func (d *dashboard) collect(ctx context.Context) error {
 	d.mu.Unlock()
 	s.bootstrapNodes(ctx)
 	var work sync.WaitGroup
-	for i := 0; i < resolverWorkers; i++ {
-		work.Add(1)
-		go func() {
-			defer work.Done()
-			idle := time.NewTicker(200 * time.Millisecond)
-			defer idle.Stop()
-			for ctx.Err() == nil {
-				if j, ok := s.nextJob(time.Now()); ok {
-					s.resolve(ctx, j)
-					s.releaseJob(j.hash)
-					continue
+	startWorkers := func(n int, kind jobKind) {
+		for i := 0; i < n; i++ {
+			work.Add(1)
+			go func() {
+				defer work.Done()
+				idle := time.NewTicker(50 * time.Millisecond)
+				defer idle.Stop()
+				for ctx.Err() == nil {
+					if j, ok := s.nextJobOf(time.Now(), kind); ok {
+						s.resolve(ctx, j)
+						s.releaseJob(j.hash)
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-idle.C:
+					}
 				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-idle.C:
-				}
-			}
-		}()
+			}()
+		}
 	}
+	startWorkers(cacheWorkers, jobCache)
+	startWorkers(peerWorkers, jobPeer)
+	work.Add(1)
+	go func() {
+		defer work.Done()
+		d.ingestDump(ctx)
+	}()
+	work.Add(1)
+	go func() {
+		defer work.Done()
+		d.ingestCatalog(ctx)
+	}()
 	work.Add(1)
 	go func() {
 		defer work.Done()
@@ -267,10 +285,76 @@ func applyMetadata(rec *observation, info *metainfo.Info, source string, latency
 	return true
 }
 
+func (s *sampler) markCacheTried(hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cacheTried == nil {
+		s.cacheTried = map[string]bool{}
+	}
+	s.cacheTried[hash] = true
+}
+
+func (s *sampler) publishResolved(j discoveryJob, rec observation, wasResolved bool, started time.Time) {
+	s.d.mu.Lock()
+	defer s.d.mu.Unlock()
+	if latest, exists := s.d.records[j.hash]; exists {
+		rec.LastSeen = latest.LastSeen
+		rec.SampleHits = latest.SampleHits
+		rec.ResolveAttempts = latest.ResolveAttempts
+		rec.Peers = latest.Peers
+		rec.Countries = latest.Countries
+		rec.Seeds = latest.Seeds
+	}
+	rec.CheckedAt = time.Now().UTC()
+	// Named torrents are done; leave NextAttempt zero so the scheduler skips them.
+	rec.NextAttempt = time.Time{}
+	s.d.records[j.hash] = rec
+	if rec.Resolved {
+		s.d.markResolvedLocked(j.hash)
+	} else {
+		s.d.markPendingLocked(j.hash)
+	}
+	s.d.pruneLocked()
+	s.d.state.Completed++
+	s.d.totalLookupTime += time.Since(started)
+	if !wasResolved && rec.Resolved {
+		s.d.state.Successes++
+		if rec.Source == "cache" {
+			s.d.state.CacheHits++
+		} else {
+			s.d.state.PeerHits++
+		}
+	}
+}
+
+func (s *sampler) resolveCache(parent context.Context, j discoveryJob, hash metainfo.Hash, rec observation, wasResolved bool, started time.Time) bool {
+	s.markCacheTried(j.hash)
+	info := s.caches.fetchWithin(parent, hash, cacheFetchTimeout)
+	if info == nil {
+		// Free the hash for a peer worker immediately after a healthy miss.
+		s.d.mu.Lock()
+		if latest, ok := s.d.records[j.hash]; ok && !latest.Resolved {
+			latest.NextAttempt = time.Now()
+			s.d.records[j.hash] = latest
+		}
+		s.d.mu.Unlock()
+		return false
+	}
+	if !applyMetadata(&rec, info, "cache", time.Since(started)) {
+		return false
+	}
+	s.publishResolved(j, rec, wasResolved, started)
+	return true
+}
+
+func (s *sampler) clearCacheTried(hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cacheTried, hash)
+}
+
 func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
-	defer cancel()
 	var hash metainfo.Hash
 	raw, err := hex.DecodeString(j.hash)
 	if err != nil || len(raw) != len(hash) {
@@ -287,6 +371,16 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		return
 	}
 	wasResolved := rec.Resolved
+	if wasResolved {
+		// Defensive: named rows must not consume cache/peer slots.
+		return
+	}
+	if j.kind == jobCache {
+		_ = s.resolveCache(parent, j, hash, rec, wasResolved, started)
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	defer cancel()
 	t, _, err := s.client.AddTorrentSpec(&torrent.TorrentSpec{AddTorrentOpts: torrent.AddTorrentOpts{InfoHash: hash, DisallowDataDownload: true, DisallowDataUpload: true, DisableInitialPieceCheck: true}})
 	if err != nil {
 		return
@@ -300,11 +394,14 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	cacheCtx, cancelCache := context.WithCancel(ctx)
 	defer cancelCache()
 	cacheEvents := make(chan *metainfo.Info, 1)
+	// Peer jobs still race caches for hashes that arrived with known peers
+	// before a cache worker claimed them.
 	if !wasResolved {
 		work.Add(1)
 		go func() {
 			defer work.Done()
 			defer close(cacheEvents)
+			s.markCacheTried(j.hash)
 			if info := s.caches.fetch(cacheCtx, hash); info != nil {
 				cacheEvents <- info
 			}
@@ -406,6 +503,9 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			rec.SampleHits = latest.SampleHits
 		}
 		s.d.records[j.hash] = rec
+		if rec.Resolved {
+			s.d.markResolvedLocked(j.hash)
+		}
 		s.d.pruneLocked()
 		s.d.mu.Unlock()
 		return true
@@ -469,9 +569,10 @@ loop:
 	rec.Peers = len(uniqueIPs)
 	rec.Countries = countries
 	rec.CheckedAt = time.Now().UTC()
-	rec.NextAttempt = rec.CheckedAt.Add(retryDelay(rec.ResolveAttempts))
 	if rec.Resolved {
-		rec.NextAttempt = rec.CheckedAt.Add(30 * time.Minute)
+		rec.NextAttempt = time.Time{}
+	} else {
+		rec.NextAttempt = rec.CheckedAt.Add(retryDelay(rec.ResolveAttempts))
 	}
 	if hasSeedEstimate {
 		rec.Seeds = countBloom(&seeds)
@@ -488,6 +589,11 @@ loop:
 	// row. Failed evicted jobs need no further retention.
 	if _, exists := s.d.records[j.hash]; exists || rec.Resolved {
 		s.d.records[j.hash] = rec
+		if rec.Resolved {
+			s.d.markResolvedLocked(j.hash)
+		} else {
+			s.d.markPendingLocked(j.hash)
+		}
 		s.d.pruneLocked()
 	}
 	s.d.state.PayloadBytes += stats.BytesReadData.Int64()

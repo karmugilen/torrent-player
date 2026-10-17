@@ -9,7 +9,8 @@ import (
 	"github.com/anacrolix/dht/v2/krpc"
 )
 
-const samplingConcurrency = 16
+// Keep BEP 51 sampling light so the uplink stays free for HTTP catalog names.
+const samplingConcurrency = 4
 
 // Free slots are refilled independently: a dead node cannot hold up replies
 // from healthy nodes or force an entire batch to wait for its timeout.
@@ -65,22 +66,23 @@ func (s *sampler) sampleNode(ctx context.Context, node krpc.NodeInfo) {
 		s.rememberSource(hex.EncodeToString(hash[:]), node)
 	}
 	now := time.Now().UTC()
+	seen := make([]string, 0, len(*reply.Samples))
 	s.d.mu.Lock()
 	s.d.state.SamplingNodes++
 	s.d.state.HashSamples += int64(len(*reply.Samples))
 	s.d.state.Status = "Sampling public torrents and resolving names in parallel"
 	for _, hash := range *reply.Samples {
 		h := hex.EncodeToString(hash[:])
-		rec, ok := s.d.records[h]
-		if !ok {
-			rec = observation{Hash: h, FirstSeen: now, Countries: map[string]int{}}
+		if s.d.upsertSampleLocked(h, now) {
+			seen = append(seen, h)
 		}
-		rec.LastSeen = now
-		rec.SampleHits++
-		s.d.records[h] = rec
 	}
 	s.d.pruneLocked()
 	s.d.mu.Unlock()
+	// Instant local dump lookup beats cache/peer for hashes already indexed.
+	for _, h := range seen {
+		s.d.tryResolveHashFromDump(h)
+	}
 }
 
 // Explore fresh random regions of the DHT even when known sample providers
