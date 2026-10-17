@@ -22,9 +22,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -59,6 +62,15 @@ class MainActivity : ComponentActivity() {
         uri?.let(session::openTorrent)
     }
     private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { (application as WebtorApp).session.persistFolder(it) } }
+    private var pendingRepairTarget: Pair<String, Int>? = null
+    private val fileRepairPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { pickedUri ->
+            pendingRepairTarget?.let { (k, idx) ->
+                session.repairFileUri(k, idx, pickedUri)
+            }
+        }
+        pendingRepairTarget = null
+    }
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -72,11 +84,21 @@ class MainActivity : ComponentActivity() {
         val savedOpenKey = savedInstanceState?.getString("savedOpenKey")
         if (savedScreen == Screen.Settings.name) {
             session.openSettings()
-        } else if (savedScreen == Screen.Files.name && savedOpenKey != null) {
-            session.openDetails(savedOpenKey)
+        }
+        lifecycleScope.launch {
+            session.initialized.await()
+            if (savedScreen == Screen.Files.name && savedOpenKey != null) {
+                if (session.ui.value.library.any { it.key == savedOpenKey }) {
+                    session.openDetails(savedOpenKey)
+                }
+            }
+            intent.getStringExtra("open_key")?.let { key ->
+                if (session.ui.value.library.any { it.key == key }) {
+                    session.openDetails(key)
+                }
+            }
         }
         if (savedInstanceState == null) handleIncoming(intent)
-        intent.getStringExtra("open_key")?.let { session.openDetails(it) }
         setContent {
             val state by session.ui.collectAsState()
             GaleTheme(
@@ -84,61 +106,65 @@ class MainActivity : ComponentActivity() {
                 theme = state.appTheme,
                 reducedEffects = state.reducedEffects,
             ) {
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    when (state.screen) {
-                        Screen.Prepare -> {
-                            val draft = state.prepare
-                            if (draft != null) {
-                                PrepareScreen(
-                                    draft = draft,
-                                    freeBytes = state.freeBytes,
-                                    onToggle = session::toggleFile,
-                                    onSelectAll = session::selectAllFiles,
-                                    onSelectNone = session::selectNoFiles,
-                                    onStart = session::startDownload,
-                                    onDirectPlay = session::startDirectPlay,
-                                    directPlayDefault = state.directPlayDefault,
-                                    onCancel = session::cancelPrepare,
-                                )
-                            } else {
-                                LibraryLayer(state)
+                ThemedScreenContainer {
+                    Surface(Modifier.fillMaxSize(), color = Color.Transparent) {
+                        when (state.screen) {
+                            Screen.Prepare -> {
+                                val draft = state.prepare
+                                if (draft != null) {
+                                    PrepareScreen(
+                                        draft = draft,
+                                        freeBytes = state.freeBytes,
+                                        onToggle = session::toggleFile,
+                                        onSelectAll = session::selectAllFiles,
+                                        onSelectNone = session::selectNoFiles,
+                                        onStart = session::startDownload,
+                                        onDirectPlay = session::startDirectPlay,
+                                        directPlayDefault = state.directPlayDefault,
+                                        onCancel = session::cancelPrepare,
+                                    )
+                                } else {
+                                    LibraryLayer(state)
+                                }
                             }
-                        }
-                        Screen.Settings -> SettingsScreen(
-                            state = state,
-                            onBack = session::closeSettings,
-                            onMaxPeers = session::setMaxPeers,
-                            onMaxPeersCommit = session::commitMaxPeers,
-                            onDarkTheme = session::setDarkTheme,
-                            onAppTheme = session::setAppTheme,
-                            onReducedEffects = session::setReducedEffects,
-                            onDirectPlayDefault = session::setDirectPlayDefault,
-                            onAntiDpi = session::setAntiDpi,
-                            onCleanup = session::cleanupCache,
-                            onClearAll = session::requestClearAll,
-                            onStopAll = session::stopAll,
-                            onStopAllAndExit = { session.stopAllAndExit() },
-                            onClearNativeCategory = { session.clearNativeCache(listOf(it)) },
-                        )
-                        Screen.Files -> {
-                            val entry = state.library.find { it.key == state.openTorrentKey }
-                            if (entry == null) LibraryLayer(state)
-                            else TorrentFilesScreen(
-                                entry = entry,
-                                error = state.error,
-                                onBack = session::closeFiles,
-                                onPlay = { index -> session.play(entry, index) },
-                                onStartOver = { index -> session.play(entry, index, fromStart = true) },
-                                onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
-                                onPause = { session.pause(entry) },
-                                onResume = { session.resume(entry) },
-                                onDelete = { session.requestDelete(entry) },
-                                onFocus = { index -> session.focusEntryFile(entry.key, index) },
-                                onClearFocus = { session.focusEntryFile(entry.key, null) },
+                            Screen.Settings -> SettingsScreen(
+                                state = state,
+                                onBack = session::closeSettings,
+                                onMaxPeers = session::setMaxPeers,
+                                onMaxPeersCommit = session::commitMaxPeers,
+                                onDarkTheme = session::setDarkTheme,
+                                onAppTheme = session::setAppTheme,
+                                onReducedEffects = session::setReducedEffects,
+                                onDirectPlayDefault = session::setDirectPlayDefault,
+                                onAntiDpi = session::setAntiDpi,
+                                onCleanup = session::cleanupCache,
+                                onClearAll = session::requestClearAll,
+                                onStopAll = session::stopAll,
+                                onStopAllAndExit = { session.stopAllAndExit() },
+                                onClearNativeCategory = { session.clearNativeCache(listOf(it)) },
+                                onPickFolder = session::pickFolder,
+                                onClearFolder = session::clearFolder,
                             )
+                            Screen.Files -> {
+                                val entry = state.library.find { it.key == state.openTorrentKey }
+                                if (entry == null) LibraryLayer(state)
+                                else TorrentFilesScreen(
+                                    entry = entry,
+                                    error = state.error,
+                                    onBack = session::closeFiles,
+                                    onPlay = { index -> session.play(entry, index) },
+                                    onStartOver = { index -> session.play(entry, index, fromStart = true) },
+                                    onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
+                                    onPause = { session.pause(entry) },
+                                    onResume = { session.resume(entry) },
+                                    onDelete = { session.requestDelete(entry) },
+                                    onFocus = { index -> session.focusEntryFile(entry.key, index) },
+                                    onClearFocus = { session.focusEntryFile(entry.key, null) },
+                                    onLocateFile = { index -> session.requestRepairFile(entry.key, index) },
+                                )
+                            }
+                            Screen.Library -> LibraryLayer(state)
                         }
-                        Screen.Library -> LibraryLayer(state)
-                    }
                     if (state.addSheetOpen) {
                         val prefetch = state.prepare?.takeIf {
                             it.source == state.magnetDraft.trim() ||
@@ -245,6 +271,11 @@ class MainActivity : ComponentActivity() {
     private fun handleEvent(event: UiEvent) {
         when (event) {
             UiEvent.PickTorrent -> pickTorrentFile()
+            UiEvent.PickFolder -> folderPicker.launch(null)
+            is UiEvent.PickFileForRepair -> {
+                pendingRepairTarget = Pair(event.entryKey, event.fileIndex)
+                fileRepairPicker.launch(arrayOf("*/*"))
+            }
             UiEvent.RequestNotifications -> requestNotifications()
             is UiEvent.OpenContent -> openContent(event)
             is UiEvent.ShareText -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, event.text) }, "Share diagnostics"))

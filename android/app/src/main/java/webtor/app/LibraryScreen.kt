@@ -9,11 +9,14 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -68,6 +71,7 @@ fun LibraryScreen(
     var sortMenuOpen by remember { mutableStateOf(false) }
 
     val inSelectionMode = selectedKeys.isNotEmpty()
+    val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
 
     LaunchedEffect(state.message) {
         state.message?.let { snackbar.showSnackbar(it); onMessageShown() }
@@ -85,7 +89,7 @@ fun LibraryScreen(
     val continueTarget = remember(state.library) { state.library.findContinueWatchingTarget() }
 
     Scaffold(
-        containerColor = colors.background,
+        containerColor = Color.Transparent,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             if (inSelectionMode) {
@@ -144,7 +148,7 @@ fun LibraryScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = colors.background,
+                        containerColor = Color.Transparent,
                         titleContentColor = colors.onBackground,
                         actionIconContentColor = colors.onBackground,
                     ),
@@ -169,6 +173,7 @@ fun LibraryScreen(
         },
     ) { padding ->
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
@@ -225,7 +230,9 @@ fun LibraryScreen(
 
                     // Filters and Sorting controls
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -247,6 +254,8 @@ fun LibraryScreen(
                                 )
                             }
                         }
+
+                        Spacer(Modifier.width(8.dp))
 
                         Box {
                             TextButton(onClick = { sortMenuOpen = true }) {

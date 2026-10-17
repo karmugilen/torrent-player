@@ -313,7 +313,60 @@ class LibrarySession(
         }
     }
 
-    fun persistFolder(uri: android.net.Uri) { runCatching { storage.persistFolder(uri, "Selected folder") }.onSuccess { _ui.update { it.copy(message = "Download folder updated") } }.onFailure { showError("Folder access is unavailable") } }
+    fun pickFolder() { _events.trySend(UiEvent.PickFolder) }
+
+    fun persistFolder(uri: android.net.Uri) {
+        runCatching {
+            val displayName = android.provider.DocumentsContract.getTreeDocumentId(uri)
+                .substringAfterLast(':').trim().ifBlank { "Selected folder" }
+            storage.persistFolder(uri, displayName)
+        }.onSuccess {
+            refreshStorageStats()
+            _ui.update { it.copy(message = "Download folder updated") }
+        }.onFailure {
+            showError("Folder access is unavailable")
+        }
+    }
+
+    fun clearFolder() {
+        storage.clearFolder()
+        refreshStorageStats()
+        _ui.update { it.copy(message = "Reverted to default Downloads/Webtor folder") }
+    }
+
+    fun requestRepairFile(key: String, fileIndex: Int) {
+        _events.trySend(UiEvent.PickFileForRepair(key, fileIndex))
+    }
+
+    fun repairFileUri(key: String, fileIndex: Int, newUri: android.net.Uri) {
+        scope.launchCommand {
+            val entry = _ui.value.library.find { it.key == key } ?: return@launchCommand
+            val file = entry.files.find { it.index == fileIndex } ?: return@launchCommand
+            runCatching {
+                app.contentResolver.takePersistableUriPermission(
+                    newUri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            val statSize = runCatching {
+                app.contentResolver.openFileDescriptor(newUri, "r")?.use { it.statSize }
+            }.getOrNull() ?: -1L
+            if (statSize > 0L && statSize < file.length) {
+                _ui.update { it.copy(error = "Selected file size (${formatBytes(statSize)}) is smaller than required (${formatBytes(file.length)}).") }
+                return@launchCommand
+            }
+            patch(key) { e ->
+                e.copy(
+                    files = e.files.map { f ->
+                        if (f.index == fileIndex) f.copy(uri = newUri.toString()) else f
+                    },
+                    error = null,
+                )
+            }
+            persist()
+            _ui.update { it.copy(message = "Repaired file destination for ${file.name}") }
+        }
+    }
 
     fun closeSettings() = _ui.update { it.copy(screen = Screen.Library, clearAllConfirm = false) }
     fun setMaxPeers(value: Int) {
@@ -1565,15 +1618,21 @@ class LibrarySession(
     fun refreshStorageStats() {
         if (storageStatsJob?.isActive == true) return
         storageStatsJob = scope.launch {
-            val stats = withContext(io) {
-                Triple(storage.freeBytes, storage.cacheBytes, storage.legacyBytes)
-            }
+            val free = withContext(io) { storage.freeBytes }
+            val cache = withContext(io) { storage.cacheBytes }
+            val legacy = withContext(io) { storage.legacyBytes }
+            val folderName = withContext(io) { storage.folderName }
+            val hasCustom = withContext(io) { storage.folder != null }
+            val warning = withContext(io) { storage.storageAccessWarning() }
             _ui.update {
                 it.copy(
-                    freeBytes = stats.first,
+                    freeBytes = free,
                     managedBytes = storage.managedBytes(it.library),
-                    cacheBytes = stats.second,
-                    legacyBytes = stats.third,
+                    cacheBytes = cache,
+                    legacyBytes = legacy,
+                    storageFolderName = folderName,
+                    hasCustomFolder = hasCustom,
+                    storageAccessWarning = warning,
                 )
             }
         }

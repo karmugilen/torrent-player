@@ -432,6 +432,79 @@ fun ThemedCard(
     }
 }
 
+/**
+ * Screen container drawing theme-specific backdrops (watery depth for Aero,
+ * parchment and botanical/celestial ornament for Antiquity, tactile desktop for Retro).
+ */
+@Composable
+fun ThemedScreenContainer(
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val theme = LocalAppTheme.current
+    val reducedEffects = LocalReducedEffects.current
+    val dark = MaterialTheme.colorScheme.background.red < 0.5f
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .drawBehind {
+                when (theme) {
+                    AppTheme.AERO -> {
+                        val waterBrush = Brush.verticalGradient(
+                            colors = if (dark) listOf(
+                                Color(0xFF07111A),
+                                Color(0xFF0E2233),
+                                Color(0xFF091622),
+                                Color(0xFF040A0F),
+                            ) else listOf(
+                                Color(0xFFE4F1FB),
+                                Color(0xFFD0E7F9),
+                                Color(0xFFE8F4FC),
+                                Color(0xFFF7FBFE),
+                            )
+                        )
+                        drawRect(brush = waterBrush)
+                        if (!reducedEffects) {
+                            val causticColor = if (dark) Color(0x1838BDF8) else Color(0x200078D7)
+                            drawCircle(causticColor, radius = size.width * 0.75f, center = Offset(size.width * 0.2f, size.height * 0.15f))
+                            drawCircle(causticColor, radius = size.width * 0.6f, center = Offset(size.width * 0.9f, size.height * 0.6f))
+                        }
+                    }
+                    AppTheme.ANTIQUITY -> {
+                        val parchmentBrush = Brush.verticalGradient(
+                            colors = if (dark) listOf(
+                                Color(0xFF161412),
+                                Color(0xFF1A1714),
+                                Color(0xFF141210),
+                            ) else listOf(
+                                Color(0xFFFBF8F1),
+                                Color(0xFFF3ECE0),
+                                Color(0xFFFAF5ED),
+                            )
+                        )
+                        drawRect(brush = parchmentBrush)
+                        if (!reducedEffects) {
+                            val ornamentColor = if (dark) Color(0x15D4A054) else Color(0x188B5A2B)
+                            drawCircle(ornamentColor, radius = 70.dp.toPx(), center = Offset(size.width - 40.dp.toPx(), 60.dp.toPx()))
+                            drawCircle(ornamentColor, radius = 110.dp.toPx(), center = Offset(30.dp.toPx(), size.height - 100.dp.toPx()))
+                        }
+                    }
+                    AppTheme.RETRO -> {
+                        val retroBg = if (dark) Color(0xFF14171C) else Color(0xFFECE9D8)
+                        drawRect(color = retroBg)
+                        if (!reducedEffects && !dark) {
+                            val stippleColor = Color(0x0C000000)
+                            drawLine(stippleColor, Offset(0f, 0f), Offset(size.width, size.height), strokeWidth = 1f)
+                        }
+                    }
+                }
+            }
+    ) {
+        content()
+    }
+}
+
 private tailrec fun Context.activity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.activity()

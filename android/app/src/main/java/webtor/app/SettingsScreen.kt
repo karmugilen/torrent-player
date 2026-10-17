@@ -60,6 +60,8 @@ fun SettingsScreen(
     onStopAll: () -> Unit,
     onStopAllAndExit: () -> Unit,
     onClearNativeCategory: ((String) -> Unit)? = null,
+    onPickFolder: () -> Unit = {},
+    onClearFolder: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -167,11 +169,7 @@ fun SettingsScreen(
                         color = colors.onBackground,
                         modifier = Modifier.padding(start = 4.dp),
                     )
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
-                        shape = MaterialTheme.shapes.medium,
-                    ) {
+                    ThemedCard(modifier = Modifier.fillMaxWidth()) {
                         val storageKnown = state.freeBytes >= 0L
                         val totalStorage = (state.managedBytes + state.freeBytes).coerceAtLeast(1L)
                         val storageFraction = if (storageKnown) (state.managedBytes.toFloat() / totalStorage.toFloat()).coerceIn(0f, 1f) else 0f
@@ -179,9 +177,34 @@ fun SettingsScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Text("Location: Downloads/Webtor", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                            Text(
+                                "Location: ${state.storageFolderName}",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.onSurface,
+                            )
+                            if (state.storageAccessWarning != null) {
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = colors.errorContainer),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(
+                                            state.storageAccessWarning,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onErrorContainer,
+                                        )
+                                        OutlinedButton(
+                                            onClick = onPickFolder,
+                                            colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.onErrorContainer),
+                                        ) {
+                                            Text("Reselect folder to restore access")
+                                        }
+                                    }
+                                }
+                            }
                             if (storageKnown) {
                                 LinearProgressIndicator(
                                     progress = { storageFraction },
@@ -198,6 +221,20 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = colors.onSurfaceVariant,
                             )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Button(onClick = onPickFolder) {
+                                    Text("Change folder")
+                                }
+                                if (state.hasCustomFolder) {
+                                    OutlinedButton(onClick = onClearFolder) {
+                                        Text("Reset to default")
+                                    }
+                                }
+                            }
                         }
                     }
                 }

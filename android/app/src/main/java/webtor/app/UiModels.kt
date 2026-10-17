@@ -53,6 +53,9 @@ data class UiState(
     val antiDpiEnabled: Boolean = false,
     val bypassStatus: webtor.core.BypassStatus? = null,
     val nativeCacheSummary: webtor.core.CacheSummary? = null,
+    val storageFolderName: String = "Downloads/Webtor",
+    val hasCustomFolder: Boolean = false,
+    val storageAccessWarning: String? = null,
 )
 
 /** User-facing library ordering. Kept pure so it is deterministic across restore/recomposition. */
@@ -66,6 +69,8 @@ fun transferAllowed(policy: TransferNetworkPolicy, connected: Boolean, wifi: Boo
 
 sealed class UiEvent {
     data object PickTorrent : UiEvent()
+    data object PickFolder : UiEvent()
+    data class PickFileForRepair(val entryKey: String, val fileIndex: Int) : UiEvent()
     data object RequestNotifications : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String,
         val playlist: List<PlaybackItem> = emptyList(), val subtitles: List<PlaybackItem> = emptyList(),
