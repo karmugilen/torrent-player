@@ -16,6 +16,7 @@ to begin coding, building an APK, installing, or deploying.
 | UI-04 | Planned | UI-01 | Replace circular reactor with expandable branching peer view; keep world map. |
 | MEDIA-01 | Planned | — | Automatic persistent thumbnails, decoder fallbacks and truthful preview states. |
 | MEDIA-02 | Planned | MEDIA-01 | Bounded verified preview reads for Direct Play/incomplete media without external-player side effects. |
+| NET-01 | Planned; user trial | — | Built-in experimental anti-DPI On/Off switch in Settings; off by default; user tests effectiveness. |
 | QA-01 | Planned | UI-01–04, MEDIA-01–02 | Focused regressions, existing suites, local APK and visual verification where available. |
 | STORAGE-01 | Backlog | First redesign | Non-destructive moved-file/folder-access repair and clearer storage recovery. |
 
@@ -207,6 +208,61 @@ narrow storage helpers/tests. Determine the smallest safe change before coding.
 creation, byte/piece budget, unavailable pieces, timeout, pause/delete, concurrent
 playback, and cleanup before storage configuration/episode changes.
 
+## NET-01 — Built-in experimental anti-DPI switch
+
+**User request:** "no need to test just add in turn off on put in setting for me
+so i can test and tell you." This settles delivery as a functional experimental
+setting with user-run effectiveness trials; it does not require proving ISP
+filtering before implementation. The standing implementation-start gate remains.
+
+**Likely files:** `SettingsScreen.kt`, `UiModels.kt`, `LibrarySession.kt`,
+`EngineClient.kt`, `engine-go/network.go`, client configuration/dialing helpers
+and a narrowly scoped bundled backend/build integration if needed.
+
+**Work:**
+
+- Add **Network → Anti-DPI (experimental)** with an On/Off switch. Default Off;
+  persist the choice and show whether the backend is actually available/active.
+- Evaluate the smallest viable built-in Android path during implementation:
+  an in-process stream adapter or app-managed local proxy is a candidate. Full
+  packet-level zapret is not assumed to work without privileged packet access.
+- Connect the switch to real network behavior. Do not deliver a UI-only toggle,
+  a flag with no consumer, or existing MSE settings mislabeled as full anti-DPI.
+- Specify coverage for outgoing TCP peers, HTTP/WebSocket trackers, UDP trackers,
+  DHT, uTP, WebRTC and incoming connections. If the initial backend covers only
+  some paths, state that plainly in the UI/help and local handoff.
+- Define routing and fallback explicitly. The library races multiple dialers;
+  merely appending a bypass dialer can let a direct connection win. Mark actual
+  bypass use, unsupported paths and failures truthfully. Do not silently claim
+  that untreated/direct connections were bypassed.
+- Switching Off restores the normal route and closes bypass-owned resources.
+  Surface any reconnect/restart requirement instead of implying existing sockets
+  have changed route instantly. Preserve pause/stop/delete intent and loopback
+  media/provider traffic used by mandatory external players.
+- Do not change peer-selection algorithms, connection limits, Direct Play
+  buffering or broad architecture as part of this ticket. A Rust rewrite is
+  not required merely because a bypass backend is native.
+
+**Acceptance:**
+
+- The switch exists in Settings, starts Off on a fresh install, survives restart,
+  and activates/deactivates a real supported implementation.
+- Unsupported backend/startup errors are visible; the switch never claims an
+  active bypass when activation failed.
+- Exact supported transports, fallback behavior and any device requirements are
+  documented. Avoid "hidden from ISP", "anonymous", or guaranteed extra peers.
+- An installable local trial APK can be delivered when implementation is
+  authorized; the user compares On/Off and reports results.
+- **No upfront ISP testing, packet capture, public-network benchmarking or
+  effectiveness proof is required.** Do not run those investigations. The
+  user's feedback determines whether this experimental feature helps their ISP.
+- No network effectiveness result is claimed from compilation or existing unit
+  checks. Do not add a separate effectiveness-testing milestone before handoff.
+
+**Decisions still technical/open:** exact backend, supported Android techniques,
+transports and failed-bypass routing. Resolve these transparently during the
+authorized implementation; do not assume full packet coverage or invisibility.
+
 ## QA-01 — Local validation and handoff
 
 **Work:**
@@ -239,6 +295,8 @@ playback, and cleanup before storage configuration/episode changes.
 1. UI-01, then UI-02/UI-03/UI-04 in bounded local commits.
 2. MEDIA-01 and MEDIA-02, including native regression coverage.
 3. QA-01 and local APK handoff. STORAGE-01 remains a separate later milestone.
+4. NET-01 is a separately deliverable experimental trial; no ISP-effectiveness
+   test milestone blocks handing it to the user once implementation is authorized.
 
 ## Execution log
 
@@ -249,3 +307,5 @@ playback, and cleanup before storage configuration/episode changes.
   --console=plain` in `android` passed. These verify only the unchanged baseline.
 - User explicitly deferred implementation. No application/native source changed;
   no redesigned APK was built or installed. All implementation tickets remain Planned.
+- Added NET-01 at the user's request: built-in anti-DPI Settings switch, Off by
+  default, with effectiveness testing left to the user. Documentation only.

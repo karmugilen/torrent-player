@@ -2,7 +2,7 @@
 
 Baseline: `a226754`. Decisions agreed in the local design conversation on 2026-10-17.
 
-**Implementation is not authorized to start yet.** The user's latest instruction
+**Implementation is not authorized to start yet.** The user's standing instruction
 is: "implementation will start when I tell you." This document and the ticket
 board are planning artifacts only. Wait for an explicit instruction to implement.
 
@@ -15,6 +15,8 @@ board are planning artifacts only. Wait for an explicit instruction to implement
   peer-selection algorithms, increase connection limits, or retune buffering.
 - Narrow engine work needed for safe thumbnail reads is in scope; retain the
   existing scheduler, transfer intent, verification, storage, and playback behavior.
+- A separately planned built-in anti-DPI switch is included for the user's own
+  network trials. This does not reopen the rejected adaptive/evolutionary work.
 
 ## Visual direction
 
@@ -69,6 +71,31 @@ Large swarms are summarized and expandable. Reduced effects disables flow motion
 - Missing metadata/peers, unsupported codecs or corrupt media cannot guarantee a
   decoded image. Show an honest themed loading/unavailable state in those cases.
 
+## Built-in anti-DPI: user trial
+
+- Add **Settings → Network → Anti-DPI (experimental)**, with a persisted On/Off
+  switch, **Off by default**. The user wants zapret-style behavior built into
+  the app, rather than being required to run a separate tool.
+- On must activate a real supported bypass implementation, not merely save a
+  preference or rename the engine's existing handshake obfuscation.
+- Off restores normal networking and releases bypass-specific resources. Changes
+  must not delete saved data, change file selection, or break external playback.
+- Select the smallest viable Android integration when implementation is later
+  authorized. Do not assume packet-level desktop zapret can simply be bundled
+  into an ordinary Android app. Clearly identify the techniques/transports
+  actually supported by the delivered trial build.
+- This is an experimental connectivity feature. Do not label it anonymous,
+  invisible to the ISP, or guaranteed to find additional peers.
+- The user will test effectiveness and report feedback. **Do not require an
+  upfront ISP test, packet capture, public-swarm benchmark, or demonstrated bypass
+  success before providing the functional experimental switch.** Do not conduct
+  live ISP/network effectiveness testing on the user's behalf.
+- Whether failed adapted connections may retry untreated, and what happens to
+  transports unsupported by the chosen backend, must be documented explicitly.
+  Do not silently present ordinary connections as bypassed.
+- Rust helper candidates remain an investigation; no additional Rust migration
+  has been selected or authorized for implementation.
+
 ## Explicitly excluded
 
 - Adaptive/evolutionary architecture work, genetic optimization, a new peer
@@ -83,3 +110,5 @@ run existing Go and Android suites and build a local debug APK. Inspect the UI o
 an available Android device/emulator when possible. Report device/codec limits
 honestly. Measure engine read behavior rather than claiming an external player's
 rendered first-frame latency. Do not claim network speedups from visual changes.
+For the anti-DPI trial, effectiveness testing belongs to the user as specified
+above; a working local build is not evidence of ISP bypass.
