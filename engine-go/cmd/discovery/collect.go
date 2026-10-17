@@ -86,6 +86,7 @@ type sampler struct {
 	samplingWork  sync.WaitGroup
 	lookup        func(context.Context, *net.UDPAddr, string, krpc.MsgArgs) *krpc.Return
 	nextRefresh   time.Time
+	hints         *peerHintCache
 }
 
 func (d *dashboard) collect(ctx context.Context) error {
@@ -96,7 +97,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	cfg := dht.NewDefaultServerConfig()
 	cfg.Conn = conn
 	cfg.Passive = true
-	cfg.SendLimiter = rate.NewLimiter(64, 16)
+	cfg.SendLimiter = rate.NewLimiter(128, 32)
 	server, e := dht.NewServer(cfg)
 	if e != nil {
 		conn.Close()
@@ -116,8 +117,8 @@ func (d *dashboard) collect(ctx context.Context) error {
 	tc.AcceptPeerConnections = false
 	tc.EstablishedConnsPerTorrent = 12
 	tc.HalfOpenConnsPerTorrent = 6
-	tc.TotalHalfOpenConns = 36
-	tc.DialRateLimiter = rate.NewLimiter(32, 8)
+	tc.TotalHalfOpenConns = 72
+	tc.DialRateLimiter = rate.NewLimiter(48, 12)
 	tc.NominalDialTimeout = 4 * time.Second
 	tc.MinDialTimeout = 2 * time.Second
 	tc.HandshakesTimeout = 4 * time.Second
@@ -126,12 +127,13 @@ func (d *dashboard) collect(ctx context.Context) error {
 		return e
 	}
 	defer client.Close()
-	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency)}
+	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: &peerHintCache{}}
 	s.lookup = s.query
 	defer s.caches.close()
 	d.mu.Lock()
 	d.state.Workers = resolverWorkers
 	d.mu.Unlock()
+	s.bootstrapNodes(ctx)
 	var work sync.WaitGroup
 	for i := 0; i < resolverWorkers; i++ {
 		work.Add(1)
@@ -167,20 +169,6 @@ func (d *dashboard) collect(ctx context.Context) error {
 			}
 		}
 	}()
-	// Resolve only a few normal bootstrap endpoints; public discoveries expand
-	// the routing table. No peer inventory or device files are requested.
-	var bootstrap sync.WaitGroup
-	for _, host := range []string{"router.bittorrent.com:6881", "router.utorrent.com:6881", "dht.transmissionbt.com:6881", "dht.libtorrent.org:25401"} {
-		bootstrap.Add(1)
-		go func(h string) {
-			defer bootstrap.Done()
-			a, e := net.ResolveUDPAddr("udp4", h)
-			if e == nil {
-				s.query(ctx, a, "find_node", krpc.MsgArgs{Target: randomID()})
-			}
-		}(host)
-	}
-	bootstrap.Wait()
 	d.setStatus("Sampling public torrent hashes")
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
@@ -316,10 +304,27 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		work.Add(1)
 		go func() {
 			defer work.Done()
+			defer close(cacheEvents)
 			if info := s.caches.fetch(cacheCtx, hash); info != nil {
 				cacheEvents <- info
 			}
 		}()
+	}
+	if wasResolved {
+		close(cacheEvents)
+	}
+	// Known addresses only accelerate dialing. They are not fresh map sightings.
+	if !wasResolved {
+		if hints := s.hints.get(j.hash, time.Now()); len(hints) > 0 {
+			connections := make([]torrent.PeerInfo, 0, len(hints))
+			for _, peer := range hints {
+				connections = append(connections, torrent.PeerInfo{Addr: &net.TCPAddr{IP: peer.IP, Port: peer.Port}})
+			}
+			t.AddPeers(connections)
+			s.d.mu.Lock()
+			s.d.state.PeerHintUses++
+			s.d.mu.Unlock()
+		}
 	}
 	initialReplies := make(chan *krpc.Return, len(j.sources))
 	for _, source := range j.sources {
@@ -331,6 +336,10 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			}
 		}(source)
 	}
+	prefetchDone := make(chan struct{})
+	go func() { work.Wait(); close(prefetchDone) }()
+	var prefetchEvents <-chan struct{} = prefetchDone
+	prefetchComplete := false
 	ann, err := s.server.AnnounceTraversal(hash, dht.Scrape())
 	if err != nil {
 		return
@@ -346,6 +355,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	var seeds krpc.ScrapeBloomFilter
 	hasSeedEstimate := false
 	addPeers := func(peers []krpc.NodeAddr) {
+		s.hints.put(j.hash, peers, time.Now())
 		connections := make([]torrent.PeerInfo, 0, len(peers))
 		for _, p := range peers {
 			if publicIP(p.IP) && p.Port > 0 {
@@ -400,9 +410,24 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		s.d.mu.Unlock()
 		return true
 	}
+	noPeerTimer := time.NewTimer(8 * time.Second)
+	defer noPeerTimer.Stop()
+	noPeerDeadline, emptyExit := false, false
 loop:
 	for {
+		if !rec.Resolved && prefetchComplete && len(cacheEvents) == 0 && len(initialReplies) == 0 && len(uniqueIPs) == 0 {
+			stats := t.Stats()
+			if (peerEvents == nil && stats.TotalPeers == 0) || (noPeerDeadline && stats.ActivePeers == 0) {
+				emptyExit = true
+				break loop
+			}
+		}
 		select {
+		case <-noPeerTimer.C:
+			noPeerDeadline = true
+		case <-prefetchEvents:
+			prefetchEvents = nil
+			prefetchComplete = true
 		case <-ctx.Done():
 			break loop
 		case <-settle:
@@ -423,7 +448,11 @@ loop:
 				hasSeedEstimate = true
 				mergeBloom(&seeds, peers.BFsd)
 			}
-		case info := <-cacheEvents:
+		case info, ok := <-cacheEvents:
+			if !ok {
+				cacheEvents = nil
+				continue
+			}
 			if !accept(info, "cache") {
 				return
 			}
@@ -463,6 +492,9 @@ loop:
 	}
 	s.d.state.PayloadBytes += stats.BytesReadData.Int64()
 	s.d.state.Completed++
+	if emptyExit {
+		s.d.state.EmptyLookups++
+	}
 	s.d.totalLookupTime += time.Since(started)
 	if !wasResolved && rec.Resolved {
 		s.d.state.Successes++
@@ -473,4 +505,21 @@ loop:
 		}
 	}
 	s.d.mu.Unlock()
+}
+
+func (s *sampler) bootstrapNodes(ctx context.Context) {
+	// Resolve only a few normal bootstrap endpoints; public discoveries expand
+	// the routing table. No peer inventory or device files are requested.
+	var bootstrap sync.WaitGroup
+	for _, host := range []string{"router.bittorrent.com:6881", "router.utorrent.com:6881", "dht.transmissionbt.com:6881", "dht.libtorrent.org:25401"} {
+		bootstrap.Add(1)
+		go func(h string) {
+			defer bootstrap.Done()
+			a, e := net.ResolveUDPAddr("udp4", h)
+			if e == nil {
+				s.lookup(ctx, a, "find_node", krpc.MsgArgs{Target: randomID()})
+			}
+		}(host)
+	}
+	bootstrap.Wait()
 }

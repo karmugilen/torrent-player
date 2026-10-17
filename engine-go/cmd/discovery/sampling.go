@@ -99,6 +99,17 @@ func (s *sampler) refreshRoutes(ctx context.Context) {
 	}
 	s.mu.Unlock()
 	if !found {
+		// Retry a cold bootstrap instead of leaving discovery empty after a
+		// temporary DNS/router failure. Resolver jobs cannot block the first
+		// bootstrap because it runs before those workers are started.
+		select {
+		case s.samplingSlots <- struct{}{}:
+		default:
+			return
+		}
+		s.nextRefresh = time.Now().Add(10 * time.Second)
+		s.samplingWork.Add(1)
+		go func() { defer s.samplingWork.Done(); defer func() { <-s.samplingSlots }(); s.bootstrapNodes(ctx) }()
 		return
 	}
 	select {

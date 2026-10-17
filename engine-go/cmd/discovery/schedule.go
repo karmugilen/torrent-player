@@ -6,7 +6,7 @@ import (
 	"github.com/anacrolix/dht/v2/krpc"
 )
 
-const resolverWorkers = 12
+const resolverWorkers = 24
 
 // Keep source hints separate from persistent observations. Peer/node addresses
 // never enter the webpage or its JSON cache.

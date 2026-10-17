@@ -67,6 +67,8 @@ type state struct {
 	Completed       int           `json:"completed"`
 	Successes       int           `json:"successes"`
 	CacheHits       int           `json:"cacheHits"`
+	PeerHintUses    int           `json:"peerHintUses"`
+	EmptyLookups    int           `json:"emptyLookups"`
 	PeerHits        int           `json:"peerHits"`
 	AverageLookupMS int64         `json:"averageLookupMs"`
 	PayloadBytes    int64         `json:"payloadBytes"`

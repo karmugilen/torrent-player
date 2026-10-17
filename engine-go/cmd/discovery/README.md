@@ -35,16 +35,25 @@ invalid sizes are rejected. Movie payload requests remain disabled.
 
 The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
-Twelve asynchronous jobs run at once across the Go runtime's available CPU cores.
+Twenty-four asynchronous jobs run at once across the Go runtime's available CPU cores.
 Sixteen sampling slots refill independently of slow nodes. Random routing lookups
 refresh discovery every three seconds, and responsive nodes without BEP 51 can
 still supply new routes. Advertised sampling intervals remain respected.
 Repeatedly sampled hashes and reachable peers receive priority for name lookup.
-A shared DHT limit of 64 sends/second and peer dial limit of 32/second bound network
+A shared DHT limit of 128 sends/second and peer dial limit of 48/second bound network
 work. HTTP connections are reused, with at most three requests per cache source.
 Names appear immediately; availability counts finish settling afterward. Deadlines
 are twelve seconds for a job and four seconds for HTTP cache races. Losing HTTP
-requests are canceled and joined before a job finishes.
+requests are canceled and joined before a job finishes. Completed empty lookups
+release their slot as soon as cache and source checks finish. Lookups with no
+peer sightings or active connections stop after eight seconds and remain eligible
+for scheduled retries; live peer lookups retain the twelve-second deadline.
+
+A bounded RAM cache retains up to 24 peer addresses for each of 2,048 swarms for
+five minutes. Retries can dial these hints immediately while DHT checks run.
+Hints are not saved, exposed through the API, or counted as new map sightings.
+DHT bootstrap runs before resolver workers and retries automatically after a
+cold-start failure, so a full metadata queue cannot prevent discovery starting.
 
 Unresolved hashes retry automatically after 30 seconds, doubling to at most 15
 minutes; retries do not require another sample. One in four dispatches is reserved
@@ -101,3 +110,13 @@ about 39/minute over a 105-second window to 121/minute over a 36-second window.
 The live retained count grew past 3,000. These short sequential observations also
 depend on the responding DHT nodes. Regression checks cover growth beyond 600,
 independent sampling-slot refill, interval handling and candidate priority.
+
+A subsequent name-focused check observed 12.6 newly resolved names/minute and
+64 completed jobs/minute over 182 seconds before the resolver tuning, versus
+18.1 names/minute and 130 completed jobs/minute over 66 seconds afterward. The
+latter window completed 20 new names, reused peer hints five times, and recorded
+zero payload bytes. Public-network availability makes these variable; job
+throughput and actual named results are measured separately. Tests additionally
+cover prompt completion of an empty real local DHT lookup and hint-cache bounds,
+expiry, deduplication and address isolation. Browser checks include unknown
+country labels so an unlocated peer cannot blank the result table.
