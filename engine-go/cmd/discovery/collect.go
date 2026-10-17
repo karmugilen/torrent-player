@@ -72,16 +72,20 @@ type discoveryJob struct {
 	sources []krpc.NodeInfo
 }
 type sampler struct {
-	d          *dashboard
-	server     *dht.Server
-	client     *torrent.Client
-	mu         sync.Mutex
-	nodes      map[string]krpc.NodeInfo
-	nextSample map[string]time.Time
-	sources    map[string][]krpc.NodeInfo
-	inflight   map[string]bool
-	turn       int
-	caches     *metadataCaches
+	d             *dashboard
+	server        *dht.Server
+	client        *torrent.Client
+	mu            sync.Mutex
+	nodes         map[string]krpc.NodeInfo
+	nextSample    map[string]time.Time
+	sources       map[string][]krpc.NodeInfo
+	inflight      map[string]bool
+	turn          int
+	caches        *metadataCaches
+	samplingSlots chan struct{}
+	samplingWork  sync.WaitGroup
+	lookup        func(context.Context, *net.UDPAddr, string, krpc.MsgArgs) *krpc.Return
+	nextRefresh   time.Time
 }
 
 func (d *dashboard) collect(ctx context.Context) error {
@@ -92,7 +96,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	cfg := dht.NewDefaultServerConfig()
 	cfg.Conn = conn
 	cfg.Passive = true
-	cfg.SendLimiter = rate.NewLimiter(32, 8)
+	cfg.SendLimiter = rate.NewLimiter(64, 16)
 	server, e := dht.NewServer(cfg)
 	if e != nil {
 		conn.Close()
@@ -122,7 +126,8 @@ func (d *dashboard) collect(ctx context.Context) error {
 		return e
 	}
 	defer client.Close()
-	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches)}
+	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency)}
+	s.lookup = s.query
 	defer s.caches.close()
 	d.mu.Lock()
 	d.state.Workers = resolverWorkers
@@ -177,18 +182,24 @@ func (d *dashboard) collect(ctx context.Context) error {
 	}
 	bootstrap.Wait()
 	d.setStatus("Sampling public torrent hashes")
-	tick := time.NewTicker(2 * time.Second)
+	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for ctx.Err() == nil {
+		s.refreshRoutes(ctx)
 		s.sampleBatch(ctx)
 		d.mu.Lock()
 		d.state.Queries = int(server.Stats().OutboundQueriesAttempted)
+		d.state.ActiveSamplers = len(s.samplingSlots)
 		d.mu.Unlock()
 		select {
 		case <-ctx.Done():
 		case <-tick.C:
 		}
 	}
+	s.samplingWork.Wait()
+	d.mu.Lock()
+	d.state.ActiveSamplers = 0
+	d.mu.Unlock()
 	work.Wait()
 	return ctx.Err()
 }
@@ -215,64 +226,12 @@ func (s *sampler) addNodes(r *krpc.Return) {
 	defer s.mu.Unlock()
 	for _, n := range r.Nodes {
 		if publicIP(n.Addr.IP) && n.Addr.Port > 0 {
-			if len(s.nodes) < 1500 {
+			if len(s.nodes) < 8192 {
 				s.nodes[n.Addr.String()] = n
 			}
 			_ = s.server.AddNode(n)
 		}
 	}
-}
-func (s *sampler) sampleBatch(ctx context.Context) {
-	now := time.Now()
-	batch := []krpc.NodeInfo{}
-	s.mu.Lock()
-	for addr, n := range s.nodes {
-		if len(batch) < 4 && !now.Before(s.nextSample[addr]) {
-			batch = append(batch, n)
-			s.nextSample[addr] = now.Add(10 * time.Minute)
-		}
-	}
-	s.mu.Unlock()
-	if len(batch) == 0 {
-		s.d.setStatus("Waiting for DHT sampling intervals")
-		return
-	}
-	var work sync.WaitGroup
-	for _, n := range batch {
-		work.Add(1)
-		go func(n krpc.NodeInfo) {
-			defer work.Done()
-			r := s.query(ctx, &net.UDPAddr{IP: n.Addr.IP, Port: n.Addr.Port}, "sample_infohashes", krpc.MsgArgs{Target: randomID()})
-			if r == nil || r.Samples == nil {
-				return
-			}
-			interval := 10 * time.Minute
-			if r.Interval != nil {
-				interval = time.Duration(max(60, min(21600, *r.Interval))) * time.Second
-			}
-			s.mu.Lock()
-			s.nextSample[n.Addr.String()] = time.Now().Add(interval)
-			s.mu.Unlock()
-			s.d.mu.Lock()
-			s.d.state.SamplingNodes++
-			s.d.state.Status = "Discovering torrents and resolving names"
-			for _, h := range *r.Samples {
-				hash := hex.EncodeToString(h[:])
-				rec, ok := s.d.records[hash]
-				if !ok {
-					rec = observation{Hash: hash, FirstSeen: now.UTC(), Countries: map[string]int{}}
-				}
-				rec.LastSeen = now.UTC()
-				s.d.records[hash] = rec
-			}
-			s.d.pruneLocked()
-			s.d.mu.Unlock()
-			for _, h := range *r.Samples {
-				s.rememberSource(hex.EncodeToString(h[:]), n)
-			}
-		}(n)
-	}
-	work.Wait()
 }
 
 func cleanMetadataText(value string, limit int) string {
@@ -434,6 +393,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		latest, retained := s.d.records[j.hash]
 		if retained {
 			rec.LastSeen = latest.LastSeen
+			rec.SampleHits = latest.SampleHits
 		}
 		s.d.records[j.hash] = rec
 		s.d.pruneLocked()
@@ -493,6 +453,7 @@ loop:
 	s.d.mu.Lock()
 	if latest, exists := s.d.records[j.hash]; exists {
 		rec.LastSeen = latest.LastSeen
+		rec.SampleHits = latest.SampleHits
 	}
 	// A slow successful job must survive a newer sample evicting its unresolved
 	// row. Failed evicted jobs need no further retention.

@@ -152,7 +152,7 @@ func TestRetryReservationSurvivesEarlyFailureAndFreshWorkCannotStarveRetries(t *
 
 func TestRetentionKeepsReachableUnresolvedSwarmsForRetry(t *testing.T) {
 	d := testDashboard(t)
-	for i := 0; i < 600; i++ {
+	for i := 0; i < retainedTorrentLimit; i++ {
 		h := strings.Repeat("0", 36) + fmt.Sprintf("%04x", i)
 		d.records[h] = observation{Hash: h, LastSeen: time.Now()}
 	}
@@ -162,6 +162,20 @@ func TestRetentionKeepsReachableUnresolvedSwarmsForRetry(t *testing.T) {
 	if _, ok := d.records[h]; !ok {
 		t.Fatal("new sample evicted a reachable pending torrent before its retry")
 	}
+}
+
+func TestRepeatedSamplesReceiveNameLookupPriority(t *testing.T) {
+	d := testDashboard(t)
+	now := time.Now()
+	single, repeated := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	d.records[single] = observation{Hash: single, FirstSeen: now.Add(-time.Hour), SampleHits: 1}
+	d.records[repeated] = observation{Hash: repeated, FirstSeen: now.Add(-time.Minute), SampleHits: 3}
+	s := &sampler{d: d}
+	job, ok := s.nextJob(now)
+	if !ok || job.hash != repeated {
+		t.Fatal("repeatedly observed candidate lost priority to an older single sample")
+	}
+	s.releaseJob(job.hash)
 }
 
 func TestCacheRejectsOversizedBodiesAndDishonestLengths(t *testing.T) {

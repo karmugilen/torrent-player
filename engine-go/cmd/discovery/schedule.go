@@ -16,11 +16,11 @@ func (s *sampler) rememberSource(hash string, node krpc.NodeInfo) {
 	if s.sources == nil {
 		s.sources = make(map[string][]krpc.NodeInfo)
 	}
-	if len(s.sources) >= 2400 {
+	if len(s.sources) >= retainedTorrentLimit*2 {
 		// Hints are opportunistic; full DHT traversal works without them.
 		for key := range s.sources {
 			delete(s.sources, key)
-			if len(s.sources) < 1800 {
+			if len(s.sources) < retainedTorrentLimit*3/2 {
 				break
 			}
 		}
@@ -59,6 +59,11 @@ func (s *sampler) nextJob(now time.Time) (discoveryJob, bool) {
 	better := func(a, b observation) bool {
 		if (a.Peers > 0) != (b.Peers > 0) {
 			return a.Peers > 0
+		}
+		// Repeatedly sampled hashes are useful candidates, without implying a
+		// worldwide popularity estimate.
+		if (a.SampleHits > 1) != (b.SampleHits > 1) {
+			return a.SampleHits > 1
 		}
 		if !dueAt(a).Equal(dueAt(b)) {
 			return dueAt(a).Before(dueAt(b))

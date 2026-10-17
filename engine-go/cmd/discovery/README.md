@@ -36,7 +36,11 @@ invalid sizes are rejected. Movie payload requests remain disabled.
 The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
 Twelve asynchronous jobs run at once across the Go runtime's available CPU cores.
-A shared DHT limit of 32 sends/second and peer dial limit of 32/second bound network
+Sixteen sampling slots refill independently of slow nodes. Random routing lookups
+refresh discovery every three seconds, and responsive nodes without BEP 51 can
+still supply new routes. Advertised sampling intervals remain respected.
+Repeatedly sampled hashes and reachable peers receive priority for name lookup.
+A shared DHT limit of 64 sends/second and peer dial limit of 32/second bound network
 work. HTTP connections are reused, with at most three requests per cache source.
 Names appear immediately; availability counts finish settling afterward. Deadlines
 are twelve seconds for a job and four seconds for HTTP cache races. Losing HTTP
@@ -56,7 +60,10 @@ not required for this resolver. Payload download/upload is disabled and the
 storage implementation independently rejects movie-data reads and writes. The
 page reports the actual torrent payload counter.
 
-Observations are bounded to 600 retained hashes, favoring resolved names. Only
+Observations are bounded to 10,000 retained hashes, favoring resolved names.
+The page labels this as retained torrents and displays its capacity separately
+from incoming hash samples (which can contain repeats), so reaching the retention
+limit is not confused with discovery stopping. Only
 torrent metadata and aggregate country counts are cached, under
 `~/.cache/torrent-player/discovery.json` (or `$XDG_CACHE_HOME`). Raw peer addresses
 are transient and are not exposed by the page or saved in that cache. Cache
@@ -88,3 +95,9 @@ A local live check on 2026-10-17 observed about 18 lookup starts/minute over
 after it. The latter window resolved eight additional names and recorded zero
 payload bytes. These are short, sequential public-network observations, not a
 controlled benchmark or a guaranteed resolution rate.
+
+The sampling pipeline update was checked separately: sampling replies rose from
+about 39/minute over a 105-second window to 121/minute over a 36-second window.
+The live retained count grew past 3,000. These short sequential observations also
+depend on the responding DHT nodes. Regression checks cover growth beyond 600,
+independent sampling-slot refill, interval handling and candidate priority.

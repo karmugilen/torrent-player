@@ -88,18 +88,18 @@ func TestStateEndpointAndInvalidControl(t *testing.T) {
 func TestBoundedCacheRetainsResolvedNamesAndDropsInvalidHashes(t *testing.T) {
 	d := testDashboard(t)
 	old := time.Now().Add(-time.Hour)
-	for i := 0; i < 800; i++ {
+	for i := 0; i < retainedTorrentLimit+200; i++ {
 		h := fmt.Sprintf("%040x", i)
 		d.records[h] = observation{Hash: h, LastSeen: time.Now()}
 	}
 	h := strings.Repeat("c", 40)
 	d.records[h] = observation{Hash: h, Name: "Known video", Resolved: true, LastSeen: old}
 	d.pruneLocked()
-	if len(d.records) != 600 || !d.records[h].Resolved {
+	if len(d.records) != retainedTorrentLimit || !d.records[h].Resolved {
 		t.Fatal("cache evicted useful names or exceeded bound")
 	}
 	d.persist()
-	if len(newDashboard(d.cachePath, nil).records) != 600 {
+	if len(newDashboard(d.cachePath, nil).records) != retainedTorrentLimit {
 		t.Fatal("persisted cache changed")
 	}
 }
@@ -112,5 +112,20 @@ func TestEmptyBloomIsZeroAndUnsupportedLocationsRemainUnknown(t *testing.T) {
 	d := testDashboard(t)
 	if d.country(nil) != "ZZ" {
 		t.Fatal("invented a country")
+	}
+}
+
+func TestDiscoveryGrowsPastSixHundredAndReportsCapacity(t *testing.T) {
+	d := testDashboard(t)
+	for i := 0; i < 1000; i++ {
+		h := fmt.Sprintf("%040x", i)
+		d.records[h] = observation{Hash: h, FirstSeen: time.Now(), LastSeen: time.Now()}
+	}
+	d.pruneLocked()
+	if d.snapshot().Hashes != 1000 {
+		t.Fatal("discovery count is still capped at 600")
+	}
+	if d.snapshot().RetentionLimit != retainedTorrentLimit {
+		t.Fatal("page cannot explain its retention capacity")
 	}
 }

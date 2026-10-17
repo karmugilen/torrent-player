@@ -26,6 +26,8 @@ import (
 //go:embed ui.html
 var page string
 
+const retainedTorrentLimit = 10_000
+
 type observation struct {
 	Hash            string         `json:"hash"`
 	Name            string         `json:"name"`
@@ -42,6 +44,7 @@ type observation struct {
 	ResolveAttempts int            `json:"resolveAttempts"`
 	NextAttempt     time.Time      `json:"nextAttempt"`
 	Source          string         `json:"source"`
+	SampleHits      int            `json:"sampleHits"`
 	ResolutionMS    int64          `json:"resolutionMs"`
 }
 type state struct {
@@ -53,6 +56,9 @@ type state struct {
 	Responses       int           `json:"responses"`
 	SamplingNodes   int           `json:"samplingNodes"`
 	Hashes          int           `json:"hashes"`
+	RetentionLimit  int           `json:"retentionLimit"`
+	ActiveSamplers  int           `json:"activeSamplers"`
+	HashSamples     int64         `json:"hashSamples"`
 	Attempts        int           `json:"attempts"`
 	Resolved        int           `json:"resolved"`
 	Active          int           `json:"active"`
@@ -106,7 +112,7 @@ func validHash(h string) bool {
 	return true
 }
 func (d *dashboard) pruneLocked() {
-	if len(d.records) <= 600 {
+	if len(d.records) <= retainedTorrentLimit {
 		return
 	}
 	all := make([]observation, 0, len(d.records))
@@ -124,7 +130,7 @@ func (d *dashboard) pruneLocked() {
 		}
 		return all[i].LastSeen.After(all[j].LastSeen)
 	})
-	for _, r := range all[600:] {
+	for _, r := range all[retainedTorrentLimit:] {
 		delete(d.records, r.Hash)
 	}
 }
@@ -134,6 +140,7 @@ func (d *dashboard) snapshot() state {
 	s := d.state
 	s.Updated = time.Now().UTC()
 	s.Hashes = len(d.records)
+	s.RetentionLimit = retainedTorrentLimit
 	if s.Completed > 0 {
 		s.AverageLookupMS = d.totalLookupTime.Milliseconds() / int64(s.Completed)
 	}
