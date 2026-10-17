@@ -29,6 +29,27 @@ pending implementation evidence and integration review. See
 | QA-01 | Pending integration: lead | UI-01–04, MEDIA-01–02 | Focused regressions, existing suites, local APK and visual verification where available. |
 | STORAGE-01 | Assigned: agy; later slice | First redesign | Non-destructive moved-file/folder-access repair and clearer storage recovery. |
 
+## Integration review status
+
+Both initial implementation reports were received. Neither platform slice has
+been accepted or merged into the lead branch yet. The same two workers have
+bounded correction tasks; no additional implementation workers are needed.
+
+- **Android, reviewed at `7ebcbd3`:** generated XML confirms 112 app tests and
+  22 core tests with zero failures. Source review found remaining Direct Play
+  preview/seekability/cancellation gaps, wrong-episode Continue watching dispatch,
+  cache-clear/recovery lifecycle issues, and incomplete visual/storage-repair
+  acceptance. Corrections requested from agy.
+- **Native, reviewed at `a854e0e`:** Android native library and all three preview
+  JNI exports verified. Source review found unenforced preview limits/lifecycle,
+  unconsumed resume-cache data, cache/routing concurrency and durability issues.
+  Corrections requested from grok.
+- Full integrated suites, final two-axis review, APK build/checksum and actual
+  Android visual verification remain pending corrected delivery. Existing tests
+  and worker completion labels do not establish feature completeness.
+- No status polling or live ISP-effectiveness tests. Resume verification from
+  completed correction reports/callbacks; anti-DPI effectiveness remains user-tested.
+
 ## Rules shared by all tickets
 
 - External Android players are mandatory. Preserve URI grants, playlists,
@@ -598,3 +619,7 @@ repeated clear/use cycles, entry deletion, accounting, low space and absent file
 - Subsequent instruction supersedes that hold: implement the full board with
   agy and grok in parallel using Herdr. Isolated write ownership and integration
   contracts are recorded in REDESIGN_EXECUTION.md. No work is accepted as complete yet.
+- Initial Android/native reports reviewed at `7ebcbd3` / `a854e0e`. Evidence
+  checked independently; functional/spec and concurrency gaps were sent back to
+  the same workers. Await corrected reports rather than treating first passes
+  as final delivery. No application commits integrated into the lead branch yet.
