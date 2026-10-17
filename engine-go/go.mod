@@ -94,3 +94,5 @@ require (
 )
 
 replace github.com/wlynxg/anet => ./patches/anet
+
+replace github.com/anacrolix/torrent => ./patches/torrent

@@ -29,10 +29,10 @@ class PlaybackProvider : ContentProvider() {
             ?: throw FileNotFoundException("Download was removed")
         val index = parts[1].toIntOrNull()
         val file = entry.files.find {
-            it.index == index && (it.index in entry.selected || it.isVerifiedComplete)
+            it.index == index && (it.index in entry.selected || (!entry.directPlay && it.isVerifiedComplete))
         }
             ?: throw FileNotFoundException("File is not selected")
-        if (entry.isDeleting || file.uri == null) throw FileNotFoundException("File is unavailable")
+        if (entry.isDeleting || (!entry.directPlay && file.uri == null)) throw FileNotFoundException("File is unavailable")
         return entry to file
     }
 
@@ -59,7 +59,7 @@ class PlaybackProvider : ContentProvider() {
         try {
             val (entry, file) = target(uri)
             val app = context!!.applicationContext as WebtorApp
-            if (file.isVerifiedComplete) {
+            if (!entry.directPlay && file.isVerifiedComplete) {
                 val descriptor = app.contentResolver.openFileDescriptor(Uri.parse(file.uri), "r")
                     ?: throw FileNotFoundException("Downloaded file is unavailable")
                 if (descriptor.statSize >= 0 && descriptor.statSize < file.length) {

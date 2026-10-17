@@ -188,7 +188,7 @@ func (s *EngineServer) applyTransferState(rec *TorrentRecord) {
 	}
 	for i, f := range t.Files() {
 		priority := torrent.PiecePriorityNone
-		if active && selected[i] {
+		if active && selected[i] && !rec.DirectPlay {
 			priority = torrent.PiecePriorityNormal
 		}
 		f.SetPriority(priority)

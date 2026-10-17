@@ -37,6 +37,7 @@ fun AddSheet(
     freeBytes: Long = 0, onToggle: ((Int) -> Unit)? = null,
     onSelectAll: (() -> Unit)? = null, onSelectNone: (() -> Unit)? = null,
     onDownload: (() -> Unit)? = null,
+    onDirectPlay: (() -> Unit)? = null, directPlayDefault: Boolean = false,
     destination: String = "Downloads/Webtor",
     existingEntry: DownloadEntry? = null, onOpenExisting: (() -> Unit)? = null,
 ) {
@@ -55,7 +56,7 @@ fun AddSheet(
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedBytes
     val canAddPending = !ready && draft != null && !busy && existingEntry == null && onDownload != null && engineReady
-    val canDownload = (ready && selection.isNotEmpty() && !insufficientSpace || canAddPending) && existingEntry == null && onDownload != null
+    val canDownload = !busy && (ready && selection.isNotEmpty() && !insufficientSpace || canAddPending) && existingEntry == null && onDownload != null
     Scaffold(
         modifier = Modifier.imePadding(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -100,12 +101,17 @@ fun AddSheet(
                         }
                     } else {
                         Button(
-                            onClick = { onDownload?.invoke() },
-                            enabled = canDownload,
+                            onClick = { if (directPlayDefault && ready) onDirectPlay?.invoke() else onDownload?.invoke() },
+                            enabled = if (directPlayDefault && ready) selection.isNotEmpty() && !busy else canDownload,
                             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
-                            Text(if (canAddPending) "Add and wait" else "Download", maxLines = 1)
+                            Text(if (canAddPending) "Add and wait" else if (directPlayDefault) "Direct Play" else "Download", maxLines = 1)
                         }
+                        if (ready) OutlinedButton(
+                            onClick = { if (directPlayDefault) onDownload?.invoke() else onDirectPlay?.invoke() },
+                            enabled = !busy && selection.isNotEmpty() && (!directPlayDefault || !insufficientSpace),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(if (directPlayDefault) "Download for offline use" else "Direct Play · keep only startup cache") }
                     }
                 }
             }

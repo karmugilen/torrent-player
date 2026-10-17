@@ -22,6 +22,8 @@ data class SavedFile(
     val relativePath: String? = null,
     /** Hashed complete bytes. Display `progress` may include unverified receive. */
     val verifiedBytes: Long = 0L,
+    val playbackPositionMs: Long = 0L,
+    val playbackDurationMs: Long = 0L,
 ) {
     val isVerifiedComplete: Boolean get() = length == 0L || verifiedBytes >= length
 }
@@ -63,6 +65,7 @@ data class DownloadEntry(
     val focusedFile: Int? = null,
     val transferStage: TransferStage? = null,
     val transferReason: String? = null,
+    val directPlay: Boolean = false,
 ) {
     val total get() = files.filter { it.index in selected }.sumOf { it.length }
     val downloaded get() = files.filter { it.index in selected }.sumOf { (it.length * it.progress.coerceIn(0.0, 1.0)).toLong() }
@@ -73,7 +76,7 @@ data class DownloadEntry(
     val checkPercent get() = status?.let {
         if (it.checkTotal > 0) (100L * it.checkedPieces / it.checkTotal).toInt().coerceIn(0, 100) else 0
     } ?: 0
-    val complete get() = metadataReady && selected.isNotEmpty() && !checking &&
+    val complete get() = !directPlay && metadataReady && selected.isNotEmpty() && !checking &&
         files.filter { it.index in selected }.all { it.isVerifiedComplete }
 
     fun controlsBusy(): Boolean = isDeleting || lifecycleState == EntryLifecycleState.PREPARING ||
@@ -94,12 +97,13 @@ data class DownloadEntry(
             lifecycleState == EntryLifecycleState.PAUSED ||
             lifecycleState == EntryLifecycleState.STOPPED -> "Paused"
         checking -> "Checking saved data"
+        directPlay -> "Direct Play"
         else -> "Downloading"
     }
 }
 
 fun shouldSkipStartupRestore(entry: DownloadEntry): Boolean =
-    entry.complete || entry.paused || entry.isDeleting
+    entry.complete || entry.paused || entry.isDeleting || entry.directPlay
 
 fun requiresFileSelectionForResume(entry: DownloadEntry): Boolean =
     entry.metadataReady && entry.selected.isEmpty()
@@ -201,9 +205,16 @@ class DownloadStorage(private val context: Context) {
         check(failed.isEmpty()) { "Some temporary torrent files could not be removed" }
     }
 
-    fun clearLegacy() {
-        check(legacyDir.deleteRecursively()) { "Some old downloads could not be removed" }
-        legacyDir.mkdirs()
+    fun deleteStartupCache(key: String) {
+        require(Regex("[a-fA-F0-9]{40,64}").matches(key)) { "Invalid torrent identity" }
+        val directory = File(legacyDir, ".startup/$key")
+        check(!directory.exists() || directory.deleteRecursively()) { "Could not remove startup cache" }
+    }
+
+    fun clearStartupCaches(activeKeys: Set<String>) {
+        File(legacyDir, ".startup").listFiles().orEmpty().filter { it.name !in activeKeys }.forEach {
+            check(it.deleteRecursively()) { "Could not remove startup cache" }
+        }
     }
 
     fun save(entries: List<DownloadEntry>) {
@@ -253,12 +264,14 @@ class DownloadStorage(private val context: Context) {
         return result
     }
 
+    private val publishedPlaybackUris = mutableSetOf<String>()
+
     fun prepareForPlayback(file: SavedFile) {
         val uri = Uri.parse(file.uri ?: error("Downloaded file is unavailable"))
         resolver.openFileDescriptor(uri, "r")?.use { fd ->
             check(fd.statSize < 0 || fd.statSize >= file.length) { "Downloaded file is shorter than expected. Resume it before playing." }
         } ?: error("Downloaded file is unavailable")
-        if (Build.VERSION.SDK_INT >= 29 && uri.authority == MediaStore.AUTHORITY) {
+        if (Build.VERSION.SDK_INT >= 29 && uri.authority == MediaStore.AUTHORITY && uri.toString() !in publishedPlaybackUris) {
             // Ask MediaStore to refresh metadata after native descriptor writes.
             // Older builds could leave an empty-file scan in its database.
             runCatching {
@@ -266,6 +279,7 @@ class DownloadStorage(private val context: Context) {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
                     put(MediaStore.MediaColumns.MIME_TYPE, mimeFor(file.name))
                 }, null, null)
+                publishedPlaybackUris += uri.toString()
             }.onFailure { android.util.Log.w("webtor-playback", "Could not refresh saved-file metadata", it) }
         }
     }
@@ -450,96 +464,106 @@ class DownloadStorage(private val context: Context) {
         }
     }
 
-    private fun encodeLibrary(entries: List<DownloadEntry>): String {
-        val array = JSONArray()
-        entries.forEach { e ->
-            array.put(JSONObject().put("key", e.key).put("title", e.title).put("source", e.source)
-                .put("metadata", e.metadata).put("metadataReady", e.metadataReady).put("autoSelect", e.autoSelect)
-                .put("engineId", e.engineId).put("destination", e.destination)
-                .put("downloadGroupUri", e.downloadGroupUri)
-                .put("paused", e.paused).put("addedAt", e.addedAt)
-                .put("generation", e.generation)
-                .put("completionAck", e.completionAck)
-                .put("focusedFile", e.focusedFile)
-                .put("isDeleting", e.isDeleting)
-                .put("lifecycleState", e.lifecycleState.name)
-                .put("selected", JSONArray(e.selected.toList()))
-                .put("files", JSONArray().apply {
-                    e.files.forEach { f -> put(JSONObject().put("index", f.index).put("name", f.name)
-                        .put("path", f.path).put("length", f.length).put("uri", f.uri).put("progress", f.progress)
-                        .put("verifiedBytes", f.verifiedBytes)
-                        .put("relativePath", f.relativePath)) }
-                }))
+    companion object {
+        internal fun encodeLibrary(entries: List<DownloadEntry>): String {
+            val array = JSONArray()
+            entries.forEach { e ->
+                array.put(JSONObject().put("key", e.key).put("title", e.title).put("source", e.source)
+                    .put("metadata", e.metadata).put("metadataReady", e.metadataReady).put("autoSelect", e.autoSelect)
+                    .put("engineId", e.engineId).put("destination", e.destination)
+                    .put("downloadGroupUri", e.downloadGroupUri)
+                    .put("paused", e.paused).put("addedAt", e.addedAt)
+                    .put("generation", e.generation)
+                    .put("completionAck", e.completionAck)
+                    .put("focusedFile", e.focusedFile)
+                    .put("directPlay", e.directPlay)
+                    .put("isDeleting", e.isDeleting)
+                    .put("lifecycleState", e.lifecycleState.name)
+                    .put("selected", JSONArray(e.selected.toList()))
+                    .put("files", JSONArray().apply {
+                        e.files.forEach { f -> put(JSONObject().put("index", f.index).put("name", f.name)
+                            .put("path", f.path).put("length", f.length).put("uri", f.uri).put("progress", f.progress)
+                            .put("verifiedBytes", f.verifiedBytes)
+                            .put("playbackPositionMs", f.playbackPositionMs).put("playbackDurationMs", f.playbackDurationMs)
+                            .put("relativePath", f.relativePath)) }
+                    }))
+            }
+            return array.toString()
         }
-        return array.toString()
-    }
 
-    private fun parseEntry(e: JSONObject): DownloadEntry {
-        val files = e.getJSONArray("files")
-        val selected = e.getJSONArray("selected")
-        val metadata = e.optString("metadata", "")
-        val metadataReady = e.optBoolean("metadataReady", files.length() > 0 || metadata.isNotBlank())
-        val stateName = e.optString("lifecycleState", "")
-        val savedState = EntryLifecycleState.entries.find { it.name == stateName }
-        val isDeleting = e.optBoolean("isDeleting", false)
-        // Legacy Watch/stream library rows are treated as ordinary stopped downloads
-        // (Watch UI was removed; keep Download + RAM write-back only).
-        val legacyStream = e.optString("storageMode", "") == "STREAM" || e.optBoolean("watchOnly", false)
-        val paused = e.optBoolean("paused", false) || legacyStream
-        val lifecycleState = when {
-            isDeleting -> EntryLifecycleState.ERROR
-            legacyStream -> EntryLifecycleState.STOPPED
-            savedState == EntryLifecycleState.PAUSING -> EntryLifecycleState.PAUSED
-            savedState == EntryLifecycleState.STOPPING || savedState == EntryLifecycleState.PREPARING -> EntryLifecycleState.STOPPED
-            savedState != null -> savedState
-            paused -> EntryLifecycleState.PAUSED
-            else -> EntryLifecycleState.STOPPED
+        internal fun parseEntry(e: JSONObject): DownloadEntry {
+            val files = e.getJSONArray("files")
+            val selected = e.getJSONArray("selected")
+            val metadata = e.optString("metadata", "")
+            val metadataReady = e.optBoolean("metadataReady", files.length() > 0 || metadata.isNotBlank())
+            val stateName = e.optString("lifecycleState", "")
+            val savedState = EntryLifecycleState.entries.find { it.name == stateName }
+            val isDeleting = e.optBoolean("isDeleting", false)
+            val directPlay = e.optBoolean("directPlay", false)
+            // Legacy Watch/stream library rows are treated as ordinary stopped downloads
+            // (Watch UI was removed; keep Download + RAM write-back only).
+            val legacyStream = e.optString("storageMode", "") == "STREAM" || e.optBoolean("watchOnly", false)
+            val paused = e.optBoolean("paused", false) || legacyStream || directPlay
+            val lifecycleState = when {
+                isDeleting -> EntryLifecycleState.ERROR
+                directPlay -> EntryLifecycleState.PAUSED
+                legacyStream -> EntryLifecycleState.STOPPED
+                savedState == EntryLifecycleState.PAUSING -> EntryLifecycleState.PAUSED
+                savedState == EntryLifecycleState.STOPPING || savedState == EntryLifecycleState.PREPARING -> EntryLifecycleState.STOPPED
+                savedState != null -> savedState
+                paused -> EntryLifecycleState.PAUSED
+                else -> EntryLifecycleState.STOPPED
+            }
+            val destination = if (legacyStream) {
+                "Downloads/Webtor"
+            } else {
+                e.getString("destination")
+            }
+            val entry = DownloadEntry(
+                e.getString("key"), e.getString("title"), e.getString("source"), metadata,
+                if (legacyStream || directPlay || e.isNull("engineId")) null else e.getString("engineId"),
+                destination,
+                (0 until files.length()).map { n -> files.getJSONObject(n).let { f ->
+                    val length = f.getLong("length")
+                    val progress = f.optDouble("progress", 0.0).let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
+                    // Older saves only stored verified-based progress; migrate into verifiedBytes.
+                    val verifiedBytes = when {
+                        f.has("verifiedBytes") && !f.isNull("verifiedBytes") -> f.optLong("verifiedBytes", 0L)
+                        length <= 0L -> 0L
+                        else -> (length * progress).toLong().coerceIn(0L, length)
+                    }
+                    SavedFile(f.getInt("index"), f.getString("name"), f.getString("path"), length,
+                        if (legacyStream || f.isNull("uri")) null else f.getString("uri"),
+                        if (directPlay) 0.0 else progress,
+                        if (f.isNull("relativePath")) null else f.getString("relativePath"),
+                        verifiedBytes = if (directPlay) 0L else verifiedBytes,
+                        playbackPositionMs = f.optLong("playbackPositionMs", 0L).coerceAtLeast(0L),
+                        playbackDurationMs = f.optLong("playbackDurationMs", 0L).coerceAtLeast(0L))
+                } },
+                (0 until selected.length()).map { selected.getInt(it) }.toSet(),
+                paused || isDeleting || savedState == EntryLifecycleState.PAUSING || savedState == EntryLifecycleState.STOPPING,
+                status = null,
+                error = if (isDeleting) "Deletion was interrupted. Tap Remove to retry." else null,
+                addedAt = e.optLong("addedAt", 0L),
+                generation = e.optLong("generation", 0L),
+                isDeleting = false,
+                lifecycleState = lifecycleState,
+                metadataReady = metadataReady,
+                autoSelect = e.optBoolean("autoSelect", true),
+                completionAck = e.optLong("completionAck", if (metadataReady && selected.length() > 0) e.optLong("generation", 0L) else 0L),
+                focusedFile = if (e.has("focusedFile") && !e.isNull("focusedFile")) e.optInt("focusedFile") else null,
+                downloadGroupUri = e.optString("downloadGroupUri", "").ifBlank { null },
+                directPlay = directPlay,
+            )
+            require(entry.key.isNotBlank()) { "Missing torrent identity" }
+            require((!entry.metadataReady || entry.files.isNotEmpty()) && entry.files.map { it.index }.toSet().size == entry.files.size) { "Invalid torrent files" }
+            require(entry.files.withIndex().all { (index, file) -> file.index == index && file.length >= 0 }) { "Invalid file index or length" }
+            require(entry.selected.all { it in entry.files.indices }) { "Invalid file selection" }
+            require(entry.metadataReady || entry.files.isEmpty()) { "Metadata-pending downloads cannot contain files" }
+            return entry
         }
-        val destination = if (legacyStream) {
-            "Downloads/Webtor"
-        } else {
-            e.getString("destination")
-        }
-        val entry = DownloadEntry(
-            e.getString("key"), e.getString("title"), e.getString("source"), metadata,
-            if (legacyStream || e.isNull("engineId")) null else e.getString("engineId"),
-            destination,
-            (0 until files.length()).map { n -> files.getJSONObject(n).let { f ->
-                val length = f.getLong("length")
-                val progress = f.optDouble("progress", 0.0).let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
-                // Older saves only stored verified-based progress; migrate into verifiedBytes.
-                val verifiedBytes = when {
-                    f.has("verifiedBytes") && !f.isNull("verifiedBytes") -> f.optLong("verifiedBytes", 0L)
-                    length <= 0L -> 0L
-                    else -> (length * progress).toLong().coerceIn(0L, length)
-                }
-                SavedFile(f.getInt("index"), f.getString("name"), f.getString("path"), length,
-                    if (legacyStream || f.isNull("uri")) null else f.getString("uri"),
-                    progress,
-                    if (f.isNull("relativePath")) null else f.getString("relativePath"),
-                    verifiedBytes = verifiedBytes)
-            } },
-            (0 until selected.length()).map { selected.getInt(it) }.toSet(),
-            paused || isDeleting || savedState == EntryLifecycleState.PAUSING || savedState == EntryLifecycleState.STOPPING,
-            status = null,
-            error = if (isDeleting) "Deletion was interrupted. Tap Remove to retry." else null,
-            addedAt = e.optLong("addedAt", 0L),
-            generation = e.optLong("generation", 0L),
-            isDeleting = false,
-            lifecycleState = lifecycleState,
-            metadataReady = metadataReady,
-            autoSelect = e.optBoolean("autoSelect", true),
-            completionAck = e.optLong("completionAck", if (metadataReady && selected.length() > 0) e.optLong("generation", 0L) else 0L),
-            focusedFile = if (e.has("focusedFile") && !e.isNull("focusedFile")) e.optInt("focusedFile") else null,
-            downloadGroupUri = e.optString("downloadGroupUri", "").ifBlank { null },
-        )
-        require(entry.key.isNotBlank()) { "Missing torrent identity" }
-        require((!entry.metadataReady || entry.files.isNotEmpty()) && entry.files.map { it.index }.toSet().size == entry.files.size) { "Invalid torrent files" }
-        require(entry.files.withIndex().all { (index, file) -> file.index == index && file.length >= 0 }) { "Invalid file index or length" }
-        require(entry.selected.all { it in entry.files.indices }) { "Invalid file selection" }
-        require(entry.metadataReady || entry.files.isEmpty()) { "Metadata-pending downloads cannot contain files" }
-        return entry
-    }
+
+    } // serialization
 
     private fun importTorrents(): List<File> = context.cacheDir.listFiles().orEmpty().filter {
         it.isFile && it.name.startsWith("import-") && it.name.endsWith(".torrent")
@@ -551,6 +575,7 @@ class DownloadStorage(private val context: Context) {
 
     @android.annotation.TargetApi(Build.VERSION_CODES.Q)
     private fun mediaStoreDownloadsUri(): Uri = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+
 }
 
 // Only return ancestors within the app's download root; never the shared root itself.

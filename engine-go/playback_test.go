@@ -21,6 +21,10 @@ import (
 )
 
 func playbackFixture(t *testing.T) (*EngineServer, *TorrentRecord, []byte) {
+	return playbackFixtureMode(t, false)
+}
+
+func playbackFixtureMode(t *testing.T, direct bool) (*EngineServer, *TorrentRecord, []byte) {
 	t.Helper()
 	s := testEngine(t)
 	// Two files share a piece; the movie also spans several complete pieces.
@@ -57,7 +61,13 @@ func playbackFixture(t *testing.T) (*EngineServer, *TorrentRecord, []byte) {
 		t.Fatal(err)
 	}
 	fd := int(f.Fd())
-	body, _ = json.Marshal(ConfigureRequest{ID: added.ID, Descriptors: []*int{nil, &fd}, Selected: []int{1}})
+	config := ConfigureRequest{ID: added.ID, Descriptors: []*int{nil, &fd}, Selected: []int{1}}
+	if direct {
+		config.Descriptors = []*int{nil, nil}
+		config.StorageMode = StorageModeStream
+		config.StreamCacheBytes = 16 << 20
+	}
+	body, _ = json.Marshal(config)
 	code, response = s.DispatchControl("POST", "/configure", string(body))
 	_ = f.Close() // Only Go's duplicated descriptor remains alive.
 	if code != 200 {
@@ -192,6 +202,10 @@ func TestPlaybackWaitsForVerificationThenSupportsSeeking(t *testing.T) {
 }
 
 func largePlaybackFixture(t *testing.T, pieces int) (*EngineServer, *TorrentRecord, int64) {
+	return largePlaybackFixtureMode(t, pieces, false)
+}
+
+func largePlaybackFixtureMode(t *testing.T, pieces int, direct bool) (*EngineServer, *TorrentRecord, int64) {
 	t.Helper()
 	s := testEngine(t)
 	pieceLen := int64(1024 * 1024)
@@ -226,7 +240,13 @@ func largePlaybackFixture(t *testing.T, pieces int) (*EngineServer, *TorrentReco
 		t.Fatal(err)
 	}
 	fd := int(f.Fd())
-	body, _ = json.Marshal(ConfigureRequest{ID: added.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	config := ConfigureRequest{ID: added.ID, Descriptors: []*int{&fd}, Selected: []int{0}}
+	if direct {
+		config.Descriptors = []*int{nil}
+		config.StorageMode = StorageModeStream
+		config.StreamCacheBytes = 16 << 20
+	}
+	body, _ = json.Marshal(config)
 	code, response = s.DispatchControl("POST", "/configure", string(body))
 	_ = f.Close()
 	if code != 200 {

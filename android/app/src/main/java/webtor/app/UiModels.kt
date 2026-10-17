@@ -41,6 +41,7 @@ data class UiState(
     val restoring: Boolean = false,
     val maxPeers: Int = 55,
     val darkTheme: Boolean = true,
+    val directPlayDefault: Boolean = false,
     val diagnosticsPreview: String? = null,
     val networkPolicy: TransferNetworkPolicy = TransferNetworkPolicy.ANY,
     val networkAllowed: Boolean = true,
@@ -59,7 +60,9 @@ fun transferAllowed(policy: TransferNetworkPolicy, connected: Boolean, wifi: Boo
 sealed class UiEvent {
     data object PickTorrent : UiEvent()
     data object RequestNotifications : UiEvent()
-    data class OpenContent(val uri: String, val mime: String, val name: String) : UiEvent()
+    data class OpenContent(val uri: String, val mime: String, val name: String,
+        val playlist: List<PlaybackItem> = emptyList(), val subtitles: List<PlaybackItem> = emptyList(),
+        val positionMs: Long = 0L) : UiEvent()
     data object ExitApp : UiEvent()
     data class ShareText(val text: String) : UiEvent()
 }

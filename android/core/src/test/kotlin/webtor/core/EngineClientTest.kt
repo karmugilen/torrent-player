@@ -94,6 +94,17 @@ class EngineClientTest {
     }
 
     @Test
+    fun playSendsOptionalResumeByteHint() {
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","fileIndex":2,"name":"a.mp4","length":100,"streamUrl":"http://127.0.0.1:8000/x"}"""))
+        client.play("abc", 2, 75L)
+        val request = transport.takeRequest()
+        assertEquals("/play", request.path)
+        val json = JSONObject(request.body.readUtf8())
+        assertEquals(2, json.getInt("fileIndex"))
+        assertEquals(75L, json.getLong("offset"))
+    }
+
+    @Test
     fun addAndPlay() {
         transport.enqueue(TestResponse().setBody("""{"id":"abc","infoHash":"dead"}"""))
         val added = client.add("magnet:?xt=urn:btih:dead")

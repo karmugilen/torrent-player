@@ -30,6 +30,24 @@ class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
     private val session get() = vm.session
 
+    private var launchedPlaybackUri: String? = null
+    private var launchedPlaybackItems: Set<String> = emptySet()
+    private val viewer = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        @Suppress("DEPRECATION")
+        fun number(key: String): Long? = (data?.extras?.get(key) as? Number)?.toLong()
+        val position = number("extra_position") ?: number("position")
+        val uri = returnedPlaybackUri(data?.data?.toString(), launchedPlaybackUri, launchedPlaybackItems)
+        if (position != null && uri != null) session.recordPlaybackPosition(uri, position, number("extra_duration") ?: number("duration") ?: 0L)
+        launchedPlaybackUri = null
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("playbackUri", launchedPlaybackUri)
+        outState.putStringArrayList("playbackItems", ArrayList(launchedPlaybackItems))
+        super.onSaveInstanceState(outState)
+    }
+
     private val torrentPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(session::openTorrent)
     }
@@ -41,6 +59,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        launchedPlaybackUri = savedInstanceState?.getString("playbackUri")
+        launchedPlaybackItems = savedInstanceState?.getStringArrayList("playbackItems")?.toSet().orEmpty()
         if (savedInstanceState == null) handleIncoming(intent)
         intent.getStringExtra("open_key")?.let { session.openDetails(it) }
         setContent {
@@ -58,6 +78,8 @@ class MainActivity : ComponentActivity() {
                                     onSelectAll = session::selectAllFiles,
                                     onSelectNone = session::selectNoFiles,
                                     onStart = session::startDownload,
+                                    onDirectPlay = session::startDirectPlay,
+                                    directPlayDefault = state.directPlayDefault,
                                     onCancel = session::cancelPrepare,
                                 )
                             } else {
@@ -70,6 +92,7 @@ class MainActivity : ComponentActivity() {
                             onMaxPeers = session::setMaxPeers,
                             onMaxPeersCommit = session::commitMaxPeers,
                             onDarkTheme = session::setDarkTheme,
+                            onDirectPlayDefault = session::setDirectPlayDefault,
                             onCleanup = session::cleanupCache,
                             onClearAll = session::requestClearAll,
                             onStopAll = session::stopAll,
@@ -83,6 +106,7 @@ class MainActivity : ComponentActivity() {
                                 error = state.error,
                                 onBack = session::closeFiles,
                                 onPlay = { index -> session.play(entry, index) },
+                                onStartOver = { index -> session.play(entry, index, fromStart = true) },
                                 onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
                                 onPause = { session.pause(entry) },
                                 onResume = { session.resume(entry) },
@@ -117,6 +141,8 @@ class MainActivity : ComponentActivity() {
                             onSelectAll = session::selectAllFiles,
                             onSelectNone = session::selectNoFiles,
                             onDownload = session::startDownload,
+                            onDirectPlay = session::startDirectPlay,
+                            directPlayDefault = state.directPlayDefault,
                             existingEntry = existing,
                             onOpenExisting = existing?.let {
                                 {
@@ -195,7 +221,7 @@ class MainActivity : ComponentActivity() {
         when (event) {
             UiEvent.PickTorrent -> pickTorrentFile()
             UiEvent.RequestNotifications -> requestNotifications()
-            is UiEvent.OpenContent -> openContent(event.uri, event.mime, event.name)
+            is UiEvent.OpenContent -> openContent(event)
             is UiEvent.ShareText -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, event.text) }, "Share diagnostics"))
             UiEvent.ExitApp -> finish()
         }
@@ -252,16 +278,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openContent(uriString: String, mime: String, name: String) {
-        val uri = Uri.parse(uriString)
+    private fun openContent(event: UiEvent.OpenContent) {
+        val uri = Uri.parse(event.uri)
         val view = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
+            setDataAndType(uri, event.mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            clipData = ClipData.newRawUri(name, uri)
-            putExtra(Intent.EXTRA_TITLE, name)
-            putExtra("title", name)
+            clipData = ClipData.newRawUri(event.name, uri).apply {
+                (event.playlist + event.subtitles).distinctBy { it.uri }.filter { it.uri != event.uri }.forEach {
+                    addItem(ClipData.Item(Uri.parse(it.uri)))
+                }
+            }
+            putExtra(Intent.EXTRA_TITLE, event.name)
+            putExtra("title", event.name)
+            putExtra("return_result", true)
+            // MX-compatible players use an integer; VLC accepts either numeric type.
+            putExtra("position", event.positionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            putExtra("video_list", event.playlist.map { Uri.parse(it.uri) }.toTypedArray())
+            putExtra("video_list.name", event.playlist.map { it.name }.toTypedArray())
+            putExtra("video_list.filename", event.playlist.map { it.name }.toTypedArray())
+            putExtra("video_list_is_explicit", true)
+            putExtra("subs", event.subtitles.map { Uri.parse(it.uri) }.toTypedArray())
+            putExtra("subs.name", event.subtitles.map { it.name }.toTypedArray())
+            putExtra("subs.enable", event.subtitles.take(1).map { Uri.parse(it.uri) }.toTypedArray())
+            event.subtitles.firstOrNull()?.let { putExtra("subtitles_location", it.uri) }
         }
-        launchViewer(view)
+        launchedPlaybackUri = event.uri
+        launchedPlaybackItems = event.playlist.map { it.uri }.toSet()
+        if (!launchViewer(view)) launchedPlaybackUri = null
     }
 
     private fun launchViewer(intent: Intent): Boolean {
@@ -275,7 +318,7 @@ class MainActivity : ComponentActivity() {
             }
             // Launch the implicit intent directly so Android owns the choice and
             // can offer its native Just once / Always player selection.
-            startActivity(intent)
+            viewer.launch(intent)
             return true
         } catch (_: ActivityNotFoundException) {
             session.showError(missing)

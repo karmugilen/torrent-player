@@ -32,11 +32,13 @@
 
 ## Key Features
 
-- **Single-Contract Workflow**: Straightforward pipeline: **Magnet / Torrent $\to$ Local Storage (`Downloads/Webtor`) $\to$ Stream / Play**. No confusing virtual containers or temporary caches.
+- **Two storage choices**: Download selected files to `Downloads/Webtor` for offline use, or choose **Direct Play** to keep video in bounded RAM and save only a small verified startup cache. Choose the default in Settings; both actions remain available when adding a torrent.
 - **In-Progress Streaming & Per-File Playback**: Launch directly into your favorite Android video player (VLC, Nova Player, Just Player, MPV, etc.) while downloading progresses, or play finished videos anytime.
+- **External-player extras**: Naturally ordered episode playlists, matching selected subtitle files, and saved resume positions for players that support the corresponding Android intent/result contracts.
 - **Selective File Downloads**: Choose exactly which files, episodes, or bonus materials to download from multi-file torrents.
 - **Battery-Friendly & Low-RAM Stability**:
-  - Native Go engine with bounded preparation and piece-boundary storage.
+  - Native Go engine with bounded preparation and piece-boundary storage. Direct Play prioritizes opening/container pieces, adapts forward buffering to reader consumption, parks idle probes, and retries stalled reads through the existing peer scheduler.
+  - CPU-sized background workers validate startup caches and hash independent pieces, capped at four workers per torrent. Direct Play entries stay paused on app startup. See [playback and cache behavior](docs/DIRECT_PLAY.md).
   - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's existing one-second sampling clock.
 - **Modern Material 3 Design**: Built with Jetpack Compose featuring dynamic colors, light and dark themes, interactive piece bitfield visualizer, and animated video preview frames.
 - **Cached Public Trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled. See [tracker discovery details](docs/RELEASE_1.4.4.md).
@@ -61,7 +63,7 @@ adb install -r torrent-player.apk
 1. **Add a Torrent**: Paste a magnet link or open a `.torrent` file. The app inspects the metadata and displays the file selection sheet.
 2. **Select Files & Destination**: Choose the specific files to download. Files are stored directly in `Downloads/Webtor`. A fresh install does not require broad "All Files Access" storage permissions.
 3. **Download & Play**:
-   - Tap **Download** to start fetching pieces.
+   - Tap **Download** to save selected files, or **Direct Play** to launch your external player with a RAM video cache. Select matching subtitle files alongside the video to include them in supported players.
    - Tap **Play** on any video item to open Android's native app picker and stream in-progress or completed files immediately in your chosen media player.
 4. **Library & Persistence**: Downloads persist in your library across application restarts. Previously saved metadata-only entries remain safely paused until you explicitly choose Download.
 5. **Background Operation & Controls**:

@@ -49,6 +49,7 @@ fun SettingsScreen(
     onMaxPeers: (Int) -> Unit,
     onMaxPeersCommit: () -> Unit,
     onDarkTheme: (Boolean) -> Unit,
+    onDirectPlayDefault: (Boolean) -> Unit,
     onCleanup: () -> Unit,
     onClearAll: () -> Unit,
     onStopAll: () -> Unit,
@@ -82,6 +83,15 @@ fun SettingsScreen(
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    ListItem(
+                        headlineContent = { Text("Prefer Direct Play") },
+                        supportingContent = { Text("On: video stays in RAM; only a small startup cache is saved. Off: download selected files for offline use. Both choices remain available when adding a torrent.") },
+                        trailingContent = { Switch(checked = state.directPlayDefault, onCheckedChange = onDirectPlayDefault) },
+                    )
+                }
+            }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(

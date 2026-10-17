@@ -46,6 +46,7 @@ fun TorrentFilesScreen(
     onDelete: () -> Unit,
     onFocus: (Int) -> Unit = {},
     onClearFocus: () -> Unit = {},
+    onStartOver: (Int) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -190,8 +191,10 @@ fun TorrentFilesScreen(
                     file = file,
                     isSelected = file.index in entry.selected,
                     paused = entry.paused,
-                    canPlay = !busy && !entry.checking,
+                    canPlay = !busy && (!entry.checking || completedPlayFile(entry, file.index) != null),
+                    directPlay = entry.directPlay,
                     onPlay = { onPlay(file.index) },
+                    onStartOver = { onStartOver(file.index) },
                     onToggle = { onToggleFile(file.index) },
                     focused = entry.focusedFile == file.index,
                     onFocus = { onFocus(file.index) },
@@ -250,6 +253,7 @@ private fun DownloadSummary(
             Text(
                 if (entry.checking) "Checking saved data · ${entry.checkPercent}%"
                 else if (!entry.metadataReady) "Fetching file list…"
+                else if (entry.directPlay) "${formatBytes(entry.downloaded)} cached · video stays in RAM"
                 else "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)} · $percent%",
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
@@ -257,7 +261,7 @@ private fun DownloadSummary(
             transferTelemetry(entry)?.let { text ->
                 Text(text, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
-            if (!entry.complete) {
+            if (!entry.complete && !entry.directPlay) {
                 LinearProgressIndicator(
                     progress = { entry.progress.coerceIn(0f, 1f) },
                     modifier = Modifier
@@ -468,14 +472,17 @@ private fun TorrentFileRow(
     focused: Boolean = false,
     onFocus: () -> Unit = {},
     onClearFocus: () -> Unit = {},
+    directPlay: Boolean = false,
+    onStartOver: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
-    val complete = file.isVerifiedComplete
-    val canPlayVideo = isVideo && !file.uri.isNullOrBlank() && (isSelected || complete)
+    val complete = !directPlay && file.isVerifiedComplete
+    val canPlayVideo = isVideo && (directPlay || !file.uri.isNullOrBlank()) && (isSelected || complete)
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
     val statusText = when {
         !isSelected -> "Not selected"
+        directPlay -> if (paused) "Direct Play · paused" else "Direct Play"
         file.uri.isNullOrBlank() -> "Not downloaded"
         complete -> "Ready"
         paused -> "Paused"
@@ -503,12 +510,13 @@ private fun TorrentFileRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    "${formatBytes((file.length * file.progress).toLong())} of ${formatBytes(file.length)} · $statusText",
+                    if (directPlay) "${formatBytes(file.length)} · $statusText"
+                    else "${formatBytes((file.length * file.progress).toLong())} of ${formatBytes(file.length)} · $statusText",
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant,
                 )
             }
-            if (isSelected) {
+            if (isSelected && !directPlay) {
                 FilledTonalButton(
                     onClick = if (focused) onClearFocus else onFocus,
                     shape = RoundedCornerShape(14.dp),
@@ -541,13 +549,13 @@ private fun TorrentFileRow(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 ) {
                     Text(
-                        if (isVideo) "Play" else "Open",
+                        if (isVideo && file.playbackPositionMs > 0) "Resume ${playbackTime(file.playbackPositionMs)}" else if (isVideo) "Play" else "Open",
                         style = MaterialTheme.typography.labelMedium,
                     )
                 }
             }
         }
-        if (isSelected && !complete) {
+        if (isSelected && !complete && !directPlay) {
             LinearProgressIndicator(
                 progress = { file.progress.toFloat().coerceIn(0f, 1f) },
                 modifier = Modifier
@@ -558,6 +566,7 @@ private fun TorrentFileRow(
                 trackColor = colors.surface,
             )
         }
+        if (canPlayVideo && file.playbackPositionMs > 0) TextButton(onClick = onStartOver, enabled = canPlay) { Text("Play from start") }
         HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(top = 2.dp))
     }
 }

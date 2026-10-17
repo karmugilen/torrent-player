@@ -14,6 +14,7 @@ fun DownloadEntry.liveUploadSpeed(): Long? =
     if (hasActiveTransfer() && !checking) liveStatus()?.uploadSpeed?.coerceAtLeast(0L) else null
 
 fun DownloadEntry.selectedEta(): Long? {
+    if (directPlay) return null
     val speed = liveDownloadSpeed() ?: return null
     return if (speed <= 0 || downloaded >= total) null
     else ((total - downloaded).toDouble() / speed * 1000).toLong()
@@ -29,7 +30,11 @@ fun transferTelemetry(entry: DownloadEntry): String? {
 }
 
 fun entryTelemetry(entry: DownloadEntry): String = buildString {
-    append(if (entry.metadataReady) "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)}" else entry.stateLabel())
+    append(when {
+        entry.directPlay -> "Direct Play · ${formatBytes(entry.downloaded)} cached"
+        entry.metadataReady -> "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)}"
+        else -> entry.stateLabel()
+    })
     if (entry.checking) append(" · Checked ${entry.checkPercent}%")
     else transferTelemetry(entry)?.let { append(" · $it") }
 }
@@ -39,13 +44,15 @@ data class DownloadNotification(val title: String, val text: String, val progres
 fun downloadNotification(entries: List<DownloadEntry>): DownloadNotification? {
     val active = entries.filter { it.hasActiveTransfer() }
     if (active.isEmpty()) return null
-    val downloading = active.filter { it.metadataReady && !it.checking }
+    val streaming = active.filter { it.directPlay && !it.checking }
+    val downloading = active.filter { !it.directPlay && it.metadataReady && !it.checking }
     val checking = active.filter { it.checking }
     val waiting = active.count { !it.metadataReady && !it.checking }
     val total = downloading.sumOf { it.total }
     val got = downloading.sumOf { it.downloaded }
     val progress = if (total <= 0) 0 else (100.0 * got / total).toInt().coerceIn(0, 100)
     val text = when {
+        streaming.isNotEmpty() && downloading.isEmpty() -> "Direct Play · " + formatSpeed(streaming.sumOf { it.liveDownloadSpeed() ?: 0L })
         downloading.isNotEmpty() -> buildString {
             append("${formatBytes(got)} / ${formatBytes(total)} · ")
             val speeds = downloading.mapNotNull { it.liveDownloadSpeed() }
@@ -53,10 +60,12 @@ fun downloadNotification(entries: List<DownloadEntry>): DownloadNotification? {
             val statuses = downloading.mapNotNull { it.liveStatus() }
             // A partial snapshot cannot claim a total peer count.
             if (statuses.size == downloading.size) append(" · ${formatPeers(statuses.sumOf { it.numPeers.coerceAtLeast(0) })}")
+            if (streaming.isNotEmpty()) append(" · ${streaming.size} playing")
             if (waiting > 0) append(" · $waiting waiting")
         }
         checking.isNotEmpty() -> buildString {
             append("Checking saved data · ${checking.map { it.checkPercent }.average().toInt()}%")
+            if (streaming.isNotEmpty()) append(" · ${streaming.size} playing")
             if (waiting > 0) append(" · $waiting waiting")
         }
         else -> "Waiting for peers"

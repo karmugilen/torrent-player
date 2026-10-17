@@ -95,11 +95,12 @@ fun pickPlayIndex(entry: DownloadEntry): Int? {
         entry.files.filter { it.uri != null && it.isVerifiedComplete }
     }
     val videos = files.filter { it.name.isVideoName() }
-    return (videos.ifEmpty { files }).maxByOrNull { it.length }?.index
+    return if (videos.size > 1) videos.minByOrNull { naturalMediaKey(it.path) }?.index
+    else (videos.ifEmpty { files }).maxByOrNull { it.length }?.index
 }
 
 fun DownloadEntry.canPlay(): Boolean =
-    !isDeleting && !controlsBusy() && files.any { !it.uri.isNullOrBlank() && (it.index in selected || it.isVerifiedComplete) }
+    !isDeleting && !controlsBusy() && files.any { (directPlay || !it.uri.isNullOrBlank()) && (it.index in selected || (!directPlay && it.isVerifiedComplete)) }
 
 fun DownloadEntry.selectedVideoCount(): Int =
     files.count { it.index in selected && it.name.isVideoName() }
@@ -213,4 +214,4 @@ fun readableError(message: String?): String {
 fun completedPlayFile(entry: DownloadEntry, fileIndex: Int? = pickPlayIndex(entry)): SavedFile? =
     // A fully saved file remains locally playable after the user deselects it
     // from transfer demand. Incomplete files still require selection.
-    entry.files.find { it.index == fileIndex && it.uri != null && it.isVerifiedComplete }
+    entry.files.find { !entry.directPlay && it.index == fileIndex && it.uri != null && it.isVerifiedComplete }

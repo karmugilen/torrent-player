@@ -100,8 +100,7 @@ type DocumentTorrentStorage struct {
 	chunkLength, totalLength int64
 	files                    []FileDescriptor
 	attached, closed         bool
-	// stream is true when selected files are stored under .stream/ instead of
-	// Android document descriptors (Watch mode).
+	// stream uses bounded RAM with only verified startup pieces persisted.
 	stream        bool
 	needsVerify   bool
 	restoreVerify atomic.Bool
@@ -113,6 +112,18 @@ type DocumentTorrentStorage struct {
 	cacheOrder                []int // LRU: index 0 is oldest
 	cacheBytes, maxCacheBytes int64
 	streamMaxBytes            int64
+	startupPieces             map[int]bool
+	startupSaved              map[int]bool
+	streamDemand              map[int]bool
+	onStreamEvict             func(int)
+	startupPending            map[int][]byte
+	startupWriting            bool
+	streamLost                map[int]bool
+	streamRanges              map[int][]streamByteRange
+	streamWhole               map[int]bool
+	completionPending         map[int]bool
+	completionWake            chan struct{}
+	streamReady               chan struct{}
 	lastReadOffset            int64
 	completed                 map[int]bool
 	checkpointDirty           bool
@@ -143,7 +154,7 @@ func engineOwnedPartPath(baseDir, infoHashHex string, fileIndex int, streamSelec
 // for one info-hash. Safe when the directories do not exist.
 func DeleteEngineOwnedStorage(baseDir, infoHashHex string) error {
 	var first error
-	for _, dir := range []string{streamDir(baseDir, infoHashHex), boundaryDir(baseDir, infoHashHex)} {
+	for _, dir := range []string{streamDir(baseDir, infoHashHex), boundaryDir(baseDir, infoHashHex), filepath.Join(baseDir, ".startup", infoHashHex)} {
 		if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
 		}
@@ -201,8 +212,11 @@ func (st *DocumentTorrentStorage) AttachDescriptors(descriptors []*int, selected
 }
 
 // AttachDescriptorsMode is AttachDescriptors with an explicit storage mode.
-// stream=true opens selected nil-descriptor files under .stream/.
+// stream=true uses Direct Play RAM storage with nil descriptors.
 func (st *DocumentTorrentStorage) AttachDescriptorsMode(descriptors []*int, selected []int, stream bool) error {
+	if stream {
+		return st.attachDirectPlay(descriptors, selected)
+	}
 	return st.attachDescriptors(descriptors, selected, stream)
 }
 
@@ -593,7 +607,7 @@ func (st *DocumentTorrentStorage) NeedsVerify() bool {
 // initial restore obligation is consumed.
 func (st *DocumentTorrentStorage) MarkVerified() {
 	st.mu.Lock()
-	for st.checkpointFlushing {
+	for st.checkpointFlushing || st.startupWriting {
 		st.mu.Unlock()
 		time.Sleep(5 * time.Millisecond)
 		st.mu.Lock()
@@ -843,12 +857,12 @@ func (st *DocumentTorrentStorage) Close() error {
 	}
 	// Drain an in-flight coalesced flush so it cannot rewrite the checkpoint
 	// after this Close observes checkpointDirty=false.
-	for st.checkpointFlushing {
+	for st.checkpointFlushing || st.startupWriting {
 		st.mu.Unlock()
 		time.Sleep(5 * time.Millisecond)
 		st.mu.Lock()
 	}
-	if st.attached {
+	if st.attached && !st.stream {
 		_ = st.flushAllDirtyLocked()
 		st.checkpointDirty = true
 		st.checkpointGen++
@@ -858,6 +872,13 @@ func (st *DocumentTorrentStorage) Close() error {
 		st.mu.Lock()
 	}
 	st.closed = true
+	st.notifyStreamReadyLocked()
+	if st.completionWake != nil {
+		close(st.completionWake)
+	}
+	if st.stream {
+		unregisterStartupCache(st.baseDir, st.infoHash.HexString())
+	}
 	var first error
 	for i := range st.files {
 		if st.files[i].File != nil {
@@ -909,6 +930,9 @@ func (st *DocumentTorrentStorage) ensureCacheSlotLocked(index int, expected int6
 	if _, ok := st.cache[index]; ok {
 		return false, nil
 	}
+	if st.stream {
+		return st.ensureStreamSlotLocked(index, expected)
+	}
 	for st.cacheBytes+expected > st.maxCacheBytes {
 		if len(st.cacheOrder) == 0 {
 			return false, fmt.Errorf("piece cache is full")
@@ -940,6 +964,14 @@ func (st *DocumentTorrentStorage) loadCacheFromDiskLocked(index int) {
 	if !ok || !st.attached || len(data) == 0 {
 		return
 	}
+	if st.stream {
+		if st.startupSaved[index] {
+			if saved, err := os.ReadFile(st.startupPiecePath(index)); err == nil && len(saved) == len(data)+32 {
+				copy(data, saved[32:])
+			}
+		}
+		return
+	}
 	if _, err := st.readFromFiles(int64(index)*st.chunkLength, data); err != nil {
 		// Sparse / never-written regions read as zeros; leave the buffer as-is.
 		return
@@ -948,6 +980,9 @@ func (st *DocumentTorrentStorage) loadCacheFromDiskLocked(index int) {
 }
 
 func (st *DocumentTorrentStorage) flushPieceLocked(index int) error {
+	if st.stream {
+		return nil // Only verified startup pieces are persisted by MarkComplete.
+	}
 	data, ok := st.cache[index]
 	if !ok || !st.cacheDirty[index] {
 		return nil
@@ -976,6 +1011,9 @@ func (st *DocumentTorrentStorage) flushAllDirtyLocked() error {
 }
 
 func (st *DocumentTorrentStorage) scheduleDiskFlushLocked() {
+	if st.stream {
+		return
+	}
 	if st.diskFlushing || st.closed || !st.attached {
 		return
 	}
@@ -1039,10 +1077,18 @@ func (p *documentPiece) ReadAt(b []byte, off int64) (int, error) {
 	st := p.storage
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	return p.readAtLocked(b, off)
+}
+
+func (p *documentPiece) readAtLocked(b []byte, off int64) (int, error) {
+	st := p.storage
 	if st.closed {
 		return 0, fmt.Errorf("storage closed")
 	}
 	index := p.piece.Index()
+	if st.streamLost[index] {
+		return 0, errStreamEvicted
+	}
 	if data, ok := st.cache[index]; ok {
 		st.touchCacheLocked(index)
 		if off >= int64(len(data)) {
@@ -1059,6 +1105,22 @@ func (p *documentPiece) ReadAt(b []byte, off int64) (int, error) {
 	}
 	if !st.attached {
 		return 0, fmt.Errorf("download storage is not configured")
+	}
+	if st.stream {
+		if !st.startupSaved[index] {
+			return 0, fmt.Errorf("stream piece was evicted")
+		}
+		saved, err := os.Open(st.startupPiecePath(index))
+		if err != nil {
+			return 0, err
+		}
+		defer saved.Close()
+		if off < 0 || off >= p.piece.Length() {
+			return 0, io.EOF
+		}
+		// Startup integrity was validated at configure; read only the bytes
+		// requested by the player rather than allocating the whole piece.
+		return saved.ReadAt(b, off+32)
 	}
 	abs := int64(index)*st.chunkLength + off
 	st.lastReadOffset = abs
@@ -1097,6 +1159,11 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 	if off < 0 || off+int64(len(b)) > expected {
 		return 0, fmt.Errorf("invalid piece write")
 	}
+	// A late peer response must not overwrite verified RAM or a warm startup
+	// piece while completion refresh is cancelling its old request.
+	if st.stream && st.completed[index] {
+		return len(b), nil
+	}
 	if !st.attached {
 		data, ok := st.cache[index]
 		if !ok {
@@ -1116,6 +1183,9 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 	// receives are not blocked on storage I/O.
 	created, err := st.ensureCacheSlotLocked(index, expected)
 	if err != nil {
+		if st.stream {
+			return 0, err
+		}
 		// Cache full of dirty pieces that could not be flushed: fall back to disk.
 		return st.writeToFiles(int64(index)*st.chunkLength+off, b)
 	}
@@ -1127,6 +1197,9 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 		st.loadCacheFromDiskLocked(index)
 	}
 	copy(st.cache[index][off:], b)
+	if st.stream {
+		st.recordStreamWriteLocked(index, off, off+int64(len(b)), expected)
+	}
 	st.cacheDirty[index] = true
 	st.touchCacheLocked(index)
 	st.scheduleDiskFlushLocked()
@@ -1139,6 +1212,15 @@ func (p *documentPiece) MarkComplete() error {
 		return fmt.Errorf("storage closed")
 	}
 	index := p.piece.Index()
+	if p.storage.stream {
+		if p.storage.streamLost[index] || (!p.storage.streamWhole[index] && !p.storage.startupSaved[index]) {
+			return errStreamEvicted
+		}
+		p.storage.completed[index] = true
+		p.storage.saveStartupPieceLocked(index)
+		p.storage.notifyStreamReadyLocked()
+		return nil
+	}
 	// Durable complete bits require the piece bytes on disk first. fsync is
 	// coalesced into drainSyncAndCheckpoint so MediaStore Sync is not on the
 	// per-piece hot path.
@@ -1169,6 +1251,11 @@ func (p *documentPiece) MarkNotComplete() error {
 		return nil
 	}
 	delete(p.storage.completed, index)
+	if p.storage.stream {
+		delete(p.storage.streamLost, index)
+		delete(p.storage.streamRanges, index)
+		delete(p.storage.streamWhole, index)
+	}
 	p.storage.dropCacheLocked(index)
 	p.storage.checkpointDirty = true
 	p.storage.scheduleCheckpointFlushLocked()
@@ -1278,6 +1365,9 @@ func (st *DocumentTorrentStorage) clearCompletedOverlappingLocked(fileIndex int)
 }
 
 func (st *DocumentTorrentStorage) scheduleCheckpointFlushLocked() {
+	if st.stream {
+		return
+	}
 	if st.checkpointFlushing || st.closed || !st.attached {
 		return
 	}

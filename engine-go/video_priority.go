@@ -33,13 +33,20 @@ func (s *EngineServer) applyVideoStartupHints(rec *TorrentRecord) {
 		if !selected[i] || !isVideoFileName(f.DisplayPath()) {
 			continue
 		}
+		if rec.DirectPlay && (rec.FocusedFile == nil || i != *rec.FocusedFile) {
+			continue
+		}
 		length := f.Length()
 		if length <= 0 {
 			continue
 		}
-		raiseSpan(demand, spanFromFile(f, 0, minInt64(length, videoStartupHeadBytes)), torrent.PiecePriorityNow)
-		if length > videoStartupTailBytes {
-			raiseSpan(demand, spanFromFile(f, length-videoStartupTailBytes, length), torrent.PiecePriorityNow)
+		head, tail := videoStartupHeadBytes, videoStartupTailBytes
+		if rec.DirectPlay {
+			head, tail = directStartupHead, directStartupTail
+		}
+		raiseSpan(demand, spanFromFile(f, 0, minInt64(length, head)), torrent.PiecePriorityNow)
+		if length > tail {
+			raiseSpan(demand, spanFromFile(f, length-tail, length), torrent.PiecePriorityNow)
 		}
 	}
 	c.setHints(demand)

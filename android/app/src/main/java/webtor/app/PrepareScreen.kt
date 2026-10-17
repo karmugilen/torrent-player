@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -47,6 +48,8 @@ fun PrepareScreen(
     onSelectNone: () -> Unit,
     onStart: () -> Unit,
     onCancel: () -> Unit,
+    onDirectPlay: () -> Unit,
+    directPlayDefault: Boolean = false,
 ) {
     BackHandler(onBack = onCancel)
     val torrent = draft.torrent
@@ -54,7 +57,8 @@ fun PrepareScreen(
     val selectedSize = torrent?.files?.filter { it.index in draft.selected }?.sumOf { it.length } ?: 0L
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedSize
-    val canStart = ready && !draft.busy && draft.selected.isNotEmpty() && !insufficientSpace
+    val canChoose = ready && !draft.busy && draft.selected.isNotEmpty()
+    val canStart = canChoose && (directPlayDefault || !insufficientSpace)
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -92,14 +96,19 @@ fun PrepareScreen(
                     }
                     draft.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                     Button(
-                        onClick = onStart,
+                        onClick = if (directPlayDefault) onDirectPlay else onStart,
                         enabled = canStart,
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 48.dp),
                     ) {
-                        Text("Download", maxLines = 1)
+                        Text(if (directPlayDefault) "Direct Play" else "Download", maxLines = 1)
                     }
+                    OutlinedButton(
+                        onClick = if (directPlayDefault) onStart else onDirectPlay,
+                        enabled = canChoose && (!directPlayDefault || !insufficientSpace),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(if (directPlayDefault) "Download for offline use" else "Direct Play · keep only startup cache") }
                 }
             }
         },
@@ -143,7 +152,7 @@ fun PrepareScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        "Videos are selected by default when available.",
+                        "Videos are selected by default. Select matching subtitle files to include them in supported players.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

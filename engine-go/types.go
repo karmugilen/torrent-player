@@ -70,6 +70,7 @@ type TorrentView struct {
 }
 
 type PlayRequest struct {
+	Offset    *int64 `json:"offset,omitempty"`
 	ID        string `json:"id"`
 	FileIndex *int   `json:"fileIndex,omitempty"`
 }
@@ -90,8 +91,8 @@ type PlayResponse struct {
 }
 
 // StorageModeDownload writes selected files to Android-supplied descriptors
-// (MediaStore / SAF). StorageModeStream writes selected files to app-private
-// engine files under .stream/ and never expects external descriptors.
+// (MediaStore / SAF). StorageModeStream keeps video in bounded RAM and saves
+// only verified startup pieces under .startup/, with no external descriptors.
 const (
 	StorageModeDownload = "download"
 	StorageModeStream   = "stream"
@@ -104,9 +105,10 @@ type ConfigureRequest struct {
 	// bytes for later reselection and verified local playback.
 	Descriptors []*int `json:"descriptors"`
 	Selected    []int  `json:"selected"`
-	// StorageMode is "download" (default) or "stream". Stream mode opens
-	// selected files under .stream/ with nil descriptors.
-	StorageMode string `json:"storageMode,omitempty"`
+	// StorageMode is "download" (default) or "stream" (Direct Play).
+	// Direct Play requires nil descriptors.
+	StorageMode      string `json:"storageMode,omitempty"`
+	StreamCacheBytes int64  `json:"streamCacheBytes,omitempty"`
 }
 
 type SelectRequest struct {

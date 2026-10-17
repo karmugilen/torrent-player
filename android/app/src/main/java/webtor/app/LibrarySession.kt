@@ -116,7 +116,7 @@ class LibrarySession(
         scope.launch {
             try {
                 val loaded = withContext(io) { storage.load() }.map {
-                    val staysPaused = it.paused || serviceSuppressed
+                    val staysPaused = it.paused || serviceSuppressed || it.directPlay
                     it.copy(
                         engineId = null,
                         paused = staysPaused,
@@ -135,6 +135,7 @@ class LibrarySession(
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
+                        directPlayDefault = settings.getBoolean("directPlayDefault", false),
                         networkPolicy = savedNetworkPolicy(),
                     )
                 }
@@ -430,7 +431,7 @@ class LibrarySession(
             patch(entryKey) { it.copy(generation = generation, error = null) }
             var addedFile: SavedFile? = null
             try {
-                val effectiveFiles = if (selecting && file.uri.isNullOrBlank()) {
+                val effectiveFiles = if (!current.directPlay && selecting && file.uri.isNullOrBlank()) {
                     // Allocate the destination only when the user requests the
                     // file. The operation is reversible if /select fails.
                     withContext(io) { storage.createAdditionalFile(current, file) }.also { addedFile = it }
@@ -438,9 +439,9 @@ class LibrarySession(
                 } else current.files
                 val id = current.engineId
                 if (id != null) {
-                    val pfds = withContext(io) { storage.openFiles(effectiveFiles, next) }
+                    val pfds = if (current.directPlay) emptyList() else withContext(io) { storage.openFiles(effectiveFiles, next) }
                     try {
-                        val descriptors = descriptorsFor(effectiveFiles, pfds, next)
+                        val descriptors = if (current.directPlay) null else descriptorsFor(effectiveFiles, pfds, next)
                         withContext(io) { client.select(id, next, descriptors) }
                     } finally {
                         pfds.forEach { runCatching { it?.close() } }
@@ -475,7 +476,29 @@ class LibrarySession(
         }
     }
 
+    fun setDirectPlayDefault(enabled: Boolean) {
+        settings.edit().putBoolean("directPlayDefault", enabled).apply()
+        _ui.update { it.copy(directPlayDefault = enabled) }
+    }
+
+    /** Keep one active RAM stream so separate movies cannot multiply the memory budget. */
+    private suspend fun releaseOtherDirectPlay(keepKey: String) {
+        val others = _ui.value.library.filter { it.directPlay && it.key != keepKey && it.engineId != null }
+        for (other in others) {
+            withContext(io) { client.remove(other.engineId!!, destroyStore = false) }
+            patch(other.key) { e -> e.copy(engineId = null, paused = true, status = null,
+                lifecycleState = EntryLifecycleState.PAUSED,
+                files = e.files.map { it.copy(progress = 0.0, verifiedBytes = 0L) }) }
+        }
+    }
+
+    private fun directPlayMemoryBytes(): Long {
+        val manager = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        return (manager.memoryClass / 4).coerceIn(16, 64).toLong() * 1024 * 1024
+    }
+
     fun startDownload() = commitPreparedDownload()
+    fun startDirectPlay() = commitPreparedDownload(directPlay = true)
 
     private suspend fun releasePreparedEngine(id: String) {
         if (_ui.value.library.any { it.engineId == id }) return
@@ -488,13 +511,14 @@ class LibrarySession(
         }
     }
 
-    private fun commitPreparedDownload() {
+    private fun commitPreparedDownload(directPlay: Boolean = false) {
         scope.launch {
             mutex.withLock {
                 if (commitInProgress || !beginUserWork()) return@withLock
                 val draft = _ui.value.prepare ?: return@withLock
                 val torrent = draft.torrent
                 if (torrent?.ready != true) {
+                    if (directPlay) { setPrepareError("Waiting for file information. You can save the magnet as a download meanwhile."); return@withLock }
                     val source = draft.source.trim()
                     val key = infoHashFromMagnet(source) ?: draft.engineId
                     if (_ui.value.library.any { it.key.equals(key, true) || it.engineId == draft.engineId }) {
@@ -543,19 +567,20 @@ class LibrarySession(
                     setPrepareError("This torrent is already in your library.")
                     return@withLock
                 }
-                if (Build.VERSION.SDK_INT < 29) {
+                if (!directPlay && Build.VERSION.SDK_INT < 29) {
                     setPrepareError("Torrent Player needs Android 10 or newer to save into Downloads.")
                     return@withLock
                 }
                 commitInProgress = true
                 val key = torrent.infoHash ?: draft.engineId
                 val provisional = DownloadEntry(
+                    directPlay = directPlay,
                     key = key,
                     title = torrent.name ?: key,
                     source = torrent.magnetURI ?: draft.source,
                     metadata = "",
                     engineId = draft.engineId,
-                    destination = "Downloads/Webtor",
+                    destination = if (directPlay) "Direct Play · RAM + startup cache" else "Downloads/Webtor",
                     files = torrent.files.map {
                         SavedFile(
                             it.index, it.name, it.path, it.length,
@@ -583,18 +608,19 @@ class LibrarySession(
                 try {
                     val needed = torrent.files.filter { it.index in draft.selected }.sumOf { it.length }
                     val free = withContext(io) { storage.freeBytes }
-                    check(needed <= free) {
+                    check(directPlay || needed <= free) {
                         "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available."
                     }
+                    if (directPlay) releaseOtherDirectPlay(key)
                     val metadata = withContext(io) { client.metadata(draft.engineId) }
                     val skeleton = provisional.copy(metadata = metadata)
-                    val createdResult = withContext(io) { storage.createFiles(skeleton, storage.folder) }
+                    val createdResult = if (directPlay) CreatedDownloadFiles(skeleton.files) else withContext(io) { storage.createFiles(skeleton, storage.folder) }
                     val created = createdResult.files
                     try {
-                        val pfds = withContext(io) { storage.openFiles(created, draft.selected) }
+                        val pfds = if (directPlay) emptyList() else withContext(io) { storage.openFiles(created, draft.selected) }
                         try {
-                            val descriptors = descriptorsFor(created, pfds, draft.selected)
-                            withContext(io) { client.configure(draft.engineId, descriptors, draft.selected) }
+                            val descriptors = if (directPlay) List<Int?>(created.size) { null } else descriptorsFor(created, pfds, draft.selected)
+                            withContext(io) { client.configure(draft.engineId, descriptors, draft.selected, if (directPlay) "stream" else "download", directPlayMemoryBytes()) }
                         } finally {
                             pfds.forEach { runCatching { it?.close() } }
                         }
@@ -622,6 +648,7 @@ class LibrarySession(
                     refreshStorageStats()
                     syncService(force = true)
                     reconcileTransferState()
+                    if (directPlay) play(entry)
                 } catch (t: Throwable) {
                     _ui.update {
                         it.copy(
@@ -709,6 +736,7 @@ class LibrarySession(
             }
 
             try {
+                if (current.directPlay) releaseOtherDirectPlay(current.key)
                 if (current.engineId != null) {
                     withContext(io) { client.resume(current.engineId) }
                     patch(current.key) {
@@ -806,7 +834,18 @@ class LibrarySession(
         }
     }
 
-    fun play(entry: DownloadEntry, fileIndex: Int? = null) {
+    fun recordPlaybackPosition(uri: String, positionMs: Long, durationMs: Long) {
+        if (positionMs < 0) return
+        scope.launchCommand {
+            val entry = _ui.value.library.find { e -> e.files.any { PlaybackProvider.uriFor(e, it).toString() == uri } } ?: return@launchCommand
+            patch(entry.key) { e -> e.copy(files = e.files.map { f ->
+                if (PlaybackProvider.uriFor(e, f).toString() != uri) f else f.withPlaybackPosition(positionMs, durationMs)
+            }) }
+            persist()
+        }
+    }
+
+    fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand
             try {
@@ -816,21 +855,18 @@ class LibrarySession(
                 check(targetIndex != null && (targetIndex in current.selected || completedPlayFile(current, targetIndex) != null)) {
                     "This file was not selected for download."
                 }
-                current.engineId?.let { id ->
-                    val status = withContext(io) { client.torrent(id) }
-                    applyStatus(status, current.key, current.generation)
+                if (current.directPlay) releaseOtherDirectPlay(current.key)
+                if (fromStart) {
+                    patch(current.key) { e -> e.copy(files = e.files.map { if (it.index == targetIndex) it.copy(playbackPositionMs = 0) else it }) }
                     current = _ui.value.library.find { it.key == entry.key } ?: current
-                }
-                if (current.checking) {
-                    _ui.update { it.copy(message = "Checking saved data. Play will be available when the check finishes.") }
-                    return@launchCommand
                 }
                 completedPlayFile(current, targetIndex)?.let { file ->
                     withContext(io) { storage.prepareForPlayback(file) }
-                    _events.send(UiEvent.OpenContent(PlaybackProvider.uriFor(current, file).toString(), mimeFor(file.name), file.name))
+                    _events.send(playbackEvent(current, file))
+                    if (fromStart) persist()
                     return@launchCommand
                 }
-                if (current.files.none { it.index in current.selected && it.uri != null }) {
+                if (!current.directPlay && current.files.none { it.index in current.selected && it.uri != null }) {
                     error("Start this download before playing.")
                 }
                 if (current.engineId == null) {
@@ -854,11 +890,11 @@ class LibrarySession(
                     withContext(io) { client.resume(id) }
                     patch(current.key) { it.copy(paused = false) }
                 }
-                withContext(io) { client.play(id, targetIndex) }
                 val file = current.files.first { it.index == targetIndex }
+                withContext(io) { client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint()) }
+                _events.send(playbackEvent(current, file))
                 persist()
                 syncService()
-                _events.send(UiEvent.OpenContent(PlaybackProvider.uriFor(current, file).toString(), mimeFor(file.name), file.name))
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 val msg = readableError(t)
@@ -1004,7 +1040,7 @@ class LibrarySession(
                     withContext(io) { client.remove(id, destroyStore = true) }
                     engineRemoved = true
                 }
-                withContext(io) { storage.deleteFiles(target.files) }
+                withContext(io) { storage.deleteFiles(target.files); if (target.directPlay) storage.deleteStartupCache(target.key) }
                 (app as? WebtorApp)?.thumbnails?.invalidate(target)
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
@@ -1036,6 +1072,7 @@ class LibrarySession(
     fun confirmClearAll() {
         scope.launch {
             val next = _ui.value.library.map { entry ->
+                if (entry.directPlay) return@map entry
                 try {
                     entry.engineId?.let { id ->
                         recentlyInvalidatedIds.add(id)
@@ -1065,11 +1102,11 @@ class LibrarySession(
     }
 
     fun cleanupCache() {
-        scope.launch {
+        scope.launchCommand {
             try {
                 withContext(io) {
                     storage.clearCache()
-                    if (storage.legacyBytes > 0) storage.clearLegacy()
+                    storage.clearStartupCaches(_ui.value.library.filter { it.engineId != null && it.directPlay }.map { it.key }.toSet())
                 }
                 refreshStorageStats()
                 _ui.update { it.copy(message = "Temporary files were removed.") }
@@ -1657,7 +1694,7 @@ class LibrarySession(
             return
         }
         val hasAnyUri = current.files.any { it.uri != null }
-        if (!hasAnyUri && (current.metadataReady || current.files.isNotEmpty())) {
+        if (!current.directPlay && !hasAnyUri && (current.metadataReady || current.files.isNotEmpty())) {
             if (Build.VERSION.SDK_INT < 29) {
                 failRestore(current.key, expectedGen, "Torrent Player needs Android 10 or newer to save into Downloads.")
                 return
@@ -1719,7 +1756,7 @@ class LibrarySession(
                 runCatching { withContext(io) { client.metadata(added.id) } }.getOrDefault("")
             }
 
-            val effectiveFiles = if (!hasAnyUri) {
+            val effectiveFiles = if (!current.directPlay && !hasAnyUri) {
                 val skeleton = current.copy(metadata = fetchedMetadata)
                 val createdResult = withContext(io) { storage.createFiles(skeleton, storage.folder) }
                 createdFiles = createdResult.files
@@ -1730,10 +1767,10 @@ class LibrarySession(
             }
 
             // Opening once both validates access and supplies configuration.
-            val pfds = withContext(io) { storage.openFiles(effectiveFiles, current.selected) }
+            val pfds = if (current.directPlay) emptyList() else withContext(io) { storage.openFiles(effectiveFiles, current.selected) }
             try {
-                val descriptors = descriptorsFor(effectiveFiles, pfds, current.selected)
-                withContext(io) { client.configure(added.id, descriptors, current.selected) }
+                val descriptors = if (current.directPlay) List<Int?>(effectiveFiles.size) { null } else descriptorsFor(effectiveFiles, pfds, current.selected)
+                withContext(io) { client.configure(added.id, descriptors, current.selected, if (current.directPlay) "stream" else "download", directPlayMemoryBytes()) }
             } catch (e: EngineException) {
                 if (e.message?.contains("already configured", ignoreCase = true) != true) throw e
             } finally {
@@ -1757,7 +1794,7 @@ class LibrarySession(
                 failRestore(current.key, expectedGen, "Transfers were stopped. Try Resume again.")
                 return
             }
-            if (!hasAnyUri) {
+            if (!current.directPlay && !hasAnyUri) {
                 _events.trySend(UiEvent.RequestNotifications)
             }
             val status = runCatching { withContext(io) { client.torrent(added.id) } }.getOrNull()
@@ -1962,7 +1999,7 @@ class LibrarySession(
                 t.error != null -> EntryLifecycleState.ERROR
                 !entry.metadataReady -> if (t.paused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING
                 entry.selected.isEmpty() -> EntryLifecycleState.STOPPED
-                !t.checking && files.filter { it.index in entry.selected }.all { it.isVerifiedComplete } -> EntryLifecycleState.COMPLETED
+                !entry.directPlay && !t.checking && files.filter { it.index in entry.selected }.all { it.isVerifiedComplete } -> EntryLifecycleState.COMPLETED
                 t.paused -> EntryLifecycleState.PAUSED
                 else -> EntryLifecycleState.DOWNLOADING
             }

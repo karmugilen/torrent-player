@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -65,6 +66,7 @@ type TorrentRecord struct {
 	Torrent              *torrent.Torrent
 	Prepared             bool
 	Configured           bool
+	DirectPlay           bool
 	Selected             []int
 	FocusedFile          *int
 	Generation           int64
@@ -140,6 +142,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	storageClient := NewDocumentStorageClient(downloadDir)
 
 	cfg := torrent.NewDefaultClientConfig()
+	cfg.PieceHashersPerTorrent = backgroundWorkers()
 	cfg.DataDir = downloadDir
 	cfg.DefaultStorage = storageClient
 	cfg.ListenPort = 0
@@ -449,6 +452,7 @@ func (s *EngineServer) Close() {
 		s.mu.RUnlock()
 		for _, rec := range records {
 			stopSavedDataCheck(rec)
+			s.closePlaybackReaders(rec.Torrent)
 		}
 		s.client.Close()
 		s.geoMu.Lock()
@@ -707,6 +711,10 @@ func (s *EngineServer) handleFocus(w http.ResponseWriter, r *http.Request) {
 
 func (s *EngineServer) applyBackgroundFocus(rec *TorrentRecord) {
 	c := s.ensurePlaybackCoordinator(rec.Torrent)
+	if rec.DirectPlay {
+		c.setFocus(nil)
+		return
+	}
 	if !s.payloadTransfersAllowed.Load() || rec.FocusedFile == nil || rec.Paused || !rec.Configured || rec.Checking {
 		c.setFocus(nil)
 		return
@@ -926,6 +934,11 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		name = &n
 		tfFiles := t.Files()
 		verified := rec.verifiedFileBytesCached(t, tStats.PiecesComplete)
+		// Cache eviction can move completion between pieces without changing
+		// their count. Stream snapshots must use the current distribution.
+		if rec.DirectPlay {
+			verified = verifiedFileBytes(t)
+		}
 		selected := make(map[int]bool, len(rec.Selected))
 		for _, index := range rec.Selected {
 			selected[index] = true
@@ -975,14 +988,14 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 
 	// An explicit empty selection means “download nothing”, not a completed
 	// torrent. This distinction matters when users uncheck every file.
-	done := ready && len(rec.Selected) > 0 && !rec.Checking && totalLen > 0 && verifiedTotal >= totalLen
+	done := !rec.DirectPlay && ready && len(rec.Selected) > 0 && !rec.Checking && totalLen > 0 && verifiedTotal >= totalLen
 	numPeers := tStats.ActivePeers
 	if numPeers == 0 {
 		numPeers = len(t.PeerConns())
 	}
 
 	var timeRemaining *int64
-	if downSpeed > 0 && totalLen > received {
+	if !rec.DirectPlay && downSpeed > 0 && totalLen > received {
 		rem := int64(float64(totalLen-received) / float64(downSpeed) * 1000)
 		timeRemaining = &rem
 	}
@@ -1060,8 +1073,8 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "torrent not found"})
 		return
 	}
-	rec.mu.RLock()
-	defer rec.mu.RUnlock()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
 
 	t := rec.Torrent
 	if err := waitForInfo(r, t); err != nil {
@@ -1118,9 +1131,13 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	// urgent read regions and therefore wins over this background focus.
 	focused := fileIdx
 	rec.FocusedFile = &focused
-	targetFile.Download()
+	if !rec.DirectPlay {
+		targetFile.Download()
+	}
 	s.applyVideoStartupHints(rec)
 	s.applyBackgroundFocus(rec)
+	coordinator := s.ensurePlaybackCoordinator(t)
+	coordinator.prepareResume(targetFile, req.Offset)
 
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/torrent/%s/file/%d", s.streamPort, rec.ID, fileIdx)
 
@@ -1173,19 +1190,40 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not available"})
 		return
 	}
-	if req.StorageMode == StorageModeStream {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stream storage mode is not supported"})
-		return
-	}
-	if req.StorageMode != "" && req.StorageMode != StorageModeDownload {
+	if req.StorageMode != "" && req.StorageMode != StorageModeDownload && req.StorageMode != StorageModeStream {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid storageMode"})
 		return
 	}
-	if err := st.AttachDescriptors(req.Descriptors, req.Selected); err != nil {
+	direct := req.StorageMode == StorageModeStream
+	if direct {
+		st.mu.Lock()
+		if req.StreamCacheBytes > 0 {
+			st.streamMaxBytes = max(int64(16<<20), min(int64(96<<20), req.StreamCacheBytes))
+		}
+		st.onStreamEvict = func(index int) {
+			rec.mu.RLock()
+			defer rec.mu.RUnlock()
+			if !rec.removed {
+				t.Piece(index).UpdateCompletion()
+			}
+		}
+		st.mu.Unlock()
+	}
+	if err := st.AttachDescriptorsMode(req.Descriptors, req.Selected, direct); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	rec.Configured = true
+	rec.DirectPlay = direct
+	if direct {
+		// Temporary pressure must not trigger the library's default permanent
+		// download-disable handler. It requeues the failed chunk itself.
+		t.SetOnWriteChunkError(func(err error) {
+			if !errors.Is(err, errStreamBusy) {
+				t.DisallowDataDownload()
+			}
+		})
+	}
 	rec.Selected = req.Selected
 	if rec.FocusedFile != nil {
 		keep := false
@@ -1250,7 +1288,9 @@ func (s *EngineServer) handleSelect(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "download storage is not configured"})
 		return
 	}
-	if req.Descriptors != nil {
+	if rec.DirectPlay {
+		// RAM-backed files need no Android destination descriptors.
+	} else if req.Descriptors != nil {
 		if err := st.UpdateSelection(req.Descriptors, req.Selected); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -1344,6 +1384,7 @@ func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if st := s.storage.GetStorage(rec.InfoHash); st != nil {
 		_ = st.DeleteCheckpoint()
 	}
+	s.closePlaybackReaders(rec.Torrent)
 	rec.Torrent.Drop()
 	_ = s.storage.DeleteCheckpoint(rec.InfoHash)
 	if destroy {
@@ -1616,14 +1657,15 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload transfers are disabled in settings", http.StatusConflict)
 		return
 	}
-	reader := file.NewReader()
-	defer reader.Close()
-
-	// Tie reader context to client HTTP connection to cleanly abort on client seek/disconnect
-	reader.SetContext(r.Context())
-	// SetReadaheadFunc(nil) enables fixed readahead rather than dynamic piece-count throttling
-	reader.SetReadaheadFunc(nil)
-	reader.SetReadahead(playbackWindowBytes)
+	playback, err := s.OpenPlayback(id, fileIdx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	defer playback.Close()
+	stopCancel := context.AfterFunc(r.Context(), playback.Close)
+	defer stopCancel()
+	reader := &playbackHTTPReader{playback: playback}
 
 	ext := filepath.Ext(file.DisplayPath())
 	mimeType := mime.TypeByExtension(ext)

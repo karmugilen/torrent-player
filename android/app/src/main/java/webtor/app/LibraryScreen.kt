@@ -278,7 +278,7 @@ private fun TorrentRow(
                     )
                 }
             }
-            if (!entry.complete) {
+            if (!entry.complete && !entry.directPlay) {
                 LinearProgressIndicator(
                     progress = { progress.coerceIn(0f, 1f) },
                     modifier = Modifier
@@ -308,11 +308,11 @@ private fun TorrentRow(
                 if (canPlay || entry.complete) {
                     Button(
                         onClick = if (isMultiVideo) onOpen else if (canPlay) onPlay else onOpen,
-                        enabled = !busy && !entry.checking,
+                        enabled = !busy && (!entry.checking || completedPlayFile(entry, pickPlayIndex(entry)) != null),
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null)
                         Spacer(Modifier.width(4.dp))
-                        Text(if (isVideo) "Play" else "Open")
+                        Text(if (isVideo && currentResumePosition(entry) > 0) "Resume" else if (isVideo) "Play" else "Open")
                     }
                 }
 

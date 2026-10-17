@@ -152,9 +152,10 @@ class EngineClient(
         return parseTorrent(json)
     }
 
-    fun play(id: String, fileIndex: Int? = null): PlayInfo {
+    fun play(id: String, fileIndex: Int? = null, offset: Long? = null): PlayInfo {
         val body = JSONObject().put("id", id)
         if (fileIndex != null) body.put("fileIndex", fileIndex)
+        if (offset != null) body.put("offset", offset.coerceAtLeast(0L))
         return parsePlay(post("/play", body))
     }
 
@@ -199,11 +200,12 @@ class EngineClient(
         descriptors: List<Int?>,
         selected: Set<Int>,
         storageMode: String = "download",
+        streamCacheBytes: Long = 0L,
     ) {
         post("/configure", JSONObject().put("id", id)
             .put("descriptors", JSONArray().apply { descriptors.forEach { put(it ?: JSONObject.NULL) } })
             .put("selected", JSONArray(selected.toList()))
-            .put("storageMode", storageMode))
+            .put("storageMode", storageMode).put("streamCacheBytes", streamCacheBytes))
     }
 
     fun select(id: String, selected: Set<Int>, descriptors: List<Int?>? = null) {
