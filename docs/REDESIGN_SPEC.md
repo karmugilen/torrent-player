@@ -2,6 +2,10 @@
 
 Baseline: `a226754`. Decisions agreed in the local design conversation on 2026-10-17.
 
+**Implementation is not authorized to start yet.** The user's latest instruction
+is: "implementation will start when I tell you." This document and the ticket
+board are planning artifacts only. Wait for an explicit instruction to implement.
+
 ## Delivery and scope
 
 - Work locally. Track tickets in Markdown and make local commits. Do not push,
@@ -50,6 +54,7 @@ Large swarms are summarized and expandable. Reduced effects disables flow motion
 ## Automatic thumbnails
 
 - Automatic on Wi-Fi and mobile data. No manual Load preview gate.
+- Automatic thumbnail loading is a required feature, not an optional stretch goal.
 - Attempt a real decoded video frame before playback/full download, including
   Direct Play. Reuse already available verified bytes before fetching more.
 - Cache successful images persistently for incomplete and Direct Play entries,
@@ -63,6 +68,13 @@ Large swarms are summarized and expandable. Reduced effects disables flow motion
 - Try independent decode fallbacks and accept a dark real frame as a last resort.
 - Missing metadata/peers, unsupported codecs or corrupt media cannot guarantee a
   decoded image. Show an honest themed loading/unavailable state in those cases.
+
+## Explicitly excluded
+
+- Adaptive/evolutionary architecture work, genetic optimization, a new peer
+  scoring/scheduling layer, and connection or buffering retuning.
+- An embedded player, replacing the geographic map, GitHub issues, pushing or
+  publishing, and starting implementation before the user requests it.
 
 ## Validation
 
