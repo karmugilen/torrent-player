@@ -1209,8 +1209,14 @@ class LibrarySession(
                 withContext(io) {
                     storage.clearCache()
                     storage.clearStartupCaches(_ui.value.library.filter { it.engineId != null && it.directPlay }.map { it.key }.toSet())
+                    (app as? WebtorApp)?.thumbnails?.clearDiskCache()
+                    runCatching { client.clearCache(listOf("startup", "resume", "peers", "dht")) }
                 }
                 refreshStorageStats()
+                runCatching {
+                    val summary = withContext(io) { client.getCache() }
+                    _ui.update { it.copy(nativeCacheSummary = summary) }
+                }
                 _ui.update { it.copy(message = "Temporary files were removed.") }
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = readableError(t)) }

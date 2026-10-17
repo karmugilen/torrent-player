@@ -35,7 +35,7 @@ class WebtorApp : Application() {
         engine = EngineHost(this)
         engineClient = EngineClient(engine)
         session = LibrarySession(this, engineClient, engine)
-        thumbnails = ThumbnailRepository(this)
+        thumbnails = ThumbnailRepository(this, engine)
         engine.start()
         session.start()
         val cm = getSystemService(ConnectivityManager::class.java)
