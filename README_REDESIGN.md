@@ -1,8 +1,26 @@
-# Torrent Player 2.1.2 — Episode previews and responsiveness
+# Torrent Player 2.1.3 — Varied previews and parallel verification
 
 This update combines the Android redesign and native engine improvements. Work,
 tickets, commits and APKs remain local. External Android players are still the
 required playback path.
+
+## Varied previews and parallel verification (2.1.3)
+
+- Video identity seeds three varied middle-frame targets (18–84% of the available
+  duration); cached frames remain stable across screen refreshes. Earlier successful
+  positions and the opening frame are fallbacks rather than the first choice.
+- During Direct Play, targets follow the current playback byte position, with
+  small backward variation. Native previews remain restricted to verified cached
+  pieces while a player is active; they do not fetch distant random pieces.
+- Live refresh favors the newest real frame when it resembles an older cached
+  frame. Thumbnail cache version 11 regenerates the prior fixed targets lazily.
+- Native piece hashing and startup validation use the Go runtime's CPU allowance,
+  replacing the four-worker cap. Saved-data checks pipeline independent pieces
+  concurrently; one dispatcher owns pause/resume and progress. The torrent client
+  retains its shared limit on active piece hashers across all torrents.
+- GPU drawing and background texture preparation remain enabled. Torrent hashing
+  stays on the CPU; this build does not add a GPU hashing backend or claim measured
+  public-swarm throughput gains.
 
 ## Episode previews and responsiveness (2.1.2)
 

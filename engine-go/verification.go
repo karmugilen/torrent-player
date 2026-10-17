@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -70,58 +71,90 @@ func (s *EngineServer) checkSavedData(ctx context.Context, rec *TorrentRecord, j
 			st.SetRestoreVerify(false)
 		}
 	}
+	// Pipeline independent checks through all available CPU workers. A single
+	// dispatcher owns pause/resume and progress; workers only verify pieces.
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	workers := min(backgroundWorkers(), len(pieces))
+	jobs := make(chan int)
+	results := make(chan error, workers)
+	var work sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		work.Add(1)
+		go func() {
+			defer work.Done()
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case index := <-jobs:
+					if workerCtx.Err() != nil {
+						return
+					}
+					var err error
+					if st != nil && st.PieceComplete(index) {
+						rec.Torrent.Piece(index).UpdateCompletion()
+					} else {
+						err = rec.Torrent.Piece(index).VerifyDataContext(workerCtx)
+					}
+					select {
+					case results <- err:
+					case <-workerCtx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+	defer func() { cancelWorkers(); work.Wait() }()
 	lastNotify := time.Now()
-	for _, index := range pieces {
-		for {
+	next, checked := 0, 0
+	for checked < len(pieces) {
+		rec.mu.RLock()
+		paused := rec.Paused
+		rec.mu.RUnlock()
+		var ready chan<- int
+		var index int
+		if !paused && next < len(pieces) {
+			ready, index = jobs, pieces[next]
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-job.wake:
+			// Re-evaluate the latest user intent before dispatching more work.
+		case ready <- index:
+			next++
+		case err := <-results:
 			if ctx.Err() != nil {
 				return
 			}
-			rec.mu.RLock()
-			paused := rec.Paused
-			rec.mu.RUnlock()
-			if !paused {
-				break
-			}
-			select {
-			case <-ctx.Done():
+			if err != nil {
+				// Join the complete pipeline before changing verification mode.
+				cancelWorkers()
+				work.Wait()
+				rec.mu.Lock()
+				message := fmt.Sprintf("Could not check saved data: %v", err)
+				rec.Error, rec.Paused, rec.Checking = &message, true, false
+				clearRestore()
+				if st != nil {
+					st.UnfreezeTrusted()
+				}
+				s.applyTransferState(rec)
+				rec.mu.Unlock()
+				s.notifyChange()
 				return
-			case <-job.wake:
 			}
-		}
-		// Removal/shutdown cancels and joins this worker before closing the
-		// torrent, so no verification call can race a dropped torrent.
-		trusted := st != nil && st.PieceComplete(index)
-		var err error
-		if trusted {
-			// Storage already has a durable verified bit for this piece (usually
-			// from a checkpoint). Refresh torrent completion without re-hashing.
-			rec.Torrent.Piece(index).UpdateCompletion()
-		} else {
-			err = rec.Torrent.Piece(index).VerifyDataContext(ctx)
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		rec.mu.Lock()
-		if err != nil {
-			message := fmt.Sprintf("Could not check saved data: %v", err)
-			rec.Error, rec.Paused, rec.Checking = &message, true, false
-			clearRestore()
-			if st != nil {
-				st.UnfreezeTrusted()
-			}
-			s.applyTransferState(rec)
+			checked++
+			rec.mu.Lock()
+			rec.CheckedPieces++
 			rec.mu.Unlock()
-			s.notifyChange()
-			return
-		}
-		rec.CheckedPieces++
-		rec.mu.Unlock()
-		if time.Since(lastNotify) >= 250*time.Millisecond {
-			s.notifyChange()
-			lastNotify = time.Now()
+			if time.Since(lastNotify) >= 250*time.Millisecond {
+				s.notifyChange()
+				lastNotify = time.Now()
+			}
 		}
 	}
+
 	rec.mu.Lock()
 	if !rec.removed && ctx.Err() == nil {
 		rec.Checking = false

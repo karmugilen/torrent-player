@@ -409,7 +409,7 @@ class DownloadEntryTest {
     fun thumbnailCacheKeyUsesStableIdentityNotHashCode() {
         val video = file(2, 12345, 0.5, "ep.mkv")
         val e = entry(listOf(video), setOf(2)).copy(key = "AbCDef")
-        assertEquals("v10-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
+        assertEquals("v11-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
         assertEquals("safe_name", ThumbnailRepository.sanitize("Safe/Name"))
     }
 
@@ -443,6 +443,28 @@ class DownloadEntryTest {
         assertNull(previewVideo(pack, 4)) // Subtitle: never show a video image for it.
         assertNull(previewVideo(pack, 999))
         assertEquals(2, firstPreviewVideo(pack.copy(focusedFile = 999))?.index)
+    }
+
+    @Test
+    fun middleFrameTargetsVaryByEpisodeButStayStableAcrossRefreshes() {
+        val durationMs = 2_400_000L
+        val first = previewTargetTimesUs("torrent/episode-1", durationMs)
+        val second = previewTargetTimesUs("torrent/episode-2", durationMs)
+        assertEquals(first, previewTargetTimesUs("torrent/episode-1", durationMs))
+        assertTrue("Episodes must not all seek the same timestamps", first != second)
+        assertEquals(3, first.distinct().size)
+        assertTrue(first.all { it in 360_000_000L..2_040_000_000L })
+    }
+
+    @Test
+    fun liveFrameTargetsStayNearPlaybackInsteadOfReturningTheIntro() {
+        val targets = previewTargetTimesUs("torrent/episode-1", 2_400_000L, playbackOffsetUs = 900_000_000L)
+        assertTrue(targets.all { it in 894_000_000L..900_000_000L })
+        val later = previewTargetTimesUs("torrent/episode-1", 2_400_000L, playbackOffsetUs = 1_200_000_000L)
+        assertTrue(later.all { it in 1_194_000_000L..1_200_000_000L })
+        assertTrue(targets != later)
+        assertTrue(previewTargetTimesUs("episode", 2_400_000L, availableRatio = 0.2)
+            .all { it in 0L..480_000_000L })
     }
 
     @Test

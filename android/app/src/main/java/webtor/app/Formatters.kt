@@ -146,6 +146,31 @@ internal fun previewFramesDiffer(first: IntArray, second: IntArray): Boolean {
     return difference > first.size * 3L * 6L
 }
 
+/** Decoder targets shared by saved-file and native preview reads. */
+internal fun previewTargetTimesUs(
+    identity: String,
+    durationMs: Long,
+    availableRatio: Double = 1.0,
+    playbackOffsetUs: Long? = null,
+): List<Long> {
+    if (durationMs <= 0L) return listOf(500_000L, 1_500_000L, 3_000_000L)
+    val durationUs = durationMs.coerceAtMost(Long.MAX_VALUE / 1000L) * 1000L
+    if (playbackOffsetUs != null) {
+        val body = playbackOffsetUs.coerceIn(0L, durationUs - 1L)
+        val random = kotlin.random.Random(identity.hashCode() xor (body / 12_000_000L).toInt())
+        val window = minOf(body, 6_000_000L)
+        return listOf((body - (random.nextDouble() * window).toLong()), body).distinct()
+    }
+    val availableUs = (durationUs * availableRatio.coerceIn(0.0, 1.0)).toLong()
+    if (availableUs <= 0L) return emptyList()
+    // Stable jitter in separated middle bands: refresh/recomposition does not
+    // cause new seeks, while different torrent/file identities avoid shared intros.
+    val random = kotlin.random.Random(identity.hashCode())
+    return listOf(0.18 to 0.36, 0.42 to 0.60, 0.66 to 0.84)
+        .map { (from, to) -> (availableUs * random.nextDouble(from, to)).toLong() }
+        .distinct()
+}
+
 /** Complete: 20/50/80 of full duration. Live: up to 3 spots inside downloaded span. */
 fun previewRatios(progress: Double, complete: Boolean): List<Double> {
     if (complete || progress >= 1.0) return listOf(0.20, 0.50, 0.80)

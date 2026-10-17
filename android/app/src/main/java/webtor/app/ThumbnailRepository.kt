@@ -252,9 +252,10 @@ class ThumbnailRepository(
             return fallback
         }
 
-        result = distinctFrames(if (liveState?.active == true && fallback.isNotEmpty()) {
-            listOf(fallback.first()) + fallback.drop(1).takeLast(1) + listOfNotNull(result.lastOrNull())
-        } else result)
+        result = if (liveState?.active == true && fallback.isNotEmpty()) {
+            // Prefer the newest real frame when it resembles an older still.
+            distinctFrames((fallback + result).asReversed()).asReversed()
+        } else distinctFrames(result)
         return synchronized(publicationLock) {
             if (isStale(capturedGlobal, capturedEntry, entry.key)) return@synchronized emptyList()
             attemptHistory.remove(key)
@@ -318,14 +319,13 @@ class ThumbnailRepository(
 
             val frames = ArrayList<Bitmap>(3)
             val tried = HashSet<Long>()
-            var firstOffsetUs = facts?.successfulOffsetUs ?: 0L
+            var firstOffsetUs = -1L
             val bodyOffsetUs = if (liveState?.active == true && video.length > 0L && actualDuration > 0L) {
                 (liveState.byteOffset.toDouble() / video.length * actualDuration * 1000.0).toLong()
                     .coerceIn(0L, (actualDuration * 1000L - 1L).coerceAtLeast(0L))
-            } else 0L
-            val candidates = if (video.isVerifiedComplete && actualDuration > 0L) {
-                COMPLETE_RATIOS.map { (actualDuration * it * 1000).toLong() }
-            } else listOf(bodyOffsetUs, firstOffsetUs, 0L).distinct()
+            } else null
+            val candidates = (previewTargetTimesUs(key, actualDuration, playbackOffsetUs = bodyOffsetUs) +
+                listOfNotNull(facts?.successfulOffsetUs, 0L)).distinct()
             for (candidate in candidates) {
                 val frame = grabNonDark(retriever, candidate, actualDuration, tried)
                 if (frame != null) {
@@ -465,7 +465,7 @@ class ThumbnailRepository(
             val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
             val frames = ArrayList<Bitmap>(3)
             val tried = HashSet<Long>()
-            var firstOffsetUs = facts?.successfulOffsetUs ?: -1L
+            var firstOffsetUs = -1L
 
             fun take(timeUs: Long): Boolean {
                 if (frames.size >= 3) return false
@@ -476,18 +476,9 @@ class ThumbnailRepository(
                 return true
             }
 
-            // Probe facts offset first if valid
-            if (firstOffsetUs >= 0L) take(firstOffsetUs)
-
-            if (actualDuration > 0L) {
-                for (ratio in COMPLETE_RATIOS) {
-                    take((actualDuration * ratio * 1000.0).toLong())
-                }
-                if (frames.isEmpty()) take(0L)
-            } else {
-                for (t in listOf(500_000L, 1_000_000L, 2_000_000L)) take(t)
-                if (frames.isEmpty()) take(0L)
-            }
+            previewTargetTimesUs(key, actualDuration).forEach { take(it) }
+            if (frames.isEmpty()) facts?.successfulOffsetUs?.let { take(it) }
+            if (frames.isEmpty()) take(0L)
 
             if (frames.isNotEmpty() && actualDuration > 0L && !isStale(capturedGlobal, capturedEntry, entryKey)) {
                 saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L), capturedGlobal, capturedEntry, entryKey)
@@ -509,7 +500,7 @@ class ThumbnailRepository(
             val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
             val frames = ArrayList<Bitmap>(3)
             val tried = HashSet<Long>()
-            var firstOffsetUs = facts?.successfulOffsetUs ?: -1L
+            var firstOffsetUs = -1L
 
             fun take(timeUs: Long): Boolean {
                 if (frames.size >= 3) return false
@@ -520,16 +511,9 @@ class ThumbnailRepository(
                 return true
             }
 
-            if (firstOffsetUs >= 0L) take(firstOffsetUs)
-
-            if (actualDuration > 0L) {
-                for (ratio in livePreviewRatios(progress)) {
-                    take((actualDuration * ratio * 1000.0).toLong())
-                }
-                if (frames.isEmpty()) take(0L)
-            } else {
-                for (t in listOf(500_000L, 1_500_000L, 3_000_000L, 0L)) take(t)
-            }
+            previewTargetTimesUs(key, actualDuration, availableRatio = progress).forEach { take(it) }
+            if (frames.isEmpty()) facts?.successfulOffsetUs?.let { take(it) }
+            if (frames.isEmpty()) take(0L)
 
             if (frames.isNotEmpty() && !isStale(capturedGlobal, capturedEntry, entryKey)) {
                 saveMediaFacts(key, retriever, actualDuration, firstOffsetUs.coerceAtLeast(0L), capturedGlobal, capturedEntry, entryKey)
@@ -728,12 +712,11 @@ class ThumbnailRepository(
     companion object {
         private const val LIVE_REFRESH_MS = 12_000L
         private const val EXTRACT_TIMEOUT_MS = 10_000L
-        private const val ALGORITHM = "v10"
+        private const val ALGORITHM = "v11"
         private const val COMPLETE_BUCKET = 101
         private const val MAX_MEMORY_BYTES = 32L * 1024L * 1024L
         private const val MAX_RETRY_ATTEMPTS = 3
         private const val RETRY_BACKOFF_MS = 15_000L
-        private val COMPLETE_RATIOS = listOf(0.20, 0.50, 0.80)
 
         fun cacheKey(entry: DownloadEntry, video: SavedFile): String =
             "$ALGORITHM-${sanitize(entry.key)}-${video.index}-${video.length}"

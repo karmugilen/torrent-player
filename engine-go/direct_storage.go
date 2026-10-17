@@ -118,9 +118,9 @@ func (st *DocumentTorrentStorage) validStartupPiece(index int, data []byte) bool
 	return true
 }
 
-// Limit CPU-heavy parallel work on small phones while allowing larger devices
-// to hash multiple independent pieces. Go already schedules peer I/O across cores.
-func backgroundWorkers() int { return max(1, min(4, runtime.GOMAXPROCS(0))) }
+// Use the runtime CPU allowance, including all available cores on Android.
+// The torrent client also caps aggregate active hashers across all torrents.
+func backgroundWorkers() int { return max(1, runtime.GOMAXPROCS(0)) }
 
 func (st *DocumentTorrentStorage) saveStartupPieceLocked(index int) {
 	if !st.startupPieces[index] || st.startupSaved[index] {
@@ -493,7 +493,7 @@ func (st *DocumentTorrentStorage) validateStartupPiecesLocked(planned map[int]bo
 	}
 	close(jobs)
 	var workers sync.WaitGroup
-	for w := 0; w < backgroundWorkers(); w++ {
+	for w := 0; w < min(backgroundWorkers(), len(planned)); w++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()

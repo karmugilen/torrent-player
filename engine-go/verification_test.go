@@ -23,10 +23,13 @@ import (
 // Delay actual disk reads to reproduce a check that outlives its control request.
 type gatedStorage struct {
 	storage.ClientImpl
-	enabled atomic.Bool
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
+	enabled      atomic.Bool
+	entered      chan struct{}
+	release      chan struct{}
+	once         sync.Once
+	active       atomic.Int32
+	parallel     chan struct{}
+	parallelOnce sync.Once
 }
 
 func (g *gatedStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, hash metainfo.Hash) (storage.TorrentImpl, error) {
@@ -43,15 +46,24 @@ type gatedPiece struct {
 
 func (p *gatedPiece) ReadAt(b []byte, off int64) (int, error) {
 	if p.gate.enabled.Load() {
+		active := p.gate.active.Add(1)
+		defer p.gate.active.Add(-1)
+		if active > 1 && p.gate.parallel != nil {
+			p.gate.parallelOnce.Do(func() { close(p.gate.parallel) })
+		}
 		p.gate.once.Do(func() { close(p.gate.entered) })
 		<-p.gate.release
 	}
 	return p.PieceImpl.ReadAt(b, off)
 }
 
-func recoveryMetadata(t *testing.T) ([]byte, string) {
+func recoveryMetadata(t *testing.T, repeats ...int) ([]byte, string) {
 	t.Helper()
-	data := bytes.Repeat([]byte("saved torrent data."), 8192)
+	count := 8192
+	if len(repeats) > 0 {
+		count = repeats[0]
+	}
+	data := bytes.Repeat([]byte("saved torrent data."), count)
 	info := metainfo.Info{Name: "resume.bin", Length: int64(len(data)), PieceLength: 16 * 1024}
 	for start := 0; start < len(data); start += int(info.PieceLength) {
 		hash := sha1.Sum(data[start:min(start+int(info.PieceLength), len(data))])
@@ -107,9 +119,12 @@ func waitRecovery(t *testing.T, check func() bool) {
 	}
 }
 
-func gatedRecovery(t *testing.T) (*EngineServer, *TorrentRecord, func()) {
+func gatedRecovery(t *testing.T, configure ...func(*gatedStorage)) (*EngineServer, *TorrentRecord, func()) {
 	t.Helper()
 	gate := &gatedStorage{entered: make(chan struct{}), release: make(chan struct{})}
+	for _, f := range configure {
+		f(gate)
+	}
 	s := testEngine(t, func(cfg *torrent.ClientConfig) {
 		gate.ClientImpl = cfg.DefaultStorage
 		cfg.DefaultStorage = gate
@@ -117,7 +132,8 @@ func gatedRecovery(t *testing.T) (*EngineServer, *TorrentRecord, func()) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(gate.release) }) }
 	t.Cleanup(release)
-	data, metadata := recoveryMetadata(t)
+	// More pieces than workers leave an undispatched batch to test pause.
+	data, metadata := recoveryMetadata(t, 65536)
 	rec := addRecoveryTorrent(t, s, metadata)
 	f, err := os.CreateTemp(t.TempDir(), "saved")
 	if err != nil {
@@ -158,6 +174,20 @@ func gatedRecovery(t *testing.T) (*EngineServer, *TorrentRecord, func()) {
 	return s, rec, release
 }
 
+func TestSavedDataVerificationRunsIndependentPiecesConcurrently(t *testing.T) {
+	if backgroundWorkers() < 2 {
+		t.Skip("requires two CPU workers")
+	}
+	parallel := make(chan struct{})
+	_, _, release := gatedRecovery(t, func(g *gatedStorage) { g.parallel = parallel })
+	defer release()
+	select {
+	case <-parallel:
+	case <-time.After(time.Second):
+		t.Fatal("saved-data checker serialized independent pieces despite multiple available hashers")
+	}
+}
+
 func recoveryCommand(t *testing.T, s *EngineServer, rec *TorrentRecord, path string) {
 	t.Helper()
 	body, _ := json.Marshal(IdRequest{ID: rec.ID})
@@ -179,7 +209,7 @@ func TestRestoreOutlivesRequestAndPauseResumeRemainResponsive(t *testing.T) {
 	}
 	recoveryCommand(t, s, rec, "/pause")
 	release()
-	waitRecovery(t, func() bool { return recoveryStatus(t, s, rec).CheckedPieces == 1 })
+	waitRecovery(t, func() bool { return recoveryStatus(t, s, rec).CheckedPieces > 0 })
 	status := recoveryStatus(t, s, rec)
 	if !status.Checking || !status.Paused {
 		t.Fatalf("pause was lost: %+v", status)
