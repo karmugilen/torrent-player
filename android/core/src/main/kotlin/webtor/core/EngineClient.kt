@@ -118,6 +118,25 @@ data class PieceTelemetry(
     val buckets: List<PieceBucket>,
 )
 
+data class BypassStatus(
+    val enabled: Boolean,
+    val active: Boolean,
+    val mode: String,
+    val coverage: List<String>,
+    val error: String? = null,
+)
+
+data class CacheCategory(
+    val id: String,
+    val bytes: Long,
+    val reclaimableBytes: Long,
+)
+
+data class CacheSummary(
+    val categories: List<CacheCategory>,
+    val memoryBytes: Long,
+)
+
 class EngineException(
     message: String,
     val statusCode: Int = 0,
@@ -249,6 +268,42 @@ class EngineClient(
         post("/settings", JSONObject().put("payloadTransfersAllowed", allowed))
             .optBoolean("payloadTransfersAllowed", allowed)
 
+    fun getBypass(): BypassStatus {
+        val json = get("/bypass")
+        val coverageArr = json.optJSONArray("coverage") ?: JSONArray()
+        val coverage = List(coverageArr.length()) { coverageArr.getString(it) }
+        return BypassStatus(
+            enabled = json.optBoolean("enabled"),
+            active = json.optBoolean("active"),
+            mode = json.optString("mode", "off"),
+            coverage = coverage,
+            error = json.nullableString("error"),
+        )
+    }
+
+    fun setBypass(enabled: Boolean): BypassStatus {
+        val json = post("/bypass", JSONObject().put("enabled", enabled))
+        val coverageArr = json.optJSONArray("coverage") ?: JSONArray()
+        val coverage = List(coverageArr.length()) { coverageArr.getString(it) }
+        return BypassStatus(
+            enabled = json.optBoolean("enabled", enabled),
+            active = json.optBoolean("active"),
+            mode = json.optString("mode", if (enabled) "active" else "off"),
+            coverage = coverage,
+            error = json.nullableString("error"),
+        )
+    }
+
+    fun getCache(): CacheSummary {
+        val json = get("/cache")
+        return parseCacheSummary(json)
+    }
+
+    fun clearCache(categories: List<String>): CacheSummary {
+        val json = post("/cache/clear", JSONObject().put("categories", JSONArray(categories)))
+        return parseCacheSummary(json)
+    }
+
     fun shutdown() {
         post("/shutdown", JSONObject())
     }
@@ -375,6 +430,25 @@ class EngineClient(
                 checkTotal = json.optInt("checkTotal"),
                 focusedFile = if (json.has("focusedFile") && !json.isNull("focusedFile")) json.optInt("focusedFile") else null,
                 verifiedBytes = json.optLong("verifiedBytes", 0L),
+            )
+        }
+
+        fun parseCacheSummary(json: JSONObject): CacheSummary {
+            val categories = ArrayList<CacheCategory>()
+            val arr = json.optJSONArray("categories") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val cat = arr.getJSONObject(i)
+                categories.add(
+                    CacheCategory(
+                        id = cat.getString("id"),
+                        bytes = cat.optLong("bytes", 0L),
+                        reclaimableBytes = cat.optLong("reclaimableBytes", 0L),
+                    )
+                )
+            }
+            return CacheSummary(
+                categories = categories,
+                memoryBytes = json.optLong("memoryBytes", 0L),
             )
         }
     }

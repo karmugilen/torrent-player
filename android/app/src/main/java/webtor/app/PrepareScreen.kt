@@ -102,13 +102,13 @@ fun PrepareScreen(
                             .fillMaxWidth()
                             .heightIn(min = 48.dp),
                     ) {
-                        Text(if (directPlayDefault) "Direct Play" else "Download", maxLines = 1)
+                        Text(if (directPlayDefault) "Watch now (Direct Play)" else "Save for offline (Download)", maxLines = 1)
                     }
                     OutlinedButton(
                         onClick = if (directPlayDefault) onStart else onDirectPlay,
                         enabled = canChoose && (!directPlayDefault || !insufficientSpace),
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text(if (directPlayDefault) "Download for offline use" else "Direct Play · keep only startup cache") }
+                    ) { Text(if (directPlayDefault) "Save for offline (Download full files)" else "Watch now (Direct Play · stream without saving)") }
                 }
             }
         },

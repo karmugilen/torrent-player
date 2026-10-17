@@ -81,6 +81,10 @@ class EngineHost(private val context: Context) : EngineTransport {
     external fun readPlayback(handle: Long, offset: Long, size: Int, target: ByteArray): Int
     external fun closePlayback(handle: Long)
 
+    external fun openPreview(id: String, fileIndex: Int): Long
+    external fun readPreview(handle: Long, offset: Long, size: Int, target: ByteArray): Int
+    external fun closePreview(handle: Long)
+
     companion object {
         const val TAG = "webtor-engine"
 

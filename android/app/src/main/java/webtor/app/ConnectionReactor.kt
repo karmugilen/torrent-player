@@ -1,147 +1,402 @@
 package webtor.app
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import webtor.core.PeerConnection
-import kotlin.math.cos
-import kotlin.math.sin
 
-internal const val REACTOR_MAX_PEERS = 18
+private const val DEFAULT_PEERS_PER_GROUP = 4
 
 @Composable
 internal fun ConnectionReactor(
-    peers: List<PeerConnection>, activity: Map<String, Boolean>, countKnown: Boolean,
-    download: String, upload: String,
+    peers: List<PeerConnection>,
+    activity: Map<String, Boolean>,
+    countKnown: Boolean,
+    download: String,
+    upload: String,
+    modifier: Modifier = Modifier,
 ) {
     val hud = SwarmHud(MaterialTheme.colorScheme)
-    val shown = remember(peers) { peers.sortedWith(compareBy({ it.transport }, { it.address })).take(REACTOR_MAX_PEERS) }
-    // Animate only peers whose payload counters changed; idle views stay static.
-    // Canvas reads the frame state directly, without recomposing the screen.
-    val phase: State<Float> = if (activity.isNotEmpty() && shown.any { it.connectionKey() in activity }) {
-        rememberInfiniteTransition(label = "Peer data flow").animateFloat(
-            initialValue = 0f, targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(1_800, easing = LinearEasing), RepeatMode.Restart),
-            label = "Payload pulse",
-        )
-    } else remember { mutableFloatStateOf(0f) }
-    Box(Modifier.fillMaxWidth().height(288.dp)) {
-        Canvas(Modifier.fillMaxSize().semantics {
-            contentDescription = if (countKnown) "This device connected to ${peers.size} peers. Download $download, upload $upload."
-            else "Loading peer connections."
-        }) {
-            val center = Offset(size.width / 2, size.height / 2 + 8.dp.toPx())
-            val outer = minOf(size.width / 2 - 20.dp.toPx(), size.height / 2 - 24.dp.toPx()).coerceAtLeast(0f)
-            val core = minOf(42.dp.toPx(), outer * 0.42f)
-            drawCircle(
-                Brush.radialGradient(listOf(hud.accent.copy(alpha = 0.09f), hud.background.copy(alpha = 0f)), center, outer.coerceAtLeast(1f)),
-                outer, center,
-            )
-            val grid = 24.dp.toPx()
-            var x = 0f
-            while (x < size.width) {
-                drawLine(hud.accent.copy(alpha = 0.035f), Offset(x, 38.dp.toPx()), Offset(x, size.height))
-                x += grid
+    val reducedEffects = LocalReducedEffects.current
+    val groups = remember(peers) {
+        peers.groupBy { it.transport }
+            .toSortedMap()
+            .mapValues { (_, list) ->
+                list.sortedWith(compareBy({ it.address }, { it.client }))
             }
-            var y = 38.dp.toPx()
-            while (y < size.height) {
-                drawLine(hud.accent.copy(alpha = 0.035f), Offset(0f, y), Offset(size.width, y))
-                y += grid
-            }
-            drawCircle(hud.accent.copy(alpha = 0.08f), outer - 10.dp.toPx(), center, style = Stroke(1.dp.toPx()))
-            for (tick in 0 until 72) {
-                val angle = tick * Math.PI * 2 / 72
-                val direction = Offset(cos(angle).toFloat(), sin(angle).toFloat())
-                val major = tick % 6 == 0
-                drawLine(
-                    hud.accent.copy(alpha = if (major) 0.32f else 0.12f), center + direction * outer,
-                    center + direction * (outer - (if (major) 6.dp.toPx() else 2.dp.toPx())), strokeWidth = 1.dp.toPx(),
-                )
-            }
-            shown.forEachIndexed { index, peer ->
-                val angle = -Math.PI / 2 + (index + 0.5) * Math.PI * 2 / shown.size
-                val direction = Offset(cos(angle).toFloat(), sin(angle).toFloat())
-                val tangent = Offset(-direction.y, direction.x)
-                val start = center + direction * (core + 9.dp.toPx())
-                val end = center + direction * (outer - 18.dp.toPx())
-                val control = center + direction * (outer * 0.64f) + tangent * 13.dp.toPx()
-                val route = Path().apply {
-                    moveTo(start.x, start.y)
-                    quadraticTo(control.x, control.y, end.x, end.y)
-                }
-                val color = hud.protocol(peer.transport)
-                val receiving = activity[peer.connectionKey()]
-                drawPath(route, color.copy(alpha = if (receiving != null) 0.4f else 0.18f), style = Stroke(1.dp.toPx()))
-                drawCircle(color.copy(alpha = 0.09f), 11.dp.toPx(), end)
-                drawCircle(color.copy(alpha = 0.48f), 6.dp.toPx(), end, style = Stroke(1.dp.toPx()))
-                drawCircle(color, 2.5.dp.toPx(), end)
-                if (receiving != null) {
-                    val progress = (phase.value + index * 0.17f) % 1f
-                    val t = if (receiving) 1f - progress else progress
-                    val position = start * ((1f - t) * (1f - t)) + control * (2 * (1f - t) * t) + end * (t * t)
-                    drawCircle(color.copy(alpha = 0.16f), 7.dp.toPx(), position)
-                    drawCircle(color, 2.dp.toPx(), position)
+    }
+    val activeCount = remember(peers, activity) {
+        peers.count { it.connectionKey() in activity }
+    }
+
+    val semanticSummary = remember(peers, countKnown, download, upload, groups) {
+        if (!countKnown) "Loading peer connections."
+        else if (peers.isEmpty()) "This device connected to 0 peers. Download $download, upload $upload."
+        else "This device connected to ${peers.size} peers across ${groups.keys.joinToString()} protocols. $activeCount transferring. Download $download, upload $upload."
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = semanticSummary },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        // UI-04: Device node at top
+        DeviceRootNode(download = download, upload = upload, hud = hud, totalPeers = peers.size)
+
+        if (peers.isEmpty()) {
+            VerticalBranchConnector(height = 20.dp, color = hud.accent.copy(alpha = 0.25f))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = hud.panel,
+                border = BorderStroke(1.dp, hud.muted.copy(alpha = 0.2f)),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            ) {
+                Box(
+                    modifier = Modifier.padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (!countKnown) "Searching for swarm connections…" else "No peers connected yet",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = hud.muted,
+                    )
                 }
             }
-            drawCircle(hud.background, core + 7.dp.toPx(), center)
-            drawCircle(hud.accent.copy(alpha = 0.07f), core, center)
-            drawCircle(hud.accent.copy(alpha = 0.27f), core, center, style = Stroke(1.dp.toPx()))
-            val ring = core + 5.dp.toPx()
-            for (segment in 0 until 3) {
-                drawArc(
-                    hud.accent, startAngle = segment * 120f - 90, sweepAngle = 78f, useCenter = false,
-                    topLeft = center - Offset(ring, ring), size = Size(ring * 2, ring * 2), style = Stroke(2.dp.toPx()),
+        } else {
+            VerticalBranchConnector(height = 16.dp, color = hud.accent.copy(alpha = 0.25f))
+
+            // Protocol groups branching out
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                groups.forEach { (transport, groupPeers) ->
+                    ProtocolGroupSection(
+                        transport = transport,
+                        peers = groupPeers,
+                        activity = activity,
+                        hud = hud,
+                        reducedEffects = reducedEffects,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceRootNode(
+    download: String,
+    upload: String,
+    hud: SwarmHud,
+    totalPeers: Int,
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = hud.panel,
+        border = BorderStroke(1.5.dp, hud.accent.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (totalPeers > 0) hud.accent else hud.muted)
+                    )
+                    Text(
+                        "THIS DEVICE",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.2.sp,
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        color = hud.text,
+                    )
+                }
+                Text(
+                    "$totalPeers connected peers",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = hud.muted,
                 )
             }
-            val inner = core - 8.dp.toPx()
-            drawArc(
-                hud.accent.copy(alpha = 0.15f), startAngle = 20f, sweepAngle = 240f, useCenter = false,
-                topLeft = center - Offset(inner, inner), size = Size(inner * 2, inner * 2), style = Stroke(1.dp.toPx()),
-            )
-            val length = 10.dp.toPx()
-            for (corner in listOf(Offset(0f, 42.dp.toPx()), Offset(size.width, 42.dp.toPx()), Offset(0f, size.height), Offset(size.width, size.height))) {
-                val dx = if (corner.x == 0f) length else -length
-                val dy = if (corner.y == size.height) -length else length
-                drawLine(hud.accent.copy(alpha = 0.36f), corner, corner + Offset(dx, 0f), 1.dp.toPx())
-                drawLine(hud.accent.copy(alpha = 0.36f), corner, corner + Offset(0f, dy), 1.dp.toPx())
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                RateColumn(label = "DOWN", rate = download, color = hud.accent)
+                RateColumn(label = "UP", rate = upload, color = hud.secondary)
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            ReactorReadout("RECEIVING", download, Alignment.Start)
-            ReactorReadout("SENDING", upload, Alignment.End)
-        }
-        Column(Modifier.align(Alignment.Center).offset(y = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(if (countKnown) peers.size.toString() else "—", color = hud.text, fontSize = 30.sp, fontWeight = FontWeight.Light, fontFamily = FontFamily.Monospace)
-            Text("PEERS", color = hud.accent, fontSize = 9.sp, letterSpacing = 2.sp, fontFamily = FontFamily.Monospace)
-        }
+    }
+}
+
+@Composable
+private fun RateColumn(label: String, rate: String, color: Color) {
+    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(1.dp)) {
         Text(
-            "THIS DEVICE", Modifier.align(Alignment.BottomCenter).padding(bottom = 3.dp),
-            color = hud.muted, fontSize = 9.sp, letterSpacing = 2.sp, fontFamily = FontFamily.Monospace,
+            label,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 8.sp,
+                fontFamily = FontFamily.Monospace,
+                letterSpacing = 1.sp,
+            ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            rate,
+            style = MaterialTheme.typography.labelMedium.copy(
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            ),
+            color = color,
         )
     }
 }
 
 @Composable
-private fun ReactorReadout(label: String, value: String, alignment: Alignment.Horizontal) {
-    val hud = SwarmHud(MaterialTheme.colorScheme)
-    Column(horizontalAlignment = alignment, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(label, color = hud.muted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, letterSpacing = 1.sp)
-        Text(value, color = hud.accent, style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
+private fun ProtocolGroupSection(
+    transport: String,
+    peers: List<PeerConnection>,
+    activity: Map<String, Boolean>,
+    hud: SwarmHud,
+    reducedEffects: Boolean,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val protocolColor = hud.protocol(transport)
+    val displayedPeers = if (expanded || peers.size <= DEFAULT_PEERS_PER_GROUP) peers else peers.take(DEFAULT_PEERS_PER_GROUP)
+    val hasMore = peers.size > DEFAULT_PEERS_PER_GROUP
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // Protocol Branch Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = protocolColor.copy(alpha = 0.15f),
+                    border = BorderStroke(1.dp, protocolColor.copy(alpha = 0.4f)),
+                ) {
+                    Text(
+                        transport,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        color = protocolColor,
+                    )
+                }
+                Text(
+                    "${peers.size} ${if (peers.size == 1) "peer" else "peers"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = hud.muted,
+                )
+            }
+
+            if (hasMore) {
+                TextButton(
+                    onClick = { expanded = !expanded },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(
+                        if (expanded) "Show less" else "+${peers.size - DEFAULT_PEERS_PER_GROUP} more",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = hud.accent,
+                    )
+                }
+            }
+        }
+
+        // Rectangular peer tiles
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            displayedPeers.forEach { peer ->
+                val peerTransfer = activity[peer.connectionKey()]
+                RectangularPeerTile(
+                    peer = peer,
+                    transferring = peerTransfer,
+                    protocolColor = protocolColor,
+                    hud = hud,
+                    reducedEffects = reducedEffects,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RectangularPeerTile(
+    peer: PeerConnection,
+    transferring: Boolean?,
+    protocolColor: Color,
+    hud: SwarmHud,
+    reducedEffects: Boolean,
+) {
+    val isActive = transferring != null
+    val borderAlpha = if (isActive) 0.5f else 0.15f
+    val borderColor = if (isActive) protocolColor else hud.muted
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = hud.panel,
+        border = BorderStroke(1.dp, borderColor.copy(alpha = borderAlpha)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    // Country badge if available
+                    peer.country?.takeIf { it.isNotBlank() }?.let { country ->
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = hud.background,
+                            border = BorderStroke(0.5.dp, hud.muted.copy(alpha = 0.3f)),
+                        ) {
+                            Text(
+                                country.uppercase(),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 9.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                ),
+                                color = hud.text,
+                            )
+                        }
+                    }
+
+                    // Client identifier
+                    Text(
+                        peer.client.ifBlank { peer.address },
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                        color = hud.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // Address & transfer totals
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        peer.address,
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = hud.muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "↓ ${formatBytes(peer.downloaded)} · ↑ ${formatBytes(peer.uploaded)}",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = hud.muted,
+                    )
+                }
+            }
+
+            // Real activity status (no fake animation on idle)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                val statusDotColor = when (transferring) {
+                    true -> hud.accent
+                    false -> hud.secondary
+                    null -> Color.Transparent
+                }
+                if (transferring != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(statusDotColor)
+                    )
+                }
+                Text(
+                    text = when (transferring) {
+                        true -> "Receiving"
+                        false -> "Sending"
+                        null -> "Idle"
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                    ),
+                    color = when (transferring) {
+                        true -> hud.accent
+                        false -> hud.secondary
+                        null -> hud.muted
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VerticalBranchConnector(height: androidx.compose.ui.unit.Dp, color: Color) {
+    Canvas(
+        modifier = Modifier
+            .width(2.dp)
+            .height(height)
+    ) {
+        drawLine(
+            color = color,
+            start = Offset(size.width / 2, 0f),
+            end = Offset(size.width / 2, size.height),
+            strokeWidth = 2.dp.toPx(),
+        )
     }
 }

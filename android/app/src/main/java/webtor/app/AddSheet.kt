@@ -105,13 +105,13 @@ fun AddSheet(
                             enabled = if (directPlayDefault && ready) selection.isNotEmpty() && !busy else canDownload,
                             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
-                            Text(if (canAddPending) "Add and wait" else if (directPlayDefault) "Direct Play" else "Download", maxLines = 1)
+                            Text(if (canAddPending) "Save and wait for peers" else if (directPlayDefault) "Watch now (Direct Play)" else "Save for offline (Download)", maxLines = 1)
                         }
                         if (ready) OutlinedButton(
                             onClick = { if (directPlayDefault) onDownload?.invoke() else onDirectPlay?.invoke() },
                             enabled = !busy && selection.isNotEmpty() && (!directPlayDefault || !insufficientSpace),
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text(if (directPlayDefault) "Download for offline use" else "Direct Play · keep only startup cache") }
+                        ) { Text(if (directPlayDefault) "Save for offline (Download full files)" else "Watch now (Direct Play · stream without saving)") }
                     }
                 }
             }

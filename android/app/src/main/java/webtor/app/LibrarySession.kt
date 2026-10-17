@@ -63,6 +63,8 @@ class LibrarySession(
     private var networkSnapshot = NetworkSnapshot()
     private val networkUpdates = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var shutdownComplete = false
+    private val antiDpiMutex = Mutex()
+    private var pendingAntiDpiTarget: Boolean? = null
 
     private val _ui = MutableStateFlow(UiState(networkPolicy = savedNetworkPolicy(), networkAllowed = false))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -135,7 +137,10 @@ class LibrarySession(
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
+                        appTheme = parseSavedTheme(settings.getString("appTheme", "AERO")),
+                        reducedEffects = settings.getBoolean("reducedEffects", false),
                         directPlayDefault = settings.getBoolean("directPlayDefault", false),
+                        antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
                     )
                 }
@@ -152,6 +157,15 @@ class LibrarySession(
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
                     runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
+                    val antiDpi = settings.getBoolean("antiDpiEnabled", false)
+                    val bypass = runCatching { withContext(io) { client.setBypass(antiDpi) } }.getOrNull()
+                    if (bypass != null) {
+                        _ui.update { it.copy(bypassStatus = bypass) }
+                    }
+                    val nativeCache = runCatching { withContext(io) { client.getCache() } }.getOrNull()
+                    if (nativeCache != null) {
+                        _ui.update { it.copy(nativeCacheSummary = nativeCache) }
+                    }
                     restoreAll(loaded)
                 }
                 mutex.withLock { reconcileTransferState() }
@@ -205,6 +219,54 @@ class LibrarySession(
         settings.edit().putBoolean("darkTheme", dark).apply()
         _ui.update { it.copy(darkTheme = dark) }
     }
+
+    fun setAppTheme(theme: AppTheme) {
+        settings.edit().putString("appTheme", theme.name).apply()
+        _ui.update { it.copy(appTheme = theme) }
+    }
+
+    fun setReducedEffects(enabled: Boolean) {
+        settings.edit().putBoolean("reducedEffects", enabled).apply()
+        _ui.update { it.copy(reducedEffects = enabled) }
+    }
+
+    fun setAntiDpi(enabled: Boolean) {
+        settings.edit().putBoolean("antiDpiEnabled", enabled).apply()
+        _ui.update { it.copy(antiDpiEnabled = enabled) }
+        pendingAntiDpiTarget = enabled
+        if (_ui.value.engineReady) {
+            scope.launch {
+                antiDpiMutex.withLock {
+                    while (true) {
+                        val target = pendingAntiDpiTarget ?: break
+                        pendingAntiDpiTarget = null
+                        try {
+                            val status = withContext(io) { client.setBypass(target) }
+                            if (pendingAntiDpiTarget == null) {
+                                _ui.update { it.copy(bypassStatus = status, error = null) }
+                            }
+                        } catch (t: Throwable) {
+                            if (t is CancellationException) throw t
+                            if (pendingAntiDpiTarget == null) {
+                                _ui.update { it.copy(error = readableError(t)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun clearNativeCache(categories: List<String>) {
+        if (_ui.value.engineReady) {
+            scope.launch {
+                val res = runCatching { withContext(io) { client.clearCache(categories) } }.getOrNull()
+                if (res != null) {
+                    _ui.update { it.copy(nativeCacheSummary = res) }
+                }
+            }
+        }
+    }
     fun setNetworkPolicy(policy: TransferNetworkPolicy) {
         settings.edit().putString("networkPolicy", policy.name).apply()
         updateNetworkState(networkSnapshot, policy)
@@ -251,7 +313,60 @@ class LibrarySession(
         }
     }
 
-    fun persistFolder(uri: android.net.Uri) { runCatching { storage.persistFolder(uri, "Selected folder") }.onSuccess { _ui.update { it.copy(message = "Download folder updated") } }.onFailure { showError("Folder access is unavailable") } }
+    fun pickFolder() { _events.trySend(UiEvent.PickFolder) }
+
+    fun persistFolder(uri: android.net.Uri) {
+        runCatching {
+            val displayName = android.provider.DocumentsContract.getTreeDocumentId(uri)
+                .substringAfterLast(':').trim().ifBlank { "Selected folder" }
+            storage.persistFolder(uri, displayName)
+        }.onSuccess {
+            refreshStorageStats()
+            _ui.update { it.copy(message = "Download folder updated") }
+        }.onFailure {
+            showError("Folder access is unavailable")
+        }
+    }
+
+    fun clearFolder() {
+        storage.clearFolder()
+        refreshStorageStats()
+        _ui.update { it.copy(message = "Reverted to default Downloads/Webtor folder") }
+    }
+
+    fun requestRepairFile(key: String, fileIndex: Int) {
+        _events.trySend(UiEvent.PickFileForRepair(key, fileIndex))
+    }
+
+    fun repairFileUri(key: String, fileIndex: Int, newUri: android.net.Uri) {
+        scope.launchCommand {
+            val entry = _ui.value.library.find { it.key == key } ?: return@launchCommand
+            val file = entry.files.find { it.index == fileIndex } ?: return@launchCommand
+            runCatching {
+                app.contentResolver.takePersistableUriPermission(
+                    newUri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            val statSize = runCatching {
+                app.contentResolver.openFileDescriptor(newUri, "r")?.use { it.statSize }
+            }.getOrNull() ?: -1L
+            if (statSize > 0L && statSize < file.length) {
+                _ui.update { it.copy(error = "Selected file size (${formatBytes(statSize)}) is smaller than required (${formatBytes(file.length)}).") }
+                return@launchCommand
+            }
+            patch(key) { e ->
+                e.copy(
+                    files = e.files.map { f ->
+                        if (f.index == fileIndex) f.copy(uri = newUri.toString()) else f
+                    },
+                    error = null,
+                )
+            }
+            persist()
+            _ui.update { it.copy(message = "Repaired file destination for ${file.name}") }
+        }
+    }
 
     fun closeSettings() = _ui.update { it.copy(screen = Screen.Library, clearAllConfirm = false) }
     fun setMaxPeers(value: Int) {
@@ -710,6 +825,103 @@ class LibrarySession(
     /** Applies a batch command independently so one bad entry does not block the rest. */
     fun pauseAll(entries: List<DownloadEntry>) = entries.forEach { pause(it) }
 
+    fun pauseBatch(keys: Set<String>) {
+        keys.forEach { key ->
+            _ui.value.library.find { it.key == key }?.let { pause(it) }
+        }
+    }
+
+    fun resumeBatch(keys: Set<String>) {
+        keys.forEach { key ->
+            _ui.value.library.find { it.key == key }?.let { resume(it) }
+        }
+    }
+
+    fun deleteBatch(keys: Set<String>, eraseFiles: Boolean) {
+        if (isShuttingDown.get()) return
+        val targets = _ui.value.library.filter { it.key in keys }
+        if (targets.isEmpty()) return
+        targets.forEach { cancelRetry(it.key) }
+        val nextGens = targets.associate { it.key to (it.generation + 1) }
+
+        _ui.update { state ->
+            state.copy(
+                library = state.library.map { entry ->
+                    val nextGen = nextGens[entry.key]
+                    if (nextGen != null) {
+                        entry.copy(
+                            isDeleting = true,
+                            lifecycleState = EntryLifecycleState.DELETING,
+                            generation = nextGen,
+                        )
+                    } else entry
+                }
+            )
+        }
+        syncService()
+
+        scope.launchCommand {
+            var failureCount = 0
+            targets.forEach { target ->
+                val current = _ui.value.library.find { it.key == target.key } ?: return@forEach
+                val targetGen = nextGens[target.key] ?: (target.generation + 1)
+                if (current.generation != targetGen) return@forEach
+
+                var engineRemoved = current.engineId == null
+                val id = current.engineId
+                try {
+                    if (id != null) {
+                        recentlyInvalidatedIds.add(id)
+                        withContext(io) { client.remove(id, destroyStore = eraseFiles) }
+                        engineRemoved = true
+                    }
+                    if (eraseFiles) {
+                        withContext(io) {
+                            storage.deleteFiles(current.files)
+                            if (current.directPlay) storage.deleteStartupCache(current.key)
+                        }
+                    }
+                    (app as? WebtorApp)?.thumbnails?.invalidate(current)
+                    withContext(io) { storage.retireTorrent(current.key, targetGen) }
+                    _ui.update { state ->
+                        val latest = state.library.find { it.key == current.key }
+                        if (latest?.generation == targetGen) {
+                            state.copy(
+                                library = state.library.filter { it.key != current.key },
+                                screen = if (state.openTorrentKey == current.key) Screen.Library else state.screen,
+                                openTorrentKey = state.openTorrentKey.takeUnless { it == current.key },
+                            )
+                        } else state
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    failureCount++
+                    if (!engineRemoved && id != null) {
+                        recentlyInvalidatedIds.remove(id)
+                    }
+                    patch(current.key) { e ->
+                        if (e.generation == targetGen) {
+                            e.copy(
+                                isDeleting = false,
+                                lifecycleState = EntryLifecycleState.ERROR,
+                                engineId = if (engineRemoved) null else e.engineId,
+                                paused = if (engineRemoved) true else e.paused,
+                                status = if (engineRemoved) null else e.status,
+                                error = readableError(t),
+                            )
+                        } else e
+                    }
+                }
+            }
+            persist()
+            refreshStorageStats()
+            syncService()
+            if (failureCount > 0) {
+                _ui.update { it.copy(message = "Could not remove $failureCount item(s)") }
+            }
+        }
+    }
+
     fun resume(entry: DownloadEntry) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand
@@ -974,12 +1186,14 @@ class LibrarySession(
         syncService()
 
         scope.launchCommand {
+            var engineRemoved = target.engineId == null
             try {
                 val id = target.engineId
                 if (id != null) {
                     recentlyInvalidatedIds.add(id)
                     // Stream cache has nothing useful to keep in Downloads; always wipe it.
                     withContext(io) { client.remove(id, false) }
+                    engineRemoved = true
                 }
                 (app as? WebtorApp)?.thumbnails?.invalidate(target)
                 _ui.update { state ->
@@ -987,16 +1201,20 @@ class LibrarySession(
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
+                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 persist()
                 refreshStorageStats()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                target.engineId?.let { recentlyInvalidatedIds.remove(it) }
+                if (!engineRemoved) target.engineId?.let { recentlyInvalidatedIds.remove(it) }
                 patch(target.key) {
                     it.copy(
                         isDeleting = false,
                         lifecycleState = EntryLifecycleState.ERROR,
+                        engineId = if (engineRemoved) null else target.engineId,
+                        paused = if (engineRemoved) true else target.paused,
+                        status = if (engineRemoved) null else target.status,
                         error = readableError(t),
                     )
                 }
@@ -1047,6 +1265,7 @@ class LibrarySession(
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
+                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 persist()
                 refreshStorageStats()
                 syncService()
@@ -1104,13 +1323,30 @@ class LibrarySession(
     fun cleanupCache() {
         scope.launchCommand {
             try {
+                var reclaimedNative = 0L
                 withContext(io) {
                     storage.clearCache()
-                    storage.clearStartupCaches(_ui.value.library.filter { it.engineId != null && it.directPlay }.map { it.key }.toSet())
+                    (app as? WebtorApp)?.thumbnails?.clearDiskCache()
+                    if (_ui.value.engineReady) {
+                        val res = client.clearCache(listOf("startup", "resume", "peers", "dht"))
+                        reclaimedNative = res.categories.sumOf { it.reclaimableBytes }
+                    }
                 }
                 refreshStorageStats()
-                _ui.update { it.copy(message = "Temporary files were removed.") }
+                if (_ui.value.engineReady) {
+                    val summary = withContext(io) { client.getCache() }
+                    _ui.update { it.copy(nativeCacheSummary = summary) }
+                }
+                _ui.update {
+                    val msg = if (reclaimedNative > 0L) {
+                        "Cache cleared: ${formatBytes(reclaimedNative)} reclaimed."
+                    } else {
+                        "Temporary files were removed."
+                    }
+                    it.copy(message = msg, error = null)
+                }
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 _ui.update { it.copy(error = readableError(t)) }
             }
         }
@@ -1382,15 +1618,21 @@ class LibrarySession(
     fun refreshStorageStats() {
         if (storageStatsJob?.isActive == true) return
         storageStatsJob = scope.launch {
-            val stats = withContext(io) {
-                Triple(storage.freeBytes, storage.cacheBytes, storage.legacyBytes)
-            }
+            val free = withContext(io) { storage.freeBytes }
+            val cache = withContext(io) { storage.cacheBytes }
+            val legacy = withContext(io) { storage.legacyBytes }
+            val folderName = withContext(io) { storage.folderName }
+            val hasCustom = withContext(io) { storage.folder != null }
+            val warning = withContext(io) { storage.storageAccessWarning() }
             _ui.update {
                 it.copy(
-                    freeBytes = stats.first,
+                    freeBytes = free,
                     managedBytes = storage.managedBytes(it.library),
-                    cacheBytes = stats.second,
-                    legacyBytes = stats.third,
+                    cacheBytes = cache,
+                    legacyBytes = legacy,
+                    storageFolderName = folderName,
+                    hasCustomFolder = hasCustom,
+                    storageAccessWarning = warning,
                 )
             }
         }
@@ -2163,4 +2405,10 @@ class LibrarySession(
             )
         }
     }
+}
+
+internal fun parseSavedTheme(name: String?): AppTheme = when (name?.uppercase()) {
+    "ANTIQUITY" -> AppTheme.ANTIQUITY
+    "RETRO" -> AppTheme.RETRO
+    else -> AppTheme.AERO
 }

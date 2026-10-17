@@ -20,6 +20,8 @@ data class DeleteRequest(
     val title: String,
 )
 
+enum class AppTheme { AERO, ANTIQUITY, RETRO }
+
 data class UiState(
     val screen: Screen = Screen.Library,
     val openTorrentKey: String? = null,
@@ -41,11 +43,19 @@ data class UiState(
     val restoring: Boolean = false,
     val maxPeers: Int = 55,
     val darkTheme: Boolean = true,
+    val appTheme: AppTheme = AppTheme.AERO,
+    val reducedEffects: Boolean = false,
     val directPlayDefault: Boolean = false,
     val diagnosticsPreview: String? = null,
     val networkPolicy: TransferNetworkPolicy = TransferNetworkPolicy.ANY,
     val networkAllowed: Boolean = true,
     val networkReason: String? = null,
+    val antiDpiEnabled: Boolean = false,
+    val bypassStatus: webtor.core.BypassStatus? = null,
+    val nativeCacheSummary: webtor.core.CacheSummary? = null,
+    val storageFolderName: String = "Downloads/Webtor",
+    val hasCustomFolder: Boolean = false,
+    val storageAccessWarning: String? = null,
 )
 
 /** User-facing library ordering. Kept pure so it is deterministic across restore/recomposition. */
@@ -59,6 +69,8 @@ fun transferAllowed(policy: TransferNetworkPolicy, connected: Boolean, wifi: Boo
 
 sealed class UiEvent {
     data object PickTorrent : UiEvent()
+    data object PickFolder : UiEvent()
+    data class PickFileForRepair(val entryKey: String, val fileIndex: Int) : UiEvent()
     data object RequestNotifications : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String,
         val playlist: List<PlaybackItem> = emptyList(), val subtitles: List<PlaybackItem> = emptyList(),
@@ -80,4 +92,63 @@ fun List<DownloadEntry>.stableLibrarySort(sort: LibrarySort): List<DownloadEntry
 fun List<DownloadEntry>.filterLibrary(query: String): List<DownloadEntry> {
     val q = query.trim()
     return if (q.isEmpty()) this else filter { it.title.contains(q, ignoreCase = true) || it.files.any { file -> file.name.contains(q, ignoreCase = true) } }
+}
+
+enum class LibraryFilter { ALL, ACTIVE, READY, NEEDS_ATTENTION }
+
+fun DownloadEntry.matchesFilter(filter: LibraryFilter): Boolean = when (filter) {
+    LibraryFilter.ALL -> true
+    LibraryFilter.ACTIVE -> !paused && !complete && (lifecycleState == EntryLifecycleState.DOWNLOADING || lifecycleState == EntryLifecycleState.PREPARING || checking)
+    LibraryFilter.READY -> complete || (directPlay && files.any { it.isVerifiedComplete || it.verifiedBytes > 0L })
+    LibraryFilter.NEEDS_ATTENTION -> error != null || status?.error != null || lifecycleState == EntryLifecycleState.ERROR
+}
+
+fun List<DownloadEntry>.applyFilter(filter: LibraryFilter): List<DownloadEntry> =
+    if (filter == LibraryFilter.ALL) this else filter { it.matchesFilter(filter) }
+
+data class ContinueWatchingTarget(
+    val entry: DownloadEntry,
+    val file: SavedFile,
+)
+
+fun List<DownloadEntry>.findContinueWatchingTarget(): ContinueWatchingTarget? {
+    var bestTarget: ContinueWatchingTarget? = null
+    var bestBookmarkTime: Long = -1L
+    var bestAddedAt: Long = -1L
+
+    for (entry in this) {
+        if (entry.isDeleting) continue
+        for (file in entry.files) {
+            // Must be a playable video file
+            if (!file.name.isVideoName() && !file.path.isVideoName()) continue
+            if (file.playbackPositionMs <= 0L) continue
+            if (file.playbackDurationMs > 0L && file.playbackPositionMs >= file.playbackDurationMs - 3000L) {
+                continue
+            }
+
+            val bTime = file.bookmarkUpdatedAt
+            val aTime = entry.addedAt
+
+            val isBetter = when {
+                bestTarget == null -> true
+                bTime > bestBookmarkTime -> true
+                bTime == bestBookmarkTime && bTime > 0L -> {
+                    if (aTime != bestAddedAt) aTime > bestAddedAt
+                    else entry.key > bestTarget.entry.key || (entry.key == bestTarget.entry.key && file.index < bestTarget.file.index)
+                }
+                bTime == 0L && bestBookmarkTime == 0L -> {
+                    if (aTime != bestAddedAt) aTime > bestAddedAt
+                    else entry.key > bestTarget.entry.key || (entry.key == bestTarget.entry.key && file.index < bestTarget.file.index)
+                }
+                else -> false
+            }
+
+            if (isBetter) {
+                bestTarget = ContinueWatchingTarget(entry, file)
+                bestBookmarkTime = bTime
+                bestAddedAt = aTime
+            }
+        }
+    }
+    return bestTarget
 }

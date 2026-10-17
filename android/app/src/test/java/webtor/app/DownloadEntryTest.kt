@@ -2,6 +2,7 @@ package webtor.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,6 +31,94 @@ class DownloadEntryTest {
         val second = entry(listOf(file(0, 1, 0.0, "notes.txt")), setOf(0)).copy(key = "b", title = "Same", addedAt = 10)
         assertEquals(listOf("a", "b"), listOf(first, second).stableLibrarySort(LibrarySort.NAME).map { it.key })
         assertEquals(listOf(first), listOf(first, second).filterLibrary("episode"))
+    }
+
+    @Test
+    fun libraryFiltersDistinguishActiveReadyAndNeedsAttention() {
+        val active = entry(listOf(file(0, 100, 0.5)), setOf(0)).copy(key = "active", lifecycleState = EntryLifecycleState.DOWNLOADING)
+        val ready = entry(listOf(file(0, 100, 1.0, verifiedBytes = 100)), setOf(0)).copy(key = "ready", lifecycleState = EntryLifecycleState.COMPLETED)
+        val directPlay = entry(listOf(file(0, 100, 0.5, verifiedBytes = 50)), setOf(0)).copy(key = "dp", directPlay = true, lifecycleState = EntryLifecycleState.PAUSED)
+        val error = entry(listOf(file(0, 100, 0.0)), setOf(0)).copy(key = "err", error = "Storage full", lifecycleState = EntryLifecycleState.ERROR)
+        val all = listOf(active, ready, directPlay, error)
+
+        assertEquals(listOf("active"), all.applyFilter(LibraryFilter.ACTIVE).map { it.key })
+        assertEquals(listOf("ready", "dp"), all.applyFilter(LibraryFilter.READY).map { it.key })
+        assertEquals(listOf("err"), all.applyFilter(LibraryFilter.NEEDS_ATTENTION).map { it.key })
+        assertEquals(4, all.applyFilter(LibraryFilter.ALL).size)
+    }
+
+    @Test
+    fun continueWatchingFindsRealBookmarkAndIgnoresEmptyPositions() {
+        val noBookmark = entry(listOf(file(0, 100, 1.0, "ep0.mkv")), setOf(0))
+        assertNull(listOf(noBookmark).findContinueWatchingTarget())
+
+        // Non-video files with bookmark positions must be ignored
+        val nonVideoBookmarked = file(0, 100, 1.0, "notes.txt").copy(playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
+        assertNull(listOf(entry(listOf(nonVideoBookmarked), setOf(0))).findContinueWatchingTarget())
+
+        val bookmarkedFile = file(1, 100, 1.0, "ep1.mkv").copy(playbackPositionMs = 45_000L, playbackDurationMs = 120_000L)
+        val withBookmark = entry(listOf(file(0, 100, 1.0, "ep0.mkv"), bookmarkedFile), setOf(0, 1)).copy(key = "series", title = "Show S01")
+        val target = listOf(withBookmark).findContinueWatchingTarget()
+        assertTrue(target != null)
+        assertEquals("series", target?.entry?.key)
+        assertEquals(1, target?.file?.index)
+        assertEquals(45_000L, target?.file?.playbackPositionMs)
+    }
+
+    @Test
+    fun continueWatchingTargetsMostRecentlyBookmarkedEpisodeAndIgnoresFinishedEpisodes() {
+        val ep1 = file(0, 100, 1.0, "Show.S01E01.mkv").copy(
+            playbackPositionMs = 45_000L,
+            playbackDurationMs = 120_000L,
+            bookmarkUpdatedAt = 1000L,
+        )
+        val ep2 = file(1, 100, 1.0, "Show.S01E02.mkv").copy(
+            playbackPositionMs = 30_000L,
+            playbackDurationMs = 120_000L,
+            bookmarkUpdatedAt = 2000L,
+        )
+        val series = entry(listOf(ep1, ep2), setOf(0, 1)).copy(key = "series", title = "Show S01")
+
+        // Ep 2 has newer bookmarkUpdatedAt, so it must be selected
+        val targetEp2 = listOf(series).findContinueWatchingTarget()
+        assertEquals(1, targetEp2?.file?.index)
+
+        // If Ep 2 is finished (within 3 seconds of duration), it should fall back to Ep 1
+        val ep2Finished = ep2.copy(playbackPositionMs = 118_000L, bookmarkUpdatedAt = 3000L)
+        val seriesWithFinishedEp2 = series.copy(files = listOf(ep1, ep2Finished))
+        val targetEp1 = listOf(seriesWithFinishedEp2).findContinueWatchingTarget()
+        assertEquals(0, targetEp1?.file?.index)
+
+        // Legacy records with bookmarkUpdatedAt == 0L fall back to entry.addedAt
+        val legacy1 = entry(listOf(ep1.copy(bookmarkUpdatedAt = 0L)), setOf(0)).copy(key = "leg1", addedAt = 500L)
+        val legacy2 = entry(listOf(ep2.copy(bookmarkUpdatedAt = 0L)), setOf(1)).copy(key = "leg2", addedAt = 1500L)
+        val legacyTarget = listOf(legacy1, legacy2).findContinueWatchingTarget()
+        assertEquals("leg2", legacyTarget?.entry?.key)
+    }
+
+    @Test
+    fun naturalEpisodeOrderingSortsEpisodesProperly() {
+        val ep1 = file(0, 100, 1.0, "Show.S01E01.mkv")
+        val ep2 = file(1, 100, 1.0, "Show.S01E02.mkv")
+        val ep10 = file(2, 100, 1.0, "Show.S01E10.mkv")
+        val ep9 = file(3, 100, 1.0, "Show.S01E9.mkv")
+
+        val sorted = listOf(ep10, ep2, ep9, ep1).sortedWith(compareBy<SavedFile> { naturalMediaKey(it.name) }.thenBy { it.index })
+        assertEquals(listOf("Show.S01E01.mkv", "Show.S01E02.mkv", "Show.S01E9.mkv", "Show.S01E10.mkv"), sorted.map { it.name })
+    }
+
+    @Test
+    fun defaultVideoSelectionIncludesPairedSubtitles() {
+        val files = listOf(
+            webtor.core.TorrentFile(0, "Movie.mp4", "Movie.mp4", 1_000_000L, 0.0, "video"),
+            webtor.core.TorrentFile(1, "Movie.en.srt", "Movie.en.srt", 20_000L, 0.0, "text"),
+            webtor.core.TorrentFile(2, "Unrelated.txt", "Unrelated.txt", 500L, 0.0, "text"),
+        )
+        val selected = defaultVideoSelection(files)
+        assertTrue(0 in selected)
+        assertTrue(1 in selected)
+        assertFalse(2 in selected)
+        assertTrue("Movie.en.srt".isSubtitleName())
     }
 
     @Test

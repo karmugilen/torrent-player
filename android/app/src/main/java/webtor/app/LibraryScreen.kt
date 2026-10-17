@@ -5,24 +5,31 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -44,62 +52,128 @@ fun LibraryScreen(
     onSettings: () -> Unit,
     onPause: (DownloadEntry) -> Unit,
     onResume: (DownloadEntry) -> Unit,
-    onPlay: (DownloadEntry) -> Unit,
+    onPlay: (DownloadEntry, Int?) -> Unit,
     onOpen: (DownloadEntry) -> Unit,
     onDelete: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     onMessageShown: () -> Unit,
+    onPauseBatch: ((Set<String>) -> Unit)? = null,
+    onResumeBatch: ((Set<String>) -> Unit)? = null,
+    onDeleteBatch: ((Set<String>, Boolean) -> Unit)? = null,
 ) {
     val repository = (LocalContext.current.applicationContext as WebtorApp).thumbnails
     val snackbar = remember { SnackbarHostState() }
-    var query by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableStateOf(LibraryFilter.ALL) }
+    var sort by rememberSaveable { mutableStateOf(LibrarySort.RECENT) }
+    var selectedKeys by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    var showBatchDeleteDialog by remember { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+
+    val inSelectionMode = selectedKeys.isNotEmpty()
+    val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+
     LaunchedEffect(state.message) {
         state.message?.let { snackbar.showSnackbar(it); onMessageShown() }
     }
+
+    // Keep selection valid against disappearing/deleted items
+    LaunchedEffect(state.library) {
+        val currentKeys = state.library.map { it.key }.toSet()
+        if (selectedKeys.any { it !in currentKeys }) {
+            selectedKeys = selectedKeys.filter { it in currentKeys }.toSet()
+        }
+    }
+
+    val colors = MaterialTheme.colorScheme
+    val continueTarget = remember(state.library) { state.library.findContinueWatchingTarget() }
+
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        "Downloads",
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontWeight = FontWeight.Bold,
-                        ),
-                    )
-                },
-                actions = {
-                    IconButton(onClick = onSettings) {
-                        Icon(
-                            Icons.Default.Settings,
-                            contentDescription = "Settings",
+            if (inSelectionMode) {
+                TopAppBar(
+                    title = {
+                        Text(
+                            "${selectedKeys.size} selected",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                         )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground,
-                    actionIconContentColor = MaterialTheme.colorScheme.onBackground,
-                ),
-            )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { selectedKeys = emptySet() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = {
+                            onPauseBatch?.invoke(selectedKeys)
+                            selectedKeys = emptySet()
+                        }) {
+                            Text("Pause", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                        IconButton(onClick = {
+                            onResumeBatch?.invoke(selectedKeys)
+                            selectedKeys = emptySet()
+                        }) {
+                            Text("Resume", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                        IconButton(onClick = { showBatchDeleteDialog = true }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete selected")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = colors.primaryContainer,
+                        titleContentColor = colors.onPrimaryContainer,
+                        actionIconContentColor = colors.onPrimaryContainer,
+                        navigationIconContentColor = colors.onPrimaryContainer,
+                    ),
+                )
+            } else {
+                TopAppBar(
+                    title = {
+                        Text(
+                            "Downloads",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                            ),
+                        )
+                    },
+                    actions = {
+                        IconButton(onClick = onSettings) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = "Settings",
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Transparent,
+                        titleContentColor = colors.onBackground,
+                        actionIconContentColor = colors.onBackground,
+                    ),
+                )
+            }
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onAdd,
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = {
-                    Text(
-                        "Add download",
-                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                    )
-                },
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+            if (!inSelectionMode) {
+                ExtendedFloatingActionButton(
+                    onClick = onAdd,
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = {
+                        Text(
+                            "Add download",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        )
+                    },
+                    containerColor = colors.primaryContainer,
+                    contentColor = colors.onPrimaryContainer,
+                )
+            }
         },
     ) { padding ->
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
@@ -109,76 +183,326 @@ fun LibraryScreen(
             if (!state.engineReady || state.restoring) item { LibraryNotice(state.statusLine) }
             state.error?.takeIf { !state.addSheetOpen }?.let { item { LibraryNotice(it, true) } }
             state.loadWarning?.let { item { LibraryNotice(it, true) } }
+
+            // UI-02: Watch-first Continue Watching area
+            if (continueTarget != null && query.isBlank() && filter == LibraryFilter.ALL && !inSelectionMode) {
+                item(key = "continue_watching") {
+                    ContinueWatchingCard(
+                        target = continueTarget,
+                        repository = repository,
+                        onPlay = { onPlay(continueTarget.entry, continueTarget.file.index) },
+                        onOpen = { onOpen(continueTarget.entry) },
+                    )
+                }
+            }
+
             if (state.library.isNotEmpty()) item {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 2.dp),
-                    singleLine = true,
-                    placeholder = {
-                        Text(
-                            "Search downloads",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Default.Search,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    },
-                    trailingIcon = if (query.isNotEmpty()) ({
-                        IconButton(onClick = { query = "" }) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = {
+                            Text(
+                                "Search downloads",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        },
+                        leadingIcon = {
                             Icon(
-                                Icons.Default.Clear,
-                                contentDescription = "Clear search",
+                                Icons.Default.Search,
+                                contentDescription = null,
                                 modifier = Modifier.size(20.dp),
                             )
-                        }
-                    }) else null,
-                    shape = RoundedCornerShape(12.dp),
-                )
-            }
-            val visible = state.visibleLibrary(LibrarySort.RECENT).filterLibrary(query)
-            if (visible.isEmpty()) item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 96.dp, start = 16.dp, end = 16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        },
+                        trailingIcon = if (query.isNotEmpty()) ({
+                            IconButton(onClick = { query = "" }) {
+                                Icon(
+                                    Icons.Default.Clear,
+                                    contentDescription = "Clear search",
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }) else null,
+                        shape = RoundedCornerShape(12.dp),
+                    )
+
+                    // Filters and Sorting controls
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text = "No downloads yet",
-                            style = MaterialTheme.typography.headlineSmall,
-                            textAlign = TextAlign.Center,
-                        )
-                        Text(
-                            text = "Add a magnet link or torrent file to get started.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            listOf(
+                                LibraryFilter.ALL to "All",
+                                LibraryFilter.ACTIVE to "Active",
+                                LibraryFilter.READY to "Ready",
+                                LibraryFilter.NEEDS_ATTENTION to "Attention",
+                            ).forEach { (f, label) ->
+                                val isSelected = filter == f
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { filter = f },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.width(8.dp))
+
+                        Box {
+                            TextButton(onClick = { sortMenuOpen = true }) {
+                                Text(
+                                    "Sort: ${sort.name.lowercase().replaceFirstChar { it.uppercase() }}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = sortMenuOpen,
+                                onDismissRequest = { sortMenuOpen = false },
+                            ) {
+                                LibrarySort.entries.forEach { s ->
+                                    DropdownMenuItem(
+                                        text = { Text(s.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                                        onClick = {
+                                            sort = s
+                                            sortMenuOpen = false
+                                        },
+                                        leadingIcon = if (sort == s) {
+                                            { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                        } else null,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
+
+            val visible = state.library
+                .stableLibrarySort(sort)
+                .applyFilter(filter)
+                .filterLibrary(query)
+
+            // Distinct empty states
+            if (visible.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 72.dp, start = 16.dp, end = 16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            when {
+                                state.library.isEmpty() -> {
+                                    Text(
+                                        text = "No downloads yet",
+                                        style = MaterialTheme.typography.headlineSmall,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    Text(
+                                        text = "Add a magnet link or torrent file to get started.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = colors.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                }
+                                query.isNotBlank() -> {
+                                    Text(
+                                        text = "No matching downloads",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    Text(
+                                        text = "No items match '$query'. Try another search term.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = colors.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                }
+                                else -> {
+                                    Text(
+                                        text = "No ${filter.name.lowercase().replace('_', ' ')} downloads",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    Text(
+                                        text = "There are no downloads matching this filter.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = colors.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             items(visible, key = { it.key }) { entry ->
+                val isSelected = entry.key in selectedKeys
                 TorrentRow(
                     entry = entry,
                     repository = repository,
+                    isSelected = isSelected,
+                    inSelectionMode = inSelectionMode,
+                    onToggleSelect = {
+                        selectedKeys = if (isSelected) selectedKeys - entry.key else selectedKeys + entry.key
+                    },
                     onPause = { onPause(entry) },
                     onResume = { onResume(entry) },
-                    onPlay = { onPlay(entry) },
-                    onOpen = { onOpen(entry) },
+                    onPlay = { onPlay(entry, null) },
+                    onOpen = {
+                        if (inSelectionMode) {
+                            selectedKeys = if (isSelected) selectedKeys - entry.key else selectedKeys + entry.key
+                        } else {
+                            onOpen(entry)
+                        }
+                    },
                     onDelete = { onDelete(entry) },
                     onRetry = { onRetry(entry) },
                 )
+            }
+        }
+    }
+
+    if (showBatchDeleteDialog && selectedKeys.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteDialog = false },
+            title = { Text("Delete ${selectedKeys.size} downloads?") },
+            text = { Text("Permanently erase downloaded files from your device, or remove from the library while keeping files?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val keys = selectedKeys
+                        selectedKeys = emptySet()
+                        showBatchDeleteDialog = false
+                        onDeleteBatch?.invoke(keys, true)
+                    },
+                ) {
+                    Text("Delete files", color = colors.error)
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { showBatchDeleteDialog = false }) {
+                        Text("Cancel")
+                    }
+                    TextButton(
+                        onClick = {
+                            val keys = selectedKeys
+                            selectedKeys = emptySet()
+                            showBatchDeleteDialog = false
+                            onDeleteBatch?.invoke(keys, false)
+                        },
+                    ) {
+                        Text("Keep files")
+                    }
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ContinueWatchingCard(
+    target: ContinueWatchingTarget,
+    repository: ThumbnailRepository,
+    onPlay: () -> Unit,
+    onOpen: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    ThemedCard(
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(
+                    color = colors.primaryContainer,
+                    shape = RoundedCornerShape(6.dp),
+                ) {
+                    Text(
+                        "CONTINUE WATCHING",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.onPrimaryContainer,
+                    )
+                }
+                Text(
+                    playbackTime(target.file.playbackPositionMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                var frames by remember(target.entry.key) { mutableStateOf(repository.cached(target.entry)) }
+                LaunchedEffect(target.entry.key) {
+                    val next = repository.previews(target.entry)
+                    if (next.isNotEmpty()) frames = next
+                }
+                VideoPreviewPager(
+                    entry = target.entry,
+                    frames = frames,
+                    modifier = Modifier
+                        .width(110.dp)
+                        .aspectRatio(16f / 9f),
+                )
+
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        target.entry.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        target.file.name,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (target.file.playbackDurationMs > 0L) {
+                        val progress = (target.file.playbackPositionMs.toFloat() / target.file.playbackDurationMs.toFloat()).coerceIn(0f, 1f)
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = colors.primary,
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onPlay,
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = colors.primary),
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Play episode", tint = colors.onPrimary)
+                }
             }
         }
     }
@@ -192,10 +516,14 @@ private fun LibraryNotice(message: String, error: Boolean = false) = Text(
     modifier = Modifier.padding(vertical = 10.dp),
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TorrentRow(
     entry: DownloadEntry,
     repository: ThumbnailRepository,
+    isSelected: Boolean,
+    inSelectionMode: Boolean,
+    onToggleSelect: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onPlay: () -> Unit,
@@ -209,9 +537,8 @@ private fun TorrentRow(
     val previewUri = previewVideo?.uri
     val latestEntry by rememberUpdatedState(entry)
     var frames by remember(entry.key) { mutableStateOf(repository.cached(entry)) }
-    // Mode C: refresh up to 3 live frames every 4s while downloading; 3 finals when complete.
+
     LaunchedEffect(entry.key, previewUri, entry.complete, entry.paused, entry.engineId) {
-        if (previewUri.isNullOrBlank()) return@LaunchedEffect
         while (true) {
             val current = latestEntry
             val next = repository.previews(current)
@@ -223,15 +550,14 @@ private fun TorrentRow(
             delay(4_000)
         }
     }
-    ElevatedCard(
+
+    ThemedCard(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onOpen),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-        ),
+            .combinedClickable(
+                onClick = onOpen,
+                onLongClick = onToggleSelect,
+            ),
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
@@ -242,6 +568,14 @@ private fun TorrentRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.Top,
             ) {
+                if (inSelectionMode) {
+                    Checkbox(
+                        checked = isSelected,
+                        onCheckedChange = { onToggleSelect() },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                    )
+                }
+
                 if (entry.files.any { it.index in entry.selected && it.name.isVideoName() }) {
                     VideoPreviewPager(
                         entry = entry,
@@ -295,66 +629,68 @@ private fun TorrentRow(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val selectedVideos = entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
-                val isMultiVideo = selectedVideos.size > 1
-                val canPlay = entry.canPlay()
-                val isVideo = mediaType(entry) == "Video"
+            if (!inSelectionMode) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val selectedVideos = entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
+                    val isMultiVideo = selectedVideos.size > 1
+                    val canPlay = entry.canPlay()
+                    val isVideo = mediaType(entry) == "Video"
 
-                if (canPlay || entry.complete) {
-                    Button(
-                        onClick = if (isMultiVideo) onOpen else if (canPlay) onPlay else onOpen,
-                        enabled = !busy && (!entry.checking || completedPlayFile(entry, pickPlayIndex(entry)) != null),
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (isVideo && currentResumePosition(entry) > 0) "Resume" else if (isVideo) "Play" else "Open")
-                    }
-                }
-
-                when {
-                    busy -> OutlinedButton(
-                        onClick = {},
-                        enabled = false,
-                    ) {
-                        Text(entry.stateLabel())
-                    }
-                    entry.error != null -> OutlinedButton(
-                        onClick = onRetry,
-                    ) {
-                        Text("Retry")
-                    }
-                    entry.complete -> Unit
-                    entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING) -> {
-                        val hasAnyUri = entry.files.any { it.index in entry.selected && !it.uri.isNullOrBlank() }
-                        OutlinedButton(
-                            onClick = onResume,
+                    if (canPlay || entry.complete) {
+                        Button(
+                            onClick = if (isMultiVideo) onOpen else if (canPlay) onPlay else onOpen,
+                            enabled = !busy && (!entry.checking || completedPlayFile(entry, pickPlayIndex(entry)) != null),
                         ) {
-                            Text(if (!hasAnyUri) "Download" else "Resume")
+                            Icon(Icons.Default.PlayArrow, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (isVideo && currentResumePosition(entry) > 0) "Resume" else if (isVideo) "Play" else "Open")
                         }
                     }
-                    else -> OutlinedButton(
-                        onClick = onPause,
-                    ) {
-                        Text("Pause")
+
+                    when {
+                        busy -> OutlinedButton(
+                            onClick = {},
+                            enabled = false,
+                        ) {
+                            Text(entry.stateLabel())
+                        }
+                        entry.error != null -> OutlinedButton(
+                            onClick = onRetry,
+                        ) {
+                            Text("Retry")
+                        }
+                        entry.complete -> Unit
+                        entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING) -> {
+                            val hasAnyUri = entry.files.any { it.index in entry.selected && !it.uri.isNullOrBlank() }
+                            OutlinedButton(
+                                onClick = onResume,
+                            ) {
+                                Text(if (!hasAnyUri) "Download" else "Resume")
+                            }
+                        }
+                        else -> OutlinedButton(
+                            onClick = onPause,
+                        ) {
+                            Text("Pause")
+                        }
                     }
-                }
 
-                Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.weight(1f))
 
-                IconButton(
-                    onClick = onDelete,
-                    enabled = !busy,
-                ) {
-                    Icon(
-                        Icons.Default.Delete,
-                        contentDescription = "Remove download",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    IconButton(
+                        onClick = onDelete,
+                        enabled = !busy,
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "Remove download",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
