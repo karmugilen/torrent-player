@@ -21,6 +21,13 @@
 
 See [the 2.1.3 UI, playback and improvement notes](README_REDESIGN.md) for dynamic Material UI, live cached thumbnails, playback continuity, the branching peer view, caches, storage repair and the optimized local release.
 
+## Desktop discovery webpage
+
+Run `./scripts/discovery.sh start` and open [Torrent Atlas](http://127.0.0.1:18181)
+for a live world map and public torrent discovery on this PC. Search observed
+names, filter by country, and view the top ten within the local sample.
+See [the desktop page notes](engine-go/cmd/discovery/README.md).
+
 ## Screenshots
 
 <p align="center">
