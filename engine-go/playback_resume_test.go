@@ -118,3 +118,47 @@ func TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenPlaybackReusesValidatedResumeWindow(t *testing.T) {
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	body, _ := json.Marshal(ConfigureRequest{
+		ID: rec.ID, Selected: []int{0}, Descriptors: []*int{nil}, StorageMode: StorageModeStream, StreamCacheBytes: 16 << 20,
+	})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	info := rec.Torrent.Info()
+	pieceLen := info.PieceLength
+	// Install two verified pieces into stream cache, persist as resume window.
+	writeVerifiedPiece(t, s, rec, data, 0)
+	writeVerifiedPiece(t, s, rec, data, 1)
+	offset := pieceLen // resume inside second piece span start
+	st := s.storage.GetStorage(rec.InfoHash)
+	buf, ok := st.copyVerifiedRange(0, pieceLen*2)
+	if !ok {
+		t.Fatal("expected verified range snapshot")
+	}
+	s.saveResumeWindowDetailed(rec, 0, rec.Torrent.Files()[0].DisplayPath(), rec.Torrent.Files()[0].Length(), pieceLen, 0, int64(len(buf)), buf, 1)
+
+	// Drop in-memory completion so only resume inject can warm playback.
+	st.mu.Lock()
+	st.cache, st.cacheDirty, st.cacheOrder, st.cacheBytes = make(map[int][]byte), make(map[int]bool), nil, 0
+	st.completed = make(map[int]bool)
+	st.streamWhole, st.streamRanges = make(map[int]bool), make(map[int][]streamByteRange)
+	st.mu.Unlock()
+
+	p, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	got := make([]byte, 8)
+	n, err := p.ReadAt(got, 0)
+	if err != nil || n != 8 || string(got) != string(data[:8]) {
+		t.Fatalf("warm resume read failed n=%d err=%v got=%q", n, err, got)
+	}
+	_ = offset
+}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -8,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -59,13 +63,23 @@ type dhtContactFile struct {
 }
 
 type resumeWindowMeta struct {
-	InfoHash  string    `json:"infoHash"`
-	FileIndex int       `json:"fileIndex"`
-	Offset    int64     `json:"offset"`
-	Length    int64     `json:"length"`
-	SavedAt   time.Time `json:"savedAt"`
-	Expires   time.Time `json:"expires"`
+	Version     int       `json:"version"`
+	InfoHash    string    `json:"infoHash"`
+	FileIndex   int       `json:"fileIndex"`
+	FileName    string    `json:"fileName"`
+	FileLength  int64     `json:"fileLength"`
+	PieceLength int64     `json:"pieceLength"`
+	Offset      int64     `json:"offset"`
+	Length      int64     `json:"length"`
+	Checksum    string    `json:"checksum"`
+	Generation  uint64    `json:"generation"`
+	SavedAt     time.Time `json:"savedAt"`
+	Expires     time.Time `json:"expires"`
 }
+
+const resumeWindowVersion = 2
+const peerHintMaxLoadBytes = int64(1 << 20)
+const dhtContactMaxLoadBytes = int64(512 << 10)
 
 func peerHintsPath(base string) string {
 	return filepath.Join(base, ".cache", "peer-hints.json")
@@ -103,7 +117,10 @@ func (s *EngineServer) handleClearCache(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	s.clearCacheCategories(req.Categories)
+	if err := s.clearCacheCategories(req.Categories); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, s.cacheStatus())
 }
 
@@ -155,63 +172,101 @@ func fileSize(path string) int64 {
 }
 
 func (s *EngineServer) activeCacheProtection() (startup, resume int64) {
+	type pair struct {
+		hash string
+		t    *torrent.Torrent
+		st   *DocumentTorrentStorage
+	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	items := make([]pair, 0, len(s.records))
 	for _, rec := range s.records {
-		st := s.storage.GetStorage(rec.InfoHash)
-		if st == nil {
-			continue
-		}
-		st.mu.Lock()
-		if st.stream && !st.previewTemp {
-			startup += dirBytes(filepath.Join(st.baseDir, ".startup", st.infoHash.HexString()))
-		}
-		st.mu.Unlock()
-		if coord := s.playbackOwners[rec.Torrent]; coord != nil {
-			coord.mu.Lock()
-			if len(coord.readers) > 0 || len(coord.resumeDemand) > 0 {
-				resume += dirBytes(resumeWindowDir(s.downloadDir, rec.InfoHash))
+		items = append(items, pair{hash: rec.InfoHash, t: rec.Torrent, st: s.storage.GetStorage(rec.InfoHash)})
+	}
+	s.mu.RUnlock()
+
+	s.playbackMu.Lock()
+	owners := make(map[*torrent.Torrent]*playbackPriorityCoordinator, len(s.playbackOwners))
+	for t, c := range s.playbackOwners {
+		owners[t] = c
+	}
+	s.playbackMu.Unlock()
+
+	for _, item := range items {
+		if item.st != nil {
+			item.st.mu.Lock()
+			stream := item.st.stream && !item.st.previewTemp
+			base := item.st.baseDir
+			hash := item.st.infoHash.HexString()
+			item.st.mu.Unlock()
+			if stream {
+				startup += dirBytes(filepath.Join(base, ".startup", hash))
 			}
+		}
+		if coord := owners[item.t]; coord != nil {
+			coord.mu.Lock()
+			active := len(coord.readers) > 0 || len(coord.resumeDemand) > 0
 			coord.mu.Unlock()
+			if active {
+				resume += dirBytes(resumeWindowDir(s.downloadDir, item.hash))
+			}
 		}
 	}
 	return startup, resume
 }
 
-func (s *EngineServer) clearCacheCategories(categories []string) {
+func (s *EngineServer) clearCacheCategories(categories []string) error {
 	if len(categories) == 0 {
-		return
+		return fmt.Errorf("no categories")
 	}
 	want := make(map[string]bool, len(categories))
 	for _, c := range categories {
-		want[c] = true
+		switch c {
+		case "startup", "resume", "peers", "dht":
+			want[c] = true
+		default:
+			return fmt.Errorf("invalid cache category %q", c)
+		}
 	}
-	activeStartup, activeResume := s.activeCacheProtection()
-	_ = activeStartup
-	_ = activeResume
+	s.cacheClearGen++
+	gen := s.cacheClearGen
 	base := s.downloadDir
+	var firstErr error
+	note := func(err error) {
+		if err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if want["peers"] {
-		_ = os.Remove(peerHintsPath(base))
 		s.peerHintMu.Lock()
+		s.peerHintGen++
 		s.peerHints = nil
+		note(os.Remove(peerHintsPath(base)))
 		s.peerHintMu.Unlock()
 	}
 	if want["dht"] {
-		_ = os.Remove(dhtContactsPath(base))
+		s.dhtMu.Lock()
+		s.dhtGen++
+		s.dhtContacts = nil
+		note(os.Remove(dhtContactsPath(base)))
+		s.dhtMu.Unlock()
 	}
 	if want["startup"] {
-		s.clearInactiveStartupCaches()
+		note(s.clearInactiveStartupCaches())
 	}
 	if want["resume"] {
-		s.clearInactiveResumeWindows()
+		note(s.clearInactiveResumeWindows(gen))
 	}
+	return firstErr
 }
 
-func (s *EngineServer) clearInactiveStartupCaches() {
+func (s *EngineServer) clearInactiveStartupCaches() error {
 	root := filepath.Join(s.downloadDir, ".startup")
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	protected := make(map[string]bool)
 	s.mu.RLock()
@@ -221,44 +276,61 @@ func (s *EngineServer) clearInactiveStartupCaches() {
 		}
 	}
 	s.mu.RUnlock()
+	var firstErr error
 	for _, e := range entries {
 		if !e.IsDir() || protected[e.Name()] {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
+	return firstErr
 }
 
-func (s *EngineServer) clearInactiveResumeWindows() {
+func (s *EngineServer) clearInactiveResumeWindows(clearGen uint64) error {
 	root := filepath.Join(s.downloadDir, ".cache", "resume")
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	protected := make(map[string]bool)
 	s.playbackMu.Lock()
+	owners := make(map[*torrent.Torrent]*playbackPriorityCoordinator, len(s.playbackOwners))
 	for t, coord := range s.playbackOwners {
+		owners[t] = coord
+	}
+	s.playbackMu.Unlock()
+	s.mu.RLock()
+	for _, rec := range s.records {
+		coord := owners[rec.Torrent]
+		if coord == nil {
+			continue
+		}
 		coord.mu.Lock()
 		active := len(coord.readers) > 0 || len(coord.resumeDemand) > 0
 		coord.mu.Unlock()
-		if !active {
-			continue
+		if active {
+			protected[rec.InfoHash] = true
 		}
-		s.mu.RLock()
-		for _, rec := range s.records {
-			if rec.Torrent == t {
-				protected[rec.InfoHash] = true
-			}
-		}
-		s.mu.RUnlock()
 	}
-	s.playbackMu.Unlock()
+	s.mu.RUnlock()
+	var firstErr error
 	for _, e := range entries {
 		if !e.IsDir() || protected[e.Name()] {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+		if clearGen != 0 && s.cacheClearGen != clearGen {
+			break
+		}
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
+	return firstErr
 }
 
 // --- CACHE-02 peer hints ---
@@ -269,6 +341,10 @@ func (s *EngineServer) rememberPeerHint(infoHash string, peer torrent.PeerInfo, 
 	}
 	host, port, err := net.SplitHostPort(peer.Addr.String())
 	if err != nil || net.ParseIP(host) == nil || port == "0" {
+		return
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
 		return
 	}
 	transport := "tcp"
@@ -334,15 +410,25 @@ func (s *EngineServer) persistPeerHintsLocked() {
 		return
 	}
 	tmp := path + ".tmp"
+	gen := s.peerHintGen
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	if s.peerHintGen != gen {
+		_ = os.Remove(tmp)
 		return
 	}
 	_ = os.Rename(tmp, path)
 }
 
 func (s *EngineServer) loadPeerHints() {
-	data, err := os.ReadFile(peerHintsPath(s.downloadDir))
-	if err != nil {
+	path := peerHintsPath(s.downloadDir)
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > peerHintMaxLoadBytes {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || int64(len(data)) > peerHintMaxLoadBytes {
 		return
 	}
 	var file peerHintFile
@@ -351,18 +437,28 @@ func (s *EngineServer) loadPeerHints() {
 	}
 	now := time.Now()
 	out := make(map[string][]peerHint)
+	count := 0
 	for hash, hints := range file.Torrents {
-		if !isHexInfoHash(hash) {
+		if !isHexInfoHash(hash) || count >= peerHintMaxTorrents {
 			continue
 		}
-		kept := hints[:0:0]
+		kept := make([]peerHint, 0, len(hints))
 		for _, h := range hints {
-			if h.Expires.After(now) && h.Addr != "" {
+			host, port, err := net.SplitHostPort(h.Addr)
+			if err != nil || net.ParseIP(host) == nil {
+				continue
+			}
+			p, err := strconv.Atoi(port)
+			if err != nil || p <= 0 || p > 65535 {
+				continue
+			}
+			if h.Expires.After(now) && len(kept) < peerHintMaxPerTorrent {
 				kept = append(kept, h)
 			}
 		}
 		if len(kept) > 0 {
 			out[hash] = kept
+			count++
 		}
 	}
 	s.peerHintMu.Lock()
@@ -423,18 +519,27 @@ func (s *EngineServer) forgetPeerHints(infoHash string) {
 // --- CACHE-03 DHT contacts ---
 
 func (s *EngineServer) rememberDHTContact(addr string, family string) {
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			return
-		}
-		ip = net.ParseIP(host)
-		if ip == nil {
-			return
-		}
-		addr = net.JoinHostPort(host, "6881")
+	s.rememberDHTContactAt(addr, family, time.Time{})
+}
+
+// rememberDHTContactAt stores a validated UDP endpoint. lastGood zero means
+// "seen in routing table, not yet confirmed responsive" and is stored as the
+// zero time so restore treats the contact as needing revalidation.
+func (s *EngineServer) rememberDHTContactAt(addr string, family string, lastGood time.Time) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Bare IP without port is not a usable DHT endpoint.
+		return
 	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+		return
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p <= 0 || p > 65535 {
+		return
+	}
+	addr = net.JoinHostPort(ip.String(), strconv.Itoa(p))
 	if family == "" {
 		if ip.To4() != nil {
 			family = "ipv4"
@@ -443,13 +548,17 @@ func (s *EngineServer) rememberDHTContact(addr string, family string) {
 		}
 	}
 	now := time.Now()
-	contact := dhtContact{Addr: addr, Family: family, LastGood: now, Expires: now.Add(dhtContactTTL)}
+	contact := dhtContact{Addr: addr, Family: family, LastGood: lastGood, Expires: now.Add(dhtContactTTL)}
 	s.dhtMu.Lock()
 	defer s.dhtMu.Unlock()
 	list := s.dhtContacts
 	replaced := false
 	for i := range list {
 		if list[i].Addr == contact.Addr {
+			// Preserve a stronger LastGood if the new evidence is empty.
+			if contact.LastGood.IsZero() && !list[i].LastGood.IsZero() {
+				contact.LastGood = list[i].LastGood
+			}
 			list[i] = contact
 			replaced = true
 			break
@@ -489,15 +598,25 @@ func (s *EngineServer) persistDHTContactsLocked() {
 		return
 	}
 	tmp := path + ".tmp"
+	gen := s.dhtGen
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	if s.dhtGen != gen {
+		_ = os.Remove(tmp)
 		return
 	}
 	_ = os.Rename(tmp, path)
 }
 
 func (s *EngineServer) loadDHTContacts() {
-	data, err := os.ReadFile(dhtContactsPath(s.downloadDir))
-	if err != nil {
+	path := dhtContactsPath(s.downloadDir)
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > dhtContactMaxLoadBytes {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || int64(len(data)) > dhtContactMaxLoadBytes {
 		return
 	}
 	var file dhtContactFile
@@ -507,7 +626,15 @@ func (s *EngineServer) loadDHTContacts() {
 	now := time.Now()
 	kept := make([]dhtContact, 0, len(file.Contacts))
 	for _, c := range file.Contacts {
-		if c.Expires.After(now) && c.Addr != "" {
+		host, port, err := net.SplitHostPort(c.Addr)
+		if err != nil || net.ParseIP(host) == nil {
+			continue
+		}
+		p, err := strconv.Atoi(port)
+		if err != nil || p <= 0 || p > 65535 {
+			continue
+		}
+		if c.Expires.After(now) {
 			kept = append(kept, c)
 		}
 	}
@@ -547,14 +674,35 @@ func (s *EngineServer) snapshotDHTContacts() {
 			if ni.Addr.IP.To4() == nil {
 				family = "ipv6"
 			}
-			s.rememberDHTContact(net.JoinHostPort(ni.Addr.IP.String(), fmt.Sprintf("%d", ni.Addr.Port)), family)
+			// Routing-table presence is not proof of a recent response.
+			s.rememberDHTContactAt(
+				net.JoinHostPort(ni.Addr.IP.String(), strconv.Itoa(ni.Addr.Port)),
+				family,
+				time.Time{},
+			)
 		}
 	}
 }
 
 // --- CACHE-04 resume window ---
 
+func resumeChecksum(data []byte) string {
+	sum := sha1.Sum(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *EngineServer) saveResumeWindow(rec *TorrentRecord, fileIndex int, offset, length int64, data []byte) {
+	s.saveResumeWindowDetailed(rec, fileIndex, "", 0, 0, offset, length, data, 0)
+}
+
+func (s *EngineServer) saveResumeWindowDetailed(
+	rec *TorrentRecord,
+	fileIndex int,
+	fileName string,
+	fileLength, pieceLength, offset, length int64,
+	data []byte,
+	generation uint64,
+) {
 	if rec == nil || length <= 0 || int64(len(data)) != length || length > resumeWindowMaxBytes {
 		return
 	}
@@ -564,36 +712,72 @@ func (s *EngineServer) saveResumeWindow(rec *TorrentRecord, fileIndex int, offse
 	}
 	// Bound total resume cache size.
 	if dirBytes(filepath.Join(s.downloadDir, ".cache", "resume"))+length > resumeWindowTotalMax {
-		s.clearInactiveResumeWindows()
+		_ = s.clearInactiveResumeWindows(0)
 		if dirBytes(filepath.Join(s.downloadDir, ".cache", "resume"))+length > resumeWindowTotalMax {
 			return
 		}
 	}
-	meta := resumeWindowMeta{
-		InfoHash:  rec.InfoHash,
-		FileIndex: fileIndex,
-		Offset:    offset,
-		Length:    length,
-		SavedAt:   time.Now(),
-		Expires:   time.Now().Add(resumeWindowTTL),
+	if fileName == "" && rec.Torrent != nil {
+		files := rec.Torrent.Files()
+		if fileIndex >= 0 && fileIndex < len(files) {
+			fileName = files[fileIndex].DisplayPath()
+			fileLength = files[fileIndex].Length()
+		}
+		if info := rec.Torrent.Info(); info != nil {
+			pieceLength = info.PieceLength
+		}
 	}
-	raw, _ := json.Marshal(meta)
-	tmpMeta := filepath.Join(dir, "window.json.tmp")
-	tmpData := filepath.Join(dir, "window.bin.tmp")
+	meta := resumeWindowMeta{
+		Version:     resumeWindowVersion,
+		InfoHash:    rec.InfoHash,
+		FileIndex:   fileIndex,
+		FileName:    fileName,
+		FileLength:  fileLength,
+		PieceLength: pieceLength,
+		Offset:      offset,
+		Length:      length,
+		Checksum:    resumeChecksum(data),
+		Generation:  generation,
+		SavedAt:     time.Now(),
+		Expires:     time.Now().Add(resumeWindowTTL),
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return
+	}
+	tmpDir, err := os.MkdirTemp(dir, "write-*")
+	if err != nil {
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+	tmpData := filepath.Join(tmpDir, "window.bin")
+	tmpMeta := filepath.Join(tmpDir, "window.json")
 	if err := os.WriteFile(tmpData, data, 0600); err != nil {
 		return
 	}
 	if err := os.WriteFile(tmpMeta, raw, 0600); err != nil {
-		_ = os.Remove(tmpData)
 		return
 	}
-	_ = os.Rename(tmpData, filepath.Join(dir, "window.bin"))
-	_ = os.Rename(tmpMeta, filepath.Join(dir, "window.json"))
+	finalData := filepath.Join(dir, "window.bin")
+	finalMeta := filepath.Join(dir, "window.json")
+	if err := os.Rename(tmpData, finalData); err != nil {
+		return
+	}
+	if err := os.Rename(tmpMeta, finalMeta); err != nil {
+		// Keep previous good meta if present; drop inconsistent data.
+		_ = os.Remove(finalData)
+		return
+	}
 }
 
 func (s *EngineServer) loadResumeWindow(infoHash string) (resumeWindowMeta, []byte, bool) {
 	dir := resumeWindowDir(s.downloadDir, infoHash)
-	raw, err := os.ReadFile(filepath.Join(dir, "window.json"))
+	metaPath := filepath.Join(dir, "window.json")
+	info, err := os.Stat(metaPath)
+	if err != nil || info.Size() > 64<<10 {
+		return resumeWindowMeta{}, nil, false
+	}
+	raw, err := os.ReadFile(metaPath)
 	if err != nil {
 		return resumeWindowMeta{}, nil, false
 	}
@@ -601,12 +785,23 @@ func (s *EngineServer) loadResumeWindow(infoHash string) (resumeWindowMeta, []by
 	if json.Unmarshal(raw, &meta) != nil || meta.InfoHash != infoHash || meta.Length <= 0 || meta.Length > resumeWindowMaxBytes {
 		return resumeWindowMeta{}, nil, false
 	}
+	if meta.Version != 0 && meta.Version != resumeWindowVersion {
+		return resumeWindowMeta{}, nil, false
+	}
 	if !meta.Expires.After(time.Now()) {
 		_ = os.RemoveAll(dir)
 		return resumeWindowMeta{}, nil, false
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "window.bin"))
+	binPath := filepath.Join(dir, "window.bin")
+	binInfo, err := os.Stat(binPath)
+	if err != nil || binInfo.Size() != meta.Length || binInfo.Size() > resumeWindowMaxBytes {
+		return resumeWindowMeta{}, nil, false
+	}
+	data, err := os.ReadFile(binPath)
 	if err != nil || int64(len(data)) != meta.Length {
+		return resumeWindowMeta{}, nil, false
+	}
+	if meta.Checksum != "" && resumeChecksum(data) != meta.Checksum {
 		return resumeWindowMeta{}, nil, false
 	}
 	return meta, data, true
@@ -614,4 +809,73 @@ func (s *EngineServer) loadResumeWindow(infoHash string) (resumeWindowMeta, []by
 
 func (s *EngineServer) deleteResumeWindow(infoHash string) {
 	_ = os.RemoveAll(resumeWindowDir(s.downloadDir, infoHash))
+}
+
+// applyResumeWindowToStorage injects a validated resume window into storage so
+// OpenPlayback can reuse already-verified bytes without an extra fetch.
+func (s *EngineServer) applyResumeWindowToStorage(rec *TorrentRecord, fileIndex int) (offset int64, ok bool) {
+	if rec == nil || rec.Torrent == nil || rec.Torrent.Info() == nil {
+		return 0, false
+	}
+	meta, data, loaded := s.loadResumeWindow(rec.InfoHash)
+	if !loaded || meta.FileIndex != fileIndex {
+		return 0, false
+	}
+	files := rec.Torrent.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		return 0, false
+	}
+	file := files[fileIndex]
+	info := rec.Torrent.Info()
+	if meta.FileName != "" && meta.FileName != file.DisplayPath() {
+		return 0, false
+	}
+	if meta.FileLength != 0 && meta.FileLength != file.Length() {
+		return 0, false
+	}
+	if meta.PieceLength != 0 && meta.PieceLength != info.PieceLength {
+		return 0, false
+	}
+	if meta.Offset < 0 || meta.Offset+meta.Length > file.Length() {
+		return 0, false
+	}
+	st := s.storage.GetStorage(rec.InfoHash)
+	if st == nil {
+		return 0, false
+	}
+	abs := file.Offset() + meta.Offset
+	if !st.injectVerifiedBytes(abs, data) {
+		return 0, false
+	}
+	return meta.Offset, true
+}
+
+// peerDialEndpoint returns a validated dial/listen address for caching.
+// Inbound RemoteAddr may be a transient source port; prefer PeerListenPort.
+func peerDialEndpoint(pc *torrent.PeerConn) net.Addr {
+	if pc == nil || pc.RemoteAddr == nil {
+		return nil
+	}
+	host, portStr, err := net.SplitHostPort(pc.RemoteAddr.String())
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+		return nil
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return nil
+	}
+	// Prefer the peer's advertised listen port when present (inbound source
+	// ports are not dialable endpoints).
+	if pc.PeerListenPort > 0 && pc.PeerListenPort <= 65535 {
+		port = pc.PeerListenPort
+	}
+	network := strings.ToLower(pc.Network)
+	if strings.Contains(network, "udp") || strings.Contains(network, "utp") {
+		return &net.UDPAddr{IP: ip, Port: port}
+	}
+	return &net.TCPAddr{IP: ip, Port: port}
 }

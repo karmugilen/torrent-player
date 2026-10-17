@@ -344,6 +344,12 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	if rec.DirectPlay {
 		s.applyVideoStartupHints(rec)
 	}
+	// CACHE-04: reuse a bounded validated resume window before scheduling demand.
+	resumeOffset := p.priorityOwner.resumePosition(file)
+	if warmed, ok := s.applyResumeWindowToStorage(rec, index); ok {
+		resumeOffset = warmed
+		p.priorityOwner.prepareResume(file, &warmed)
+	}
 	headBytes, tailBytes := videoStartupHeadBytes, videoStartupTailBytes
 	if p.refreshCompletion {
 		headBytes, tailBytes = directStartupHead, directStartupTail
@@ -355,7 +361,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 		p.tailBoostActive = p.tailBegin < p.tailEnd
 	}
 	p.openPhase = true
-	p.updateWindowLocked(p.priorityOwner.resumePosition(file))
+	p.updateWindowLocked(resumeOffset)
 	p.armIdleLocked()
 	return p, nil
 }

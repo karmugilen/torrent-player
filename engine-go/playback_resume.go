@@ -103,9 +103,10 @@ func (p *playbackReader) noteResumeReadLocked(offset int64) {
 }
 
 // persistVerifiedResumeWindow stores already-verified bytes near a useful
-// resume offset. It never starts background fetching.
+// resume offset. It never starts background fetching. Direct Play RAM pieces
+// are snapshotted from the stream cache; download mode uses file pread.
 func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex int, offset int64) {
-	if rec == nil || s == nil {
+	if rec == nil || s == nil || rec.Torrent == nil {
 		return
 	}
 	files := rec.Torrent.Files()
@@ -117,22 +118,31 @@ func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex
 	if st == nil {
 		return
 	}
-	length := min(resumeWindowMaxBytes, file.Length()-offset)
+	// Align to whole pieces so resume inject can mark completion safely.
+	info := rec.Torrent.Info()
+	if info == nil || info.PieceLength <= 0 {
+		return
+	}
+	pieceLen := info.PieceLength
+	aligned := offset - (offset % pieceLen)
+	if aligned < 0 {
+		aligned = 0
+	}
+	length := min(resumeWindowMaxBytes, file.Length()-aligned)
+	length -= length % pieceLen
 	if length <= 0 {
 		return
 	}
-	abs := file.Offset() + offset
-	if !st.RangeComplete(abs, length) {
-		return
-	}
-	spans, ok := st.byteSpans(abs, length)
+	abs := file.Offset() + aligned
+	buf, ok := st.copyVerifiedRange(abs, length)
 	if !ok {
 		return
 	}
-	buf := make([]byte, int(length))
-	n, err := preadFileSpans(spans, buf)
-	if err != nil || int64(n) != length {
-		return
+	var generation uint64
+	if c := s.ensurePlaybackCoordinator(rec.Torrent); c != nil {
+		c.mu.Lock()
+		generation = c.resumeGeneration
+		c.mu.Unlock()
 	}
-	s.saveResumeWindow(rec, fileIndex, offset, length, buf)
+	s.saveResumeWindowDetailed(rec, fileIndex, file.DisplayPath(), file.Length(), pieceLen, aligned, length, buf, generation)
 }
