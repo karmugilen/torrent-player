@@ -24,6 +24,7 @@ class PlayService : Service() {
     private var progress: Int = 0
     private var paused: Boolean = false
     private var isMultiple: Boolean = false
+    private var playbackOnly: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,6 +71,7 @@ class PlayService : Service() {
         if (intent?.hasExtra(EXTRA_PAUSED) == true) {
             paused = intent.getBooleanExtra(EXTRA_PAUSED, false)
         }
+        if (intent?.hasExtra(EXTRA_PLAYBACK_ONLY) == true) playbackOnly = intent.getBooleanExtra(EXTRA_PLAYBACK_ONLY, false)
         if (intent?.hasExtra(EXTRA_MULTIPLE) == true) {
             isMultiple = intent.getBooleanExtra(EXTRA_MULTIPLE, false)
         }
@@ -103,7 +105,7 @@ class PlayService : Service() {
         return NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(if (playbackOnly) android.R.drawable.ic_media_play else android.R.drawable.stat_sys_download)
             .setContentIntent(open)
             .setDeleteIntent(serviceAction(ACTION_REFRESH, REQUEST_REFRESH, flags))
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -112,9 +114,9 @@ class PlayService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setShowWhen(false)
-            .setProgress(100, progress, false)
+            .setProgress(if (playbackOnly) 0 else 100, if (playbackOnly) 0 else progress, false)
             .apply {
-                if (!commandInProgress) {
+                if (!commandInProgress && !playbackOnly) {
                     addAction(android.R.drawable.ic_menu_close_clear_cancel, stopLabel, stop)
                 }
             }
@@ -152,7 +154,7 @@ class PlayService : Service() {
                 manager.createNotificationChannel(channel)
                 val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 val open = PendingIntent.getActivity(ctx, entry.key.hashCode(), Intent(ctx, MainActivity::class.java).putExtra("open_key", entry.key), flags)
-                manager.notify(entry.key.hashCode(), NotificationCompat.Builder(ctx, "webtor-complete").setSmallIcon(android.R.drawable.stat_sys_download_done).setContentTitle("Download complete").setContentText("A download is ready").setContentIntent(open).setAutoCancel(true).build())
+                manager.notify(entry.key.hashCode(), NotificationCompat.Builder(ctx, "webtor-complete").setSilent(true).setOnlyAlertOnce(true).setSmallIcon(android.R.drawable.stat_sys_download_done).setContentTitle("Download complete").setContentText("A download is ready").setContentIntent(open).setAutoCancel(true).build())
             }
         }
         const val ACTION_STOP = "webtor.app.STOP"
@@ -162,6 +164,7 @@ class PlayService : Service() {
         const val EXTRA_PROGRESS = "progress"
         const val EXTRA_PAUSED = "paused"
         const val EXTRA_MULTIPLE = "multiple"
+        private const val EXTRA_PLAYBACK_ONLY = "playbackOnly"
         private const val CHANNEL = "webtor-downloads"
         private const val NOTIF_ID = 42
         private const val REQUEST_OPEN = 0
@@ -175,6 +178,7 @@ class PlayService : Service() {
             paused: Boolean = false,
             text: String = "Downloading",
             multiple: Boolean = false,
+            playbackOnly: Boolean = false,
         ) {
             val intent = Intent(ctx, PlayService::class.java)
                 .putExtra(EXTRA_TITLE, title)
@@ -182,6 +186,7 @@ class PlayService : Service() {
                 .putExtra(EXTRA_PAUSED, paused)
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_MULTIPLE, multiple)
+                .putExtra(EXTRA_PLAYBACK_ONLY, playbackOnly)
             runCatching { ContextCompat.startForegroundService(ctx, intent) }
         }
 

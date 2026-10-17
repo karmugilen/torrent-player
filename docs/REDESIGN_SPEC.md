@@ -8,6 +8,23 @@ This supersedes the earlier instruction to wait. Keep delivery local and use
 completion reports/callbacks instead of repeated status polling. See
 [REDESIGN_EXECUTION.md](REDESIGN_EXECUTION.md) for ownership and integration.
 
+## Current user decisions (supersede the original visual plan)
+
+The user stopped both workers and asked the lead to finish, build and install
+an optimized release. Later device feedback supersedes the earlier glass design:
+
+- Dynamic Material You colours enabled by default; standard Material typography,
+  controls and opaque surfaces. Aero/Antiquity/Retro remain optional solid palettes.
+- Remove glass/transparency and the Continue watching section.
+- Fix Add/library overlap, peer-card IPv6/counter overflow and related layout issues.
+- Keep external-player streams protected when downloading completes. Completion
+  alerts must not interrupt audio focus.
+- Switching Direct Play movies must preserve existing sessions and open readers.
+- Refresh Direct Play still thumbnails from verified cached video data, retaining
+  a real fallback when a new frame cannot decode.
+- Continue working locally, without more workers or a GitHub push. Document all
+  delivered changes in a README and install the optimized release using an update.
+
 ## Delivery and scope
 
 - Work locally. Track tickets in Markdown and make local commits. Do not push,
@@ -24,19 +41,11 @@ completion reports/callbacks instead of repeated status polling. See
 
 ## Visual direction
 
-Three selectable themes share one set of screens and controls:
-
-1. **Aero** (default): blue/teal water, translucent glass, gloss, highlights and
-   tactile depth inspired by Vista/Windows 7.
-2. **Antiquity**: parchment, botanical line work, celestial ornament, warm brass
-   and serif headings inspired by Art Nouveau and historic prints.
-3. **Retro**: classic window framing, bevels, pixel details and restrained
-   monospace typography inspired by 1980s/1990s computing.
-
-Rich, mostly still backgrounds; short interaction transitions; a reduced-effects
-setting. Maintain legible text, accessible touch targets, font scaling and light
-and dark appearances. Wallpaper-derived dynamic colors must not erase each
-theme's identity.
+Use dynamic Material You colours on Android 12+, opaque Material surfaces,
+standard typography and shapes, and consistent light/dark appearance. Older
+Android versions use a solid fallback palette. Optional Aero, Antiquity and Retro
+colour choices remain available when dynamic colours are disabled. No glass,
+transparent panels, gloss overlays, paper/water textures or ornamental chrome.
 
 ## User experience
 

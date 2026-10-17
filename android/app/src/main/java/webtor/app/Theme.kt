@@ -3,53 +3,26 @@ package webtor.app
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import android.os.Build
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Shapes
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Typography
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.composed
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowInsetsControllerCompat
-import java.util.concurrent.ConcurrentHashMap
 
 val LocalAppTheme = compositionLocalOf { AppTheme.AERO }
 val LocalReducedEffects = compositionLocalOf { false }
 
-// --- 1. AERO THEME (Vista/Windows 7 inspired glass & gloss) ---
+// --- 1. AERO THEME (optional cool blue palette) ---
 private val AeroLightColors = lightColorScheme(
     primary = Color(0xFF0078D7),
     onPrimary = Color(0xFFFFFFFF),
@@ -104,7 +77,7 @@ private val AeroDarkColors = darkColorScheme(
     onErrorContainer = Color(0xFFFFDAD6),
 )
 
-// --- 2. ANTIQUITY THEME (Art Nouveau, parchment, brass & botanicals) ---
+// --- 2. ANTIQUITY THEME (optional warm palette) ---
 private val AntiquityLightColors = lightColorScheme(
     primary = Color(0xFF8B5A2B), // warm brass/leather
     onPrimary = Color(0xFFFFFFFF),
@@ -159,7 +132,7 @@ private val AntiquityDarkColors = darkColorScheme(
     onErrorContainer = Color(0xFFFFD9D9),
 )
 
-// --- 3. RETRO THEME (1980s/1990s beveled desktop & pixel aesthetic) ---
+// --- 3. RETRO THEME (optional classic palette) ---
 private val RetroLightColors = lightColorScheme(
     primary = Color(0xFF000080), // classic window navy
     onPrimary = Color(0xFFFFFFFF),
@@ -220,326 +193,44 @@ fun themeColorScheme(theme: AppTheme, dark: Boolean): ColorScheme = when (theme)
     AppTheme.RETRO -> if (dark) RetroDarkColors else RetroLightColors
 }
 
-private val AeroShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(14.dp),
-    large = RoundedCornerShape(18.dp),
-    extraLarge = RoundedCornerShape(26.dp),
-)
 
-private val AntiquityShapes = Shapes(
-    extraSmall = RoundedCornerShape(4.dp),
-    small = RoundedCornerShape(6.dp),
-    medium = RoundedCornerShape(10.dp),
-    large = RoundedCornerShape(14.dp),
-    extraLarge = RoundedCornerShape(20.dp),
-)
-
-private val RetroShapes = Shapes(
-    extraSmall = RoundedCornerShape(1.dp),
-    small = RoundedCornerShape(2.dp),
-    medium = RoundedCornerShape(3.dp),
-    large = RoundedCornerShape(4.dp),
-    extraLarge = RoundedCornerShape(6.dp),
-)
-
-fun themeShapes(theme: AppTheme): Shapes = when (theme) {
-    AppTheme.AERO -> AeroShapes
-    AppTheme.ANTIQUITY -> AntiquityShapes
-    AppTheme.RETRO -> RetroShapes
-}
-
-fun themeTypography(theme: AppTheme): Typography {
-    val headingFont = when (theme) {
-        AppTheme.AERO -> FontFamily.SansSerif
-        AppTheme.ANTIQUITY -> FontFamily.Serif
-        AppTheme.RETRO -> FontFamily.Monospace
-    }
-    val bodyFont = when (theme) {
-        AppTheme.RETRO -> FontFamily.Monospace
-        else -> FontFamily.SansSerif
-    }
-
-    return Typography(
-        displayLarge = TextStyle(fontFamily = headingFont, fontSize = 54.sp, lineHeight = 60.sp, fontWeight = FontWeight.Bold),
-        displayMedium = TextStyle(fontFamily = headingFont, fontSize = 42.sp, lineHeight = 48.sp, fontWeight = FontWeight.Bold),
-        displaySmall = TextStyle(fontFamily = headingFont, fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.SemiBold),
-        headlineLarge = TextStyle(fontFamily = headingFont, fontSize = 30.sp, lineHeight = 36.sp, fontWeight = FontWeight.SemiBold),
-        headlineMedium = TextStyle(fontFamily = headingFont, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold),
-        headlineSmall = TextStyle(fontFamily = headingFont, fontSize = 20.sp, lineHeight = 24.sp, fontWeight = FontWeight.Medium),
-        titleLarge = TextStyle(fontFamily = headingFont, fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
-        titleMedium = TextStyle(fontFamily = headingFont, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium),
-        titleSmall = TextStyle(fontFamily = headingFont, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
-        bodyLarge = TextStyle(fontFamily = bodyFont, fontSize = 15.sp, lineHeight = 22.sp),
-        bodyMedium = TextStyle(fontFamily = bodyFont, fontSize = 13.sp, lineHeight = 19.sp),
-        bodySmall = TextStyle(fontFamily = bodyFont, fontSize = 12.sp, lineHeight = 16.sp),
-        labelLarge = TextStyle(fontFamily = bodyFont, fontSize = 14.sp, fontWeight = FontWeight.Medium),
-        labelMedium = TextStyle(fontFamily = bodyFont, fontSize = 12.sp, fontWeight = FontWeight.Medium),
-        labelSmall = TextStyle(fontFamily = bodyFont, fontSize = 11.sp, fontWeight = FontWeight.Normal),
-    )
-}
-
-// CACHE-06: Precomputed static theme decoration cache
-data class ThemeDecoration(
-    val hasGlassTreatment: Boolean,
-    val hasOrnamentTreatment: Boolean,
-    val hasBevelTreatment: Boolean,
-    val glassGlowBrush: Brush?,
-    val glassBorderColor: Color,
-    val brassOrnamentColor: Color,
-    val bevelLightColor: Color,
-    val bevelDarkColor: Color,
-)
-
-private val decorationCache = ConcurrentHashMap<Pair<AppTheme, Boolean>, ThemeDecoration>()
-
-fun getThemeDecoration(theme: AppTheme, dark: Boolean): ThemeDecoration {
-    return decorationCache.getOrPut(theme to dark) {
-        when (theme) {
-            AppTheme.AERO -> ThemeDecoration(
-                hasGlassTreatment = true,
-                hasOrnamentTreatment = false,
-                hasBevelTreatment = false,
-                glassGlowBrush = Brush.verticalGradient(
-                    listOf(
-                        if (dark) Color(0x3580D0FF) else Color(0x55FFFFFF),
-                        Color(0x05FFFFFF),
-                        Color(0x00FFFFFF),
-                    )
-                ),
-                glassBorderColor = if (dark) Color(0x4038BDF8) else Color(0x600078D7),
-                brassOrnamentColor = Color.Transparent,
-                bevelLightColor = Color.Transparent,
-                bevelDarkColor = Color.Transparent,
-            )
-            AppTheme.ANTIQUITY -> ThemeDecoration(
-                hasGlassTreatment = false,
-                hasOrnamentTreatment = true,
-                hasBevelTreatment = false,
-                glassGlowBrush = null,
-                glassBorderColor = Color.Transparent,
-                brassOrnamentColor = if (dark) Color(0xFFC59B27) else Color(0xFF8B5A2B),
-                bevelLightColor = Color.Transparent,
-                bevelDarkColor = Color.Transparent,
-            )
-            AppTheme.RETRO -> ThemeDecoration(
-                hasGlassTreatment = false,
-                hasOrnamentTreatment = false,
-                hasBevelTreatment = true,
-                glassGlowBrush = null,
-                glassBorderColor = Color.Transparent,
-                brassOrnamentColor = Color.Transparent,
-                bevelLightColor = if (dark) Color(0xFF454C59) else Color(0xFFFFFFFF),
-                bevelDarkColor = if (dark) Color(0xFF101216) else Color(0xFF808080),
-            )
-        }
-    }
-}
-
-/**
- * Themed card container applying distinct glass, ornament, or bevel treatment.
- */
+/** Opaque Material surfaces are shared by the system and optional colour palettes. */
 @Composable
-fun ThemedCard(
-    modifier: Modifier = Modifier,
-    shape: Shape? = null,
-    tonalElevation: Dp = 2.dp,
-    content: @Composable BoxScope.() -> Unit,
-) {
-    val theme = LocalAppTheme.current
-    val reducedEffects = LocalReducedEffects.current
-    val dark = MaterialTheme.colorScheme.background.red < 0.5f
-    val dec = getThemeDecoration(theme, dark)
-    val cardShape = shape ?: themeShapes(theme).medium
-
-    when {
-        theme == AppTheme.AERO -> {
-            Surface(
-                modifier = modifier
-                    .border(BorderStroke(1.dp, dec.glassBorderColor), cardShape)
-                    .clip(cardShape),
-                shape = cardShape,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = if (dark) 0.85f else 0.92f),
-                tonalElevation = tonalElevation,
-            ) {
-                Box(
-                    modifier = Modifier.then(
-                        if (!reducedEffects && dec.glassGlowBrush != null) {
-                            Modifier.background(dec.glassGlowBrush)
-                        } else Modifier
-                    )
-                ) {
-                    content()
-                }
-            }
-        }
-        theme == AppTheme.ANTIQUITY -> {
-            Surface(
-                modifier = modifier
-                    .border(BorderStroke(1.5.dp, dec.brassOrnamentColor.copy(alpha = 0.5f)), cardShape)
-                    .clip(cardShape),
-                shape = cardShape,
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = tonalElevation,
-            ) {
-                Box(
-                    modifier = Modifier.drawBehind {
-                        // Ornamental corner brackets in Antiquity
-                        if (!reducedEffects) {
-                            val strokeWidth = 1.5.dp.toPx()
-                            val bracketLen = 14.dp.toPx()
-                            val bracketColor = dec.brassOrnamentColor.copy(alpha = 0.6f)
-                            // Top-left bracket
-                            drawLine(bracketColor, Offset(4.dp.toPx(), 4.dp.toPx()), Offset(4.dp.toPx() + bracketLen, 4.dp.toPx()), strokeWidth)
-                            drawLine(bracketColor, Offset(4.dp.toPx(), 4.dp.toPx()), Offset(4.dp.toPx(), 4.dp.toPx() + bracketLen), strokeWidth)
-                            // Bottom-right bracket
-                            drawLine(bracketColor, Offset(size.width - 4.dp.toPx() - bracketLen, size.height - 4.dp.toPx()), Offset(size.width - 4.dp.toPx(), size.height - 4.dp.toPx()), strokeWidth)
-                            drawLine(bracketColor, Offset(size.width - 4.dp.toPx(), size.height - 4.dp.toPx() - bracketLen), Offset(size.width - 4.dp.toPx(), size.height - 4.dp.toPx()), strokeWidth)
-                        }
-                    }
-                ) {
-                    content()
-                }
-            }
-        }
-        theme == AppTheme.RETRO -> {
-            // Classic 3D beveled container (light on top-left, dark shadow on bottom-right)
-            Surface(
-                modifier = modifier
-                    .drawBehind {
-                        val stroke = 2.dp.toPx()
-                        // Top & Left highlight
-                        drawLine(dec.bevelLightColor, Offset(0f, 0f), Offset(size.width, 0f), stroke)
-                        drawLine(dec.bevelLightColor, Offset(0f, 0f), Offset(0f, size.height), stroke)
-                        // Bottom & Right shadow
-                        drawLine(dec.bevelDarkColor, Offset(0f, size.height), Offset(size.width, size.height), stroke)
-                        drawLine(dec.bevelDarkColor, Offset(size.width, 0f), Offset(size.width, size.height), stroke)
-                    }
-                    .padding(2.dp),
-                shape = cardShape,
-                color = MaterialTheme.colorScheme.surface,
-            ) {
-                Box {
-                    content()
-                }
-            }
-        }
-        else -> {
-            Surface(
-                modifier = modifier,
-                shape = cardShape,
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = tonalElevation,
-            ) {
-                Box { content() }
-            }
-        }
+fun ThemedCard(modifier: Modifier = Modifier, shape: Shape? = null,
+    tonalElevation: Dp = 1.dp, content: @Composable BoxScope.() -> Unit) {
+    Surface(modifier, shape = shape ?: MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = tonalElevation) {
+        Box(content = content)
     }
 }
 
-/**
- * Screen container drawing theme-specific backdrops (watery depth for Aero,
- * parchment and botanical/celestial ornament for Antiquity, tactile desktop for Retro).
- */
 @Composable
-fun ThemedScreenContainer(
-    modifier: Modifier = Modifier,
-    content: @Composable BoxScope.() -> Unit,
-) {
-    val theme = LocalAppTheme.current
-    val reduced = LocalReducedEffects.current
-    val colors = MaterialTheme.colorScheme
-    val dark = colors.background.red < 0.5f
-    Box(modifier.fillMaxSize().drawWithCache {
-        val water = Brush.verticalGradient(if (dark)
-            listOf(Color(0xFF061424), Color(0xFF103C50), Color(0xFF071724))
-            else listOf(Color(0xFFC5E8F8), Color(0xFFE6F5F2), Color(0xFFB7DCEB)))
-        val parchment = Brush.verticalGradient(if (dark)
-            listOf(Color(0xFF211B17), Color(0xFF151B18), Color(0xFF251F19))
-            else listOf(Color(0xFFF6EACC), Color(0xFFFFF7E5), Color(0xFFEBD9B3)))
-        val waves = (0..3).map { i -> Path().apply {
-            val y = size.height * (0.18f + i * 0.23f)
-            moveTo(-size.width * .1f, y)
-            cubicTo(size.width*.28f, y-size.height*.18f, size.width*.65f, y+size.height*.15f, size.width*1.1f, y-size.height*.08f)
-        } }
-        val stars = listOf(.74f to .09f, .87f to .15f, .68f to .22f, .90f to .30f, .79f to .39f)
-            .map { Offset(size.width*it.first, size.height*it.second) }
-        val stem = Path().apply {
-            moveTo(18.dp.toPx(), size.height*.9f)
-            cubicTo(55.dp.toPx(), size.height*.76f, 13.dp.toPx(), size.height*.64f, 62.dp.toPx(), size.height*.5f)
-        }
-        onDrawBehind {
-            when (theme) {
-                AppTheme.AERO -> {
-                    drawRect(water)
-                    if (!reduced) {
-                        waves.forEachIndexed { i, wave ->
-                            drawPath(wave, Color.White.copy(alpha = if (dark) .07f else .26f), style = Stroke((18+i*7).dp.toPx()))
-                            drawPath(wave, colors.primary.copy(alpha=.12f), style = Stroke(1.dp.toPx()))
-                        }
-                        drawCircle(Brush.radialGradient(listOf(Color.White.copy(alpha=.22f), Color.Transparent), center=Offset(size.width*.8f,size.height*.1f), radius=size.width*.8f), size.width*.8f, Offset(size.width*.8f,size.height*.1f))
-                    }
-                }
-                AppTheme.ANTIQUITY -> {
-                    drawRect(parchment)
-                    if (!reduced) {
-                        val ink = colors.secondary.copy(alpha=if(dark) .20f else .19f)
-                        // Fine paper fibres and a botanical plate at the page edge.
-                        for (i in 0..75) {
-                            val y=size.height*i/75f
-                            drawLine(colors.primary.copy(alpha=.035f),Offset(0f,y),Offset(size.width,y+(i%3-1)*2f))
-                        }
-                        drawPath(stem,ink,style=Stroke(1.3.dp.toPx()))
-                        for (i in 0..7) {
-                            val y=size.height*(.55f+i*.044f)
-                            val x=(25+i%3*8).dp.toPx()
-                            val leaf=Path().apply { moveTo(x,y); quadraticTo(x+35.dp.toPx(),y-24.dp.toPx(),x+28.dp.toPx(),y-6.dp.toPx()); quadraticTo(x+14.dp.toPx(),y+7.dp.toPx(),x,y) }
-                            drawPath(leaf,ink)
-                        }
-                        stars.zipWithNext().forEach { (a,b) -> drawLine(colors.tertiary.copy(alpha=.23f),a,b,1.dp.toPx()) }
-                        stars.forEach { star ->
-                            drawCircle(colors.tertiary.copy(alpha=.40f),2.dp.toPx(),star)
-                            drawLine(colors.tertiary.copy(alpha=.35f),star-Offset(5.dp.toPx(),0f),star+Offset(5.dp.toPx(),0f))
-                            drawLine(colors.tertiary.copy(alpha=.35f),star-Offset(0f,5.dp.toPx()),star+Offset(0f,5.dp.toPx()))
-                        }
-                        drawCircle(colors.tertiary.copy(alpha=.12f),size.width*.27f,Offset(size.width*.86f,size.height*.18f),style=Stroke(1.dp.toPx()))
-                    }
-                }
-                AppTheme.RETRO -> {
-                    drawRect(if(dark) Color(0xFF142824) else Color(0xFF97B6AD))
-                    if (!reduced) {
-                        val step=12.dp.toPx()
-                        for (x in 0..(size.width/step).toInt()) for (y in 0..(size.height/step).toInt()) {
-                            if((x+y)%2==0) drawRect(Color.Black.copy(alpha=.05f),Offset(x*step,y*step),Size(2.dp.toPx(),2.dp.toPx()))
-                        }
-                        drawRect(colors.primary.copy(alpha=.12f),Offset(size.width*.82f,size.height*.12f),Size(24.dp.toPx(),24.dp.toPx()))
-                    }
-                }
-            }
-        }
-    }, content=content)
+fun ThemedScreenContainer(modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
+    Surface(modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Box(Modifier.fillMaxSize(), content = content)
+    }
 }
 
-/** Shared tactile edge for the primary controls in every screen. */
-fun Modifier.themedControl(): Modifier = composed {
-    val theme=LocalAppTheme.current
-    val colors=MaterialTheme.colorScheme
-    val reduced=LocalReducedEffects.current
-    this.drawWithCache {
-        onDrawWithContent {
-            drawContent()
-            if (!reduced) when(theme) {
-                AppTheme.AERO -> drawRoundRect(Brush.verticalGradient(listOf(Color.White.copy(alpha=.22f),Color.Transparent),endY=size.height*.55f),cornerRadius=androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()))
-                AppTheme.ANTIQUITY -> {
-                    drawLine(colors.tertiary.copy(alpha=.6f),Offset(10.dp.toPx(),3.dp.toPx()),Offset(size.width-10.dp.toPx(),3.dp.toPx()),1.dp.toPx())
-                }
-                AppTheme.RETRO -> {
-                    drawLine(Color.White.copy(alpha=.65f),Offset.Zero,Offset(size.width,0f),2.dp.toPx())
-                    drawLine(Color.Black.copy(alpha=.45f),Offset(0f,size.height),Offset(size.width,size.height),2.dp.toPx())
-                }
+@Composable
+fun GaleTheme(dark: Boolean = true, theme: AppTheme = AppTheme.AERO,
+    reducedEffects: Boolean = false, dynamicColors: Boolean = true, content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val colors = if (dynamicColors && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    } else themeColorScheme(theme, dark)
+    val view = LocalView.current
+    if (!view.isInEditMode) SideEffect {
+        view.context.activity()?.window?.let { window ->
+            window.statusBarColor = colors.background.toArgb()
+            window.navigationBarColor = colors.background.toArgb()
+            WindowInsetsControllerCompat(window, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
             }
         }
+    }
+    CompositionLocalProvider(LocalAppTheme provides theme, LocalReducedEffects provides reducedEffects) {
+        MaterialTheme(colorScheme = colors, shapes = Shapes(), typography = Typography(), content = content)
     }
 }
 
@@ -547,42 +238,4 @@ private tailrec fun Context.activity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.activity()
     else -> null
-}
-
-@Composable
-fun GaleTheme(
-    dark: Boolean = true,
-    theme: AppTheme = AppTheme.AERO,
-    reducedEffects: Boolean = false,
-    content: @Composable () -> Unit,
-) {
-    val colors = themeColorScheme(theme, dark)
-    val shapes = themeShapes(theme)
-    val typography = themeTypography(theme)
-
-    val view = LocalView.current
-    if (!view.isInEditMode) {
-        SideEffect {
-            val window = view.context.activity()?.window ?: return@SideEffect
-            val bar = colors.background.toArgb()
-            window.statusBarColor = bar
-            window.navigationBarColor = bar
-            WindowInsetsControllerCompat(window, view).apply {
-                isAppearanceLightStatusBars = !dark
-                isAppearanceLightNavigationBars = !dark
-            }
-        }
-    }
-
-    CompositionLocalProvider(
-        LocalAppTheme provides theme,
-        LocalReducedEffects provides reducedEffects,
-    ) {
-        MaterialTheme(
-            colorScheme = colors,
-            shapes = shapes,
-            typography = typography,
-            content = content,
-        )
-    }
 }

@@ -71,6 +71,8 @@ data class TorrentStatus(
     val verifiedBytes: Long = 0L,
 )
 
+data class LivePreviewState(val active: Boolean, val byteOffset: Long, val signature: String)
+
 data class PlayInfo(
     val id: String,
     val fileIndex: Int,
@@ -191,6 +193,11 @@ class EngineClient(
         val query = if (maxBuckets != null) "?maxBuckets=$maxBuckets" else ""
         val json = get("/pieces/$id$query")
         return parsePieces(json)
+    }
+
+    fun previewState(id: String, fileIndex: Int): LivePreviewState {
+        val json = get("/preview-state/$id?fileIndex=$fileIndex")
+        return LivePreviewState(json.optBoolean("active"), json.optLong("byteOffset").coerceAtLeast(0L), json.optString("signature"))
     }
 
     fun metadata(id: String): String = get("/metadata/$id").getString("torrentData")

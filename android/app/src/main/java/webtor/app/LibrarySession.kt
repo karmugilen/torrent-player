@@ -138,6 +138,7 @@ class LibrarySession(
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
                         appTheme = parseSavedTheme(settings.getString("appTheme", "AERO")),
+                        dynamicColors = settings.getBoolean("dynamicColors", true),
                         reducedEffects = settings.getBoolean("reducedEffects", false),
                         directPlayDefault = settings.getBoolean("directPlayDefault", false),
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
@@ -216,6 +217,11 @@ class LibrarySession(
     fun setDarkTheme(dark: Boolean) {
         settings.edit().putBoolean("darkTheme", dark).apply()
         _ui.update { it.copy(darkTheme = dark) }
+    }
+
+    fun setDynamicColors(enabled: Boolean) {
+        settings.edit().putBoolean("dynamicColors", enabled).apply()
+        _ui.update { it.copy(dynamicColors = enabled) }
     }
 
     fun setAppTheme(theme: AppTheme) {
@@ -604,17 +610,6 @@ class LibrarySession(
         _ui.update { it.copy(directPlayDefault = enabled) }
     }
 
-    /** Keep one active RAM stream so separate movies cannot multiply the memory budget. */
-    private suspend fun releaseOtherDirectPlay(keepKey: String) {
-        val others = _ui.value.library.filter { it.directPlay && it.key != keepKey && it.engineId != null }
-        for (other in others) {
-            withContext(io) { client.remove(other.engineId!!, destroyStore = false) }
-            patch(other.key) { e -> e.copy(engineId = null, paused = true, status = null,
-                lifecycleState = EntryLifecycleState.PAUSED,
-                files = e.files.map { it.copy(progress = 0.0, verifiedBytes = 0L) }) }
-        }
-    }
-
     private fun directPlayMemoryBytes(): Long {
         val manager = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
         return (manager.memoryClass / 4).coerceIn(16, 64).toLong() * 1024 * 1024
@@ -736,7 +731,7 @@ class LibrarySession(
                     check(directPlay || needed <= free) {
                         "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available."
                     }
-                    if (directPlay) releaseOtherDirectPlay(key)
+
                     val metadata = withContext(io) { client.metadata(draft.engineId) }
                     val skeleton = provisional.copy(metadata = metadata)
                     val createdResult = if (directPlay) CreatedDownloadFiles(skeleton.files) else withContext(io) { storage.createFiles(skeleton, storage.folder) }
@@ -958,7 +953,6 @@ class LibrarySession(
             }
 
             try {
-                if (current.directPlay) releaseOtherDirectPlay(current.key)
                 if (current.engineId != null) {
                     withContext(io) { client.resume(current.engineId) }
                     patch(current.key) {
@@ -1077,7 +1071,6 @@ class LibrarySession(
                 check(targetIndex != null && (targetIndex in current.selected || completedPlayFile(current, targetIndex) != null)) {
                     "This file was not selected for download."
                 }
-                if (current.directPlay) releaseOtherDirectPlay(current.key)
                 if (fromStart) {
                     patch(current.key) { e -> e.copy(files = e.files.map { if (it.index == targetIndex) it.copy(playbackPositionMs = 0) else it }) }
                     current = _ui.value.library.find { it.key == entry.key } ?: current
@@ -2382,7 +2375,7 @@ class LibrarySession(
             lastServiceUpdate = 0L
             return
         }
-        val notification = downloadNotification(_ui.value.library)
+        val notification = downloadNotification(_ui.value.library, (app as? WebtorApp)?.playbackLeases?.activeKeys().orEmpty())
         if (notification == null) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
@@ -2397,6 +2390,7 @@ class LibrarySession(
                 paused = false,
                 text = notification.text,
                 multiple = notification.multiple,
+                playbackOnly = notification.playbackOnly,
             )
             lastServiceUpdate = now
         }

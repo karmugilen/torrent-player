@@ -104,3 +104,12 @@ IDs, delivered tickets, exact checks, limitations and blockers; mark partial wor
 honestly. Do not change delivered artifacts after callback without an explicit
 correction. Runtime IDs and temporary coordination material stay in ignored
 `.herderHelp/`, not durable project memory.
+
+## Lead takeover and final user revisions
+
+Both owned worker tabs were stopped at the user's explicit request; their work
+was preserved and integrated locally. The user then requested the lead alone
+finish the fixes and install an optimized release. Final review therefore runs
+with the lead, without spawning more agents. The current Material UI, playback
+continuity, Direct Play switching and live-preview decisions in REDESIGN_SPEC.md
+supersede the original decoration/Continue-watching acceptance criteria.

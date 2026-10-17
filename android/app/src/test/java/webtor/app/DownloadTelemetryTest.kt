@@ -13,6 +13,15 @@ class DownloadTelemetryTest {
         status = EngineClient.parseTorrent(JSONObject("""{"id":"$id","ready":true,"downloadSpeed":$speed,"uploadSpeed":10,"numPeers":$peers}""")),
     )
 
+    @Test fun completionKeepsForegroundProtectionUntilPlayerDescriptorCloses() {
+        val before = active()
+        val completed = before.copy(files = before.files.map { it.copy(progress = 1.0, verifiedBytes = it.length) })
+        assertNotNull(downloadNotification(listOf(before), setOf(before.key)))
+        assertNotNull("An open player descriptor must keep its process protected after completion",
+            downloadNotification(listOf(completed), setOf(completed.key)))
+        assertNull(downloadNotification(listOf(completed), emptySet()))
+    }
+
     @Test fun differentTorrentsKeepIndependentRatesIncludingIdlePeers() {
         val first = active(speed = 100)
         val second = active("two", speed = 0, peers = 5)

@@ -44,6 +44,7 @@ data class UiState(
     val maxPeers: Int = 55,
     val darkTheme: Boolean = true,
     val appTheme: AppTheme = AppTheme.AERO,
+    val dynamicColors: Boolean = true,
     val reducedEffects: Boolean = false,
     val directPlayDefault: Boolean = false,
     val diagnosticsPreview: String? = null,

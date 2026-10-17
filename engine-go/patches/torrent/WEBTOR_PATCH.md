@@ -17,6 +17,10 @@ Additional local hook for experimental anti-DPI:
   adapter here so outgoing TCP peers are adapted without a process-global race
   across EngineServer instances. UDP/uTP dialers are unchanged.
 
+- `PeerConn.CacheDialAddr` in `peerconn.go` exposes a synchronized dialable peer
+  endpoint for the bounded peer cache. Incoming source ports are excluded unless
+  an advertised listening port is available.
+
 All other upstream source files are unchanged aside from the items above. This
 avoids an unrelated engine upgrade. The original LICENSE is included. The parent
 module's local replacement ensures both Android builds and ordinary `go test`

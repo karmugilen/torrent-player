@@ -636,6 +636,10 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		if len(parts) == 2 && parts[0] == "preview-state" {
+			s.handlePreviewState(w, r, parts[1])
+			return
+		}
 		if len(parts) == 1 && parts[0] == "stats" {
 			s.handleStats(w, r)
 			return

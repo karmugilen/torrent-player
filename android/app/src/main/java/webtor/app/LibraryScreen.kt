@@ -86,10 +86,9 @@ fun LibraryScreen(
     }
 
     val colors = MaterialTheme.colorScheme
-    val continueTarget = remember(state.library) { state.library.findContinueWatchingTarget() }
 
     Scaffold(
-        containerColor = Color.Transparent,
+        containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             if (inSelectionMode) {
@@ -148,7 +147,7 @@ fun LibraryScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent,
+                        containerColor = MaterialTheme.colorScheme.background,
                         titleContentColor = colors.onBackground,
                         actionIconContentColor = colors.onBackground,
                     ),
@@ -183,18 +182,6 @@ fun LibraryScreen(
             if (!state.engineReady || state.restoring) item { LibraryNotice(state.statusLine) }
             state.error?.takeIf { !state.addSheetOpen }?.let { item { LibraryNotice(it, true) } }
             state.loadWarning?.let { item { LibraryNotice(it, true) } }
-
-            // UI-02: Watch-first Continue Watching area
-            if (continueTarget != null && query.isBlank() && filter == LibraryFilter.ALL && !inSelectionMode) {
-                item(key = "continue_watching") {
-                    ContinueWatchingCard(
-                        target = continueTarget,
-                        repository = repository,
-                        onPlay = { onPlay(continueTarget.entry, continueTarget.file.index) },
-                        onOpen = { onOpen(continueTarget.entry) },
-                    )
-                }
-            }
 
             if (state.library.isNotEmpty()) item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -416,99 +403,6 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun ContinueWatchingCard(
-    target: ContinueWatchingTarget,
-    repository: ThumbnailRepository,
-    onPlay: () -> Unit,
-    onOpen: () -> Unit,
-) {
-    val colors = MaterialTheme.colorScheme
-    ThemedCard(
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Surface(
-                    color = colors.primaryContainer,
-                    shape = RoundedCornerShape(6.dp),
-                ) {
-                    Text(
-                        "CONTINUE WATCHING",
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.onPrimaryContainer,
-                    )
-                }
-                Text(
-                    playbackTime(target.file.playbackPositionMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                var frames by remember(target.entry.key) { mutableStateOf(repository.cached(target.entry)) }
-                LaunchedEffect(target.entry.key) {
-                    val next = repository.previews(target.entry)
-                    if (next.isNotEmpty()) frames = next
-                }
-                VideoPreviewPager(
-                    entry = target.entry,
-                    frames = frames,
-                    modifier = Modifier
-                        .width(110.dp)
-                        .aspectRatio(16f / 9f),
-                )
-
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        target.entry.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        target.file.name,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (target.file.playbackDurationMs > 0L) {
-                        val progress = (target.file.playbackPositionMs.toFloat() / target.file.playbackDurationMs.toFloat()).coerceIn(0f, 1f)
-                        LinearProgressIndicator(
-                            progress = { progress },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp)),
-                            color = colors.primary,
-                        )
-                    }
-                }
-
-                IconButton(
-                    onClick = onPlay,
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = colors.primary),
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "Play episode", tint = colors.onPrimary)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun LibraryNotice(message: String, error: Boolean = false) = Text(
     message,
     color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
@@ -536,20 +430,7 @@ private fun TorrentRow(
     val previewVideo = firstPreviewVideo(entry)
     val previewUri = previewVideo?.uri
     val latestEntry by rememberUpdatedState(entry)
-    var frames by remember(entry.key) { mutableStateOf(repository.cached(entry)) }
-
-    LaunchedEffect(entry.key, previewUri, entry.complete, entry.paused, entry.engineId) {
-        while (true) {
-            val current = latestEntry
-            val next = repository.previews(current)
-            if (next.isNotEmpty()) frames = next
-            else if (frames == null) frames = emptyList()
-            if (current.complete) break
-            val live = !current.paused && current.engineId != null
-            if (!live) break
-            delay(4_000)
-        }
-    }
+    val frames = rememberVideoPreviews(entry)
 
     ThemedCard(
         modifier = Modifier
@@ -719,6 +600,9 @@ fun VideoPreviewPager(
         return
     }
     val pager = rememberPagerState(pageCount = { ready.size })
+    LaunchedEffect(ready.lastOrNull()) {
+        if (entry.directPlay && ready.size > 1) pager.scrollToPage(ready.lastIndex)
+    }
     Box(modifier = modifier.clip(shape)) {
         HorizontalPager(
             state = pager,

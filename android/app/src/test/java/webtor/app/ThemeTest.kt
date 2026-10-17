@@ -42,18 +42,12 @@ class ThemeTest {
         }
     }
 
-    @Test
-    fun decorationCacheProvidesPrecomputedArtwork() {
-        val aeroDec = getThemeDecoration(AppTheme.AERO, dark = true)
-        val antiquityDec = getThemeDecoration(AppTheme.ANTIQUITY, dark = false)
-        val retroDec = getThemeDecoration(AppTheme.RETRO, dark = true)
-
-        assertTrue(aeroDec.hasGlassTreatment)
-        assertTrue(antiquityDec.hasOrnamentTreatment)
-        assertTrue(retroDec.hasBevelTreatment)
-
-        // Cached lookup returns same instance
-        val aeroDec2 = getThemeDecoration(AppTheme.AERO, dark = true)
-        assertTrue(aeroDec === aeroDec2)
+    @Test fun allPaletteSurfacesAreOpaque() {
+        for (theme in AppTheme.entries) for (dark in listOf(false, true)) {
+            val colors = themeColorScheme(theme, dark)
+            assertEquals(1f, colors.surface.alpha)
+            assertEquals(1f, colors.background.alpha)
+        }
+        assertTrue(UiState().dynamicColors)
     }
 }

@@ -77,20 +77,7 @@ fun TorrentFilesScreen(
     }
     val previewVideo = firstPreviewVideo(entry)
     val latestEntry by rememberUpdatedState(entry)
-    var frames by remember(entry.key) { mutableStateOf(thumbnails.cached(entry)) }
-    LaunchedEffect(entry.key, previewVideo?.index, entry.complete, entry.paused, entry.engineId) {
-        if (previewVideo == null) return@LaunchedEffect
-        while (true) {
-            val current = latestEntry
-            val next = thumbnails.previews(current)
-            if (next.isNotEmpty()) frames = next
-            else if (frames == null) frames = emptyList()
-            if (current.complete) break
-            val live = !current.paused && current.engineId != null
-            if (!live) break
-            delay(4_000)
-        }
-    }
+    val frames = rememberVideoPreviews(entry)
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(entry.key, entry.engineId, lifecycleOwner) {
         val engineId = entry.engineId
@@ -162,7 +149,7 @@ fun TorrentFilesScreen(
     }
 
     Scaffold(
-        containerColor = Color.Transparent,
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Download details", style = MaterialTheme.typography.titleLarge) },
@@ -191,7 +178,7 @@ fun TorrentFilesScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.surface.copy(alpha = 0.90f),
+                    containerColor = colors.surface,
                     titleContentColor = colors.onBackground,
                     navigationIconContentColor = colors.onBackground,
                     actionIconContentColor = colors.onBackground,
@@ -384,7 +371,7 @@ private fun DownloadSummary(
                 FilledTonalButton(
                     onClick = onShareMagnet,
                     enabled = magnetAvailable,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).themedControl(),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     shape = RoundedCornerShape(12.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 ) {
@@ -395,7 +382,7 @@ private fun DownloadSummary(
                 OutlinedButton(
                     onClick = onCopyMagnet,
                     enabled = magnetAvailable,
-                    modifier = Modifier.heightIn(min = 48.dp).themedControl(),
+                    modifier = Modifier.heightIn(min = 48.dp),
                     shape = RoundedCornerShape(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                 ) {
@@ -446,7 +433,7 @@ private fun TransferCard(label: String, value: String, modifier: Modifier = Modi
     Card(
         modifier = modifier,
         shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
     ) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
@@ -478,7 +465,7 @@ private fun TrackerDetailsSection(status: webtor.core.TorrentStatus?) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
     ) {
         Column {
             TextButton(
@@ -643,7 +630,7 @@ private fun TorrentFileRow(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .width(88.dp)
-                        .heightIn(min = 48.dp).themedControl(),
+                        .heightIn(min = 48.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     colors = if (focused) {
                         ButtonDefaults.filledTonalButtonColors(
@@ -666,7 +653,7 @@ private fun TorrentFileRow(
                     onClick = onPlay,
                     enabled = canPlay,
                     shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.heightIn(min = 48.dp).themedControl(),
+                    modifier = Modifier.heightIn(min = 48.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 ) {
                     Text(
@@ -749,7 +736,7 @@ private fun TechnicalCard(
     Card(
         modifier = modifier,
         shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
     ) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)

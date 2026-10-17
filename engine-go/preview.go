@@ -45,6 +45,7 @@ type previewReader struct {
 	admitted   map[int]bool
 	admittedN  int64
 	closed     bool
+	cachedOnly bool
 	temp       bool
 	waitCancel context.CancelFunc
 }
@@ -142,6 +143,10 @@ func (s *EngineServer) OpenPreview(id string, index int) (PreviewReader, error) 
 	p.reader.SetReadaheadFunc(nil)
 	p.reader.SetReadahead(0)
 	p.owner = s.ensurePlaybackCoordinator(rec.Torrent)
+	p.owner.mu.Lock()
+	p.owner.storage = st
+	p.cachedOnly = rec.DirectPlay && len(p.owner.readers) > 0
+	p.owner.mu.Unlock()
 	if s.shuttingDown.Load() {
 		return fail(fmt.Errorf("engine is closing"))
 	}
@@ -227,6 +232,14 @@ func (p *previewReader) ReadAt(data []byte, offset int64) (int, error) {
 		return 0, nil
 	}
 	data = data[:min(int64(len(data)), p.length-offset)]
+	if p.cachedOnly {
+		st, abs := p.storage, p.file.Offset()+offset
+		p.mu.Unlock()
+		if n, _ := st.readVerifiedPreview(data, abs); n > 0 {
+			return n, nil
+		}
+		return -1, fmt.Errorf("preview range is not cached yet")
+	}
 	if err := p.admitRange(offset, int64(len(data))); err != nil {
 		p.mu.Unlock()
 		return -1, err

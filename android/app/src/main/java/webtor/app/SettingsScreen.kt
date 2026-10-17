@@ -62,12 +62,13 @@ fun SettingsScreen(
     onClearNativeCategory: ((String) -> Unit)? = null,
     onPickFolder: () -> Unit = {},
     onClearFolder: () -> Unit = {},
+    onDynamicColors: (Boolean) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
 
     Scaffold(
-        containerColor = Color.Transparent,
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Settings", style = MaterialTheme.typography.titleLarge) },
@@ -77,7 +78,7 @@ fun SettingsScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.surface.copy(alpha = 0.90f),
+                    containerColor = colors.surface,
                     titleContentColor = colors.onBackground,
                     navigationIconContentColor = colors.onBackground,
                 ),
@@ -110,11 +111,16 @@ fun SettingsScreen(
                     )
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+                        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
                         shape = MaterialTheme.shapes.medium,
                     ) {
                         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("Theme style", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = colors.onSurface)
+                            ListItem(
+                                headlineContent = { Text("Dynamic Material colors") },
+                                supportingContent = { Text("Match your wallpaper on Android 12 and newer") },
+                                trailingContent = { Switch(checked = state.dynamicColors, onCheckedChange = onDynamicColors) },
+                            )
+                            Text("Alternative color palette", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = colors.onSurface)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -126,7 +132,8 @@ fun SettingsScreen(
                                 ).forEach { (theme, label) ->
                                     val isSelected = state.appTheme == theme
                                     FilterChip(
-                                        selected = isSelected,
+                                        selected = isSelected && !state.dynamicColors,
+                                        enabled = !state.dynamicColors,
                                         onClick = { onAppTheme(theme) },
                                         label = { Text(label) },
                                         modifier = Modifier.weight(1f),
@@ -152,8 +159,8 @@ fun SettingsScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("Reduced effects", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                    Text("Suppress motion, glows, and complex continuous shaders", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                    Text("Reduce motion", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                    Text("Reduce nonessential connection and interface animations", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
                                 Switch(checked = state.reducedEffects, onCheckedChange = onReducedEffects)
                             }
@@ -249,7 +256,7 @@ fun SettingsScreen(
                     )
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+                        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
                         shape = MaterialTheme.shapes.medium,
                     ) {
                         Column(
@@ -366,7 +373,7 @@ fun SettingsScreen(
                     )
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+                        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
                         shape = MaterialTheme.shapes.medium,
                     ) {
                         ListItem(
@@ -416,7 +423,7 @@ fun SettingsScreen(
                     )
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+                        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer),
                         shape = MaterialTheme.shapes.medium,
                     ) {
                         ListItem(

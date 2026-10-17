@@ -107,9 +107,10 @@ class MainActivity : ComponentActivity() {
                 dark = state.darkTheme,
                 theme = state.appTheme,
                 reducedEffects = state.reducedEffects,
+                dynamicColors = state.dynamicColors,
             ) {
                 ThemedScreenContainer {
-                    Surface(Modifier.fillMaxSize(), color = Color.Transparent) {
+                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                         if (!state.addSheetOpen) screenStates.SaveableStateProvider(if (state.screen == Screen.Files) "files:${state.openTorrentKey}" else state.screen.name) {
                         when (state.screen) {
                             Screen.Prepare -> {
@@ -137,6 +138,7 @@ class MainActivity : ComponentActivity() {
                                 onMaxPeersCommit = session::commitMaxPeers,
                                 onDarkTheme = session::setDarkTheme,
                                 onAppTheme = session::setAppTheme,
+                                onDynamicColors = session::setDynamicColors,
                                 onReducedEffects = session::setReducedEffects,
                                 onDirectPlayDefault = session::setDirectPlayDefault,
                                 onAntiDpi = session::setAntiDpi,

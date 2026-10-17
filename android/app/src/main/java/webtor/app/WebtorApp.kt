@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.util.Log
 
 class WebtorApp : Application() {
+    val playbackLeases = PlaybackLeases { if (::session.isInitialized) session.refreshTransferNotification() }
     private var networkMonitor: NetworkMonitor? = null
     lateinit var engine: EngineHost
         private set

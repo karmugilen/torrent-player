@@ -21,16 +21,7 @@ fun DraftVideoPreview(draft: PrepareDraft) {
         directPlay = true,
     )
     if (firstPreviewVideo(entry) == null) return
-    val repository = (LocalContext.current.applicationContext as WebtorApp).thumbnails
-    var frames by remember(entry.key) { mutableStateOf(repository.cached(entry)) }
-    val current by rememberUpdatedState(entry)
-    LaunchedEffect(draft.engineId, draft.selected) {
-        while (true) {
-            val next = repository.previews(current)
-            if (next.isNotEmpty()) { frames = next; break }
-            delay(4_000L)
-        }
-    }
+    val frames = rememberVideoPreviews(entry)
     ThemedCard(Modifier.fillMaxWidth()) {
         VideoPreviewPager(entry, frames, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
     }

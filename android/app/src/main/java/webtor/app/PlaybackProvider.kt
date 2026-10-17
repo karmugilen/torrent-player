@@ -71,6 +71,7 @@ class PlaybackProvider : ContentProvider() {
             val id = entry.engineId ?: throw FileNotFoundException("Resume the download before playing")
             val handle = app.engine.openPlayback(id, file.index)
             if (handle == 0L) throw FileNotFoundException("Cannot open torrent stream")
+            val lease = app.playbackLeases.acquire(entry.key)
             // A blocked read must not block another player's seek or UI commands.
             val thread = HandlerThread("torrent-playback").apply { start() }
             try {
@@ -84,15 +85,13 @@ class PlaybackProvider : ContentProvider() {
                             return count
                         }
                         override fun onRelease() {
-                            app.engine.closePlayback(handle)
-                            thread.quitSafely()
+                            try { app.engine.closePlayback(handle) } finally { lease.close(); thread.quitSafely() }
                         }
                     },
                     Handler(thread.looper),
                 )
             } catch (t: Throwable) {
-                app.engine.closePlayback(handle)
-                thread.quitSafely()
+                try { app.engine.closePlayback(handle) } finally { lease.close(); thread.quitSafely() }
                 throw FileNotFoundException("Cannot open torrent stream: ${t.message}")
             }
         } finally {

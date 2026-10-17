@@ -41,6 +41,17 @@ private class FakeEngineTransport : EngineTransport {
 }
 
 class EngineClientTest {
+    @Test fun previewStateUsesNativePlaybackAndCacheSnapshot() {
+        val client = EngineClient { method, path, _ ->
+            assertEquals("GET", method)
+            assertEquals("/preview-state/movie?fileIndex=2", path)
+            EngineResponse(200, """{"active":true,"byteOffset":10485760,"signature":"9a2"}""")
+        }
+        val state = client.previewState("movie", 2)
+        assertTrue(state.active)
+        assertEquals(10485760L, state.byteOffset)
+        assertEquals("9a2", state.signature)
+    }
     @Test
     fun connectionsReadsNativeSnapshotAndHandlesEmptyPausedList() {
         transport.enqueue(TestResponse().setBody(

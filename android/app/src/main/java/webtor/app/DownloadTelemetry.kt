@@ -39,11 +39,16 @@ fun entryTelemetry(entry: DownloadEntry): String = buildString {
     else transferTelemetry(entry)?.let { append(" · $it") }
 }
 
-data class DownloadNotification(val title: String, val text: String, val progress: Int, val multiple: Boolean)
+data class DownloadNotification(val title: String, val text: String, val progress: Int, val multiple: Boolean, val playbackOnly: Boolean = false)
 
-fun downloadNotification(entries: List<DownloadEntry>): DownloadNotification? {
+fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String> = emptySet()): DownloadNotification? {
     val active = entries.filter { it.hasActiveTransfer() }
-    if (active.isEmpty()) return null
+    if (active.isEmpty()) {
+        val playing = entries.filter { it.key in playbackKeys && !it.isDeleting }
+        return if (playing.isEmpty()) null else DownloadNotification(
+            title = if (playing.size == 1) playing.first().title else "Video playback",
+            text = "Serving video to your player", progress = 100, multiple = playing.size > 1, playbackOnly = true)
+    }
     val streaming = active.filter { it.directPlay && !it.checking }
     val downloading = active.filter { !it.directPlay && it.metadataReady && !it.checking }
     val checking = active.filter { it.checking }

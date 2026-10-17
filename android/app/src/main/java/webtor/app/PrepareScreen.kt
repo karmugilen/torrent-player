@@ -61,7 +61,7 @@ fun PrepareScreen(
     val canChoose = ready && !draft.busy && draft.selected.isNotEmpty()
     val canStart = canChoose && (directPlayDefault || !insufficientSpace)
     Scaffold(
-        containerColor = Color.Transparent,
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Choose files", style = MaterialTheme.typography.titleLarge) },
@@ -71,7 +71,7 @@ fun PrepareScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
+                    containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onBackground,
                     navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
                 ),
@@ -101,7 +101,7 @@ fun PrepareScreen(
                         enabled = canStart,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 48.dp).themedControl(),
+                            .heightIn(min = 48.dp),
                     ) {
                         Text(if (directPlayDefault) "Watch now (Direct Play)" else "Save for offline (Download)", maxLines = 1)
                     }

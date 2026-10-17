@@ -120,40 +120,12 @@ private fun DeviceRootNode(
         border = BorderStroke(1.5.dp, hud.accent.copy(alpha = 0.35f)),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(if (totalPeers > 0) hud.accent else hud.muted)
-                    )
-                    Text(
-                        "THIS DEVICE",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.2.sp,
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                        color = hud.text,
-                    )
-                }
-                Text(
-                    "$totalPeers connected peers",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = hud.muted,
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                RateColumn(label = "DOWN", rate = download, color = hud.accent)
-                RateColumn(label = "UP", rate = upload, color = hud.secondary)
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("This device · $totalPeers connected peers", style = MaterialTheme.typography.titleSmall,
+                color = hud.text)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                RateColumn(label = "Download", rate = download, color = hud.accent)
+                RateColumn(label = "Upload", rate = upload, color = hud.secondary)
             }
         }
     }
@@ -282,104 +254,27 @@ private fun RectangularPeerTile(
         border = BorderStroke(1.dp, borderColor.copy(alpha = borderAlpha)),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(
-                modifier = Modifier.weight(1f).padding(end = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    // Country badge if available
-                    peer.country?.takeIf { it.isNotBlank() }?.let { country ->
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = hud.background,
-                            border = BorderStroke(0.5.dp, hud.muted.copy(alpha = 0.3f)),
-                        ) {
-                            Text(
-                                country.uppercase(),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                ),
-                                color = hud.text,
-                            )
-                        }
-                    }
-
-                    // Client identifier
-                    Text(
-                        peer.client.ifBlank { peer.address },
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                        color = hud.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                peer.country?.takeIf { it.isNotBlank() }?.let {
+                    Text(it.uppercase(), style = MaterialTheme.typography.labelSmall, color = hud.muted)
                 }
-
-                // Address & transfer totals
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        peer.address,
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                        color = hud.muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        "↓ ${formatBytes(peer.downloaded)} · ↑ ${formatBytes(peer.uploaded)}",
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                        color = hud.muted,
-                    )
-                }
+                Text(peer.client.ifBlank { "Unknown client" }, Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium, color = hud.text,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-
-            // Real activity status (no fake animation on idle)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                val statusDotColor = when (transferring) {
-                    true -> hud.accent
-                    false -> hud.secondary
-                    null -> Color.Transparent
-                }
-                if (transferring != null) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(statusDotColor)
-                    )
-                }
-                Text(
-                    text = when (transferring) {
-                        true -> "Receiving"
-                        false -> "Sending"
-                        null -> "Idle"
-                    },
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                    ),
-                    color = when (transferring) {
-                        true -> hud.accent
-                        false -> hud.secondary
-                        null -> hud.muted
-                    },
-                )
+            Text(peer.address, Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = hud.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("↓ ${formatBytes(peer.downloaded)}   ↑ ${formatBytes(peer.uploaded)}", Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium, color = hud.muted,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(when (transferring) { true -> "Receiving"; false -> "Sending"; null -> "Idle" },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isActive) protocolColor else hud.muted, maxLines = 1, softWrap = false)
             }
         }
     }
