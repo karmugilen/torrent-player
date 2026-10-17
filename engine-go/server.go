@@ -135,11 +135,15 @@ type EngineServer struct {
 	geoMu             sync.RWMutex
 	geoIP             *maxminddb.Reader
 	previewActive     *previewReader
+	previewReserveGen uint64
 	bypass            bypassController
 	peerHintMu        sync.Mutex
 	peerHints         map[string][]peerHint
+	peerHintGen       uint64
 	dhtMu             sync.Mutex
 	dhtContacts       []dhtContact
+	dhtGen            uint64
+	cacheClearGen     uint64
 }
 
 func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServer, error) {
@@ -234,11 +238,20 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 		if rec == nil || pc == nil || pc.RemoteAddr == nil {
 			return
 		}
-		private := false
-		if info := rec.Torrent.Info(); info != nil && info.Private != nil {
-			private = *info.Private
+		// Reject unknown privacy: missing metadata must not be treated as public.
+		info := rec.Torrent.Info()
+		if info == nil {
+			return
 		}
-		s.rememberPeerHint(rec.InfoHash, torrent.PeerInfo{Addr: pc.RemoteAddr, Source: pc.Discovery}, private)
+		if info.Private != nil && *info.Private {
+			return
+		}
+		// Prefer a dialable listen endpoint over a transient inbound source port.
+		addr := peerDialEndpoint(pc)
+		if addr == nil {
+			return
+		}
+		s.rememberPeerHint(rec.InfoHash, torrent.PeerInfo{Addr: addr, Source: pc.Discovery}, false)
 	}
 
 	client, err := torrent.NewClient(cfg)
@@ -481,8 +494,9 @@ func (s *EngineServer) Close() {
 			stopSavedDataCheck(rec)
 			s.closePlaybackReaders(rec.Torrent)
 		}
-		s.client.Close()
+		// Capture DHT contacts before the client tears down its servers.
 		s.snapshotDHTContacts()
+		s.client.Close()
 		s.geoMu.Lock()
 		if s.geoIP != nil {
 			_ = s.geoIP.Close()
@@ -1044,6 +1058,15 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		timeRemaining = &rem
 	}
 
+	warning := rec.Warning
+	if warning == nil {
+		if st := s.storage.GetStorage(rec.InfoHash); st != nil {
+			if err := st.CheckpointPersistError(); err != nil {
+				msg := "checkpoint persist failed: " + err.Error()
+				warning = &msg
+			}
+		}
+	}
 	view := TorrentView{
 		ID:            rec.ID,
 		InfoHash:      &infoHashStr,
@@ -1070,6 +1093,7 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		Checking:      rec.Checking,
 		CheckedPieces: rec.CheckedPieces,
 		CheckTotal:    rec.CheckTotal,
+		Warning:       warning,
 	}
 
 	writeJSON(w, http.StatusOK, view)
@@ -1215,8 +1239,8 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "torrent is closing"})
 		return
 	}
-	// Configuration replaces any temporary preview storage for this torrent.
-	s.closeActivePreview()
+	// Configuration replaces temporary preview storage for this torrent only.
+	s.closePreviewFor(rec)
 
 	t := rec.Torrent
 	if err := waitForInfo(r, t); err != nil {
@@ -1381,7 +1405,7 @@ func (s *EngineServer) handlePauseResume(w http.ResponseWriter, r *http.Request,
 	rec.Generation++
 	rec.Paused = pause
 	if pause {
-		s.closeActivePreview()
+		s.closePreviewFor(rec)
 	}
 	if !pause && rec.Error != nil {
 		// A failed saved-data check is recoverable: resume clears the visible
@@ -1434,7 +1458,7 @@ func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if st := s.storage.GetStorage(rec.InfoHash); st != nil {
 		_ = st.DeleteCheckpoint()
 	}
-	s.closeActivePreview()
+	s.closePreviewFor(rec)
 	s.closePlaybackReaders(rec.Torrent)
 	s.forgetPeerHints(rec.InfoHash)
 	s.deleteResumeWindow(rec.InfoHash)

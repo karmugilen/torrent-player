@@ -2,11 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 func TestOpenPreviewReadsVerifiedBytesWithoutFocusChange(t *testing.T) {
@@ -180,5 +185,226 @@ func TestPauseReleasesPreviewDemand(t *testing.T) {
 	s.mu.Unlock()
 	if active != nil {
 		t.Fatal("pause must close active preview")
+	}
+}
+
+func TestPreviewBudgetEnforcedAcrossSeeks(t *testing.T) {
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	// Only the head piece is verified. A far seek must admit new pieces and
+	// fail once the session budget cannot fit them.
+	writeVerifiedPiece(t, s, rec, data, 0)
+	preview, err := s.OpenPreview(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preview.Close()
+	pr := preview.(*previewReader)
+	pr.mu.Lock()
+	pr.budget = rec.Torrent.Info().PieceLength
+	pr.admitted = map[int]bool{}
+	pr.admittedN = 0
+	pr.mu.Unlock()
+
+	if _, err := preview.ReadAt(make([]byte, 8), 0); err != nil {
+		t.Fatalf("head read within budget: %v", err)
+	}
+	tail := preview.Length() - 8
+	if _, err := preview.ReadAt(make([]byte, 8), tail); err == nil {
+		t.Fatal("expected budget failure for far seek outside admitted union")
+	}
+}
+
+func TestPreviewSessionDeadlineBlocksUnlimitedReads(t *testing.T) {
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	writeVerifiedPiece(t, s, rec, data, 0)
+	preview, err := s.OpenPreview(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preview.Close()
+	pr := preview.(*previewReader)
+	pr.mu.Lock()
+	pr.cancel()
+	pr.mu.Unlock()
+	if _, err := preview.ReadAt(make([]byte, 4), 0); err == nil {
+		t.Fatal("expected session deadline to reject further reads")
+	}
+}
+
+func TestPreviewCloseJoinsBlockedRead(t *testing.T) {
+	_, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	preview, err := s.OpenPreview(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := preview.(*previewReader)
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		pr.readIO.Lock()
+		close(started)
+		time.Sleep(50 * time.Millisecond)
+		pr.readIO.Unlock()
+		_, err := preview.ReadAt(make([]byte, 4), 0)
+		done <- err
+	}()
+	<-started
+	closed := make(chan struct{})
+	go func() {
+		_ = preview.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not join active I/O")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked read did not finish after Close")
+	}
+}
+
+func TestPreviewConcurrentOpenAtomic(t *testing.T) {
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	writeVerifiedPiece(t, s, rec, data, 0)
+
+	const n = 8
+	type result struct {
+		p   PreviewReader
+		err error
+	}
+	results := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			p, err := s.OpenPreview(rec.ID, 0)
+			results <- result{p: p, err: err}
+		}()
+	}
+	ok := 0
+	var keep PreviewReader
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err == nil {
+			ok++
+			if keep == nil {
+				keep = r.p
+			} else {
+				_ = r.p.Close()
+			}
+		}
+	}
+	if keep != nil {
+		_ = keep.Close()
+	}
+	if ok != 1 {
+		t.Fatalf("expected exactly one successful open, got %d", ok)
+	}
+}
+
+func TestPauseOtherTorrentLeavesPreview(t *testing.T) {
+	data, metadata := recoveryMetadata(t)
+	dir := t.TempDir()
+	s := testEngineAt(t, dir)
+	rec := addRecoveryTorrent(t, s, metadata)
+	otherData := bytes.Repeat([]byte("other torrent payload."), 8192)
+	otherMeta := func() string {
+		info := metainfo.Info{Name: "other.bin", Length: int64(len(otherData)), PieceLength: 16 * 1024}
+		for start := 0; start < len(otherData); start += int(info.PieceLength) {
+			hash := sha1.Sum(otherData[start:min(start+int(info.PieceLength), len(otherData))])
+			info.Pieces = append(info.Pieces, hash[:]...)
+		}
+		encoded, err := bencode.Marshal(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mi := metainfo.MetaInfo{InfoBytes: encoded}
+		var buf bytes.Buffer
+		if err := mi.Write(&buf); err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(buf.Bytes())
+	}()
+	other := addRecoveryTorrent(t, s, otherMeta)
+	if other.ID == rec.ID || other.InfoHash == rec.InfoHash {
+		t.Fatal("expected a distinct torrent for target-aware pause")
+	}
+	destination, err := os.CreateTemp(t.TempDir(), "partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	fd := int(destination.Fd())
+	body, _ := json.Marshal(ConfigureRequest{ID: rec.ID, Descriptors: []*int{&fd}, Selected: []int{0}})
+	if code, response := s.DispatchControl("POST", "/configure", string(body)); code != 200 {
+		t.Fatalf("configure: %d %s", code, response)
+	}
+	writeVerifiedPiece(t, s, rec, data, 0)
+	preview, err := s.OpenPreview(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preview.Close()
+	if code, response := s.DispatchControl("POST", "/pause", `{"id":"`+other.ID+`"}`); code != 200 {
+		t.Fatalf("pause other: %d %s", code, response)
+	}
+	s.mu.Lock()
+	active := s.previewActive
+	s.mu.Unlock()
+	if active == nil {
+		t.Fatal("pausing unrelated torrent must not close this preview")
 	}
 }
