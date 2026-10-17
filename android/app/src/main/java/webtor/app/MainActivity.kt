@@ -45,6 +45,13 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("playbackUri", launchedPlaybackUri)
         outState.putStringArrayList("playbackItems", ArrayList(launchedPlaybackItems))
+        val currentUi = session.ui.value
+        if (currentUi.screen == Screen.Settings) {
+            outState.putString("savedScreen", Screen.Settings.name)
+        } else if (currentUi.screen == Screen.Files && currentUi.openTorrentKey != null) {
+            outState.putString("savedScreen", Screen.Files.name)
+            outState.putString("savedOpenKey", currentUi.openTorrentKey)
+        }
         super.onSaveInstanceState(outState)
     }
 
@@ -61,11 +68,22 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         launchedPlaybackUri = savedInstanceState?.getString("playbackUri")
         launchedPlaybackItems = savedInstanceState?.getStringArrayList("playbackItems")?.toSet().orEmpty()
+        val savedScreen = savedInstanceState?.getString("savedScreen")
+        val savedOpenKey = savedInstanceState?.getString("savedOpenKey")
+        if (savedScreen == Screen.Settings.name) {
+            session.openSettings()
+        } else if (savedScreen == Screen.Files.name && savedOpenKey != null) {
+            session.openDetails(savedOpenKey)
+        }
         if (savedInstanceState == null) handleIncoming(intent)
         intent.getStringExtra("open_key")?.let { session.openDetails(it) }
         setContent {
             val state by session.ui.collectAsState()
-            GaleTheme(dark = state.darkTheme) {
+            GaleTheme(
+                dark = state.darkTheme,
+                theme = state.appTheme,
+                reducedEffects = state.reducedEffects,
+            ) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     when (state.screen) {
                         Screen.Prepare -> {
