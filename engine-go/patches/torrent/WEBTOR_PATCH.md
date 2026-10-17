@@ -11,10 +11,11 @@ with one upstream fix backported:
 
 Additional local hook for experimental anti-DPI:
 
-- `OutgoingTCPConnHook` / `SetOutgoingTCPConnHook` in `client.go` wraps
-  successfully dialed TCP peer connections. Webtor installs a write-split
-  stream adapter here so outgoing TCP peers are adapted without racing an
-  untreated dialer. UDP/uTP dialers are unchanged.
+- `Client.SetOutgoingTCPConnHook` in `client.go` installs a per-client wrapper
+  for successfully dialed TCP peer connections (stored on `Client`, threaded
+  through `dialPool`/`dialFromSocket`). Webtor installs a write-split stream
+  adapter here so outgoing TCP peers are adapted without a process-global race
+  across EngineServer instances. UDP/uTP dialers are unchanged.
 
 All other upstream source files are unchanged aside from the items above. This
 avoids an unrelated engine upgrade. The original LICENSE is included. The parent

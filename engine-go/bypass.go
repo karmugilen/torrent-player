@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/anacrolix/torrent"
 )
 
 const (
@@ -53,6 +51,7 @@ type splitConn struct {
 	mu        sync.Mutex
 	remaining int
 	delay     time.Duration
+	disabled  atomic.Bool
 }
 
 func newSplitConn(c net.Conn) net.Conn {
@@ -63,6 +62,9 @@ func newSplitConn(c net.Conn) net.Conn {
 }
 
 func (c *splitConn) Write(b []byte) (int, error) {
+	if c.disabled.Load() {
+		return c.Conn.Write(b)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.remaining <= 0 || len(b) <= 1 {
@@ -72,8 +74,6 @@ func (c *splitConn) Write(b []byte) (int, error) {
 	for len(b) > 0 {
 		n := 1
 		if c.remaining <= 0 {
-			n = len(b)
-		} else if len(b) < n {
 			n = len(b)
 		}
 		if c.remaining > 0 && n > c.remaining {
@@ -90,12 +90,31 @@ func (c *splitConn) Write(b []byte) (int, error) {
 		if err != nil {
 			return total, err
 		}
+		if wrote == 0 {
+			return total, fmt.Errorf("tcp-write-split: zero-progress write")
+		}
 		b = b[wrote:]
 		if c.remaining > 0 && len(b) > 0 && c.delay > 0 {
 			time.Sleep(c.delay)
 		}
 	}
 	return total, nil
+}
+
+func (c *splitConn) disableSplit() {
+	c.disabled.Store(true)
+}
+
+func isLoopbackAddr(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *EngineServer) bypassSnapshot() bypassStatus {
@@ -134,7 +153,9 @@ func (s *EngineServer) setBypassEnabled(enabled bool) bypassStatus {
 		s.bypass.active = false
 		s.bypass.mode = bypassModeOff
 		s.bypass.coverage = nil
-		torrent.SetOutgoingTCPConnHook(nil)
+		if s.client != nil {
+			s.client.SetOutgoingTCPConnHook(nil)
+		}
 		return s.bypassStatusLocked()
 	}
 	return s.bypassStatusLocked()
@@ -146,14 +167,22 @@ func (s *EngineServer) activateBypassLocked() error {
 	}
 	s.bypass.epoch.Add(1)
 	epoch := s.bypass.epoch.Load()
-	torrent.SetOutgoingTCPConnHook(func(c net.Conn) net.Conn {
+	s.client.SetOutgoingTCPConnHook(func(c net.Conn) net.Conn {
 		if s.bypass.epoch.Load() != epoch {
+			return c
+		}
+		// Preserve loopback media/control peer traffic untreated.
+		if ra := c.RemoteAddr(); ra != nil && isLoopbackAddr(ra.String()) {
 			return c
 		}
 		return newSplitConn(c)
 	})
 	if s.trackerSockets != nil {
 		s.trackerSockets.setSplit(true)
+		// Existing pooled tracker sockets were dialed untreated; reset so new
+		// announces reconnect under the split dialer. Coverage describes new
+		// connections after activation.
+		s.trackerSockets.reset()
 	}
 	s.bypass.active = true
 	s.bypass.mode = bypassModeTCPSplit
@@ -164,7 +193,9 @@ func (s *EngineServer) activateBypassLocked() error {
 
 func (s *EngineServer) deactivateBypassLocked() {
 	s.bypass.epoch.Add(1)
-	torrent.SetOutgoingTCPConnHook(nil)
+	if s.client != nil {
+		s.client.SetOutgoingTCPConnHook(nil)
+	}
 	if s.trackerSockets != nil {
 		s.trackerSockets.setSplit(false)
 		s.trackerSockets.reset()
@@ -207,12 +238,8 @@ func (d *networkDialer) DialContext(ctx context.Context, network, address string
 	split := d.split
 	d.mu.Unlock()
 	// Preserve loopback media/control traffic untreated.
-	if host, _, err := net.SplitHostPort(address); err == nil {
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			split = false
-		} else if host == "localhost" {
-			split = false
-		}
+	if isLoopbackAddr(address) {
+		split = false
 	}
 	c, err := (&net.Dialer{Timeout: 6 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, address)
 	if err != nil {
