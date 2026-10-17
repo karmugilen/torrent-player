@@ -217,8 +217,78 @@ class DownloadStorage(private val context: Context) {
         }
     }
 
+    private val snapshotsDir get() = File(context.filesDir, "snapshots").apply { mkdirs() }
+    private val tombstonesFile get() = File(snapshotsDir, "tombstones.txt")
+    private val metaDir get() = File(context.filesDir, "torrent_meta").apply { mkdirs() }
+
+    fun retireTorrent(key: String) {
+        if (key.isBlank()) return
+        runCatching {
+            val set = loadTombstones().toMutableSet()
+            set.add(key)
+            val tmp = File(snapshotsDir, "tombstones.tmp")
+            tmp.writeText(set.joinToString("\n"))
+            tmp.renameTo(tombstonesFile)
+            File(metaDir, "$key.json").delete()
+        }
+    }
+
+    fun loadTombstones(): Set<String> = runCatching {
+        if (!tombstonesFile.exists()) emptySet()
+        else tombstonesFile.readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    }.getOrDefault(emptySet())
+
+    fun storageAccessWarning(): String? {
+        val current = folder ?: return null
+        val uri = Uri.parse(current)
+        val hasPermission = resolver.persistedUriPermissions.any { it.uri == uri && it.isWritePermission }
+        return if (!hasPermission) {
+            "Storage location '${folderName}' is inaccessible. Reselect folder in Settings to restore access."
+        } else null
+    }
+
     fun save(entries: List<DownloadEntry>) {
-        check(prefs.edit().putString("library", encodeLibrary(entries)).commit()) { "Could not save download library" }
+        val encoded = encodeLibrary(entries)
+        check(prefs.edit().putString("library", encoded).commit()) { "Could not save download library" }
+        // Bounded snapshots with atomic replacement
+        runCatching {
+            val snapshotFile = File(snapshotsDir, "snapshot-${System.currentTimeMillis()}.json")
+            val tmp = File(snapshotsDir, "snapshot.tmp")
+            tmp.writeText(encoded)
+            if (tmp.renameTo(snapshotFile)) {
+                val allSnapshots = snapshotsDir.listFiles { _, name -> name.startsWith("snapshot-") && name.endsWith(".json") }
+                    ?.sortedByDescending { it.lastModified() }
+                    .orEmpty()
+                if (allSnapshots.size > 3) {
+                    allSnapshots.drop(3).forEach { it.delete() }
+                }
+            }
+        }
+        // Versioned per-torrent metadata isolation
+        runCatching {
+            val activeKeys = entries.map { it.key }.toSet()
+            entries.forEach { e ->
+                if (e.metadata.isNotBlank() || e.metadataReady) {
+                    val metaObj = JSONObject().apply {
+                        put("version", 1)
+                        put("key", e.key)
+                        put("title", e.title)
+                        put("source", e.source)
+                        put("metadata", e.metadata)
+                        put("metadataReady", e.metadataReady)
+                        put("generation", e.generation)
+                        put("addedAt", e.addedAt)
+                    }
+                    val tmpMeta = File(metaDir, "${e.key}.tmp")
+                    tmpMeta.writeText(metaObj.toString())
+                    tmpMeta.renameTo(File(metaDir, "${e.key}.json"))
+                }
+            }
+            metaDir.listFiles { _, name -> name.endsWith(".json") }?.forEach { f ->
+                val k = f.name.removeSuffix(".json")
+                if (k !in activeKeys) f.delete()
+            }
+        }
     }
 
     fun exportJson(): String = prefs.getString("library", "[]") ?: "[]"
@@ -247,20 +317,46 @@ class DownloadStorage(private val context: Context) {
             }
             loadWarning = "Some saved downloads could not be restored. Their library records were preserved for recovery; files have not been deleted."
         }
-        val array = try { JSONArray(raw) } catch (_: org.json.JSONException) {
-            preserveDamagedLibrary()
+        fun trySnapshotFallback(): List<DownloadEntry> {
+            val tombstones = loadTombstones()
+            val latestSnapshot = snapshotsDir.listFiles { _, name -> name.startsWith("snapshot-") && name.endsWith(".json") }
+                ?.maxByOrNull { it.lastModified() }
+            if (latestSnapshot != null && latestSnapshot.exists()) {
+                val snapshotRaw = runCatching { latestSnapshot.readText() }.getOrNull()
+                if (!snapshotRaw.isNullOrBlank()) {
+                    val fallback = parseLibrarySnapshot(snapshotRaw, tombstones)
+                    if (fallback.isNotEmpty()) {
+                        loadWarning = "Recovered library from backup snapshot. Damaged records were preserved for diagnosis."
+                        return fallback
+                    }
+                }
+            }
             return emptyList()
         }
+
+        val array = try { JSONArray(raw) } catch (_: org.json.JSONException) {
+            preserveDamagedLibrary()
+            val fallback = trySnapshotFallback()
+            return fallback
+        }
         var damaged = false
+        val tombstones = loadTombstones()
         val result = (0 until array.length()).mapNotNull { i ->
             try {
-                parseEntry(array.getJSONObject(i))
+                val entry = parseEntry(array.getJSONObject(i))
+                if (entry.key in tombstones) null else entry
             } catch (_: Exception) {
                 damaged = true
                 null
             }
         }
-        if (damaged) preserveDamagedLibrary()
+        if (damaged) {
+            preserveDamagedLibrary()
+            if (result.isEmpty()) {
+                val fallback = trySnapshotFallback()
+                if (fallback.isNotEmpty()) return fallback
+            }
+        }
         return result
     }
 

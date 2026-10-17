@@ -64,4 +64,28 @@ class DownloadRestoreTest {
         assertFalse(shouldRestoreAtStartup(ready))
         assertTrue(shouldRestoreAtStartup(ready.copy(selected = setOf(0), files = ready.files.map { it.copy(uri = "content://downloads/1") })))
     }
+
+    @Test
+    fun parseLibrarySnapshotFiltersOutTombstones() {
+        val entry1 = pending().copy(key = "key1", title = "Torrent 1")
+        val entry2 = pending().copy(key = "key2", title = "Torrent 2")
+        val encoded = DownloadStorage.encodeLibrary(listOf(entry1, entry2))
+
+        val restored = parseLibrarySnapshot(encoded, setOf("key1"))
+        assertEquals(1, restored.size)
+        assertEquals("key2", restored[0].key)
+    }
+
+    @Test
+    fun parseLibrarySnapshotPreservesValidEntriesWhenOneIsCorrupt() {
+        val entry1 = pending().copy(key = "valid-key", title = "Valid Torrent")
+        val validJson = org.json.JSONArray(DownloadStorage.encodeLibrary(listOf(entry1))).getJSONObject(0)
+        // Corrupt entry has missing key / invalid structure
+        val corruptJson = org.json.JSONObject("""{"badField":123}""")
+        val array = org.json.JSONArray().put(validJson).put(corruptJson)
+
+        val restored = parseLibrarySnapshot(array.toString(), emptySet())
+        assertEquals(1, restored.size)
+        assertEquals("valid-key", restored[0].key)
+    }
 }

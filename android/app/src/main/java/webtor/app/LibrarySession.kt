@@ -1031,6 +1031,7 @@ class LibrarySession(
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
+                withContext(io) { storage.retireTorrent(target.key) }
                 persist()
                 refreshStorageStats()
                 syncService()
@@ -1091,6 +1092,7 @@ class LibrarySession(
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
+                withContext(io) { storage.retireTorrent(target.key) }
                 persist()
                 refreshStorageStats()
                 syncService()

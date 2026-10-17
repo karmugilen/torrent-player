@@ -23,7 +23,27 @@ fun restoredPendingDiscovery(entry: DownloadEntry, id: String, status: TorrentSt
         lifecycleState = if (startPaused) EntryLifecycleState.PAUSED else EntryLifecycleState.DOWNLOADING,
     )
 
-/** Retry the initial read and metadata handoff even when their native event was already consumed. */
 fun needsDiscoveryStatusRefresh(entry: DownloadEntry): Boolean =
     entry.engineId != null && !entry.paused && !entry.controlsBusy() && !entry.complete &&
         (!entry.metadataReady || entry.liveStatus() == null)
+
+fun parseLibrarySnapshot(rawJson: String, tombstones: Set<String> = emptySet()): List<DownloadEntry> {
+    val array = try {
+        org.json.JSONArray(rawJson)
+    } catch (_: Exception) {
+        return emptyList()
+    }
+    val result = ArrayList<DownloadEntry>()
+    for (i in 0 until array.length()) {
+        try {
+            val obj = array.getJSONObject(i)
+            val entry = DownloadStorage.parseEntry(obj)
+            if (entry.key !in tombstones) {
+                result.add(entry)
+            }
+        } catch (_: Exception) {
+            // Skip individual damaged record to isolate recovery
+        }
+    }
+    return result
+}
