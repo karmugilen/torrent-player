@@ -109,6 +109,9 @@ func (s *sampler) nextJob(now time.Time) (discoveryJob, bool) {
 }
 
 func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
+	if kind == jobCache && s.caches != nil && !s.caches.available() {
+		return discoveryJob{}, false
+	}
 	s.d.mu.Lock()
 	defer s.d.mu.Unlock()
 	s.mu.Lock()
@@ -150,7 +153,7 @@ func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 	s.d.records[chosen.Hash] = chosen
 	s.d.state.Active++
 	if kind == jobPeer {
-		s.d.state.Pending--
+		s.d.state.Pending = max(0, s.d.state.Pending-1)
 	}
 	return discoveryJob{hash: chosen.Hash, sources: append([]krpc.NodeInfo(nil), s.sources[chosen.Hash]...), kind: kind}, true
 }
@@ -171,7 +174,6 @@ func (s *sampler) releaseJob(hash string) {
 		// when that batch was empty. No backlog rescan is needed for handoff.
 		if rec, ok := s.d.records[hash]; ok && s.cacheTried[hash] && s.eligibleLocked(rec, time.Now(), jobPeer) {
 			s.dispatch[jobPeer].offer(rec, time.Now())
-			s.d.state.Pending++
 		}
 	}
 }

@@ -133,6 +133,9 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
   hand off directly to the peer batch. Both stages count as one retry attempt.
   Recently reachable swarms outrank overdue empty retries, with retry fairness
   maintained independently in each worker pool.
+- Cache workers skip admission while all mirrors are cooling down. A cooldown
+  race or timeout waiting for source slots is not a completed network lookup or
+  a healthy miss; it retries cache work without consuming a hash retry attempt.
 - CSV misses are remembered per loaded dump. Pending matching skips unchanged
   pending revisions; loading a new dump automatically invalidates old misses.
 - Rust catalog parsing uses serde_json, preserves Unicode/escaped punctuation,

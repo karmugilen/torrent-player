@@ -307,6 +307,45 @@ func TestDispatchSeesNewSamplesAfterBoundedRefresh(t *testing.T) {
 	}
 }
 
+func TestCoolingMirrorsDoNotConsumeAttemptsOrCreatePeerHandoffs(t *testing.T) {
+	d := testDashboard(t)
+	hash := strings.Repeat("ac", 20)
+	now := time.Now()
+	d.upsertSampleLocked(hash, now)
+	caches := newMetadataCaches([]string{"https://example.invalid/{hash}"})
+	defer caches.close()
+	caches.sources[0].next = now.Add(time.Minute)
+	s := &sampler{d: d, caches: caches}
+	if _, ok := s.nextJobOf(now, jobCache); ok {
+		t.Fatal("scheduled cache work although no mirror can accept a request")
+	}
+	if d.records[hash].ResolveAttempts != 0 || d.state.Active != 0 {
+		t.Fatal("source cooldown consumed a hash retry attempt")
+	}
+}
+
+func TestMirrorCooldownAfterDispatchIsNotCountedAsNetworkMiss(t *testing.T) {
+	d := testDashboard(t)
+	hash := strings.Repeat("ad", 20)
+	d.upsertSampleLocked(hash, time.Now())
+	caches := newMetadataCaches([]string{"https://example.invalid/{hash}"})
+	defer caches.close()
+	s := &sampler{d: d, caches: caches}
+	job, ok := s.nextJobOf(time.Now(), jobCache)
+	if !ok {
+		t.Fatal("ready cache job missing")
+	}
+	caches.sources[0].next = time.Now().Add(time.Minute)
+	s.resolve(context.Background(), job)
+	s.releaseJob(hash)
+	if d.state.Completed != 0 || d.records[hash].ResolveAttempts != 0 || s.cacheTried[hash] {
+		t.Fatal("cooldown was counted as a network lookup or hash failure")
+	}
+	if _, ok := s.nextJobOf(time.Now(), jobPeer); ok {
+		t.Fatal("cooldown filled the peer backlog without a cache request")
+	}
+}
+
 func TestRepeatedSamplesReceiveNameLookupPriority(t *testing.T) {
 	d := testDashboard(t)
 	now := time.Now()

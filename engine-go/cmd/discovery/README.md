@@ -36,8 +36,8 @@ fast name path: hash→name lookup with no peer upload. It refreshes about once 
 day. A paced remote catalog API still adds browseable names. Already-resolved
 hashes are never re-checked. Name-resolve scheduling scores unresolved hashes by
 seeds, peers, repeated DHT samples, and real retry overdue time so quiet noise
-does not starve hot swarms. The live names/min metric counts only catalog, cache,
-and peer wins (dump fills of already-sampled hashes are shown separately). DHT
+does not starve hot swarms. The live names/min metric counts cache/peer wins and
+new names for DHT-observed hashes; bulk catalog additions are shown separately. DHT
 sampling stays quiet for peer geography only. Movie payload download and upload
 stay disabled. The JSON store has no count cap. The detail drawer can copy a
 magnet link for download in another client.
@@ -51,8 +51,8 @@ Four sampling slots refill independently of slow nodes. Random routing lookups
 refresh discovery every three seconds. Advertised sampling intervals remain
 respected. A DHT limit of 24 sends/second and peer dial limit of 12/second keep
 traffic light. HTTP connections are reused, with up to 12 requests per cache
-source. Challenge HTML and ordinary misses leave mirrors healthy; only transport
-failures and rate limits back them off. Names appear immediately from catalog or
+source. Challenge HTML and ordinary misses leave mirrors healthy; HTTP rate limits
+and server failures back them off. Names appear immediately from catalog or
 cache hits. Cache deadlines are 2.5 seconds. Losing HTTP requests are canceled
 and joined before a peer job finishes. Completed empty lookups release their
 slot as soon as cache and source checks finish. Lookups with no peer sightings
@@ -83,7 +83,7 @@ The JSON store has no count cap: every named and pending observation is retained
 until age expiry. Named rows reload for 30 days; unresolved DHT noise expires
 after 24 hours. Storage is a plain JSON file only (no SQL) under
 `~/.cache/torrent-player/discovery.json` (or `$XDG_CACHE_HOME`). A local copy of
-the collaborative `torrents.csv` dump (~175MB, refreshed about monthly) lives
+the collaborative `torrents.csv` dump (~175MB, checked hourly and fetched when the local copy is over 24 hours old) lives
 beside it as `torrents.csv` and resolves DHT hashes to names with no peer upload.
 The remote torrents-csv search API still seeds browseable names. Raw peer
 addresses are transient and are not exposed or saved. The page can search stored
@@ -161,12 +161,22 @@ the first failed cycle retries after 30 seconds instead of skipping to 60.
 Recently reachable swarms take priority over old empty retries; each pool still
 reserves one dispatch in four for due retries.
 
+When all mirrors are cooling down, cache workers wait rather than marking hashes
+as misses. If sources become unavailable after dispatch, that skipped work does
+not inflate completed lookups or consume a retry attempt. Healthy cache misses
+still hand off immediately to peers.
+
 An unchanged CSV is checked at most once per pending hash. A refreshed index
 invalidates those misses automatically. Rust uses a complete JSON parser for
 catalog names, including Unicode escapes, quotes and braces; malformed JSON and
 HTML trigger fallback instead of being treated as successful empty pages. An
 in-flight exact metadata result can correct a catalog title without increasing
 the new-name count twice. Existing named rows do not start new verification jobs.
+
+The synthetic 100,000-hash waiting-backlog benchmark measured roughly 42ms per
+dispatch before batching versus 0.15ms afterward, including periodic refreshes
+under a simulated worker polling clock. This measures scheduling overhead, not
+public-network metadata availability or a guaranteed new-name rate.
 
 Rust now provides compact token/prefix search postings and parallel pending-hash
 lookup in batches. The Go fallback remains supported. A 100,000-row browse test

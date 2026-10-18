@@ -300,9 +300,22 @@ func (s *sampler) publishResolved(j discoveryJob, rec observation, wasResolved b
 	s.d.applyNameLocked(namePatch{Hash: j.hash, Name: rec.Name, Source: rec.Source, Size: rec.Size, Files: rec.Files, Kind: rec.Kind, ResolutionMS: time.Since(started).Milliseconds()}, time.Now().UTC())
 }
 
+// resolveCache returns whether a source request was attempted, for lookup rates.
 func (s *sampler) resolveCache(parent context.Context, j discoveryJob, hash metainfo.Hash, rec observation, wasResolved bool, started time.Time) bool {
+	info, attempted := s.caches.fetchAttempt(parent, hash, cacheFetchTimeout)
+	if !attempted {
+		// A source outage is not a miss for this hash. Retry the cache soon,
+		// without consuming its retry budget or filling the peer backlog.
+		s.d.mu.Lock()
+		if latest, ok := s.d.records[j.hash]; ok && !latest.Resolved {
+			latest.NextAttempt = time.Now().Add(5 * time.Second)
+			latest.ResolveAttempts = max(0, latest.ResolveAttempts-1)
+			s.d.records[j.hash] = latest
+		}
+		s.d.mu.Unlock()
+		return false
+	}
 	s.markCacheTried(j.hash)
-	info := s.caches.fetchWithin(parent, hash, cacheFetchTimeout)
 	if info == nil {
 		// Free the hash for a peer worker immediately after a healthy miss.
 		s.d.mu.Lock()
@@ -311,10 +324,10 @@ func (s *sampler) resolveCache(parent context.Context, j discoveryJob, hash meta
 			s.d.records[j.hash] = latest
 		}
 		s.d.mu.Unlock()
-		return false
+		return true
 	}
 	if !applyMetadata(&rec, info, "cache", time.Since(started)) {
-		return false
+		return true
 	}
 	s.publishResolved(j, rec, wasResolved, started)
 	return true
@@ -348,8 +361,9 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		// Defensive: named rows must not consume cache/peer slots.
 		return
 	}
+	countLookup := true
 	defer func() {
-		if parent.Err() == nil {
+		if parent.Err() == nil && countLookup {
 			s.d.mu.Lock()
 			s.d.state.Completed++
 			s.d.recordLookupRateLocked(time.Now())
@@ -358,7 +372,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		}
 	}()
 	if j.kind == jobCache {
-		_ = s.resolveCache(parent, j, hash, rec, wasResolved, started)
+		countLookup = s.resolveCache(parent, j, hash, rec, wasResolved, started)
 		return
 	}
 	defer s.clearCacheTried(j.hash)

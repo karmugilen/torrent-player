@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent/bencode"
@@ -60,6 +61,15 @@ func newMetadataCaches(templates []string) *metadataCaches {
 	return c
 }
 func (c *metadataCaches) close() { c.client.CloseIdleConnections() }
+
+func (c *metadataCaches) available() bool {
+	for _, source := range c.sources {
+		if source.available() {
+			return true
+		}
+	}
+	return false
+}
 
 func parseCacheMetadata(blob []byte, expected metainfo.Hash) (*metainfo.Info, error) {
 	if len(blob) > maxMetadataBytes {
@@ -121,10 +131,18 @@ func (c *metadataCaches) fetch(parent context.Context, hash metainfo.Hash) *meta
 }
 
 func (c *metadataCaches) fetchWithin(parent context.Context, hash metainfo.Hash, timeout time.Duration) *metainfo.Info {
+	info, _ := c.fetchAttempt(parent, hash, timeout)
+	return info
+}
+
+// attempted distinguishes a real network lookup from all mirrors cooling down
+// or the entire deadline spent waiting for a source's concurrency slot.
+func (c *metadataCaches) fetchAttempt(parent context.Context, hash metainfo.Hash, timeout time.Duration) (info *metainfo.Info, attempted bool) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	results := make(chan *metainfo.Info, len(c.sources))
 	var work sync.WaitGroup
-	defer func() { cancel(); work.Wait() }()
+	var calls atomic.Int32
+	defer func() { cancel(); work.Wait(); attempted = calls.Load() > 0 }()
 	started := 0
 	for _, source := range c.sources {
 		if !source.available() {
@@ -143,6 +161,7 @@ func (c *metadataCaches) fetchWithin(parent context.Context, hash metainfo.Hash,
 			if !s.available() {
 				return
 			}
+			calls.Add(1)
 			info := c.fetchSource(ctx, s, hash)
 			if info != nil {
 				select {
@@ -153,22 +172,22 @@ func (c *metadataCaches) fetchWithin(parent context.Context, hash metainfo.Hash,
 		}(source)
 	}
 	if started == 0 {
-		return nil
+		return nil, false
 	}
 	done := make(chan struct{})
 	go func() { work.Wait(); close(done) }()
 	select {
 	case info := <-results:
-		return info
+		return info, false
 	case <-done:
 		select {
 		case info := <-results:
-			return info
+			return info, false
 		default:
-			return nil
+			return nil, false
 		}
 	case <-ctx.Done():
-		return nil
+		return nil, false
 	}
 }
 
