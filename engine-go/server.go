@@ -87,6 +87,8 @@ type TorrentRecord struct {
 	// GET /torrent does not walk PieceStateRuns on every progress tick.
 	verifiedGen   int
 	verifiedBytes []int64
+	Seeding       bool
+	seedBase      seedAccount
 }
 
 type EngineServer struct {
@@ -105,6 +107,13 @@ type EngineServer struct {
 	maxPeers        int
 	downloadLimiter *rate.Limiter
 	uploadLimiter   *rate.Limiter
+	seedingEnabled  atomic.Bool
+	seedingAllowed  atomic.Bool
+	seedRatioMilli  atomic.Int64
+	seedTimeMinutes atomic.Int64
+	seedMu          sync.Mutex
+	seedSaveMu      sync.Mutex
+	seedAccounts    map[string]seedAccount
 	// This is a global payload-byte gate. It deliberately does not pause or
 	// remove torrents: peer discovery and metadata exchange must continue.
 	payloadTransfersAllowed atomic.Bool
@@ -161,6 +170,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	cfg.DisableTCP = false
 	cfg.DisableWebtorrent = false
 	cfg.DisablePEX = false
+	cfg.Seed = true // Per-torrent applySeedPolicy gates completed uploads.
 	cfg.DialForPeerConns = true
 	cfg.AcceptPeerConnections = true
 	cfg.AlwaysWantConns = true
@@ -231,6 +241,10 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 		next: slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}),
 	})
 	cfg.Callbacks.StatusUpdated = append(cfg.Callbacks.StatusUpdated, s.onStatusUpdated)
+	s.seedRatioMilli.Store(1000)
+	s.seedTimeMinutes.Store(60)
+	s.seedingAllowed.Store(true)
+	s.loadSeedAccounts()
 	cfg.Callbacks.CompletedHandshake = func(pc *torrent.PeerConn, hash torrent.InfoHash) {
 		s.mu.RLock()
 		rec := s.recordsByHash[hash.HexString()]
@@ -277,6 +291,7 @@ func (s *EngineServer) rateTrackerLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	var previous [sha256.Size]byte
+	seedTicks := 0
 
 	for {
 		select {
@@ -319,6 +334,11 @@ func (s *EngineServer) rateTrackerLoop() {
 		}
 		s.mu.Unlock()
 		s.sampleTorrentRates(now)
+		s.seedTick()
+		seedTicks++
+		if seedTicks%30 == 0 {
+			s.saveSeedAccounts()
+		}
 		current := s.statusFingerprint()
 		if current != previous {
 			previous = current
@@ -496,6 +516,8 @@ func (s *EngineServer) Close() {
 		}
 		// Capture DHT contacts before the client tears down its servers.
 		s.snapshotDHTContacts()
+		s.seedTick()
+		s.saveSeedAccounts()
 		s.client.Close()
 		s.geoMu.Lock()
 		if s.geoIP != nil {
@@ -922,6 +944,7 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 	hashHex := t.InfoHash().HexString()
 
 	rec := &TorrentRecord{
+		seedBase:   s.seedAccount(hashHex),
 		ID:         id,
 		InfoHash:   hashHex,
 		Torrent:    t,
@@ -1086,7 +1109,9 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		Length:        totalLen,
 		Downloaded:    received,
 		VerifiedBytes: verifiedTotal,
-		Uploaded:      0,
+		Uploaded:      seedTotals(rec).Uploaded,
+		Seeding:       rec.Seeding,
+		SeedRatio:     float64(seedTotals(rec).Uploaded) / float64(max(totalLen, seedTotals(rec).Downloaded, 1)),
 		Files:         files,
 		Trackers:      buildTrackerViews(rec, s.trackerStatusSnapshot(infoHashStr)),
 		Error:         rec.Error,
@@ -1587,6 +1612,7 @@ func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request)
 	up := limiterRate(s.uploadLimiter)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, SettingsResponse{
+		SeedingEnabled: s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
 		DownloadRateBytesSec:    down,
 		UploadRateBytesSec:      up,
@@ -1625,6 +1651,18 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.mu.Lock()
+	if req.SeedingEnabled != nil {
+		s.seedingEnabled.Store(*req.SeedingEnabled)
+	}
+	if req.SeedingAllowed != nil {
+		s.seedingAllowed.Store(*req.SeedingAllowed)
+	}
+	if req.SeedRatioMilli != nil && *req.SeedRatioMilli >= 100 && *req.SeedRatioMilli <= 10000 {
+		s.seedRatioMilli.Store(*req.SeedRatioMilli)
+	}
+	if req.SeedTimeMinutes != nil && *req.SeedTimeMinutes >= 1 && *req.SeedTimeMinutes <= 1440 {
+		s.seedTimeMinutes.Store(*req.SeedTimeMinutes)
+	}
 	if req.MaxPeers >= 8 && req.MaxPeers <= 80 {
 		s.maxPeers = req.MaxPeers
 		for _, rec := range s.records {
@@ -1652,7 +1690,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	// Re-evaluate every torrent after releasing the map lock. This changes only
 	// piece-data admission; it never mutates rec.Paused, so a manual pause is
 	// still in force when the global setting is enabled again.
-	if req.PayloadTransfersAllowed != nil {
+	if req.PayloadTransfersAllowed != nil || req.SeedingEnabled != nil || req.SeedingAllowed != nil || req.SeedRatioMilli != nil || req.SeedTimeMinutes != nil {
 		for _, rec := range records {
 			rec.mu.Lock()
 			s.applyTransferState(rec)
@@ -1660,6 +1698,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, http.StatusOK, SettingsResponse{
+		SeedingEnabled: s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
 		DownloadRateBytesSec:    down,
 		UploadRateBytesSec:      up,

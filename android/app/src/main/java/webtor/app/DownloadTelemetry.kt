@@ -11,7 +11,7 @@ fun DownloadEntry.liveDownloadSpeed(): Long? =
     if (hasActiveTransfer() && !checking) liveStatus()?.downloadSpeed?.coerceAtLeast(0L) else null
 
 fun DownloadEntry.liveUploadSpeed(): Long? =
-    if (hasActiveTransfer() && !checking) liveStatus()?.uploadSpeed?.coerceAtLeast(0L) else null
+    if ((hasActiveTransfer() || liveStatus()?.seeding == true) && !paused && !checking) liveStatus()?.uploadSpeed?.coerceAtLeast(0L) else null
 
 fun DownloadEntry.selectedEta(): Long? {
     if (directPlay) return null
@@ -21,6 +21,7 @@ fun DownloadEntry.selectedEta(): Long? {
 }
 
 fun transferTelemetry(entry: DownloadEntry): String? {
+    if (entry.liveStatus()?.seeding == true) return "Seeding · ↑ ${formatSpeed(entry.liveStatus()?.uploadSpeed ?: 0L)} · ratio ${"%.2f".format(entry.liveStatus()?.seedRatio ?: 0.0)}"
     if (!entry.hasActiveTransfer() || entry.checking) return null
     return buildList {
         add(entry.liveDownloadSpeed()?.let(::formatSpeed) ?: "—")
@@ -44,6 +45,10 @@ data class DownloadNotification(val title: String, val text: String, val progres
 fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String> = emptySet()): DownloadNotification? {
     val active = entries.filter { it.hasActiveTransfer() }
     if (active.isEmpty()) {
+        val seeds = entries.filter { !it.paused && !it.isDeleting && it.liveStatus()?.seeding == true }
+        if (seeds.isNotEmpty()) return DownloadNotification(
+            title = if (seeds.size == 1) seeds.first().title else "${seeds.size} torrents seeding",
+            text = "Seeding · ↑ ${formatSpeed(seeds.sumOf { it.liveStatus()?.uploadSpeed ?: 0L })}", progress = 100, multiple = seeds.size > 1)
         val playing = entries.filter { it.key in playbackKeys && !it.isDeleting }
         return if (playing.isEmpty()) null else DownloadNotification(
             title = if (playing.size == 1) playing.first().title else "Video playback",

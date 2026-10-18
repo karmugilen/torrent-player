@@ -92,6 +92,7 @@ data class DownloadEntry(
         paused || lifecycleState == EntryLifecycleState.PAUSED -> "Paused"
         error != null || lifecycleState == EntryLifecycleState.ERROR -> "Needs attention"
         !metadataReady -> "Waiting for peers"
+        liveStatus()?.seeding == true -> "Seeding"
         complete || lifecycleState == EntryLifecycleState.COMPLETED -> "Complete"
         transferReason != null && transferStage != TransferStage.DOWNLOADING -> transferReason
         paused || (engineId == null && lifecycleState != EntryLifecycleState.DOWNLOADING) ||

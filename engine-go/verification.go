@@ -235,4 +235,5 @@ func (s *EngineServer) applyTransferState(rec *TorrentRecord) {
 		s.applyVideoStartupHints(rec)
 	}
 	s.applyBackgroundFocus(rec)
+	s.applySeedPolicy(rec, active, false)
 }

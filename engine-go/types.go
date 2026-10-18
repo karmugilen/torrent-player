@@ -42,6 +42,8 @@ type TrackerView struct {
 }
 
 type TorrentView struct {
+	Seeding       bool          `json:"seeding"`
+	SeedRatio     float64       `json:"seedRatio"`
 	ID            string        `json:"id"`
 	InfoHash      *string       `json:"infoHash"`
 	Name          *string       `json:"name"`
@@ -159,6 +161,9 @@ type MetadataResponse struct {
 }
 
 type SettingsResponse struct {
+	SeedingEnabled       bool  `json:"seedingEnabled"`
+	SeedRatioMilli       int64 `json:"seedRatioMilli"`
+	SeedTimeMinutes      int64 `json:"seedTimeMinutes"`
 	MaxPeers             int   `json:"maxPeers"`
 	DownloadRateBytesSec int64 `json:"downloadRateBytesSec"`
 	UploadRateBytesSec   int64 `json:"uploadRateBytesSec"`
@@ -168,6 +173,10 @@ type SettingsResponse struct {
 }
 
 type SettingsRequest struct {
+	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`
+	SeedingAllowed       *bool  `json:"seedingAllowed,omitempty"`
+	SeedRatioMilli       *int64 `json:"seedRatioMilli,omitempty"`
+	SeedTimeMinutes      *int64 `json:"seedTimeMinutes,omitempty"`
 	MaxPeers             int    `json:"maxPeers"`
 	DownloadRateBytesSec *int64 `json:"downloadRateBytesSec,omitempty"`
 	UploadRateBytesSec   *int64 `json:"uploadRateBytesSec,omitempty"`

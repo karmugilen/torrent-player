@@ -63,6 +63,12 @@ fun SettingsScreen(
     onPickFolder: () -> Unit = {},
     onClearFolder: () -> Unit = {},
     onDynamicColors: (Boolean) -> Unit = {},
+    onSeeding: (Boolean) -> Unit = {},
+    onSeedRatio: (Int) -> Unit = {},
+    onSeedTime: (Int) -> Unit = {},
+    onSeedUpload: (Int) -> Unit = {},
+    onSeedWiFi: (Boolean) -> Unit = {},
+    onSeedCharging: (Boolean) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -284,6 +290,44 @@ fun SettingsScreen(
                                     color = colors.onSurfaceVariant,
                                 )
                             }
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Seed completed downloads", style = MaterialTheme.typography.bodyLarge)
+                                    Text("Share verified saved pieces after completion", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                }
+                                Switch(checked = state.seedingEnabled, onCheckedChange = onSeeding)
+                            }
+                            if (state.seedingEnabled) {
+                                Text("Stop at share ratio or active seeding time, whichever comes first. Seeding pauses during playback.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                Text("Share ratio", style = MaterialTheme.typography.labelLarge)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(500, 1000, 2000).forEach { ratio ->
+                                        FilterChip(selected = state.seedRatioMilli == ratio, onClick = { onSeedRatio(ratio) }, label = { Text("${ratio / 1000.0}×") })
+                                    }
+                                }
+                                Text("Active seeding time per torrent", style = MaterialTheme.typography.labelLarge)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(15, 60, 180).forEach { minutes ->
+                                        FilterChip(selected = state.seedTimeMinutes == minutes, onClick = { onSeedTime(minutes) }, label = { Text("$minutes min") })
+                                    }
+                                }
+                                Text("Upload cap", style = MaterialTheme.typography.labelLarge)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(128, 256, 512).forEach { speed ->
+                                        FilterChip(selected = state.seedUploadKiB == speed, onClick = { onSeedUpload(speed) }, label = { Text("$speed KiB/s") })
+                                    }
+                                }
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Seed on Wi-Fi only", Modifier.weight(1f))
+                                    Switch(checked = state.seedWiFiOnly, onCheckedChange = onSeedWiFi)
+                                }
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Seed while charging only", Modifier.weight(1f))
+                                    Switch(checked = state.seedChargingOnly, onCheckedChange = onSeedCharging)
+                                }
+                                Text("Upload totals and ratio survive restarts. Connection limits remain unchanged.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            }
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
                             Slider(
                                 value = state.maxPeers.toFloat(),
                                 onValueChange = { onMaxPeers(it.toInt()) },

@@ -69,6 +69,8 @@ data class TorrentStatus(
     val focusedFile: Int? = null,
     val warning: String? = null,
     val verifiedBytes: Long = 0L,
+    val seeding: Boolean = false,
+    val seedRatio: Double = 0.0,
 )
 
 data class LivePreviewState(val active: Boolean, val byteOffset: Long, val signature: String)
@@ -90,6 +92,11 @@ data class PeerConnection(
     val downloaded: Long,
     val uploaded: Long,
     val country: String? = null,
+    val source: String = "",
+    val verifiedBytes: Long = 0L,
+    val urgentVerifiedBytes: Long = 0L,
+    val metadataChunks: Long = 0L,
+    val badPieces: Long = 0L,
 )
 
 data class TorrentConnections(
@@ -217,6 +224,11 @@ class EngineClient(
                     downloaded = peer.optLong("downloaded"),
                     uploaded = peer.optLong("uploaded"),
                     country = peer.nullableString("country"),
+                    source = peer.optString("source"),
+                    verifiedBytes = peer.optLong("verifiedBytes"),
+                    urgentVerifiedBytes = peer.optLong("urgentVerifiedBytes"),
+                    metadataChunks = peer.optLong("metadataChunks"),
+                    badPieces = peer.optLong("badPieces"),
                 )
             },
         )
@@ -253,6 +265,12 @@ class EngineClient(
     fun focus(id: String, fileIndex: Int?) { post("/focus", JSONObject().put("id", id).apply { if (fileIndex == null) put("fileIndex", JSONObject.NULL) else put("fileIndex", fileIndex) }) }
 
     fun maxPeers(): Int = get("/settings").optInt("maxPeers", 40)
+
+    fun setSeeding(enabled: Boolean, allowed: Boolean, ratioMilli: Int, minutes: Int, uploadKiB: Int) {
+        post("/settings", JSONObject().put("seedingEnabled", enabled).put("seedingAllowed", allowed)
+            .put("seedRatioMilli", ratioMilli).put("seedTimeMinutes", minutes)
+            .put("uploadRateBytesSec", if (enabled) uploadKiB.toLong() * 1024L else 0L))
+    }
 
     fun setMaxPeers(maxPeers: Int): Int =
         post("/settings", JSONObject().put("maxPeers", maxPeers)).optInt("maxPeers", maxPeers)
@@ -427,6 +445,8 @@ class EngineClient(
                 length = json.optLong("length"),
                 downloaded = json.optLong("downloaded"),
                 uploaded = json.optLong("uploaded"),
+                seeding = json.optBoolean("seeding"),
+                seedRatio = json.optDouble("seedRatio", 0.0),
                 files = files,
                 trackers = trackers,
                 error = if (json.isNull("error")) null else json.optString("error").ifEmpty { null },

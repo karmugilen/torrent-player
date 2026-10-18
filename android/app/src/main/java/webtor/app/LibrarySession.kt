@@ -134,6 +134,12 @@ class LibrarySession(
                         library = loaded,
                         loadWarning = storage.loadWarning,
                         maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 80),
+                        seedingEnabled = settings.getBoolean("seedingEnabled", false),
+                        seedRatioMilli = settings.getInt("seedRatioMilli", 1000).coerceIn(100, 10000),
+                        seedTimeMinutes = settings.getInt("seedTimeMinutes", 60).coerceIn(1, 1440),
+                        seedUploadKiB = settings.getInt("seedUploadKiB", 256).coerceIn(16, 4096),
+                        seedWiFiOnly = settings.getBoolean("seedWiFiOnly", true),
+                        seedChargingOnly = settings.getBoolean("seedChargingOnly", false),
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
@@ -157,6 +163,7 @@ class LibrarySession(
                 waitForEngine()
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
+                    applySeedingSettings(force = true)
                     runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
                     setAntiDpi(_ui.value.antiDpiEnabled)
                     val nativeCache = runCatching { withContext(io) { client.getCache() } }.getOrNull()
@@ -312,6 +319,7 @@ class LibrarySession(
                     client.setPayloadTransfersAllowed(allowed)
                     client.networkChanged(snapshot.generation, snapshot.connected)
                 }
+                applySeedingSettings()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -395,6 +403,39 @@ class LibrarySession(
             if (_ui.value.engineReady) runCatching { withContext(io) { client.setMaxPeers(n) } }
         }
     }
+    private var lastSeedSignature: String? = null
+
+    private suspend fun applySeedingSettings(force: Boolean = false) {
+        if (!_ui.value.engineReady) return
+        val state = _ui.value
+        val battery = app.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val batteryStatus = battery?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+        val charging = batteryStatus == android.os.BatteryManager.BATTERY_STATUS_CHARGING || batteryStatus == android.os.BatteryManager.BATTERY_STATUS_FULL
+        val playing = (app as? WebtorApp)?.playbackLeases?.activeKeys().orEmpty().isNotEmpty()
+        val allowed = state.networkAllowed && networkSnapshot.connected && (!state.seedWiFiOnly || networkSnapshot.wifi) && (!state.seedChargingOnly || charging) && !playing
+        val signature = "${state.seedingEnabled}:$allowed:${state.seedRatioMilli}:${state.seedTimeMinutes}:${state.seedUploadKiB}"
+        if (!force && signature == lastSeedSignature) return
+        runCatching { withContext(io) { client.setSeeding(state.seedingEnabled, allowed, state.seedRatioMilli, state.seedTimeMinutes, state.seedUploadKiB) } }
+            .onSuccess { lastSeedSignature = signature }
+            .onFailure { if (it is CancellationException) throw it; _ui.update { s -> s.copy(error = readableError(it)) } }
+    }
+
+    fun setSeedingEnabled(value: Boolean) {
+        settings.edit().putBoolean("seedingEnabled", value).apply()
+        _ui.update { it.copy(seedingEnabled = value) }
+        scope.launchCommand {
+            applySeedingSettings()
+            if (value) for (entry in _ui.value.library.toList()) {
+                if (entry.complete && !entry.directPlay && !entry.paused && !entry.isDeleting && entry.engineId == null) restoreEntry(entry, startPaused = false)
+            }
+            syncService(force = true)
+        }
+    }
+    fun setSeedRatio(value: Int) { settings.edit().putInt("seedRatioMilli", value).apply(); _ui.update { it.copy(seedRatioMilli = value) }; scope.launch { applySeedingSettings() } }
+    fun setSeedTime(value: Int) { settings.edit().putInt("seedTimeMinutes", value).apply(); _ui.update { it.copy(seedTimeMinutes = value) }; scope.launch { applySeedingSettings() } }
+    fun setSeedUpload(value: Int) { settings.edit().putInt("seedUploadKiB", value).apply(); _ui.update { it.copy(seedUploadKiB = value) }; scope.launch { applySeedingSettings() } }
+    fun setSeedWiFi(value: Boolean) { settings.edit().putBoolean("seedWiFiOnly", value).apply(); _ui.update { it.copy(seedWiFiOnly = value) }; scope.launch { applySeedingSettings() } }
+    fun setSeedCharging(value: Boolean) { settings.edit().putBoolean("seedChargingOnly", value).apply(); _ui.update { it.copy(seedChargingOnly = value) }; scope.launch { applySeedingSettings() } }
     fun focusEntryFile(key: String, index: Int?) {
         scope.launchCommand {
             val e = _ui.value.library.find { it.key == key } ?: return@launchCommand
@@ -1364,7 +1405,7 @@ class LibrarySession(
         scope.launchCommand {
             if (isShuttingDown.get()) return@launchCommand
             val targets = _ui.value.library.filter {
-                it.engineId != null && !it.paused && !it.complete && !it.isDeleting
+                it.engineId != null && !it.paused && (!it.complete || it.liveStatus()?.seeding == true) && !it.isDeleting
             }
             if (targets.isEmpty()) {
                 syncService(force = true)
@@ -1799,7 +1840,7 @@ class LibrarySession(
             // under the same lock so pause/resume cannot race an old snapshot.
             mutex.withLock {
                 val live = _ui.value.library.find { it.key == entry.key } ?: return@withLock
-                if (shouldRestoreAtStartup(live)) restoreEntry(live, startPaused = false)
+                if (shouldRestoreAtStartup(live) || (_ui.value.seedingEnabled && live.complete && !live.directPlay && !live.paused && !live.isDeleting && live.engineId == null)) restoreEntry(live, startPaused = false)
             }
         }
     }
@@ -2155,6 +2196,7 @@ class LibrarySession(
             eventVersion = nextVersion
             val state = _ui.value
             if (!state.engineReady) continue
+            if (state.seedingEnabled || lastSeedSignature == null) applySeedingSettings()
 
             val targets = state.library.mapNotNull { e ->
                 val id = e.engineId ?: return@mapNotNull null
