@@ -154,13 +154,26 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
   hand off directly to the peer batch. Both stages count as one retry attempt.
   Recently reachable swarms outrank overdue empty retries, with retry fairness
   maintained independently in each worker pool.
-- Cache workers skip admission while all mirrors are cooling down. A cooldown
-  race or timeout waiting for source slots is not a completed network lookup or
-  a healthy miss; it retries cache work without consuming a hash retry attempt.
-- HTTP admission bounds active hash races to 48, with 96 cache workers and 24
-  peer workers. Queue waiting no longer consumes the 2.5s network deadline.
+- Cache workers skip admission while all mirrors are cooling down. Peer workers
+  bypass offline mirrors so fresh DHT samples do not wait for mirror recovery.
+  Unhealthy mirrors back off for up to 60s, then admit one recovery probe;
+  healthy mirrors keep full concurrency. API source stats expose cooldown/probe.
+  A cooldown race or timeout waiting for source slots is not a completed
+  network lookup or a healthy miss; it retries cache work without consuming a hash retry attempt.
+- HTTP admission bounds active hash races to 48, with 96 cache workers. Queue
+  waiting no longer consumes the 2.5s network deadline.
+  There are 64 peer metadata jobs with an independent 24-traversal DHT budget;
+  known endpoints dial immediately, with a 350ms hedge before DHT fallback.
+  Traversals stream peers and end after 3s, while connected metadata downloads
+  retain the 12s deadline. Tracker results also stream individually; one slow
+  tracker never blocks another's peers. Metadata completion immediately releases
+  the job instead of waiting another 1.2s for geography. Stalled connected peers
+  yield after 4s without metadata progress once source discovery finishes.
+  `peerActive`, `peerCapacity`, `dhtActive`, `dhtCapacity`, and
+  `peerMetadataChunks` expose pipeline activity in the API and website.
   DHT sends are capped at 64/s, peer dials at 24/s. Empty unresponsive swarms
-  release after 3s; active peers keep the 12s metadata deadline.
+  release after traversal admission plus 3s; progressing peers keep the 12s
+  metadata deadline.
 - Per-mirror HTTP 404/410 miss caches expire after 2 minutes and cap at 8,192
   hashes each. Cached handoffs never inflate network lookup rates. API fields
   `cacheRequests`, `cacheMissReuses`, `cacheActive`, `cacheCapacity` expose actual

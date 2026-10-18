@@ -82,6 +82,9 @@ type sampler struct {
 	sources       map[string][]krpc.NodeInfo
 	inflight      map[string]bool
 	cacheTried    map[string]bool
+	cacheOffline  bool
+	peerLookups   chan struct{}
+	pipeline      *peerPipelineStats
 	dispatch      [2]resolverBatch
 	caches        *metadataCaches
 	samplingSlots chan struct{}
@@ -150,11 +153,14 @@ func (d *dashboard) collect(ctx context.Context) error {
 	defer client.Close()
 	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, cacheTried: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: hints, trackers: newTrackerResolver()}
 	s.lookup = s.query
+	s.peerLookups = make(chan struct{}, peerLookupConcurrency)
+	s.pipeline = &peerPipelineStats{}
 	defer s.caches.close()
 	defer s.trackers.close()
 	d.mu.Lock()
 	d.state.Workers = resolverWorkers
 	d.metadataCaches = s.caches
+	d.peerPipeline = s.pipeline
 	d.trackers = s.trackers
 	d.state.DHTPort = conn.LocalAddr().(*net.UDPAddr).Port
 	d.mu.Unlock()
@@ -405,6 +411,10 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		countLookup = s.resolveCache(parent, j, hash, rec, wasResolved, started)
 		return
 	}
+	if s.pipeline != nil {
+		s.pipeline.active.Add(1)
+		defer s.pipeline.active.Add(-1)
+	}
 	defer s.clearCacheTried(j.hash)
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
@@ -427,7 +437,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	s.mu.Lock()
 	cacheAlreadyTried := s.cacheTried[j.hash]
 	s.mu.Unlock()
-	if !wasResolved && !cacheAlreadyTried {
+	if !wasResolved && !cacheAlreadyTried && s.caches != nil && s.caches.available() {
 		work.Add(1)
 		cacheWork.Add(1)
 		go func() {
@@ -452,8 +462,9 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	}
 	go func() { cacheWork.Wait(); close(cacheEvents) }()
 	// Known addresses only accelerate dialing. They are not fresh map sightings.
+	knownPeers := s.hints.get(j.hash, time.Now())
 	if !wasResolved {
-		if hints := s.hints.get(j.hash, time.Now()); len(hints) > 0 {
+		if hints := knownPeers; len(hints) > 0 {
 			connections := make([]torrent.PeerInfo, 0, len(hints))
 			for _, peer := range hints {
 				connections = append(connections, torrent.PeerInfo{Addr: &net.TCPAddr{IP: peer.IP, Port: peer.Port}})
@@ -464,14 +475,17 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			s.d.mu.Unlock()
 		}
 	}
-	initialReplies := make(chan *krpc.Return, len(j.sources)+1)
+	initialReplies := make(chan *krpc.Return, len(j.sources)+2)
 	if s.trackers != nil {
 		work.Add(1)
 		go func() {
 			defer work.Done()
-			if peers := s.trackers.lookup(ctx, hash, s.client.LocalPort()); len(peers) > 0 {
-				initialReplies <- &krpc.Return{Values: peers}
-			}
+			s.trackers.lookupEach(ctx, hash, s.client.LocalPort(), func(peers []krpc.NodeAddr) {
+				select {
+				case initialReplies <- &krpc.Return{Values: peers}:
+				case <-ctx.Done():
+				}
+			})
 		}()
 	}
 	for _, source := range j.sources {
@@ -479,20 +493,18 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		go func(source krpc.NodeInfo) {
 			defer work.Done()
 			if reply := s.query(ctx, &net.UDPAddr{IP: source.Addr.IP, Port: source.Addr.Port}, "get_peers", krpc.MsgArgs{InfoHash: krpc.ID(hash), Scrape: 1}); reply != nil {
-				initialReplies <- reply
+				select {
+				case initialReplies <- reply:
+				case <-ctx.Done():
+				}
 			}
 		}(source)
 	}
+	peerEvents, lookupStarted := s.streamPeerLookup(ctx, hash, len(knownPeers) > 0, &work)
 	prefetchDone := make(chan struct{})
 	go func() { work.Wait(); close(prefetchDone) }()
 	var prefetchEvents <-chan struct{} = prefetchDone
 	prefetchComplete := false
-	ann, err := s.server.AnnounceTraversal(hash, dht.Scrape())
-	if err != nil {
-		return
-	}
-	defer ann.Close()
-	peerEvents := ann.Peers
 	got := t.GotInfo()
 	if wasResolved {
 		got = nil
@@ -519,22 +531,6 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			t.AddPeers(connections)
 		}
 	}
-	var settle <-chan time.Time
-	var settleTimer *time.Timer
-	defer func() {
-		if settleTimer != nil {
-			settleTimer.Stop()
-		}
-	}()
-	startSettling := func() {
-		if settleTimer == nil {
-			settleTimer = time.NewTimer(1200 * time.Millisecond)
-			settle = settleTimer.C
-		}
-	}
-	if wasResolved {
-		startSettling()
-	}
 	accept := func(info *metainfo.Info, source string) bool {
 		if rec.Resolved {
 			return true
@@ -544,31 +540,60 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		}
 		cancelCache()
 		got = nil
-		startSettling()
 		s.publishResolved(j, rec, wasResolved, started)
 		return true
 	}
 	noPeerTimer := time.NewTimer(3 * time.Second)
 	defer noPeerTimer.Stop()
+	// Queueing for DHT admission is not an empty network lookup. Start the
+	// empty-swarm clock only after actual admission (or immediate hinted dials).
+	if len(knownPeers) == 0 {
+		noPeerTimer.Stop()
+	}
+	pulse := time.NewTicker(250 * time.Millisecond)
+	defer pulse.Stop()
+	lastPeerProgress := time.Now()
+	var lastChunks int64
+	seenConnected := false
 	noPeerDeadline, emptyExit := false, false
 loop:
 	for {
-		if !rec.Resolved && prefetchComplete && len(cacheEvents) == 0 && len(initialReplies) == 0 && len(uniqueIPs) == 0 {
+		if !rec.Resolved {
+			// Prefer metadata already completed over an idle/deadline decision.
+			// The final chunk and connection close can arrive in the same tick.
+			if info := t.Info(); info != nil {
+				if !accept(info, "peer") {
+					return
+				}
+				break loop
+			}
 			stats := t.Stats()
-			if (peerEvents == nil && stats.TotalPeers == 0) || (noPeerDeadline && stats.ActivePeers == 0) {
+			chunks := stats.MetadataChunksRead.Int64()
+			if chunks > lastChunks || (stats.ActivePeers > 0 && !seenConnected) {
+				lastPeerProgress, lastChunks = time.Now(), chunks
+			}
+			seenConnected = seenConnected || stats.ActivePeers > 0
+			if seenConnected && stats.ActivePeers > 0 && time.Since(lastPeerProgress) >= 4*time.Second && prefetchComplete {
+				break loop
+			}
+			if prefetchComplete && len(cacheEvents) == 0 && len(initialReplies) == 0 && stats.ActivePeers == 0 && ((peerEvents == nil && stats.TotalPeers == 0) || (noPeerDeadline && stats.HalfOpenPeers == 0 && stats.PendingPeers == 0)) {
 				emptyExit = true
 				break loop
 			}
 		}
 		select {
+		case <-lookupStarted:
+			lookupStarted = nil
+			if len(knownPeers) == 0 {
+				noPeerTimer.Reset(3 * time.Second)
+			}
+		case <-pulse.C:
 		case <-noPeerTimer.C:
 			noPeerDeadline = true
 		case <-prefetchEvents:
 			prefetchEvents = nil
 			prefetchComplete = true
 		case <-ctx.Done():
-			break loop
-		case <-settle:
 			break loop
 		case reply := <-initialReplies:
 			addPeers(reply.Values)
@@ -594,11 +619,13 @@ loop:
 			if !accept(info, "cache") {
 				return
 			}
+			break loop
 		case <-got:
 			got = nil
 			if !accept(t.Info(), "peer") {
 				return
 			}
+			break loop
 		}
 	}
 	if parent.Err() != nil {
@@ -618,6 +645,9 @@ loop:
 		rec.Seeds = nil
 	}
 	stats := t.Stats()
+	if s.pipeline != nil {
+		s.pipeline.chunks.Add(stats.MetadataChunksRead.Int64())
+	}
 	s.d.mu.Lock()
 	if latest, exists := s.d.records[j.hash]; exists {
 		rec.LastSeen = latest.LastSeen

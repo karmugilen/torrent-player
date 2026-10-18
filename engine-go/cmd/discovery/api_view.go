@@ -310,6 +310,13 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 	defer d.mu.RUnlock()
 	now := time.Now().UTC()
 	s := d.state
+	if pipeline := d.peerPipeline; pipeline != nil {
+		s.PeerActive = pipeline.active.Load()
+		s.PeerCapacity = peerWorkers
+		s.DHTActive = pipeline.lookups.Load()
+		s.DHTCapacity = peerLookupConcurrency
+		s.PeerMetadataChunks = pipeline.chunks.Load()
+	}
 	if trackers := d.trackers; trackers != nil {
 		s.TrackerRequests = trackers.requests.Load()
 		s.TrackerHits = trackers.hits.Load()

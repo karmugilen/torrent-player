@@ -36,6 +36,7 @@ type cacheSource struct {
 	mu       sync.Mutex
 	next     time.Time
 	failures int
+	probing  bool
 	misses   metadataMissCache
 	meter    sourceMeter
 }
@@ -77,6 +78,10 @@ func (c *metadataCaches) sourceStats() []sourceState {
 			name = u.Hostname()
 		}
 		stats = append(stats, source.meter.snapshot(name))
+		source.mu.Lock()
+		stats[len(stats)-1].CooldownMS = max(0, time.Until(source.next).Milliseconds())
+		stats[len(stats)-1].Probing = source.probing
+		source.mu.Unlock()
 	}
 	return stats
 }
@@ -85,6 +90,10 @@ func (c *metadataCaches) available() bool {
 	if len(c.jobs) >= cap(c.jobs) {
 		return false
 	}
+	return c.sourcesAvailable()
+}
+
+func (c *metadataCaches) sourcesAvailable() bool {
 	for _, source := range c.sources {
 		if source.available() {
 			return true
@@ -144,8 +153,30 @@ func parseCacheMetadata(blob []byte, expected metainfo.Hash) (*metainfo.Info, er
 func (s *cacheSource) available() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !time.Now().Before(s.next)
+	return !s.probing && !time.Now().Before(s.next)
 }
+
+// Healthy mirrors retain full concurrency. After an outage, allow a single
+// recovery probe rather than sending another 48-request burst to a bad mirror.
+func (s *cacheSource) begin() (probe, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.probing || time.Now().Before(s.next) {
+		return false, false
+	}
+	probe = s.failures > 0
+	if probe {
+		s.probing = true
+	}
+	return probe, true
+}
+
+func (s *cacheSource) endProbe() {
+	s.mu.Lock()
+	s.probing = false
+	s.mu.Unlock()
+}
+
 func (s *cacheSource) outcome(healthy bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -154,10 +185,10 @@ func (s *cacheSource) outcome(healthy bool) {
 		s.next = time.Time{}
 		return
 	}
-	// Keep outage windows short. Long exponential backs-offs previously
-	// disabled every mirror under parallel load and stalled name throughput.
-	s.failures = min(s.failures+1, 3)
-	s.next = time.Now().Add(time.Duration(1<<s.failures) * time.Second)
+	// Peer workers can bypass offline mirrors, so persistent mirror failures no
+	// longer need hot retries to keep discovery moving. Recover within a minute.
+	s.failures = min(s.failures+1, 6)
+	s.next = time.Now().Add(min(time.Minute, time.Duration(1<<s.failures)*time.Second))
 }
 
 func (c *metadataCaches) fetch(parent context.Context, hash metainfo.Hash) *metainfo.Info {
@@ -201,8 +232,12 @@ func (c *metadataCaches) fetchAttempt(parent context.Context, hash metainfo.Hash
 				return
 			}
 			defer func() { <-s.slots }()
-			if !s.available() {
+			probe, admitted := s.begin()
+			if !admitted {
 				return
+			}
+			if probe {
+				defer s.endProbe()
 			}
 			info := c.fetchSource(ctx, s, hash, &calls)
 			if info != nil {

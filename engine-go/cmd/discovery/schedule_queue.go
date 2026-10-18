@@ -73,7 +73,7 @@ func (s *sampler) eligibleLocked(rec observation, now time.Time, kind jobKind) b
 	if kind == jobCache {
 		return !s.cacheTried[rec.Hash]
 	}
-	return s.cacheTried[rec.Hash] || rec.Peers > 0 || rec.ResolveAttempts > 0
+	return s.cacheTried[rec.Hash] || rec.Peers > 0 || rec.ResolveAttempts > 0 || s.cacheOffline
 }
 
 func (s *sampler) refillDispatchLocked(now time.Time, kind jobKind) {

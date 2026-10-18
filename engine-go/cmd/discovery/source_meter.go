@@ -10,14 +10,16 @@ type sourceMeter struct {
 	latency                                                   [8]atomic.Int64
 }
 type sourceState struct {
-	Name      string `json:"name"`
-	Requests  int64  `json:"requests"`
-	Hits      int64  `json:"hits"`
-	Misses    int64  `json:"misses"`
-	Failures  int64  `json:"failures"`
-	Cancelled int64  `json:"cancelled"`
-	AverageMS int64  `json:"averageMs"`
-	P95MS     int64  `json:"p95Ms"`
+	Name       string `json:"name"`
+	Requests   int64  `json:"requests"`
+	Hits       int64  `json:"hits"`
+	Misses     int64  `json:"misses"`
+	Failures   int64  `json:"failures"`
+	Cancelled  int64  `json:"cancelled"`
+	AverageMS  int64  `json:"averageMs"`
+	P95MS      int64  `json:"p95Ms"`
+	CooldownMS int64  `json:"cooldownMs"`
+	Probing    bool   `json:"probing"`
 }
 
 var latencyBounds = [8]int64{100, 250, 500, 1000, 2500, 5000, 12000, 60000}

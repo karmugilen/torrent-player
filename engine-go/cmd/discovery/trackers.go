@@ -195,8 +195,16 @@ func (t *trackerResolver) fetchMetadata(ctx context.Context, hash metainfo.Hash)
 }
 
 func (t *trackerResolver) lookup(ctx context.Context, hash metainfo.Hash, port int) []krpc.NodeAddr {
+	var peers []krpc.NodeAddr
+	t.lookupEach(ctx, hash, port, func(batch []krpc.NodeAddr) { peers = append(peers, batch...) })
+	return peers
+}
+
+// Deliver each tracker reply immediately instead of waiting for the slowest
+// tracker. emit runs serially and all requests are joined before returning.
+func (t *trackerResolver) lookupEach(ctx context.Context, hash metainfo.Hash, port int, emit func([]krpc.NodeAddr)) {
 	if t == nil {
-		return nil
+		return
 	}
 	now := time.Now()
 	key := hash.HexString()
@@ -281,19 +289,20 @@ func (t *trackerResolver) lookup(ctx context.Context, hash metainfo.Hash, port i
 			results <- valid
 		}(u)
 	}
-	work.Wait()
-	close(results)
-	var peers []krpc.NodeAddr
+	go func() { work.Wait(); close(results) }()
 	seen := map[string]bool{}
 	for batch := range results {
+		var fresh []krpc.NodeAddr
 		for _, p := range batch {
 			if !seen[p.String()] {
 				seen[p.String()] = true
-				peers = append(peers, p)
+				fresh = append(fresh, p)
 			}
 		}
+		if len(fresh) > 0 && ctx.Err() == nil {
+			emit(fresh)
+		}
 	}
-	return peers
 }
 
 func (t *trackerResolver) announceRemote(ctx context.Context, raw string, hash metainfo.Hash, port int) ([]krpc.NodeAddr, time.Duration, error) {

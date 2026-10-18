@@ -7,10 +7,11 @@ import (
 )
 
 // Cache workers only hit HTTP .torrent mirrors. Peer workers finish BEP 9 for
-// hashes the mirrors miss. Keep both pools small so naming leans on
-// torrents-csv and does not flood the uplink with peer handshakes.
+// hashes the mirrors miss. Metadata waits overlap independently of the bounded
+// DHT traversal and dial budgets; extra workers do not increase wire rate limits.
 const cacheWorkers = 96
-const peerWorkers = 24
+const peerWorkers = 64
+const peerLookupConcurrency = 24
 const resolverWorkers = cacheWorkers + peerWorkers
 
 type jobKind int
@@ -115,6 +116,7 @@ func (s *sampler) nextJob(now time.Time) (discoveryJob, bool) {
 }
 
 func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
+	cacheOffline := s.caches != nil && !s.caches.sourcesAvailable()
 	if kind == jobCache && s.caches != nil && !s.caches.available() {
 		return discoveryJob{}, false
 	}
@@ -122,6 +124,7 @@ func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 	defer s.d.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.cacheOffline = cacheOffline
 	if s.cacheTried == nil {
 		s.cacheTried = map[string]bool{}
 	}

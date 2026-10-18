@@ -83,6 +83,11 @@ type state struct {
 	CacheMissReuses        int64          `json:"cacheMissReuses"`
 	CacheActive            int            `json:"cacheActive"`
 	CacheCapacity          int            `json:"cacheCapacity"`
+	PeerActive             int64          `json:"peerActive"`
+	PeerCapacity           int            `json:"peerCapacity"`
+	DHTActive              int64          `json:"dhtActive"`
+	DHTCapacity            int            `json:"dhtCapacity"`
+	PeerMetadataChunks     int64          `json:"peerMetadataChunks"`
 	MetadataSources        []sourceState  `json:"metadataSources"`
 	CatalogHits            int            `json:"catalogHits"`
 	DumpHits               int            `json:"dumpHits"`
@@ -132,6 +137,7 @@ type dashboard struct {
 	nameRates       [60]nameRateBucket
 	persistMu       sync.Mutex
 	metadataCaches  *metadataCaches
+	peerPipeline    *peerPipelineStats
 	bulkSlots       chan struct{}
 	trackers        *trackerResolver
 	dhtListen       string
