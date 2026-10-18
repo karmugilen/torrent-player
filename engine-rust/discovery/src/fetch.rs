@@ -103,7 +103,15 @@ pub fn fetch_catalog_page(query: &str, size: i32, after: i32) -> Result<CatalogP
     if resp.status() != 200 {
         return Err(format!("catalog HTTP {}", resp.status()));
     }
-    let body = resp.into_string().map_err(|e| e.to_string())?;
+    const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
+    let mut body = String::new();
+    resp.into_reader()
+        .take(MAX_CATALOG_BYTES + 1)
+        .read_to_string(&mut body)
+        .map_err(|e| e.to_string())?;
+    if body.len() as u64 > MAX_CATALOG_BYTES {
+        return Err("oversized catalog response".to_string());
+    }
     parse_catalog_json(&body)
 }
 
@@ -120,143 +128,77 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
-/// Minimal JSON extract for the known catalog shape (no serde dependency).
+/// Parse actual JSON rather than searching delimiters inside torrent names.
+/// Reject challenge pages and malformed responses so Go can try its fallback.
 fn parse_catalog_json(body: &str) -> Result<CatalogPage, String> {
-    let bytes = body.as_bytes();
-    let mut torrents = Vec::new();
-    let mut next: Option<i32> = None;
-
-    // Find "next": <num|null>
-    if let Some(i) = find_key(bytes, b"\"next\"") {
-        let rest = &bytes[i..];
-        if let Some(v) = parse_json_number_after_colon(rest) {
-            next = Some(v as i32);
-        }
-    }
-
-    let mut search_from = 0usize;
-    while let Some(rel) = find_key(&bytes[search_from..], b"\"infohash\"") {
-        let start = search_from + rel;
-        let obj_start = bytes[..start]
-            .iter()
-            .rposition(|&c| c == b'{')
-            .unwrap_or(start);
-        let obj_end = match bytes[start..].iter().position(|&c| c == b'}') {
-            Some(n) => start + n + 1,
-            None => break,
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let rows = value
+        .get("torrents")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "catalog response has no torrents array".to_string())?;
+    let next = match value.get("next") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .filter(|v| *v >= 0)
+                .ok_or_else(|| "invalid catalog cursor".to_string())?,
+        ),
+    };
+    let mut torrents = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(infohash) = row.get("infohash").and_then(|v| v.as_str()) else {
+            continue;
         };
-        let obj = &bytes[obj_start..obj_end];
-        if let Some(t) = parse_torrent_object(obj) {
-            torrents.push(t);
+        let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if infohash.len() != 40
+            || !infohash.bytes().all(|b| b.is_ascii_hexdigit())
+            || name.trim().is_empty()
+        {
+            continue;
         }
-        search_from = obj_end;
+        torrents.push(CatalogTorrent {
+            infohash: infohash.to_ascii_lowercase(),
+            name: name.to_owned(),
+            size_bytes: row
+                .get("size_bytes")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0),
+            seeders: row
+                .get("seeders")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .clamp(0, i32::MAX as i64) as i32,
+            leechers: row
+                .get("leechers")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .clamp(0, i32::MAX as i64) as i32,
+        });
     }
     Ok(CatalogPage { torrents, next })
 }
 
-fn find_key(hay: &[u8], key: &[u8]) -> Option<usize> {
-    hay.windows(key.len()).position(|w| w == key)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn parse_torrent_object(obj: &[u8]) -> Option<CatalogTorrent> {
-    let infohash = json_string_value(obj, b"\"infohash\"")?;
-    let name = json_string_value(obj, b"\"name\"")?;
-    if infohash.len() != 40 {
-        return None;
+    #[test]
+    fn catalog_preserves_unicode_escaped_quotes_and_braces() {
+        let body = r#"{"torrents":[{"infohash":"0123456789abcdef0123456789abcdef01234567","name":"{Show} \"S01\" \u65e5\u672c\u8a9e \ud83c\udfac.mkv","size_bytes":42,"seeders":3,"leechers":1}],"next":25}"#;
+        let page = parse_catalog_json(body).unwrap();
+        assert_eq!(page.torrents.len(), 1);
+        assert_eq!(page.torrents[0].name, "{Show} \"S01\" 日本語 🎬.mkv");
+        assert_eq!(page.next, Some(25));
     }
-    let size_bytes = json_i64_value(obj, b"\"size_bytes\"").unwrap_or(0);
-    let seeders = json_i64_value(obj, b"\"seeders\"").unwrap_or(0) as i32;
-    let leechers = json_i64_value(obj, b"\"leechers\"").unwrap_or(0) as i32;
-    Some(CatalogTorrent {
-        infohash: infohash.to_ascii_lowercase(),
-        name,
-        size_bytes,
-        seeders,
-        leechers,
-    })
-}
 
-fn json_string_value(obj: &[u8], key: &[u8]) -> Option<String> {
-    let i = find_key(obj, key)?;
-    let after = &obj[i + key.len()..];
-    let colon = after.iter().position(|&c| c == b':')?;
-    let mut p = colon + 1;
-    while p < after.len() && after[p].is_ascii_whitespace() {
-        p += 1;
+    #[test]
+    fn catalog_rejects_html_and_malformed_json() {
+        assert!(parse_catalog_json("<html>challenge</html>").is_err());
+        assert!(parse_catalog_json(r#"{"torrents":["#).is_err());
     }
-    if p >= after.len() || after[p] != b'"' {
-        return None;
-    }
-    p += 1;
-    let start = p;
-    let mut out = Vec::new();
-    while p < after.len() {
-        match after[p] {
-            b'\\' if p + 1 < after.len() => {
-                match after[p + 1] {
-                    b'"' | b'\\' | b'/' => {
-                        out.push(after[p + 1]);
-                        p += 2;
-                    }
-                    b'n' => {
-                        out.push(b'\n');
-                        p += 2;
-                    }
-                    b'r' => {
-                        out.push(b'\r');
-                        p += 2;
-                    }
-                    b't' => {
-                        out.push(b'\t');
-                        p += 2;
-                    }
-                    b'u' if p + 5 < after.len() => {
-                        // Skip unicode escape roughly.
-                        p += 6;
-                    }
-                    _ => {
-                        out.push(after[p + 1]);
-                        p += 2;
-                    }
-                }
-            }
-            b'"' => break,
-            c => {
-                out.push(c);
-                p += 1;
-            }
-        }
-        if out.len() > 512 {
-            break;
-        }
-    }
-    let _ = start;
-    String::from_utf8(out).ok()
-}
-
-fn json_i64_value(obj: &[u8], key: &[u8]) -> Option<i64> {
-    let i = find_key(obj, key)?;
-    parse_json_number_after_colon(&obj[i + key.len()..])
-}
-
-fn parse_json_number_after_colon(after_key: &[u8]) -> Option<i64> {
-    let colon = after_key.iter().position(|&c| c == b':')?;
-    let mut p = colon + 1;
-    while p < after_key.len() && after_key[p].is_ascii_whitespace() {
-        p += 1;
-    }
-    if after_key[p..].starts_with(b"null") {
-        return None;
-    }
-    let start = p;
-    if p < after_key.len() && (after_key[p] == b'-' || after_key[p].is_ascii_digit()) {
-        p += 1;
-        while p < after_key.len() && after_key[p].is_ascii_digit() {
-            p += 1;
-        }
-        return std::str::from_utf8(&after_key[start..p])
-            .ok()
-            .and_then(|s| s.parse().ok());
-    }
-    None
 }

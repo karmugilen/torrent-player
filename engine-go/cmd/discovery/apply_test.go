@@ -66,3 +66,26 @@ func TestCacheMissCannotBeReclaimedBeforePeerHandoff(t *testing.T) {
 		t.Fatal("cache miss did not reach peer worker")
 	}
 }
+
+func TestVerifiedMetadataCorrectsCatalogNameWithoutDoubleCounting(t *testing.T) {
+	d := testDashboard(t)
+	hash := strings.Repeat("ef", 20)
+	now := time.Now()
+	d.mu.Lock()
+	d.applyNameLocked(namePatch{Hash: hash, Name: "Catalog title", Source: "dump", Size: 10}, now)
+	added := d.applyNameLocked(namePatch{Hash: hash, Name: "Exact.Metadata.Title.mkv", Source: "peer",
+		Size: 42, Files: []string{"episode.mkv"}}, now.Add(time.Second))
+	d.applyNameLocked(namePatch{Hash: hash, Name: "Catalog title", Source: "catalog", Size: 10}, now.Add(2*time.Second))
+	d.mu.Unlock()
+	rec := d.records[hash]
+	if added || rec.Name != "Exact.Metadata.Title.mkv" || rec.Source != "peer" || rec.Size != 42 || len(rec.Files) != 1 {
+		t.Fatalf("verified metadata must correct the catalog without counting a second name: %+v", rec)
+	}
+	if d.state.Successes != 1 {
+		t.Fatal("verification counted the same hash twice")
+	}
+	view := d.snapshotForAPI(viewQuery{Q: "exact metadata", Limit: 10})
+	if view.MatchCount != 1 {
+		t.Fatal("corrected name missing from search")
+	}
+}

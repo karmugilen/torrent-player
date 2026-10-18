@@ -82,7 +82,7 @@ type sampler struct {
 	sources       map[string][]krpc.NodeInfo
 	inflight      map[string]bool
 	cacheTried    map[string]bool
-	turn          int
+	dispatch      [2]resolverBatch
 	caches        *metadataCaches
 	samplingSlots chan struct{}
 	samplingWork  sync.WaitGroup

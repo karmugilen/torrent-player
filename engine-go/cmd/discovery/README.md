@@ -44,7 +44,7 @@ magnet link for download in another client.
 
 The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
-Twenty-four cache workers and six peer workers stay small on purpose so the
+Forty-eight cache workers and eight peer workers stay small on purpose so the
 uplink is not clogged. Cache workers only query HTTPS `.torrent` mirrors and
 release immediately on a miss. Peer workers handle BEP 9 for cache misses only.
 Four sampling slots refill independently of slow nodes. Random routing lookups
@@ -68,7 +68,7 @@ cold-start failure, so a full metadata queue cannot prevent discovery starting.
 Unresolved hashes retry automatically after 30 seconds, doubling to at most 15
 minutes; retries do not require another sample. One in four dispatches is reserved
 for due retries. Reachable unresolved swarms survive pruning ahead of untested
-hashes. Cached names are reused and their availability is checked every 30 minutes.
+hashes. Named hashes leave the resolver queue and are reused without network rechecks.
 The page shows active/due jobs, new names per minute, catalog/cache/peer wins,
 successful names versus completed jobs, and mean lookup time. These counters
 describe the current process; retained names can include earlier sessions.
@@ -144,6 +144,29 @@ URL state, and cancellation of stale search requests. Searches accept words in
 any order, accents, punctuation, hashes and magnets. Live names, index additions,
 verified metadata and completed checks are measured over the last 60 seconds.
 The 1,000/minute goal counts fresh names, never a replay of the stored catalog.
+
+### Naming reliability and queue efficiency
+
+The upstream [torrents-csv contribution process](https://codeberg.org/heretic/torrents-csv-data/src/branch/main/README.md)
+scans contributors' existing `.torrent` files, checks seeder availability, merges
+their metadata into a database, and exports the CSV. Names come from collected
+metadata; a tracker scrape supplies availability counts, not a name from a hash.
+Our collector also obtains metadata through public caches and BEP 9 peers.
+
+Workers now choose from bounded batches rather than walking the full unresolved
+backlog for every job or idle poll. Batches refresh every 250ms, and each
+dispatch revalidates resolution, backoff, and in-flight ownership. Cache misses
+immediately wake the peer batch. One cache/peer cycle counts as one attempt, so
+the first failed cycle retries after 30 seconds instead of skipping to 60.
+Recently reachable swarms take priority over old empty retries; each pool still
+reserves one dispatch in four for due retries.
+
+An unchanged CSV is checked at most once per pending hash. A refreshed index
+invalidates those misses automatically. Rust uses a complete JSON parser for
+catalog names, including Unicode escapes, quotes and braces; malformed JSON and
+HTML trigger fallback instead of being treated as successful empty pages. An
+in-flight exact metadata result can correct a catalog title without increasing
+the new-name count twice. Existing named rows do not start new verification jobs.
 
 Rust now provides compact token/prefix search postings and parallel pending-hash
 lookup in batches. The Go fallback remains supported. A 100,000-row browse test

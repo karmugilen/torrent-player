@@ -98,6 +98,7 @@ type dashboard struct {
 	// pendingSet holds unresolved hashes for O(pending) job picks instead of
 	// scanning every named row in the unlimited store.
 	pendingSet      map[string]struct{}
+	pendingRevision uint64
 	searchTok       map[string][]string
 	searchCommon    map[string]bool
 	cachePath       string

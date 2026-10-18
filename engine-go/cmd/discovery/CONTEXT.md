@@ -128,6 +128,17 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
   repeating the same HTTP work. Resolved rows are never re-scheduled.
 - Full JSON persistence is serialized and runs every two minutes plus explicit
   pause/shutdown/seed completion; it previously ran every ten seconds.
+- Resolver dispatch uses bounded 128-candidate batches per fresh/retry pool,
+  refreshed every 250ms; every dispatch rechecks the live record. Cache misses
+  hand off directly to the peer batch. Both stages count as one retry attempt.
+  Recently reachable swarms outrank overdue empty retries, with retry fairness
+  maintained independently in each worker pool.
+- CSV misses are remembered per loaded dump. Pending matching skips unchanged
+  pending revisions; loading a new dump automatically invalidates old misses.
+- Rust catalog parsing uses serde_json, preserves Unicode/escaped punctuation,
+  bounds response size, and rejects HTML/malformed responses for Go fallback.
+  Exact cache/peer metadata already in flight can correct an imported name
+  without scheduling a new lookup or counting the hash as a second new name.
 - Search/filter requests abort older requests and ignore stale responses. Source
   filters, paging, and URL state are handled on the server; geography refreshes
   on country selection. Adult-name hiding redacts titles without dropping rows.

@@ -251,6 +251,62 @@ func TestResolvePriorityPrefersSeedsPeersAndRepeatedSamples(t *testing.T) {
 	}
 }
 
+func TestRecentlyReachableSwarmOutranksOverdueEmptyLookup(t *testing.T) {
+	now := time.Now()
+	stale := observation{Hash: strings.Repeat("1", 40), ResolveAttempts: 12,
+		FirstSeen: now.Add(-time.Hour), LastSeen: now.Add(-time.Hour),
+		CheckedAt: now.Add(-time.Hour), NextAttempt: now.Add(-time.Hour)}
+	reachable := observation{Hash: strings.Repeat("2", 40), ResolveAttempts: 1,
+		FirstSeen: now.Add(-time.Minute), LastSeen: now, CheckedAt: now.Add(-time.Second),
+		NextAttempt: now.Add(-time.Second), Peers: 2, SampleHits: 3}
+	if !betterResolveCandidate(reachable, stale, now) {
+		t.Fatal("old peerless retries outrank a recently reachable swarm")
+	}
+}
+
+func TestCacheMissWakesEmptyPeerBatchWithoutDoublingRetryAttempt(t *testing.T) {
+	d := testDashboard(t)
+	hash := strings.Repeat("ed", 20)
+	d.upsertSampleLocked(hash, time.Now())
+	cache := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer cache.Close()
+	s := &sampler{d: d, caches: newMetadataCaches([]string{cache.URL + "/{hash}"})}
+	defer s.caches.close()
+	if _, ok := s.nextJobOf(time.Now(), jobPeer); ok {
+		t.Fatal("untested hash bypassed the cache pool")
+	}
+	job, ok := s.nextJobOf(time.Now(), jobCache)
+	if !ok {
+		t.Fatal("cache job missing")
+	}
+	s.resolve(context.Background(), job)
+	s.releaseJob(hash)
+	job, ok = s.nextJobOf(time.Now(), jobPeer)
+	if !ok || job.hash != hash {
+		t.Fatal("cache handoff waited for another backlog scan")
+	}
+	if d.records[hash].ResolveAttempts != 1 {
+		t.Fatal("one cache/peer attempt counted twice, doubling retry backoff")
+	}
+}
+
+func TestDispatchSeesNewSamplesAfterBoundedRefresh(t *testing.T) {
+	d := testDashboard(t)
+	s := &sampler{d: d}
+	now := time.Now()
+	if _, ok := s.nextJobOf(now, jobCache); ok {
+		t.Fatal("empty queue returned a job")
+	}
+	hash := strings.Repeat("cb", 20)
+	d.upsertSampleLocked(hash, now)
+	job, ok := s.nextJobOf(now.Add(dispatchRefresh), jobCache)
+	if !ok || job.hash != hash {
+		t.Fatal("new sample was invisible after queue refresh")
+	}
+}
+
 func TestRepeatedSamplesReceiveNameLookupPriority(t *testing.T) {
 	d := testDashboard(t)
 	now := time.Now()

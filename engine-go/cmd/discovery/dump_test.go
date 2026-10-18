@@ -79,6 +79,29 @@ func TestTryResolveHashFromDumpOnSample(t *testing.T) {
 	}
 }
 
+func TestDumpMissIsCheckedOnceUntilCatalogRefresh(t *testing.T) {
+	d := testDashboard(t)
+	hash := strings.Repeat("ab", 20)
+	idx := &dumpIndex{rows: map[string]dumpRow{}}
+	d.setDumpIndex(idx)
+	d.upsertSampleLocked(hash, time.Now())
+	d.resolvePendingFromDump(idx)
+	if d.state.DumpLookups != 1 {
+		t.Fatal("initial pending lookup not recorded")
+	}
+	d.resolvePendingFromDump(idx)
+	d.tryResolveHashFromDump(hash)
+	if d.state.DumpLookups != 1 {
+		t.Fatal("unchanged catalog repeatedly searched for the same missing hash")
+	}
+	// A new CSV must invalidate misses: this hash now has a name.
+	idx = &dumpIndex{rows: map[string]dumpRow{hash: {Name: "New catalog entry.mkv"}}}
+	d.setDumpIndex(idx)
+	if d.resolvePendingFromDump(idx) != 1 || d.state.DumpLookups != 2 {
+		t.Fatal("fresh catalog did not retry its predecessor's miss")
+	}
+}
+
 func TestUnlimitedStoreKeepsGrowing(t *testing.T) {
 	d := testDashboard(t)
 	now := time.Now()

@@ -26,6 +26,11 @@ type dumpIndex struct {
 	rows     map[string]dumpRow // Go fallback; empty when rust==true
 	rust     bool
 	rustRows int
+	// A miss remains a miss until the next CSV is loaded. Keep the cache on
+	// this index so replacing it automatically makes every hash eligible again.
+	checked         map[string]struct{}
+	pendingRevision uint64
+	scanned         bool
 }
 
 type dumpRow struct {
@@ -414,8 +419,24 @@ func (d *dashboard) tryResolveHashFromDump(hash string) bool {
 		return false
 	}
 	d.mu.Lock()
-	d.state.DumpLookups++
+	if rec, ok := d.records[hash]; ok && rec.Resolved {
+		d.mu.Unlock()
+		return false
+	}
+	idx.mu.Lock()
+	if idx.checked == nil {
+		idx.checked = map[string]struct{}{}
+	}
+	_, checked := idx.checked[hash]
+	if !checked {
+		idx.checked[hash] = struct{}{}
+		d.state.DumpLookups++
+	}
+	idx.mu.Unlock()
 	d.mu.Unlock()
+	if checked {
+		return false
+	}
 	row, ok := idx.lookup(hash)
 	if !ok {
 		return false
@@ -427,12 +448,28 @@ func (d *dashboard) resolvePendingFromDump(idx *dumpIndex) int {
 	if idx == nil {
 		return 0
 	}
-	d.mu.RLock()
-	pending := make([]string, 0, len(d.pendingSet))
+	d.mu.Lock()
+	idx.mu.Lock()
+	if idx.scanned && idx.pendingRevision == d.pendingRevision {
+		idx.mu.Unlock()
+		d.mu.Unlock()
+		return 0
+	}
+	idx.scanned, idx.pendingRevision = true, d.pendingRevision
+	if idx.checked == nil {
+		idx.checked = map[string]struct{}{}
+	}
+	pending := make([]string, 0)
 	for hash := range d.pendingSet {
+		if _, checked := idx.checked[hash]; checked {
+			continue
+		}
+		idx.checked[hash] = struct{}{}
 		pending = append(pending, hash)
 	}
-	d.mu.RUnlock()
+	d.state.DumpLookups += len(pending)
+	idx.mu.Unlock()
+	d.mu.Unlock()
 	if len(pending) == 0 {
 		return 0
 	}

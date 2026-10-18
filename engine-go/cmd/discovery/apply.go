@@ -30,7 +30,11 @@ func (d *dashboard) applyNameLocked(p namePatch, now time.Time) bool {
 		rec = observation{Hash: p.Hash, FirstSeen: now, Countries: map[string]int{}}
 	}
 	wasResolved := rec.Resolved
-	if wasResolved && rec.Name != "" {
+	verified := func(source string) bool { return source == "cache" || source == "peer" }
+	// In-flight exact metadata outranks a catalog label that arrived first.
+	// No new network job is scheduled just to upgrade an already named row.
+	upgrade := verified(p.Source) && !verified(rec.Source)
+	if wasResolved && rec.Name != "" && !upgrade {
 		if p.PeerBump > rec.Peers {
 			rec.Peers = p.PeerBump
 		}
@@ -101,11 +105,17 @@ func (d *dashboard) markPendingLocked(hash string) {
 	if rec, ok := d.records[hash]; ok && rec.Resolved {
 		return
 	}
-	d.pendingSet[hash] = struct{}{}
+	if _, exists := d.pendingSet[hash]; !exists {
+		d.pendingSet[hash] = struct{}{}
+		d.pendingRevision++
+	}
 }
 
 func (d *dashboard) markResolvedLocked(hash string) {
-	delete(d.pendingSet, hash)
+	if _, exists := d.pendingSet[hash]; exists {
+		delete(d.pendingSet, hash)
+		d.pendingRevision++
+	}
 }
 
 // upsertSampleLocked records a DHT sighting. Returns whether the hash still

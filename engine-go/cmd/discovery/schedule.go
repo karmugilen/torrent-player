@@ -64,10 +64,13 @@ func dueAt(r observation) time.Time {
 func resolvePriority(r observation, now time.Time) int64 {
 	score := int64(0)
 	if r.Seeds != nil && *r.Seeds > 0 {
-		score += int64(*r.Seeds) * 100
+		score += int64(min(*r.Seeds, 100)) * 100
 	}
 	if r.Peers > 0 {
-		score += int64(r.Peers) * 40
+		score += int64(min(r.Peers, 64)) * 40
+		if !r.CheckedAt.IsZero() && now.Sub(r.CheckedAt) < peerHintTTL {
+			score += 10_000
+		}
 	}
 	hits := r.SampleHits
 	if hits > 20 {
@@ -80,8 +83,8 @@ func resolvePriority(r observation, now time.Time) int64 {
 	if r.ResolveAttempts > 0 || !r.CheckedAt.IsZero() {
 		if overdue := now.Sub(dueAt(r)); overdue > 0 {
 			secs := int(overdue / time.Second)
-			if secs > 3600 {
-				secs = 3600
+			if secs > 60 {
+				secs = 60
 			}
 			score += int64(secs)
 		}
@@ -113,69 +116,38 @@ func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 	if s.cacheTried == nil {
 		s.cacheTried = map[string]bool{}
 	}
-	var fresh, retry *observation
-	pending := 0
-	better := func(a, b observation) bool {
-		return betterResolveCandidate(a, b, now)
+	batch := &s.dispatch[kind]
+	if !now.Before(batch.refreshAt) {
+		s.refillDispatchLocked(now, kind)
 	}
-	// Only walk unresolved hashes — named dump/catalog rows stay out of the queue.
-	for hash := range s.d.pendingSet {
-		r, ok := s.d.records[hash]
-		if !ok || r.Resolved {
-			delete(s.d.pendingSet, hash)
-			continue
-		}
-		if s.inflight[r.Hash] || now.Before(dueAt(r)) {
-			continue
-		}
-		tried := s.cacheTried[r.Hash]
-		switch kind {
-		case jobCache:
-			// A completed miss belongs to the peer pool until that attempt
-			// finishes. Cache workers must never reclaim their own handoff.
-			if tried {
-				continue
-			}
-		case jobPeer:
-			// Peer workers handle cache misses and reachable unresolved swarms.
-			// Untested hashes stay with the cache pool first.
-			if !tried && r.Peers == 0 && r.ResolveAttempts == 0 {
-				continue
-			}
-		}
-		pending++
-		if r.ResolveAttempts == 0 && r.CheckedAt.IsZero() {
-			if fresh == nil || better(r, *fresh) {
-				copy := r
-				fresh = &copy
-			}
-		} else if retry == nil || better(r, *retry) {
-			copy := r
-			retry = &copy
-		}
-	}
-	if kind == jobPeer {
-		s.d.state.Pending = pending
-	}
+	fresh, hasFresh := s.readyCandidateLocked(&batch.fresh, now, kind)
+	retry, hasRetry := s.readyCandidateLocked(&batch.retry, now, kind)
 	chosen := fresh
+	queue := &batch.fresh
 	// Reserve one out of four dispatches for retries so a steady flow of new
 	// samples cannot starve previously observed torrents with available peers.
-	if retry != nil && (fresh == nil || s.turn%4 == 0) {
+	if hasRetry && (!hasFresh || batch.turn%4 == 0) {
 		chosen = retry
+		queue = &batch.retry
 	}
-	if chosen == nil {
+	if !hasFresh && !hasRetry {
 		return discoveryJob{}, false
 	}
-	s.turn++
+	*queue = (*queue)[:len(*queue)-1]
+	batch.turn++
 	if s.inflight == nil {
 		s.inflight = make(map[string]bool)
 	}
 	s.inflight[chosen.Hash] = true
 	// Reserve the retry deadline before network work. Even a malformed/private
 	// response or a client setup failure must not cause a hot retry loop.
-	chosen.ResolveAttempts++
+	// Cache miss -> peer is one attempt through two sources, not two retry
+	// failures. Double counting used to skip the initial 30-second retry.
+	if kind != jobPeer || !s.cacheTried[chosen.Hash] || chosen.ResolveAttempts == 0 {
+		chosen.ResolveAttempts++
+	}
 	chosen.NextAttempt = now.Add(retryDelay(chosen.ResolveAttempts))
-	s.d.records[chosen.Hash] = *chosen
+	s.d.records[chosen.Hash] = chosen
 	s.d.state.Active++
 	if kind == jobPeer {
 		s.d.state.Pending--
@@ -191,6 +163,16 @@ func (s *sampler) releaseJob(hash string) {
 	if s.inflight[hash] {
 		delete(s.inflight, hash)
 		s.d.state.Active--
+		if rec, ok := s.d.records[hash]; ok && rec.Resolved {
+			delete(s.cacheTried, hash)
+			return
+		}
+		// A completed cache miss can go straight to the peer batch, including
+		// when that batch was empty. No backlog rescan is needed for handoff.
+		if rec, ok := s.d.records[hash]; ok && s.cacheTried[hash] && s.eligibleLocked(rec, time.Now(), jobPeer) {
+			s.dispatch[jobPeer].offer(rec, time.Now())
+			s.d.state.Pending++
+		}
 	}
 }
 
