@@ -315,6 +315,18 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 		s.PeerCapacity = peerWorkers
 		s.DHTActive = pipeline.lookups.Load()
 		s.DHTCapacity = peerLookupConcurrency
+		s.DHTQueryLimit = dhtQueryRate
+		s.PeerDialLimit = peerDialRate
+		s.PeerHalfOpenLimit = peerHalfOpenLimit
+		s.DHTQueued = pipeline.queued.Load()
+		s.DHTLookups = pipeline.lookupCount.Load()
+		s.DHTPeerLookups = pipeline.peerLookups.Load()
+		if s.DHTLookups > 0 {
+			s.AverageDHTMS = pipeline.lookupMS.Load() / s.DHTLookups
+		}
+		s.PeerMetadataActive = pipeline.metadata.Load()
+		s.PeerConnected = pipeline.connected.Load()
+		s.PeerDialing = pipeline.dialing.Load()
 		s.PeerMetadataChunks = pipeline.chunks.Load()
 	}
 	if trackers := d.trackers; trackers != nil {

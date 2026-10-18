@@ -534,7 +534,7 @@ function renderMap(counts){
 }
 function render(){
   const records=current.records||[],counts=aggregates();
-  $('resolver-work').textContent=(current.active||0)+' active checks · peers '+(current.peerActive||0)+' / '+(current.peerCapacity||0)+' · DHT '+(current.dhtActive||0)+' / '+(current.dhtCapacity||0)+' · HTTP '+(current.cacheActive||0)+' / '+(current.cacheCapacity||0)+' · '+fmt.format(current.pending||0)+' hashes due · rates count the last 60 seconds';
+  $('resolver-work').textContent=(current.active||0)+' active checks · '+(current.peerMetadataActive||0)+' peer fetches · '+(current.peerConnected||0)+' connected / '+(current.peerDialing||0)+' dialing · DHT '+(current.dhtActive||0)+' / '+(current.dhtCapacity||0)+' ('+(current.dhtQueued||0)+' queued) · HTTP '+(current.cacheActive||0)+' / '+(current.cacheCapacity||0)+' · '+fmt.format(current.pending||0)+' hashes due · rates count the last 60 seconds';
   const sources=(current.metadataSources||[]).map(s=>s.name+': '+fmt.format(s.hits)+' hits / '+fmt.format(s.requests)+' checks, '+fmt.format(s.failures)+' failed'+(s.probing?' · recovery probe':s.cooldownMs>0?' · retry in '+Math.ceil(s.cooldownMs/1000)+'s':''));
   $('resolver-sources').textContent=fmt.format(current.feedHints||0)+' provisional feed titles · trackers: '+fmt.format(current.trackerHits||0)+' peer lists / '+fmt.format(current.trackerRequests||0)+' requests · DHT UDP '+(current.dhtPort||'—')+': '+fmt.format(current.announcements||0)+' announcements'+(sources.length?' · '+sources.join(' · '):'');
   $('resolver-lookups').textContent=fmt.format(current.lookupsPerMinute||0);

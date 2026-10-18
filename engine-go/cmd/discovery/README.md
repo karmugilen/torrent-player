@@ -44,14 +44,19 @@ magnet link for download in another client.
 
 The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
-Ninety-six cache workers and twenty-four peer workers run with bounded network
+Ninety-six cache workers and sixty-four peer workers run with bounded network
 admission. Cache workers only query HTTPS `.torrent` mirrors and
 release immediately on a miss. Peer workers handle cache misses and fast-track
 fresh endpoints or feed-associated tracker/publisher metadata hints.
 Four sampling slots refill independently of slow nodes. Random routing lookups
 refresh discovery every three seconds. Advertised sampling intervals remain
-respected. A DHT limit of 64 sends/second and peer dial limit of 24/second bound
-network traffic. HTTP connections are reused, with up to 48 requests per cache
+respected. A DHT limit of 256 sends/second and peer dial limit of 96/second bound
+network traffic. Twenty-four DHT searches run independently of metadata fetches.
+A search releases its slot after finding twelve endpoints or gathering replies
+for 750ms after its first peer. Reporting nodes and trackers can cancel a
+redundant traversal once they supply enough endpoints. Up to six peer addresses
+per swarm race within a global limit of 192 pending connections; each swarm
+keeps at most three established connections. HTTP connections are reused, with up to 48 requests per cache
 source. Confirmed 404/410 responses leave mirrors healthy; challenge HTML, HTTP
 403, transport failures, rate limits and server errors back them off. Names appear immediately from catalog or
 cache hits. Cache deadlines are 2.5 seconds. Losing HTTP requests are canceled
@@ -67,10 +72,12 @@ DHT bootstrap runs before resolver workers and retries automatically after a
 cold-start failure, so a full metadata queue cannot prevent discovery starting.
 
 Unresolved hashes retry automatically after 30 seconds, doubling to at most 15
-minutes; retries do not require another sample. One in four dispatches is reserved
-for due retries. Reachable unresolved swarms survive pruning ahead of untested
+minutes; retries do not require another sample. Dispatch preserves retry fairness
+while favoring known endpoints and fresh reporting nodes. Jobs without endpoints
+have a separate admission limit so they cannot fill the metadata pool. Reachable unresolved swarms survive pruning ahead of untested
 hashes. Named hashes leave the resolver queue and are reused without network rechecks.
-The page shows active/due jobs, new names per minute, catalog/cache/peer wins,
+The page shows queued searches, actual connected/dialing peers, active/due jobs,
+new names per minute, catalog/cache/peer wins,
 successful names versus completed jobs, and mean lookup time. These counters
 describe the current process; retained names can include earlier sessions.
 

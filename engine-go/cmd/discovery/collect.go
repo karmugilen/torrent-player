@@ -71,6 +71,7 @@ type discoveryJob struct {
 	hash    string
 	sources []krpc.NodeInfo
 	kind    jobKind
+	cold    bool
 }
 type sampler struct {
 	d             *dashboard
@@ -84,6 +85,8 @@ type sampler struct {
 	cacheTried    map[string]bool
 	cacheOffline  bool
 	peerLookups   chan struct{}
+	coldJobs      chan struct{}
+	readyPeers    map[string]bool
 	pipeline      *peerPipelineStats
 	dispatch      [2]resolverBatch
 	caches        *metadataCaches
@@ -118,8 +121,9 @@ func (d *dashboard) collect(ctx context.Context) error {
 		default:
 		}
 	}
-	// Quiet DHT: enough for sampling geography, far below a swarm client.
-	cfg.SendLimiter = rate.NewLimiter(64, 16)
+	// Keep traversal concurrency and wire admission in balance. More workers
+	// sharing the old 64-query/s budget only waited longer without finding peers.
+	cfg.SendLimiter = rate.NewLimiter(dhtQueryRate, 64)
 	server, e := dht.NewServer(cfg)
 	if e != nil {
 		conn.Close()
@@ -138,11 +142,13 @@ func (d *dashboard) collect(ctx context.Context) error {
 	tc.ListenPort = 0
 	tc.NoUpload = true
 	tc.AcceptPeerConnections = false
-	// Metadata-only peer dials stay rare; torrents-csv supplies most names.
+	// Race candidate addresses within a reachable swarm so two dead peers do
+	// not serialize its metadata fetch. Global admission and dial rate remain
+	// bounded independently; payload transfers are always disabled.
 	tc.EstablishedConnsPerTorrent = 3
-	tc.HalfOpenConnsPerTorrent = 2
-	tc.TotalHalfOpenConns = 48
-	tc.DialRateLimiter = rate.NewLimiter(24, 8)
+	tc.HalfOpenConnsPerTorrent = 6
+	tc.TotalHalfOpenConns = peerHalfOpenLimit
+	tc.DialRateLimiter = rate.NewLimiter(peerDialRate, 24)
 	tc.NominalDialTimeout = 3 * time.Second
 	tc.MinDialTimeout = 1500 * time.Millisecond
 	tc.HandshakesTimeout = 3 * time.Second
@@ -154,6 +160,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, cacheTried: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: hints, trackers: newTrackerResolver()}
 	s.lookup = s.query
 	s.peerLookups = make(chan struct{}, peerLookupConcurrency)
+	s.coldJobs = make(chan struct{}, peerLookupConcurrency)
 	s.pipeline = &peerPipelineStats{}
 	defer s.caches.close()
 	defer s.trackers.close()
@@ -224,6 +231,9 @@ func (d *dashboard) collect(ctx context.Context) error {
 	for ctx.Err() == nil {
 		s.refreshRoutes(ctx)
 		s.sampleBatch(ctx)
+		peerStats := client.Stats()
+		s.pipeline.connected.Store(int64(peerStats.ActivePeers))
+		s.pipeline.dialing.Store(int64(peerStats.ActiveHalfOpenAttempts))
 		d.mu.Lock()
 		d.state.Queries = int(server.Stats().OutboundQueriesAttempted)
 		d.state.ActiveSamplers = len(s.samplingSlots)
@@ -373,6 +383,14 @@ func (s *sampler) clearCacheTried(hash string) {
 }
 
 func (s *sampler) resolve(parent context.Context, j discoveryJob) {
+	coldHeld := j.cold
+	releaseCold := func() {
+		if coldHeld {
+			<-s.coldJobs
+			coldHeld = false
+		}
+	}
+	defer releaseCold()
 	started := time.Now()
 	var hash metainfo.Hash
 	raw, err := hex.DecodeString(j.hash)
@@ -415,6 +433,19 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		s.pipeline.active.Add(1)
 		defer s.pipeline.active.Add(-1)
 	}
+	metadataActive := false
+	startMetadata := func() {
+		releaseCold()
+		if !metadataActive && s.pipeline != nil {
+			s.pipeline.metadata.Add(1)
+			metadataActive = true
+		}
+	}
+	defer func() {
+		if metadataActive {
+			s.pipeline.metadata.Add(-1)
+		}
+	}()
 	defer s.clearCacheTried(j.hash)
 	// Bound queue residence separately; a queued DHT search must not spend its
 	// metadata-fetch deadline before it has even been admitted to the network.
@@ -467,6 +498,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	knownPeers := s.hints.get(j.hash, time.Now())
 	if !wasResolved {
 		if hints := knownPeers; len(hints) > 0 {
+			startMetadata()
 			connections := make([]torrent.PeerInfo, 0, len(hints))
 			for _, peer := range hints {
 				connections = append(connections, torrent.PeerInfo{Addr: &net.TCPAddr{IP: peer.IP, Port: peer.Port}})
@@ -502,7 +534,9 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			}
 		}(source)
 	}
-	peerEvents, lookupStarted := s.streamPeerLookup(ctx, hash, len(knownPeers) > 0, &lookupWork)
+	lookupCtx, cancelLookup := context.WithCancel(ctx)
+	defer cancelLookup()
+	peerEvents, lookupStarted := s.streamPeerLookup(lookupCtx, hash, len(knownPeers) > 0, &lookupWork)
 	prefetchDone := make(chan struct{})
 	go func() { work.Wait(); close(prefetchDone) }()
 	var prefetchEvents <-chan struct{} = prefetchDone
@@ -512,6 +546,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		got = nil
 	}
 	uniqueIPs := map[string]bool{}
+	discoveredEndpoints := map[string]bool{}
 	countries := map[string]int{}
 	var seeds krpc.ScrapeBloomFilter
 	hasSeedEstimate := false
@@ -520,6 +555,11 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		connections := make([]torrent.PeerInfo, 0, len(peers))
 		for _, p := range peers {
 			if publicIP(p.IP) && p.Port > 0 {
+				endpoint := p.String()
+				if discoveredEndpoints[endpoint] {
+					continue
+				}
+				discoveredEndpoints[endpoint] = true
 				if !uniqueIPs[p.IP.String()] {
 					uniqueIPs[p.IP.String()] = true
 					countries[s.d.country(p.IP)]++
@@ -530,7 +570,13 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			}
 		}
 		if len(connections) > 0 {
+			startMetadata()
 			t.AddPeers(connections)
+		}
+		// Direct reporting nodes and trackers can satisfy discovery before the
+		// full traversal. Release that redundant lookup too, including queue waits.
+		if len(discoveredEndpoints) >= lookupPeerTarget {
+			cancelLookup()
 		}
 	}
 	accept := func(info *metainfo.Info, source string) bool {

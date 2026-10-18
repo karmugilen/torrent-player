@@ -184,6 +184,11 @@ func (s *sampler) applyFeedEntries(items []feedEntry, now time.Time) int {
 		rec.NameHint = cleanMetadataText(item.title, 512)
 		rec.Source = "feed"
 		rec.Kind = catalogKind(rec.NameHint)
+		// Fresh publisher/tracker associations should not wait behind a long
+		// retry deadline inherited from an earlier blind DHT failure.
+		if (item.metadataURL != "" || len(item.trackers) > 0) && now.Sub(rec.CheckedAt) >= time.Minute && rec.NextAttempt.After(now) {
+			rec.NextAttempt = now
+		}
 		s.d.records[item.hash] = rec
 		s.d.markPendingLocked(item.hash)
 		s.d.indexNameLocked(item.hash, rec.NameHint)

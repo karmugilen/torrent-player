@@ -11,7 +11,10 @@ import (
 // DHT traversal and dial budgets; extra workers do not increase wire rate limits.
 const cacheWorkers = 96
 const peerWorkers = 64
-const peerLookupConcurrency = 8
+const peerLookupConcurrency = 24
+const dhtQueryRate = 256
+const peerDialRate = 96
+const peerHalfOpenLimit = 192
 const resolverWorkers = cacheWorkers + peerWorkers
 
 type jobKind int
@@ -142,8 +145,30 @@ func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 		chosen = retry
 		queue = &batch.retry
 	}
+	if kind == jobPeer && hasFresh && hasRetry {
+		freshReady := s.readyPeers[fresh.Hash] || fresh.NameHint != ""
+		retryReady := s.readyPeers[retry.Hash] || retry.NameHint != ""
+		// Prefer dialable/publisher jobs across the fresh/retry split, leaving
+		// one in eight admissions for the ordinary backlog to prevent starvation.
+		if freshReady != retryReady && batch.turn%8 != 0 {
+			if retryReady {
+				chosen, queue = retry, &batch.retry
+			} else {
+				chosen, queue = fresh, &batch.fresh
+			}
+		}
+	}
 	if !hasFresh && !hasRetry {
 		return discoveryJob{}, false
+	}
+	cold := false
+	if kind == jobPeer && s.coldJobs != nil && !s.readyPeers[chosen.Hash] && chosen.NameHint == "" {
+		select {
+		case s.coldJobs <- struct{}{}:
+			cold = true
+		default:
+			return discoveryJob{}, false
+		}
 	}
 	*queue = (*queue)[:len(*queue)-1]
 	batch.turn++
@@ -164,7 +189,7 @@ func (s *sampler) nextJobOf(now time.Time, kind jobKind) (discoveryJob, bool) {
 	if kind == jobPeer {
 		s.d.state.Pending = max(0, s.d.state.Pending-1)
 	}
-	return discoveryJob{hash: chosen.Hash, sources: append([]krpc.NodeInfo(nil), s.sources[chosen.Hash]...), kind: kind}, true
+	return discoveryJob{hash: chosen.Hash, sources: append([]krpc.NodeInfo(nil), s.sources[chosen.Hash]...), kind: kind, cold: cold}, true
 }
 
 func (s *sampler) releaseJob(hash string) {

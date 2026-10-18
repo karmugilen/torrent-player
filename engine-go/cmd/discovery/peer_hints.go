@@ -27,6 +27,23 @@ type peerHintCache struct {
 	entries map[string]peerHintEntry
 }
 
+// Snapshot only warm hashes for dispatch, avoiding a cache mutex acquisition
+// for every row in the pending backlog. Endpoint addresses stay in this cache.
+func (h *peerHintCache) readyHashes(now time.Time) map[string]bool {
+	out := make(map[string]bool)
+	if h == nil {
+		return out
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for hash, entry := range h.entries {
+		if now.Sub(entry.observed) < peerHintTTL && len(entry.peers) > 0 {
+			out[hash] = true
+		}
+	}
+	return out
+}
+
 func (h *peerHintCache) get(hash string, now time.Time) []krpc.NodeAddr {
 	if h == nil {
 		return nil

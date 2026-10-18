@@ -29,7 +29,7 @@ Binary + PID + log + `discovery.json` + `torrents.csv` under `~/.cache/torrent-p
 1. **Local dump** (`torrents.csv`, ~175MB, ~1.16M rows, sorted by infohash) — main volume; refresh ~24h.
 2. **Catalog** — `https://torrents-csv.com/service/search` (paced workers).
 3. **HTTPS .torrent caches** — race mirrors; exact infohash; public torrents only.
-4. **Peer BEP 9** — after cache miss; quiet dial limits.
+4. **Peer BEP 9** — after cache miss; bounded dial limits.
 5. **Public feeds** — SubsPlease, Nyaa and EZTV, checked every five minutes with
    conditional requests. Titles remain `NameHint` / `Resolved=false` until exact
    metadata or a catalog matches. Feed tracker hints, publisher `.torrent` links
@@ -109,7 +109,7 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - Resolved ⇒ never cache/peer re-resolve.
 - Browser never receives the full million-row store in one payload.
 - Dump index does not mutate Observations by itself.
-- Quiet DHT/peer rates; dump + catalog carry naming volume.
+- Bounded DHT/peer rates; dump + catalog carry indexed naming volume.
 - Provisional feed labels never count as verified names. Indexed batch matches
   never inflate live lookup/new-name counters.
 
@@ -162,19 +162,33 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
   network lookup or a healthy miss; it retries cache work without consuming a hash retry attempt.
 - HTTP admission bounds active hash races to 48, with 96 cache workers. Queue
   waiting no longer consumes the 2.5s network deadline.
-  There are 64 peer metadata jobs with an independent 8-traversal DHT budget;
+  There are 64 peer metadata jobs with an independent 24-traversal DHT budget;
   DHT admission waits do not consume the 12s metadata-fetch deadline (45s total
-  queue residence bound). Eight traversals share the 64-query/s wire budget,
-  leaving each traversal more room to reach its target than 24 parallel searches.
-  known endpoints dial immediately, with a 350ms hedge before DHT fallback.
-  Empty traversals end after 3s; reachable swarms continue streaming alternative
-  peers within the 12s metadata deadline. Tracker results stream individually; one slow
+  queue residence bound). The 24 traversals share a 256-query/s wire budget;
+  traversal and dial budgets are raised together so jobs do not just wait longer.
+  Known endpoints dial immediately, with a 350ms hedge before DHT fallback.
+  Traversals release admission after 12 unique endpoints or 750ms after the
+  first peer reply; empty traversals end after 3s. Metadata fetching continues
+  independently for up to 12s. Tracker results stream individually; one slow
   tracker never blocks another's peers. Metadata completion immediately releases
   the job instead of waiting another 1.2s for geography. Stalled connected peers
   yield after 4s without metadata progress once source discovery finishes.
   `peerActive`, `peerCapacity`, `dhtActive`, `dhtCapacity`, and
   `peerMetadataChunks` expose pipeline activity in the API and website.
-  DHT sends are capped at 64/s, peer dials at 24/s. Empty unresponsive swarms
+  Cold jobs without cached endpoints/publisher hints have a separate 24-job
+  admission limit, released as soon as peers arrive. Cached endpoints get a
+  priority boost across fresh/retry queues; ordinary backlog retains a fair share.
+  Fresh sampled hashes with a reporting node outrank old blind backlog. When
+  reporting nodes or associated trackers supply enough endpoints, the redundant
+  full traversal is canceled, including its admission wait.
+  `dhtQueued`, `dhtLookups`, `dhtPeerLookups`, `averageDhtMs`,
+  `peerMetadataActive`, `peerConnected`, and `peerDialing` distinguish actual
+  endpoint fetching and socket activity from jobs waiting for DHT.
+  Refreshed feed associations can wake old blind failures after at least a minute.
+  DHT sends are capped at 256/s, peer dials at 96/s. Metadata jobs can race six
+  peer addresses per swarm within 192 global half-open and three
+  established-per-swarm limits. The API exposes `dhtQueryLimit`, `peerDialLimit`,
+  and `peerHalfOpenLimit` alongside actual socket activity. Empty unresponsive swarms
   release after traversal admission plus 3s; progressing peers keep the 12s
   metadata deadline.
 - Per-mirror HTTP 404/410 miss caches expire after 2 minutes and cap at 8,192
@@ -207,3 +221,12 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - Reproduce real indexed HTTP capacity with `python scripts/benchmark-discovery.py`.
   It samples 100,000 distinct hashes across the CSV and validates nonempty named
   responses. This measures reusable labels, not new peer metadata per minute.
+
+### Live metadata measurement, 2026-10-18
+
+After the admission/slot fixes with the old network budgets, a 64.1s window
+resolved six new peer names (5.6/min). With aligned 256 DHT queries/s and
+96 peer dials/s, a subsequent 64.2s window resolved 25 new peer names
+(23.3/min), with zero payload bytes. Both windows excluded their initial 30s
+warmup and had no new cache names during measurement. These are live network
+observations, not guaranteed throughput; peer availability changes between runs.

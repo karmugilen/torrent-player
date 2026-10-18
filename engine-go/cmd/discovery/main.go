@@ -87,6 +87,16 @@ type state struct {
 	PeerCapacity           int            `json:"peerCapacity"`
 	DHTActive              int64          `json:"dhtActive"`
 	DHTCapacity            int            `json:"dhtCapacity"`
+	DHTQueryLimit          int            `json:"dhtQueryLimit"`
+	PeerDialLimit          int            `json:"peerDialLimit"`
+	PeerHalfOpenLimit      int            `json:"peerHalfOpenLimit"`
+	DHTQueued              int64          `json:"dhtQueued"`
+	DHTLookups             int64          `json:"dhtLookups"`
+	DHTPeerLookups         int64          `json:"dhtPeerLookups"`
+	AverageDHTMS           int64          `json:"averageDhtMs"`
+	PeerMetadataActive     int64          `json:"peerMetadataActive"`
+	PeerConnected          int64          `json:"peerConnected"`
+	PeerDialing            int64          `json:"peerDialing"`
 	PeerMetadataChunks     int64          `json:"peerMetadataChunks"`
 	MetadataSources        []sourceState  `json:"metadataSources"`
 	CatalogHits            int            `json:"catalogHits"`
