@@ -1,7 +1,10 @@
 # Faster discovery and hash-to-name resolution
 
 Research date: 2026-10-18. Baseline: `7f4f789`.
-This is an implementation plan; the changes below are not installed yet.
+The main intake, lookup, tracker and memory improvements below are implemented.
+See [measured results and usage](../engine-go/cmd/discovery/README.md#bulk-lookup-and-fresh-inputs).
+A dedicated BEP 9 requester and append journal remain profiling-dependent options;
+the existing requester remains in use, and snapshots now stream in small batches.
 
 The aim is more unique names, with explicit verification status, per minute.
 Completed failed checks, imported catalog labels and metadata verified against

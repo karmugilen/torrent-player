@@ -26,6 +26,9 @@ See [the 2.1.3 UI, playback and improvement notes](README_REDESIGN.md) for dynam
 Run `./scripts/discovery.sh start` and open [Torrent Atlas](http://127.0.0.1:18181)
 for a live world map and public torrent discovery on this PC. Search observed
 names, filter by country, and view the top ten within the local sample.
+The bulk lookup tool matches up to 100,000 hashes against saved names and the
+local index, with CSV export. Fresh feeds, tracker hints and publisher metadata
+run alongside DHT; provisional labels and verified results remain distinguishable.
 See [the desktop page notes](engine-go/cmd/discovery/README.md).
 
 ## Screenshots

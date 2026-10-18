@@ -152,6 +152,15 @@ footer a{color:inherit;text-underline-offset:3px}
 .resolver-card h3{font-size:12px;font-weight:600}.resolver-card p{font-size:11px;color:var(--muted)}
 .resolver-stats{display:flex;gap:22px;flex-wrap:wrap;font-size:11px;color:var(--muted);max-width:670px}
 .resolver-stats strong{display:block;font-size:16px;font-weight:500;color:var(--ink)}
+.source-summary{font-size:11px;color:var(--muted);margin-top:8px;max-width:580px}
+.bulk-card{padding:16px 22px;margin-bottom:22px}
+.bulk-card summary{cursor:pointer;font-size:13px;font-weight:600}
+.bulk-card p{font-size:12px;color:var(--muted);margin:10px 0}
+.bulk-card textarea{display:block;width:100%;min-height:100px;box-sizing:border-box;resize:vertical;padding:10px;background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:6px;font:12px monospace}
+.bulk-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
+.bulk-actions input{max-width:100%}
+.bulk-actions input::file-selector-button{border:1px solid var(--line);background:var(--white);color:var(--ink);border-radius:5px;padding:8px 12px;font:inherit;cursor:pointer;margin-right:8px}
+.bulk-results{max-height:180px;overflow:auto;font-size:12px;overflow-wrap:anywhere}
 .rate-meter{margin-top:10px;font-size:10px;color:var(--muted)}
 .rate-meter label{display:flex;justify-content:space-between;gap:12px}
 .rate-meter progress{display:block;margin-top:5px;width:240px;max-width:100%;height:5px;border:0;accent-color:var(--green)}
@@ -223,6 +232,7 @@ progress::-webkit-progress-value{background:var(--green);border-radius:2px}
   <div>
     <h3>Live name resolution</h3>
     <p id="resolver-work">Connecting metadata sources…</p>
+    <p id="resolver-sources" class="source-summary"></p>
     <div class="rate-meter"><label for="name-goal">Fresh names goal <span id="name-goal-label">0 / 1,000 per minute</span></label><progress id="name-goal" max="1000" value="0">0</progress></div>
   </div>
   <div class="resolver-stats">
@@ -233,6 +243,19 @@ progress::-webkit-progress-value{background:var(--green);border-radius:2px}
     <span><strong id="resolver-latency">—</strong>mean network lookup</span>
   </div>
 </section>
+<details class="card bulk-card reveal" id="bulk-panel">
+  <summary>Bulk hash → name lookup · 1 lakh batch target</summary>
+  <p>Paste hashes or magnets, or select a text/CSV file with up to 100,000 unique hashes. Matches use saved names and the local index. Catalog labels and verified metadata are identified separately.</p>
+  <textarea id="bulk-input" aria-label="Hashes or magnets to resolve" placeholder="One hash or magnet per line"></textarea>
+  <div class="bulk-actions">
+    <input id="bulk-file" type="file" accept=".txt,.csv,.json,.log" aria-label="Import hash list">
+    <button id="bulk-run" class="button primary" type="button">Resolve batch</button>
+    <button id="bulk-cancel" class="button" type="button" hidden>Cancel</button>
+    <button id="bulk-export" class="button" type="button" disabled>Download results CSV</button>
+  </div>
+  <p id="bulk-status" role="status" aria-live="polite">Batch throughput measures reused indexed names; it does not count as fresh network discovery.</p>
+  <div id="bulk-results" class="bulk-results"></div>
+</details>
 <section class="layout reveal">
   <div class="card map-card">
     <div class="card-top">
@@ -301,7 +324,7 @@ progress::-webkit-progress-value{background:var(--green);border-radius:2px}
       <option value="name">Name A–Z</option>
     </select>
     <select id="kind" aria-label="Content type"><option value="all">All types</option><option value="Video">Videos</option><option value="Other">Other files</option></select>
-    <select id="source" aria-label="Name source"><option value="all">All name sources</option><option value="observed">DHT sightings</option><option value="verified">Peer / cache verified</option><option value="indexed">Public catalog</option></select>
+    <select id="source" aria-label="Name source"><option value="all">All name sources</option><option value="observed">DHT sightings</option><option value="verified">Peer / cache verified</option><option value="indexed">Public catalog</option><option value="feed">Feed titles · provisional</option></select>
     <label class="check"><input id="pending" type="checkbox">Show unresolved</label>
     <label class="check"><input id="located-only" type="checkbox">Located only</label>
     <label class="check"><input id="hide-adult" type="checkbox" checked>Hide adult names</label>
@@ -385,9 +408,9 @@ function svg(tag,attrs){const n=document.createElementNS(NS,tag);for(const[k,v]o
 function project(lon,lat){return[(lon+180)*1000/360,(90-lat)*500/180]}
 const regionNames=new Intl.DisplayNames(['en'],{type:'region'});
 function countryName(c){if(c==='ZZ'||c==='Unlocated')return 'Unlocated';return countryByCode.get(c)?.name||(/^[A-Z]{2}$/.test(c)?regionNames.of(c):null)||c}
-function shownName(r){if(!r.resolved)return 'Resolving metadata…';return $('hide-adult').checked&&adult.test(r.name)?'Adult release · name hidden':r.name}
+function shownName(r){const name=r.name||r.nameHint;if(!name)return 'Resolving metadata…';return $('hide-adult').checked&&adult.test(name)?'Adult release · name hidden':name}
 function normalizeSearch(value){return value.normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim()}
-function matchesSearch(r,query){const hash=query.match(/(?:urn:btih:)?([a-f0-9]{40})/i);if(hash)return r.hash.includes(hash[1].toLowerCase());if(r.hash.includes(query))return true;const tokens=normalizeSearch(query).split(/\s+/).filter(Boolean),text=normalizeSearch([r.name||'',...(r.files||[])].join(' '));return tokens.every(token=>text.includes(token))}
+function matchesSearch(r,query){const hash=query.match(/(?:urn:btih:)?([a-f0-9]{40})/i);if(hash)return r.hash.includes(hash[1].toLowerCase());if(r.hash.includes(query))return true;const tokens=normalizeSearch(query).split(/\s+/).filter(Boolean),text=normalizeSearch([r.name||r.nameHint||'',...(r.files||[])].join(' '));return tokens.every(token=>text.includes(token))}
 function size(n){if(!n)return '—';const units=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(i>1?1:0)+' '+units[i]}
 function age(t){if(!t||t.startsWith('0001'))return 'Not checked';const s=Math.max(0,(Date.now()-Date.parse(t))/1000);if(s<60)return 'Just now';if(s<3600)return Math.floor(s/60)+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return Math.floor(s/86400)+' days ago'}
 function withinTrend(r){if(trendWindow==='all')return true;const stamp=Date.parse(r.lastSeen||r.checkedAt||r.firstSeen||0);if(!stamp)return false;const ageMs=Date.now()-stamp;return trendWindow==='today'?ageMs<=86400000:ageMs<=7*86400000}
@@ -512,6 +535,8 @@ function renderMap(counts){
 function render(){
   const records=current.records||[],counts=aggregates();
   $('resolver-work').textContent=(current.active||0)+' active checks · '+fmt.format(current.pending||0)+' hashes due · rates count the last 60 seconds';
+  const sources=(current.metadataSources||[]).map(s=>s.name+': '+fmt.format(s.hits)+' hits / '+fmt.format(s.requests)+' checks, '+fmt.format(s.failures)+' failed');
+  $('resolver-sources').textContent=fmt.format(current.feedHints||0)+' provisional feed titles · trackers: '+fmt.format(current.trackerHits||0)+' peer lists / '+fmt.format(current.trackerRequests||0)+' requests · DHT UDP '+(current.dhtPort||'—')+': '+fmt.format(current.announcements||0)+' announcements'+(sources.length?' · '+sources.join(' · '):'');
   $('resolver-lookups').textContent=fmt.format(current.lookupsPerMinute||0);
   $('resolver-speed').textContent=fmt.format(current.liveNamesPerMinute||0);
   $('resolver-indexed').textContent=fmt.format(current.indexNamesPerMinute||0);
@@ -546,7 +571,7 @@ function render(){
   for(const[rIndex,r]of filtered.entries()){
     const tr=el('tr'),name=el('td',{class:'name-cell'}),button=el('button',{class:'torrent-name',type:'button'},shownName(r)),meta=el('div',{class:'torrent-meta'});
     button.onclick=()=>openDetail(r.hash,button);
-    meta.append(el('span',{class:'hash'},r.hash.slice(0,12)+'…'),el('span',{},r.resolved?(r.kind||'Other'):'Pending'),el('span',{class:'name-source'},r.source==='dump'?'Local index':r.source==='catalog'?'Catalog':r.source==='cache'?'Verified cache':r.source==='peer'?'Verified peer':'Awaiting metadata'));
+    meta.append(el('span',{class:'hash'},r.hash.slice(0,12)+'…'),el('span',{},r.resolved?(r.kind||'Other'):'Pending'),el('span',{class:'name-source'},r.source==='dump'?'Local index':r.source==='catalog'?'Catalog':r.source==='cache'?'Verified cache':r.source==='peer'?'Verified peer':r.source==='feed'?'Feed title · unverified':'Awaiting metadata'));
     if(r.resolved){
       const mag=el('button',{class:'button',type:'button'},'Magnet');
       mag.style.cssText='margin-left:6px;padding:2px 8px;font-size:11px';
@@ -576,7 +601,7 @@ function renderDetail(){
   const r=current.records.find(r=>r.hash===detailHash)||detailRecord;if(!r)return;
   $('detail-name').textContent=shownName(r);$('detail-kind').textContent=r.resolved?(r.kind||'Other'):'Metadata pending';
   $('detail-facts').replaceChildren();
-  const sourceLabel=r.source==='dump'?'Local public catalog (not peer-verified)':r.source==='catalog'?'Public torrent catalog':r.source==='cache'?'Verified torrent cache':r.source==='peer'?'Verified peer metadata':r.resolved?'Previously stored name':'Pending';
+  const sourceLabel=r.source==='dump'?'Local public catalog (not peer-verified)':r.source==='catalog'?'Public torrent catalog':r.source==='cache'?'Verified torrent cache':r.source==='peer'?'Verified peer metadata':r.source==='feed'?'Public feed title; awaiting metadata verification':r.resolved?'Previously stored name':'Pending';
   const pairs=[['Hash',r.hash],['Size',size(r.size)],['Name source',sourceLabel],['Resolution time',r.resolutionMs?r.resolutionMs+' ms':'—'],['Lookup attempts',String(r.resolveAttempts||0)],['Next check',r.nextAttempt&&!r.nextAttempt.startsWith('0001')?new Date(r.nextAttempt).toLocaleTimeString():'Scheduled automatically'],['Peers observed',fmt.format(r.peers||0)],['Seeding estimate',r.seeds===null||r.seeds===undefined?'Unavailable':'≈ '+fmt.format(r.seeds)],['First observed',new Date(r.firstSeen).toLocaleString()],['Last checked',!r.checkedAt||r.checkedAt.startsWith('0001')?'Not checked':new Date(r.checkedAt).toLocaleString()],['Countries',Object.entries(r.countries||{}).filter(([c])=>!$('located-only').checked||(c!=='ZZ'&&c!=='Unlocated')).map(([c,n])=>countryName(c)+' ('+n+')').join(', ')||'Unlocated']];
   for(const[k,v]of pairs)$('detail-facts').append(el('dt',{},k),el('dd',{},v));
   $('detail-files').replaceChildren();
@@ -599,6 +624,62 @@ $('copy-magnet').onclick=async()=>{const r=(current.records||[]).find(x=>x.hash=
 function toast(s){clearTimeout(toastTimer);$('toast').textContent=s;$('toast').style.display='block';toastTimer=setTimeout(()=>$('toast').style.display='none',2300)}
 let searchTimer=null;
 $('search').addEventListener('input',()=>{pageLimit=150;pageOffset=0;render();clearTimeout(searchTimer);searchTimer=setTimeout(()=>poll(true),180)});
+let bulkFileText='',bulkController=null,bulkRows=[];
+function batchHashes(text){
+  const found=text.match(/magnet:\?[^\s"'<>]+|(?:urn:btih:)?\b[a-f0-9]{40}\b|\b[a-z2-7]{32}\b/gi)||[],unique=new Set();
+  for(let value of found){
+    if(value.toLowerCase().startsWith('magnet:')){try{value=new URL(value.replaceAll('&amp;','&')).searchParams.getAll('xt').find(x=>x.startsWith('urn:btih:'))||''}catch{continue}}
+    value=value.replace(/^urn:btih:/i,'').toUpperCase();
+    if(/^[A-F0-9]{40}$/.test(value))unique.add(value.toLowerCase());
+    else if(/^[A-Z2-7]{32}$/.test(value)){
+      let bits=0,acc=0,hex='';
+      for(const char of value){acc=(acc<<5)|'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'.indexOf(char);bits+=5;if(bits>=8){bits-=8;hex+=((acc>>bits)&255).toString(16).padStart(2,'0');acc&=(1<<bits)-1}}
+      if(hex.length===40)unique.add(hex);
+    }
+    if(unique.size>100000)throw Error('Use at most 100,000 unique hashes per batch.');
+  }
+  return [...unique];
+}
+$('bulk-input').addEventListener('input',()=>{bulkFileText='';$('bulk-file').value=''});
+$('bulk-file').addEventListener('change',async()=>{
+  const file=$('bulk-file').files[0];if(!file)return;
+  if(file.size>10*1024*1024){$('bulk-status').textContent='Choose a file smaller than 10 MiB.';return}
+  $('bulk-run').disabled=true;
+  try{bulkFileText=await file.text();$('bulk-input').value='';$('bulk-status').textContent='Loaded '+file.name+' · ready to resolve.'}
+  catch{$('bulk-status').textContent='Could not read this file.'}
+  finally{$('bulk-run').disabled=false}
+});
+$('bulk-cancel').onclick=()=>bulkController?.abort();
+$('bulk-run').onclick=async()=>{
+  if(bulkController)return;
+  bulkController=new AbortController();const controller=bulkController;
+  $('bulk-run').disabled=true;$('bulk-cancel').hidden=false;$('bulk-export').disabled=true;$('bulk-results').replaceChildren();bulkRows=[];
+  let checked=0,matched=0,verified=0;
+  const started=performance.now();
+  try{
+    $('bulk-status').textContent='Reading unique hashes…';await new Promise(resolve=>setTimeout(resolve,0));
+    const hashes=batchHashes(bulkFileText||$('bulk-input').value);
+    if(!hashes.length)throw Error('Paste hashes or magnets, or select a file containing them.');
+    for(let start=0;start<hashes.length;start+=10000){
+      const response=await fetch('/api/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hashes:hashes.slice(start,start+10000)}),signal:controller.signal});
+      if(!response.ok)throw Error('Batch lookup failed ('+response.status+'). Please retry.');
+      const result=await response.json();checked+=result.unique;matched+=result.matched;
+      verified+=result.results.filter(r=>r.verified).length;bulkRows.push(...result.results,...result.missing.map(hash=>({hash,name:'',source:'unmatched',verified:false})));
+      $('bulk-status').textContent=fmt.format(checked)+' / '+fmt.format(hashes.length)+' checked · '+fmt.format(matched)+' names matched';
+      await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    const elapsed=(performance.now()-started)/1000,rate=Math.round(matched*60/Math.max(elapsed,.001));
+    $('bulk-status').textContent=fmt.format(matched)+' / '+fmt.format(checked)+' unique hashes matched in '+elapsed.toFixed(2)+' s · '+fmt.format(rate)+' indexed matches/min for this batch · '+fmt.format(verified)+' carry verified metadata.';
+    for(const row of bulkRows.slice(0,30))$('bulk-results').append(el('div',{},row.hash.slice(0,12)+'… · '+(row.name?($('hide-adult').checked&&adult.test(row.name)?'Adult release · name hidden':row.name):'No indexed name')+' · '+(row.verified?'verified':row.source)));
+    if(bulkRows.length>30)$('bulk-results').append(el('p',{},'Preview: first 30 results. Download the CSV for the full batch.'));
+  }catch(error){$('bulk-status').textContent=error.name==='AbortError'?'Cancelled · '+fmt.format(checked)+' hashes checked, '+fmt.format(matched)+' names matched.':error.message}
+  finally{bulkController=null;$('bulk-run').disabled=false;$('bulk-cancel').hidden=true;$('bulk-export').disabled=!bulkRows.length}
+};
+$('bulk-export').onclick=()=>{
+  const cell=value=>{let s=String(value??'');if(/^[=+@-]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"'},lines=['hash,name,source,verified'];
+  for(const row of bulkRows)lines.push([row.hash,row.name,row.source,row.verified].map(cell).join(','));
+  const url=URL.createObjectURL(new Blob([lines.join('\r\n')],{type:'text/csv;charset=utf-8'})),link=el('a',{href:url,download:'torrent-atlas-names.csv'});link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
 for(const id of ['sort','kind','source','pending','hide-adult','located-only'])$(id).addEventListener('change',()=>{pageLimit=150;pageOffset=0;render();poll(true)});
 $('country-filter').onclick=$('reset-country').onclick=()=>{selectedCountry=null;pageOffset=0;render();poll(true)};
 function setTrend(windowName){

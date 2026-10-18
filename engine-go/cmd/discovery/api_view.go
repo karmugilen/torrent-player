@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"container/heap"
 	"encoding/json"
 	"net/url"
@@ -136,7 +137,7 @@ func hasLocated(r observation) bool {
 }
 
 func matchesView(r observation, q viewQuery, now time.Time) bool {
-	if !q.Pending && !r.Resolved {
+	if !q.Pending && !r.Resolved && r.NameHint == "" {
 		return false
 	}
 	if q.Kind != "" && q.Kind != "all" && r.Kind != q.Kind {
@@ -177,7 +178,7 @@ func matchesView(r observation, q viewQuery, now time.Time) bool {
 		if validHash(q.Q) {
 			return r.Hash == q.Q
 		}
-		text := normalizeSearchText(r.Name + " " + strings.Join(r.Files, " "))
+		text := normalizeSearchText(r.Name + " " + r.NameHint + " " + strings.Join(r.Files, " "))
 		for _, term := range q.terms {
 			if !strings.Contains(text, term) {
 				return false
@@ -309,11 +310,20 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 	defer d.mu.RUnlock()
 	now := time.Now().UTC()
 	s := d.state
+	if trackers := d.trackers; trackers != nil {
+		s.TrackerRequests = trackers.requests.Load()
+		s.TrackerHits = trackers.hits.Load()
+		s.TrackerFailures = trackers.failures.Load()
+	}
 	if caches := d.metadataCaches; caches != nil {
 		s.CacheRequests = caches.requests.Load()
 		s.CacheMissReuses = caches.missReuses.Load()
 		s.CacheActive = len(caches.jobs)
 		s.CacheCapacity = cap(caches.jobs)
+		s.MetadataSources = caches.sourceStats()
+	}
+	if d.trackers != nil {
+		s.MetadataSources = append(s.MetadataSources, d.trackers.metadataMeter.snapshot("Publisher metadata"))
 	}
 	s.Updated = now
 	d.applyNameRatesLocked(&s, now)
@@ -327,14 +337,6 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 	// Search skips the full meta walk; browse rebuilds country totals.
 	if q.Q == "" {
 		s.Resolved = 0
-		for _, r := range d.records {
-			if r.Resolved {
-				s.Resolved++
-			}
-			for c, n := range r.Countries {
-				s.CountryTotals[c] += n
-			}
-		}
 	} else {
 		s.Resolved = s.Hashes - s.Unresolved
 		if s.Resolved < 0 {
@@ -384,6 +386,12 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 		}
 	} else {
 		for _, r := range d.records {
+			if r.Resolved {
+				s.Resolved++
+			}
+			for c, n := range r.Countries {
+				s.CountryTotals[c] += n
+			}
 			push(r)
 		}
 	}
@@ -405,27 +413,65 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 	return s
 }
 
-// persistAll writes the full observation map to discovery.json without building
-// a browser-sized API payload.
+// persistAll streams an atomic JSON snapshot, copying only small batches under
+// read locks. No second full store or hundreds-of-MB JSON buffer is built.
 func (d *dashboard) persistAll() {
 	d.persistMu.Lock()
 	defer d.persistMu.Unlock()
-	d.mu.Lock()
-	records := make([]observation, 0, len(d.records))
-	for _, r := range d.records {
-		records = append(records, copyObservation(r))
+	d.mu.RLock()
+	keys := make([]string, 0, len(d.records))
+	for hash := range d.records {
+		keys = append(keys, hash)
 	}
 	path := d.cachePath
-	d.mu.Unlock()
-	b, err := json.Marshal(records)
-	if err != nil {
-		return
-	}
+	d.mu.RUnlock()
 	if os.MkdirAll(filepath.Dir(path), 0700) != nil {
 		return
 	}
 	tmp := path + ".tmp"
-	if os.WriteFile(tmp, b, 0600) == nil {
-		_ = os.Rename(tmp, path)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return
 	}
+	defer func() { _ = f.Close(); _ = os.Remove(tmp) }()
+	w := bufio.NewWriterSize(f, 256<<10)
+	if _, err = w.WriteString("["); err != nil {
+		return
+	}
+	encoder := json.NewEncoder(w)
+	first := true
+	for start := 0; start < len(keys); start += 512 {
+		batch := make([]observation, 0, 512)
+		d.mu.RLock()
+		for _, hash := range keys[start:min(start+512, len(keys))] {
+			if rec, ok := d.records[hash]; ok {
+				batch = append(batch, copyObservation(rec))
+			}
+		}
+		d.mu.RUnlock()
+		for i := range batch {
+			if !first {
+				if err = w.WriteByte(','); err != nil {
+					return
+				}
+			}
+			first = false
+			if err = encoder.Encode(&batch[i]); err != nil {
+				return
+			}
+		}
+	}
+	if _, err = w.WriteString("]\n"); err != nil {
+		return
+	}
+	if w.Flush() != nil {
+		return
+	}
+	if f.Sync() != nil {
+		return
+	}
+	if f.Close() != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }

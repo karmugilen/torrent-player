@@ -27,8 +27,13 @@ case "${1:-start}" in
       fi
     fi
     (cd "$repo_dir/engine-go" && go build -tags="$build_tags" -o "$bin_file" ./cmd/discovery)
+    discovery_env=()
+    if [[ -v TORRENT_ATLAS_FEEDS ]]; then
+      discovery_env+=("--setenv=TORRENT_ATLAS_FEEDS=$TORRENT_ATLAS_FEEDS")
+    fi
     if command -v systemd-run > /dev/null && systemd-run --user --quiet --collect \
       --unit=torrent-player-discovery \
+      "${discovery_env[@]}" \
       --property=Restart=on-failure --property=RestartSec=3 \
       "--property=StandardOutput=append:$cache_dir/discovery.log" \
       --property=StandardError=inherit \

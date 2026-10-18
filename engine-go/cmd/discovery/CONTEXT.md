@@ -4,7 +4,7 @@ Agent map for the local **Torrent Atlas** collector. Point here when changing di
 
 ## What it is
 
-Local-only metadata atlas: quiet DHT samples + hash→name resolve + world map UI. **No movie payload download/upload.** Listen `http://127.0.0.1:18181`. Store is plain JSON (no SQL).
+Local-only metadata atlas: bounded DHT discovery, public feeds, hash→name resolve and world map UI. **No movie payload download/upload.** Listen `http://127.0.0.1:18181`. Store is streaming JSON (no SQL).
 
 ```sh
 ./scripts/discovery.sh start|stop|status   # from repo root
@@ -30,6 +30,13 @@ Binary + PID + log + `discovery.json` + `torrents.csv` under `~/.cache/torrent-p
 2. **Catalog** — `https://torrents-csv.com/service/search` (paced workers).
 3. **HTTPS .torrent caches** — race mirrors; exact infohash; public torrents only.
 4. **Peer BEP 9** — after cache miss; quiet dial limits.
+5. **Public feeds** — SubsPlease, Nyaa and EZTV, checked every five minutes with
+   conditional requests. Titles remain `NameHint` / `Resolved=false` until exact
+   metadata or a catalog matches. Feed tracker hints, publisher `.torrent` links
+   and fresh token-validated DHT announcements can bypass generic mirror misses.
+6. **Additional local CSV / CSV.GZ** — streamed from `cache/catalogs`, checked
+   every five minutes. Columns: `infohash` / `hash` / `info_hash`, `name` / `title`,
+   optional `size_bytes` / `size`. Imported catalog labels are not peer verified.
 
 Already-**Resolved** hashes are never re-scheduled for cache/peer. New DHT samples call dump lookup first (`tryResolveHashFromDump`).
 
@@ -46,6 +53,9 @@ Already-**Resolved** hashes are never re-scheduled for cache/peer. New DHT sampl
 | `cache.go` / `collect.go` / `sampling.go` / `schedule.go` | DHT sample, cache/peer workers, job priority |
 | `api_view.go` | Windowed `/api/state`, sort/filter, search candidates |
 | `rates.go` | Rolling lookup/live/import/verification rates |
+| `bulk.go` | Bounded read-only hash/magnet batch resolution; independent indexed-capacity measurement |
+| `feeds.go` / `trackers.go` / `announcements.go` | Provisional feed intake, associated tracker/publisher lookup, fresh endpoint fast path |
+| `local_catalogs.go` / `restore.go` / `source_meter.go` | Additional CSVs, streaming restore, per-mirror outcome and latency metrics |
 | `search_index.go` / `search_rust.go` | Native compact postings with Go fallback for fast `q=` |
 | `ui.html` | Map, search, trending, paging, shareable filters, magnet copy |
 | `../../../engine-rust/discovery/` | Rust mmap index + dump download + catalog fetch |
@@ -72,6 +82,15 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 
 - **Retention**: count unlimited (`retainedTorrentLimit = 0`). Age: named ~30d, unresolved ~24h on load.
 - **Persist**: full map → `discovery.json` (can be hundreds of MB). Startup load can take tens of seconds; script waits up to ~90s on `/api/state?limit=1`.
+- Restore decodes one record at a time. Save streams 512-record batches to an
+  fsynced temporary file and atomic rename; it does not clone/serialize the
+  entire store in memory. Writers can run between snapshot batches.
+- **`POST /api/resolve`**: `{ "hashes": [...] }`, 1–50,000 inputs, maximum 4 MiB,
+  at most two concurrent requests. Accepts hex/base32 hashes and v1 magnets,
+  deduplicates aliases, returns named matches, verification/source and misses.
+  Uses saved names then the batched Rust CSV index. No network jobs, new-name
+  counters or observations are created. The website accepts 100,000 hashes and
+  splits them into 10,000-hash requests with a bounded preview and CSV export.
 - **`GET /api/state`**: query `q`, `sort`, `kind`, `trend`, `pending`, `located`, `country`, `top`, `limit`, `offset`. Returns stats for the **full** store + a **window** of `records` + `matchCount`.
 - Default window 150, max 600. UI **Next/Previous** requests a fixed 150-row window using `offset`, with shareable URL filters.
 - Search uses token index when possible; ultra-common tokens keep a **capped** posting list (no full-scan fallback for those). Exact 40-hex `q` is a direct hash lookup.
@@ -91,6 +110,8 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - Browser never receives the full million-row store in one payload.
 - Dump index does not mutate Observations by itself.
 - Quiet DHT/peer rates; dump + catalog carry naming volume.
+- Provisional feed labels never count as verified names. Indexed batch matches
+  never inflate live lookup/new-name counters.
 
 ## Touch map (common tasks)
 
@@ -153,3 +174,20 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - Search/filter requests abort older requests and ignore stale responses. Source
   filters, paging, and URL state are handled on the server; geography refreshes
   on country selection. Adult-name hiding redacts titles without dropping rows.
+- DHT responds on UDP `:18182` (`--dht-listen`; falls back to an ephemeral port
+  if busy) with bounded expiring peer storage. Only token-validated announcements
+  enter the endpoint fast path; the announcement count reports actual inbound
+  traffic, not claimed reachability. PEX is enabled; payload I/O remains blocked.
+- Tracker URLs come from associated public feed magnets, with at most two per
+  job, 16 active requests, 64 reusable endpoints, and per-hash tracker intervals.
+  Unknown sampled hashes are not broadcast to a generic tracker list. Endpoints
+  resolve to public IPv4 addresses; publisher metadata requires the exact hash.
+- Mirrors expose requests/hits/misses/failures/cancellations and approximate p95
+  latency. HTTP 403, challenges, malformed metadata and transport failures back
+  off; only actual 404/410 responses populate the per-hash miss cache.
+- `TORRENT_ATLAS_FEEDS` overrides the space-separated HTTPS feed list (empty
+  disables it). The launch script forwards this setting to systemd. Local
+  catalogs can be relocated with `--catalog-dir`.
+- Reproduce real indexed HTTP capacity with `python scripts/benchmark-discovery.py`.
+  It samples 100,000 distinct hashes across the CSV and validates nonempty named
+  responses. This measures reusable labels, not new peer metadata per minute.

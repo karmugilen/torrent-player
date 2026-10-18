@@ -89,16 +89,32 @@ type sampler struct {
 	lookup        func(context.Context, *net.UDPAddr, string, krpc.MsgArgs) *krpc.Return
 	nextRefresh   time.Time
 	hints         *peerHintCache
+	trackers      *trackerResolver
 }
 
 func (d *dashboard) collect(ctx context.Context) error {
-	conn, e := net.ListenPacket("udp4", ":0")
+	conn, e := net.ListenPacket("udp4", d.dhtListen)
+	if e != nil && d.dhtListen != ":0" {
+		conn, e = net.ListenPacket("udp4", ":0")
+	}
 	if e != nil {
 		return e
 	}
 	cfg := dht.NewDefaultServerConfig()
 	cfg.Conn = conn
-	cfg.Passive = true
+	cfg.Passive = false
+	hints := &peerHintCache{}
+	announcements := make(chan announcedPeer, 256)
+	cfg.PeerStore = announcementPeers{hints: hints}
+	cfg.OnAnnouncePeer = func(hash metainfo.Hash, ip net.IP, port int, ok bool) {
+		if !ok || !publicIP(ip) || port <= 0 || port > 65535 {
+			return
+		}
+		select {
+		case announcements <- announcedPeer{hash: hash.HexString(), peer: krpc.NodeAddr{IP: append(net.IP(nil), ip...), Port: port}}:
+		default:
+		}
+	}
 	// Quiet DHT: enough for sampling geography, far below a swarm client.
 	cfg.SendLimiter = rate.NewLimiter(64, 16)
 	server, e := dht.NewServer(cfg)
@@ -110,8 +126,9 @@ func (d *dashboard) collect(ctx context.Context) error {
 	tc := torrent.NewDefaultClientConfig()
 	tc.DefaultStorage = metadataStorage{}
 	tc.NoDHT = true
+	// The separate trackerResolver owns associated, rate-limited lookups.
 	tc.DisableTrackers = true
-	tc.DisablePEX = true
+	tc.DisablePEX = false
 	tc.DisableWebtorrent = true
 	tc.NoDefaultPortForwarding = true
 	tc.DisableIPv6 = true
@@ -131,12 +148,15 @@ func (d *dashboard) collect(ctx context.Context) error {
 		return e
 	}
 	defer client.Close()
-	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, cacheTried: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: &peerHintCache{}}
+	s := &sampler{d: d, server: server, client: client, nodes: map[string]krpc.NodeInfo{}, nextSample: map[string]time.Time{}, inflight: map[string]bool{}, cacheTried: map[string]bool{}, caches: newMetadataCaches(defaultMetadataCaches), samplingSlots: make(chan struct{}, samplingConcurrency), hints: hints, trackers: newTrackerResolver()}
 	s.lookup = s.query
 	defer s.caches.close()
+	defer s.trackers.close()
 	d.mu.Lock()
 	d.state.Workers = resolverWorkers
 	d.metadataCaches = s.caches
+	d.trackers = s.trackers
+	d.state.DHTPort = conn.LocalAddr().(*net.UDPAddr).Port
 	d.mu.Unlock()
 	s.bootstrapNodes(ctx)
 	var work sync.WaitGroup
@@ -164,6 +184,10 @@ func (d *dashboard) collect(ctx context.Context) error {
 	}
 	startWorkers(cacheWorkers, jobCache)
 	startWorkers(peerWorkers, jobPeer)
+	work.Add(1)
+	go func() { defer work.Done(); d.ingestLocalCatalogs(ctx) }()
+	work.Add(1)
+	go func() { defer work.Done(); s.ingestFeeds(ctx) }()
 	work.Add(1)
 	go func() {
 		defer work.Done()
@@ -200,6 +224,8 @@ func (d *dashboard) collect(ctx context.Context) error {
 		d.mu.Unlock()
 		select {
 		case <-ctx.Done():
+		case announced := <-announcements:
+			s.acceptAnnouncement(announced, time.Now().UTC())
 		case <-tick.C:
 		}
 	}
@@ -348,6 +374,9 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		return
 	}
 	copy(hash[:], raw)
+	if hash.IsZero() {
+		return
+	}
 	s.d.mu.Lock()
 	rec, exists := s.d.records[j.hash]
 	if exists {
@@ -391,7 +420,8 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	defer func() { cancel(); work.Wait() }()
 	cacheCtx, cancelCache := context.WithCancel(ctx)
 	defer cancelCache()
-	cacheEvents := make(chan *metainfo.Info, 1)
+	cacheEvents := make(chan *metainfo.Info, 2)
+	var cacheWork sync.WaitGroup
 	// Only untested peer-rich arrivals need to race HTTP. A cache miss has
 	// already been checked by the cache pool.
 	s.mu.Lock()
@@ -399,18 +429,28 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	s.mu.Unlock()
 	if !wasResolved && !cacheAlreadyTried {
 		work.Add(1)
+		cacheWork.Add(1)
 		go func() {
 			defer work.Done()
-			defer close(cacheEvents)
+			defer cacheWork.Done()
 			s.markCacheTried(j.hash)
 			if info := s.caches.fetch(cacheCtx, hash); info != nil {
 				cacheEvents <- info
 			}
 		}()
 	}
-	if wasResolved || cacheAlreadyTried {
-		close(cacheEvents)
+	if s.trackers != nil && !wasResolved {
+		work.Add(1)
+		cacheWork.Add(1)
+		go func() {
+			defer work.Done()
+			defer cacheWork.Done()
+			if info := s.trackers.fetchMetadata(cacheCtx, hash); info != nil {
+				cacheEvents <- info
+			}
+		}()
 	}
+	go func() { cacheWork.Wait(); close(cacheEvents) }()
 	// Known addresses only accelerate dialing. They are not fresh map sightings.
 	if !wasResolved {
 		if hints := s.hints.get(j.hash, time.Now()); len(hints) > 0 {
@@ -424,7 +464,16 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			s.d.mu.Unlock()
 		}
 	}
-	initialReplies := make(chan *krpc.Return, len(j.sources))
+	initialReplies := make(chan *krpc.Return, len(j.sources)+1)
+	if s.trackers != nil {
+		work.Add(1)
+		go func() {
+			defer work.Done()
+			if peers := s.trackers.lookup(ctx, hash, s.client.LocalPort()); len(peers) > 0 {
+				initialReplies <- &krpc.Return{Values: peers}
+			}
+		}()
+	}
 	for _, source := range j.sources {
 		work.Add(1)
 		go func(source krpc.NodeInfo) {

@@ -36,6 +36,8 @@ const sourceHintLimit = 20_000
 type observation struct {
 	Hash            string         `json:"hash"`
 	Name            string         `json:"name"`
+	NameHint        string         `json:"nameHint,omitempty"`
+	PeerSeenAt      time.Time      `json:"-"`
 	Kind            string         `json:"kind"`
 	Size            int64          `json:"size"`
 	Files           []string       `json:"files"`
@@ -81,10 +83,22 @@ type state struct {
 	CacheMissReuses        int64          `json:"cacheMissReuses"`
 	CacheActive            int            `json:"cacheActive"`
 	CacheCapacity          int            `json:"cacheCapacity"`
+	MetadataSources        []sourceState  `json:"metadataSources"`
 	CatalogHits            int            `json:"catalogHits"`
 	DumpHits               int            `json:"dumpHits"`
 	DumpLookups            int            `json:"dumpLookups"`
 	PeerHintUses           int            `json:"peerHintUses"`
+	FeedHints              int            `json:"feedHints"`
+	FeedRequests           int            `json:"feedRequests"`
+	FeedErrors             int            `json:"feedErrors"`
+	LocalCatalogFiles      int            `json:"localCatalogFiles"`
+	LocalCatalogRows       int            `json:"localCatalogRows"`
+	LocalCatalogErrors     int            `json:"localCatalogErrors"`
+	TrackerRequests        int64          `json:"trackerRequests"`
+	TrackerHits            int64          `json:"trackerHits"`
+	TrackerFailures        int64          `json:"trackerFailures"`
+	DHTPort                int            `json:"dhtPort"`
+	Announcements          int            `json:"announcements"`
 	EmptyLookups           int            `json:"emptyLookups"`
 	PeerHits               int            `json:"peerHits"`
 	AverageLookupMS        int64          `json:"averageLookupMs"`
@@ -118,6 +132,10 @@ type dashboard struct {
 	nameRates       [60]nameRateBucket
 	persistMu       sync.Mutex
 	metadataCaches  *metadataCaches
+	bulkSlots       chan struct{}
+	trackers        *trackerResolver
+	dhtListen       string
+	catalogDir      string
 }
 
 const namedRetention = 30 * 24 * time.Hour
@@ -130,39 +148,15 @@ func newDashboard(cachePath string, geo *maxminddb.Reader) *dashboard {
 		searchTok:    map[string][]string{},
 		searchCommon: map[string]bool{},
 		nativeSearch: newNativeSearch(),
+		bulkSlots:    make(chan struct{}, 2),
+		dhtListen:    ":18182",
+		catalogDir:   filepath.Join(filepath.Dir(cachePath), "catalogs"),
 		cachePath:    cachePath,
 		dumpPath:     filepath.Join(filepath.Dir(cachePath), "torrents.csv"),
 		geo:          geo,
 		state:        state{Started: time.Now().UTC(), Status: "Starting discovery"},
 	}
-	if b, e := os.ReadFile(cachePath); e == nil {
-		var saved []observation
-		if json.Unmarshal(b, &saved) == nil {
-			now := time.Now()
-			for _, r := range saved {
-				if !validHash(r.Hash) {
-					continue
-				}
-				// Named rows stay in the JSON store for weeks so search and
-				// trending survive restarts. Unresolved DHT noise expires sooner.
-				keepFor := unresolvedRetention
-				if r.Resolved && strings.TrimSpace(r.Name) != "" {
-					keepFor = namedRetention
-				}
-				if now.Sub(r.LastSeen) < keepFor {
-					if r.Countries == nil {
-						r.Countries = map[string]int{}
-					}
-					d.records[r.Hash] = r
-					if !r.Resolved {
-						d.pendingSet[r.Hash] = struct{}{}
-					} else if strings.TrimSpace(r.Name) != "" {
-						d.indexNameLocked(r.Hash, r.Name+" "+strings.Join(r.Files, " "))
-					}
-				}
-			}
-		}
-	}
+	d.restoreRecords()
 	d.pruneLocked()
 	return d
 }
@@ -266,6 +260,7 @@ func (d *dashboard) country(ip net.IP) string {
 }
 func (d *dashboard) handler(world []byte) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/resolve", d.serveResolve)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -328,6 +323,8 @@ func main() {
 	assets := flag.String("assets", "../android/app/src/main/assets", "offline map/country assets")
 	cacheRoot, _ := os.UserCacheDir()
 	cache := flag.String("cache", filepath.Join(cacheRoot, "torrent-player", "discovery.json"), "observations cache")
+	dhtBind := flag.String("dht-listen", ":18182", "DHT UDP listener (use :0 for an ephemeral port)")
+	catalogDir := flag.String("catalog-dir", "", "additional CSV / CSV.GZ datasets (default: cache/catalogs)")
 	flag.Parse()
 	host, _, e := net.SplitHostPort(*bind)
 	if e != nil || !net.ParseIP(host).IsLoopback() {
@@ -346,6 +343,10 @@ func main() {
 		defer geo.Close()
 	}
 	d := newDashboard(*cache, geo)
+	d.dhtListen = *dhtBind
+	if *catalogDir != "" {
+		d.catalogDir = *catalogDir
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	listener, e := net.Listen("tcp", *bind)

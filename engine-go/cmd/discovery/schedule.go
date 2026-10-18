@@ -63,6 +63,12 @@ func dueAt(r observation) time.Time {
 // seed/peer signal, repeated DHT samples, fewer failed attempts, and overdue retries.
 func resolvePriority(r observation, now time.Time) int64 {
 	score := int64(0)
+	if r.NameHint != "" {
+		score += 12_000
+	}
+	if !r.PeerSeenAt.IsZero() && now.Sub(r.PeerSeenAt) < peerHintTTL {
+		score += 20_000
+	}
 	if r.Seeds != nil && *r.Seeds > 0 {
 		score += int64(min(*r.Seeds, 100)) * 100
 	}

@@ -106,7 +106,7 @@ func TestCacheMissDoesNotDisableSourceAndOutageBacksOff(t *testing.T) {
 	}
 }
 
-func TestHTMLCacheBodyIsHealthyMiss(t *testing.T) {
+func TestHTMLCacheBodyBacksOffWithoutCachingFalseAbsence(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -122,8 +122,16 @@ func TestHTMLCacheBodyIsHealthyMiss(t *testing.T) {
 	if c.fetch(context.Background(), hash) != nil {
 		t.Fatal("HTML body accepted on retry")
 	}
-	if calls != 2 {
-		t.Fatal("challenge page disabled the mirror")
+	if calls != 1 || c.knownMissing(hash) {
+		t.Fatal("challenge was retried immediately or stored as a confirmed missing hash")
+	}
+	c.sources[0].mu.Lock()
+	c.sources[0].next = time.Now().Add(-time.Second)
+	c.sources[0].mu.Unlock()
+	c.fetch(context.Background(), hash)
+	stats := c.sourceStats()[0]
+	if calls != 2 || stats.Failures != 2 || stats.Misses != 0 {
+		t.Fatalf("recovery probe/accounting failed: %+v", stats)
 	}
 }
 

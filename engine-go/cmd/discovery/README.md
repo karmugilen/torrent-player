@@ -38,7 +38,7 @@ hashes are never re-checked. Name-resolve scheduling scores unresolved hashes by
 seeds, peers, repeated DHT samples, and real retry overdue time so quiet noise
 does not starve hot swarms. The live names/min metric counts cache/peer wins and
 new names for DHT-observed hashes; bulk catalog additions are shown separately. DHT
-sampling stays quiet for peer geography only. Movie payload download and upload
+sampling remains bounded alongside incoming peer announcements. Movie payload download and upload
 stay disabled. The JSON store has no count cap. The detail drawer can copy a
 magnet link for download in another client.
 
@@ -46,13 +46,14 @@ The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
 Ninety-six cache workers and twenty-four peer workers run with bounded network
 admission. Cache workers only query HTTPS `.torrent` mirrors and
-release immediately on a miss. Peer workers handle BEP 9 for cache misses only.
+release immediately on a miss. Peer workers handle cache misses and fast-track
+fresh endpoints or feed-associated tracker/publisher metadata hints.
 Four sampling slots refill independently of slow nodes. Random routing lookups
 refresh discovery every three seconds. Advertised sampling intervals remain
 respected. A DHT limit of 64 sends/second and peer dial limit of 24/second bound
 network traffic. HTTP connections are reused, with up to 48 requests per cache
-source. Challenge HTML and ordinary misses leave mirrors healthy; HTTP rate limits
-and server failures back them off. Names appear immediately from catalog or
+source. Confirmed 404/410 responses leave mirrors healthy; challenge HTML, HTTP
+403, transport failures, rate limits and server errors back them off. Names appear immediately from catalog or
 cache hits. Cache deadlines are 2.5 seconds. Losing HTTP requests are canceled
 and joined before a peer job finishes. Completed empty lookups release their
 slot as soon as cache and source checks finish. Lookups with no peer sightings
@@ -95,12 +96,70 @@ found per torrent. A peer can occur in multiple torrents. DHT samples do not
 represent worldwide popularity; unresolved names and unavailable seed estimates
 are explicitly shown. Adult titles can be concealed with the page's name filter.
 
+## Bulk lookup and fresh inputs
+
+Open **Bulk hash → name lookup** to paste hashes/magnets or select a text/CSV
+file with up to 100,000 unique hashes. Results show verification provenance, a
+bounded preview and CSV export. Hex and base32 aliases are deduplicated. Work
+continues in background tabs and can be cancelled. Existing names are looked up
+locally; this does not inflate new-name or network-check counters.
+
+`POST /api/resolve` accepts `{"hashes":["…"]}` (at most 50,000 inputs / 4 MiB,
+two concurrent requests). The page sends 10,000-hash batches. Missing names are
+returned explicitly rather than replaced by provisional feed titles.
+
+SubsPlease, Nyaa and EZTV feeds refresh every five minutes using conditional
+requests. Feed labels stay provisional until catalog matching or exact metadata
+verification. Associated tracker URLs and publisher `.torrent` links help find
+metadata. Tracker requests respect per-hash intervals, reuse UDP clients and
+resolve only public IPv4 endpoints. PEX is enabled. A normal DHT node listens on
+UDP 18182 (or an ephemeral port if busy); its announcement counter reports actual
+inbound traffic. Inbound traffic still depends on network reachability.
+
+To override the feed list, set `TORRENT_ATLAS_FEEDS` before starting the process;
+an empty value disables feeds. Additional CSV or CSV.GZ datasets placed in
+`~/.cache/torrent-player/catalogs/` are streamed into the shared name/search store
+within five minutes. Supported headers are `infohash`/`hash`/`info_hash`,
+`name`/`title`, and optional `size_bytes`/`size`. Catalog labels do not replace
+verified names. `--catalog-dir` selects another folder when invoking the binary.
+
+Per-mirror requests, hits, misses, failures, cancellations and approximate p95
+latency are exposed in `metadataSources`. Tracker and feed counters are separate.
+Snapshot saves and startup restoration stream records instead of constructing
+multiple full copies of the JSON database in memory.
+
+### Measured indexed capacity (2026-10-18)
+
+On this Ryzen 5 5600H PC, the running HTTP endpoint returned names for 100,000
+distinct hashes sampled across the actual CSV in **0.3582 seconds**, including
+response transfer and client JSON decoding. The real browser file-upload flow
+matched 100,000 distinct hashes in **0.55 seconds**, including the UI's sequential
+batch requests. These demonstrate the 100,000/minute indexed-capacity target;
+they reuse existing labels and do not demonstrate that many fresh network names.
+
+The initial live feed backlog reached 106 fresh names/minute in one short rolling
+window. A later window fell to 8/minute as the backlog drained. Publisher
+metadata returned 73 verified results during that session; payload bytes stayed
+zero. These are variable public-network observations, not sustained guarantees.
+
+A controlled 100,000-record save benchmark reduced allocation from about
+360 MB to 64 MB per save and elapsed time from 370 ms to 293 ms. The streamed
+CSV-import fixture processed 100,000 distinct new catalog labels in 274 ms.
+These fixture timings exclude remote source delivery.
+
+Reproduce indexed capacity through the actual HTTP interface:
+
+```sh
+python scripts/benchmark-discovery.py
+```
+
 ## Verification
 
 ```sh
 cd engine-go
 go test -race -tags=nosqlite,noboltdb ./cmd/discovery
-go vet -tags=nosqlite,noboltdb ./cmd/discovery
+go test -race -tags=nosqlite,noboltdb,rustdump ./cmd/discovery
+go vet -tags=nosqlite,noboltdb,rustdump ./cmd/discovery
 ```
 
 Tests cover payload rejection, cached observation recovery, snapshot isolation,

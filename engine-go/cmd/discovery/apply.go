@@ -52,6 +52,10 @@ func (d *dashboard) applyNameLocked(p namePatch, now time.Time) bool {
 		return false
 	}
 	rec.Name = p.Name
+	if rec.NameHint != "" && !wasResolved && d.state.FeedHints > 0 {
+		d.state.FeedHints--
+	}
+	rec.NameHint = ""
 	rec.Resolved = true
 	rec.Source = p.Source
 	rec.CheckedAt = now

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,7 @@ type cacheSource struct {
 	next     time.Time
 	failures int
 	misses   metadataMissCache
+	meter    sourceMeter
 }
 type metadataCaches struct {
 	client     *http.Client
@@ -65,6 +67,19 @@ func newMetadataCaches(templates []string) *metadataCaches {
 	return c
 }
 func (c *metadataCaches) close() { c.client.CloseIdleConnections() }
+
+func (c *metadataCaches) sourceStats() []sourceState {
+	stats := make([]sourceState, 0, len(c.sources))
+	for _, source := range c.sources {
+		u, _ := url.Parse(source.template)
+		name := source.template
+		if u != nil && u.Hostname() != "" {
+			name = u.Hostname()
+		}
+		stats = append(stats, source.meter.snapshot(name))
+	}
+	return stats
+}
 
 func (c *metadataCaches) available() bool {
 	if len(c.jobs) >= cap(c.jobs) {
@@ -237,20 +252,25 @@ func (c *metadataCaches) fetchSource(ctx context.Context, source *cacheSource, h
 	req.Header.Set("Accept-Encoding", "identity")
 	calls.Add(1)
 	c.requests.Add(1)
+	started, outcome := time.Now(), "failure"
+	defer func() { source.meter.record(started, outcome) }()
 	resp, err := c.client.Do(req)
 	if err != nil {
-		// Deadlines, cancels and ordinary dial noise stay healthy so a burst of
-		// parallel workers cannot disable the only working mirrors.
-		source.outcome(true)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			outcome = "cancelled"
+			return nil
+		}
+		source.outcome(false)
 		return nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 			source.misses.put(hash, time.Now())
+			outcome = "miss"
 		}
 		// Rate limits and gateway failures back off briefly; other statuses are misses.
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode >= 500 {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode >= 500 {
 			source.outcome(false)
 		} else {
 			source.outcome(true)
@@ -259,19 +279,26 @@ func (c *metadataCaches) fetchSource(ctx context.Context, source *cacheSource, h
 		return nil
 	}
 	if resp.ContentLength > maxMetadataBytes {
-		source.outcome(true)
+		source.outcome(false)
 		return nil
 	}
 	blob, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataBytes+1))
 	if err != nil {
-		source.outcome(true)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			outcome = "cancelled"
+			return nil
+		}
+		source.outcome(false)
 		return nil
 	}
 	info, err := parseCacheMetadata(blob, hash)
-	// Challenge pages and unknown hashes are healthy misses.
-	source.outcome(true)
 	if err != nil {
+		// HTML challenges and malformed/hash-mismatched metadata are unusable
+		// responses, not confirmed per-hash absence. Probe again after cooldown.
+		source.outcome(false)
 		return nil
 	}
+	outcome = "hit"
+	source.outcome(true)
 	return info
 }
