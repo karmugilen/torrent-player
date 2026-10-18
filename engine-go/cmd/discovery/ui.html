@@ -4,34 +4,387 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Torrent Atlas · Local discovery</title>
 <style>
-:root{color-scheme:light;--paper:#f7f6f3;--white:#fff;--ink:#292f2b;--muted:#757b75;--line:#eaeaea;--green:#47644b;--pale:#edf3ec;--amber:#956400}*{box-sizing:border-box}body{margin:0;background:var(--paper);font:14px/1.6 'Helvetica Neue',Arial,sans-serif;color:var(--ink)}button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:wait}button,input,select,a{outline-offset:4px}header{height:84px;background:var(--white);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(28px,calc((100vw - 1360px)/2));gap:20px}.brand{display:flex;gap:13px;align-items:center}.brand svg{width:30px;height:30px}.brand strong{font-size:17px;font-weight:600;letter-spacing:-.6px}.brand small{display:block;font-size:10px;letter-spacing:1.7px;text-transform:uppercase;color:var(--muted)}.header-meta{display:flex;gap:22px;align-items:center;font-size:12px;color:var(--muted)}.live{display:flex;gap:7px;align-items:center}.status-dot{width:7px;height:7px;background:#6e8a65;border-radius:50%}.status-dot.off{background:#aaa}.button{border:1px solid var(--line);background:var(--white);color:var(--ink);border-radius:5px;padding:8px 15px;font-size:12px;font-weight:600}.button.primary{background:#292f2b;color:white;border-color:#292f2b}.button:hover{background:#f1f3ef}.button.primary:hover{background:#414a43}.button:active{transform:scale(.98)}main{max-width:1416px;margin:auto;padding:36px 28px 60px}.intro{display:flex;justify-content:space-between;align-items:flex-end;gap:25px;margin-bottom:27px}.eyebrow{font-size:10px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}h1,h2,h3,p{margin:0}h1,h2{font-family:Georgia,'Times New Roman',serif;font-weight:400;letter-spacing:-1.2px}h1{font-size:42px;line-height:1.2;margin:7px 0 9px}h2{font-size:26px;line-height:1.25}.intro p{color:var(--muted);font-size:13px;max-width:650px}.stamp{text-align:right;white-space:nowrap;color:var(--muted);font-size:11px}.stamp strong{display:block;color:var(--ink);font-weight:500}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:22px}.metric,.card{border:1px solid var(--line);background:var(--white);border-radius:8px}.metric{padding:18px 23px}.metric .label{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted)}.metric strong{font-size:29px;letter-spacing:-1px;font-weight:500;display:block;margin:2px 0}.metric .sub{font-size:10px;color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(0,1fr) 255px;gap:18px}.map-card{overflow:hidden;position:relative}.card-top{padding:21px 24px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.card-top .eyebrow{margin-bottom:5px}.map-label{color:var(--muted);font-size:11px;display:flex;gap:10px;align-items:center}.map-wrap{position:relative;background:#fcfcfa;padding:4px 16px 0}.world-map{width:100%;height:auto;min-height:240px;display:block}.country{fill:#e7eae3;stroke:#fcfcfa;stroke-width:.7;cursor:pointer}.country:hover{fill:#c1d1bb}.country.active{fill:#ceddc7}.country.selected{fill:#91ad83;stroke:#6d8b61}.grid{stroke:#e8ebe5;stroke-width:.55;fill:none}.peer-dot{fill:#567c4a;stroke:#fcfcfa;stroke-width:1.3;cursor:pointer;opacity:.86}.peer-dot.selected{fill:#263e25;stroke:#fff;stroke-width:2}.map-footer{border-top:1px solid var(--line);padding:12px 24px;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);gap:15px}.legend{display:flex;align-items:center;gap:6px;white-space:nowrap}.legend i{display:inline-block;width:5px;height:5px;border-radius:50%;background:#567c4a}.legend i:nth-of-type(2){width:9px;height:9px;margin-left:5px}.legend i:nth-of-type(3){width:14px;height:14px;margin-left:5px}.country-popover{position:absolute;pointer-events:none;background:#29362b;color:#fff;border-radius:5px;padding:8px 11px;font-size:11px;z-index:2;display:none;max-width:210px}.sidebar{display:flex;flex-direction:column;gap:18px}.region-card{padding:21px 20px;flex:1}.region-card h3{font-size:12px;font-weight:600;margin:6px 0 15px}.region{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f1ed;gap:10px;cursor:pointer;width:100%;background:none;border-top:0;border-left:0;border-right:0;text-align:left;font-size:12px;color:var(--ink)}.region:hover{color:var(--green)}.region-name{display:flex;gap:8px;align-items:center}.country-code{font:9px 'SFMono-Regular',Consolas,monospace;color:var(--muted);width:21px}.region-count{color:var(--muted);font-variant-numeric:tabular-nums}.quiet{color:var(--muted);font-size:11px}.method{padding:20px}.method p{font-size:11px;color:var(--muted);margin-top:8px}.method .tag{margin-top:12px;display:inline-block}.tag{font-size:9px;letter-spacing:.8px;text-transform:uppercase;background:var(--pale);color:#496743;padding:3px 7px;border-radius:4px}.feed{margin-top:22px;overflow:hidden}.feed-head{padding:23px 24px 17px;display:flex;justify-content:space-between;align-items:center;gap:18px}.feed-head p{margin-top:5px;font-size:11px;color:var(--muted)}.feed-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.segmented{display:inline-flex;border:1px solid var(--line);border-radius:5px;padding:3px;gap:2px}.segmented button{border:0;background:none;border-radius:3px;padding:5px 10px;font-size:11px;color:var(--muted)}.segmented button.active{background:#edf1e9;color:#344532}.tools{padding:0 24px 17px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.search{position:relative;flex:1;min-width:190px}.search svg{position:absolute;width:15px;height:15px;top:11px;left:11px;color:#7c8479}.search input{width:100%;padding:8px 12px 8px 34px;background:#fbfbf9;border:1px solid var(--line);border-radius:5px;font-size:12px;color:var(--ink)}select{border:1px solid var(--line);background:#fff;border-radius:5px;padding:8px 10px;color:#596453;font-size:11px}label.check{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10px;white-space:nowrap}input[type=checkbox]{accent-color:#526d48}.filter-chip{font-size:10px;background:#edf3ec;color:#476744;padding:5px 9px;border:0;border-radius:4px;cursor:pointer}.table-scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;text-align:left;table-layout:fixed}th{background:#fafbf8;color:#7a8177;font-size:9px;text-transform:uppercase;letter-spacing:1.2px;font-weight:500;padding:11px 15px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);white-space:nowrap}th:first-child{padding-left:25px;width:52px}th:nth-child(2){width:auto}th:nth-child(3){width:90px}th:nth-child(4){width:100px}th:nth-child(5){width:170px}th:last-child{width:115px}td{border-bottom:1px solid #f0f1ed;padding:15px;font-size:11px;vertical-align:middle}td:first-child{padding-left:25px;color:#a1a69c;font:10px Consolas,monospace}.name-cell{overflow:hidden}.torrent-name{font-size:12px;color:#30382e;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;border:0;background:none;padding:0;max-width:100%;text-align:left}.torrent-name:hover{text-decoration:underline;text-underline-offset:3px}.torrent-meta{display:flex;gap:8px;font-size:9px;color:#92978b;align-items:center;margin-top:3px}.hash{font-family:Consolas,monospace;letter-spacing:.3px}.num{font-variant-numeric:tabular-nums;font-size:12px}.country-list{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#717b68;font-size:10px}.pending{color:#8d9386;font-size:11px}.age{color:#8d9386;font-size:10px}.empty{padding:47px 22px 51px;text-align:center;display:none}.empty h3{font:23px Georgia,serif;letter-spacing:-.7px;margin:8px 0;color:#485344}.empty p{font-size:12px;color:var(--muted)}.empty .tiny{font-size:10px;margin-top:9px}.feed-footer{padding:12px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;font-size:10px;color:#8b9283;gap:12px 20px}.feed-footer .button{font-size:12px;padding:7px 14px}.notice{padding:15px 18px;background:#fbf3db;color:#806222;font-size:12px;border-radius:5px;margin-bottom:20px;display:none}footer{padding-top:25px;display:flex;gap:20px;justify-content:space-between;color:#92978b;font-size:10px}footer a{color:inherit;text-underline-offset:3px}.drawer-backdrop{position:fixed;inset:0;background:rgba(30,40,25,.15);z-index:8;display:none}.drawer{position:absolute;top:0;right:0;bottom:0;width:460px;max-width:95vw;background:#fff;padding:30px;overflow:auto;border-left:1px solid var(--line)}.drawer h2{margin:22px 0 14px;font-size:27px;overflow-wrap:anywhere}.drawer dl{display:grid;grid-template-columns:110px 1fr;font-size:12px;gap:12px 10px;margin-top:25px}.drawer dt{color:#919886}.drawer dd{margin:0;overflow-wrap:anywhere}.drawer ul{font-size:11px;color:#737d68;padding-left:18px;overflow-wrap:anywhere}.drawer li{margin-bottom:8px}.drawer .close{float:right}.drawer .copy{margin:16px 0 6px}.toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);padding:9px 18px;background:#2f3e2a;color:#fff;border-radius:5px;font-size:12px;z-index:20;display:none}.spinner{width:24px;height:24px;border:1px solid #e4eadd;border-top-color:#6f8762;border-radius:50%;animation:spin 1.4s linear infinite;margin:auto}.reveal{animation:appear .45s ease both}@keyframes spin{to{transform:rotate(360deg)}}@keyframes appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}@media(max-width:950px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.header-meta .local-label{display:none}.metrics{gap:9px}.metric{padding:14px}.metric strong{font-size:25px}.intro .stamp{display:none}th:nth-child(5),td:nth-child(5){display:none}th:last-child{width:95px}}@media(max-width:620px){header{height:72px;padding:0 17px}main{padding:25px 13px 40px}h1{font-size:33px}.metrics{grid-template-columns:1fr 1fr}.intro{margin-bottom:20px}.header-meta{gap:12px}.header-meta .live{font-size:0}.brand strong{font-size:15px}.feed-head{align-items:flex-start;flex-direction:column}.feed-head,.tools{padding-left:17px;padding-right:17px}.sidebar{grid-template-columns:1fr}.method{display:none}.map-wrap{padding:0}.world-map{min-height:180px}.map-label{display:none}.card-top{padding:18px}.map-footer{padding:12px 18px}.map-footer>span{max-width:70%}th:first-child,td:first-child{width:32px;padding-left:15px;padding-right:4px}th:nth-child(3),td:nth-child(3){display:none}th:nth-child(4){width:63px}th:last-child{width:75px}th,td{padding:11px 8px}.feed-footer{padding:12px 17px}footer{flex-direction:column;gap:8px}.tools label{font-size:10px}.drawer{padding:22px}.drawer dl{grid-template-columns:85px 1fr}}
-.resolver-card{padding:16px 22px;margin-bottom:22px;display:flex;justify-content:space-between;gap:18px;align-items:center}.resolver-card h3{font-size:12px;font-weight:600}.resolver-card p{font-size:11px;color:var(--muted)}.resolver-stats{display:flex;gap:22px;flex-wrap:wrap;font-size:11px;color:var(--muted)}.resolver-stats strong{display:block;font-size:16px;font-weight:500;color:var(--ink)}@media(max-width:650px){.resolver-card{align-items:flex-start;flex-direction:column}.resolver-stats{gap:12px 24px}}
-.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.resolver-card{align-items:flex-start}.rate-meter{margin-top:10px;font-size:10px;color:var(--muted)}.rate-meter label{display:flex;justify-content:space-between;gap:12px}.rate-meter progress{display:block;margin-top:5px;width:240px;max-width:100%;height:5px;border:0;accent-color:var(--green)}progress::-webkit-progress-bar{background:var(--pale);border-radius:2px}progress::-webkit-progress-value{background:var(--green);border-radius:2px}.resolver-stats{max-width:670px}.paging{display:flex;align-items:center;gap:8px}.feed.loading tbody{opacity:.55}.feed.loading{cursor:progress}.torrent-meta .name-source{color:#596b55;background:#f0f4ee;padding:1px 5px;border-radius:3px}.table-scroll{scroll-margin-top:20px}#search-status{font-size:10px;color:var(--muted);padding:0 24px 10px}#rows{transition:opacity .12s}@media(max-width:620px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.resolver-stats{display:grid;grid-template-columns:1fr 1fr;width:100%}.feed-footer{flex-wrap:wrap}.rate-meter progress{width:100%}.rate-meter{width:100%}.paging{order:3;width:100%;justify-content:space-between}}
+:root{
+  color-scheme:light;
+  --paper:#f7f6f3;--white:#fff;--ink:#292f2b;--muted:#757b75;--line:#eaeaea;
+  --green:#47644b;--pale:#edf3ec;--amber:#956400;--amber-bg:#fbf3db;
+  --map-bg:#eef1eb;--map-land:#d5dbd1;--map-land-stroke:#f7f6f3;
+  --map-land-hover:#b7c7b0;--map-land-active:#a8bf9e;--map-land-selected:#6f9064;
+  --map-grid:#d7ddd2;--map-dot:#4f7544;--map-dot-stroke:#f7f6f3;--map-dot-hot:#2a4728;
+  --heat-1:#c5d6be;--heat-2:#9fbf94;--heat-3:#729c67;--heat-4:#4f7544;--heat-5:#2f4f2c;
+  --header-bg:rgba(255,255,255,.92);--drawer-scrim:rgba(30,40,25,.18);
+  --notice-bg:#fbf3db;--notice-ink:#806222;--toast-bg:#2f3e2a;--toast-ink:#fff;
+  --segment-active-bg:#edf1e9;--segment-active-ink:#344532;
+  --input-bg:#fbfbf9;--table-head:#fafbf8;--row-line:#f0f1ed;
+  --source-bg:#f0f4ee;--source-ink:#596b55;
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#121411;--white:#1a1d19;--ink:#e6e9e3;--muted:#9aa398;--line:#2a2f2a;
+  --green:#8fb887;--pale:#243024;--amber:#e0b45a;--amber-bg:#3a3018;
+  --map-bg:#0e110f;--map-land:#3a443a;--map-land-stroke:#121411;
+  --map-land-hover:#4a5748;--map-land-active:#5a6f56;--map-land-selected:#8fbf84;
+  --map-grid:#273027;--map-dot:#9dca94;--map-dot-stroke:#121411;--map-dot-hot:#d5edd0;
+  --heat-1:#3f4f3e;--heat-2:#4f664c;--heat-3:#678a62;--heat-4:#84ad7c;--heat-5:#b4dbab;
+  --header-bg:rgba(18,20,17,.94);--drawer-scrim:rgba(0,0,0,.55);
+  --notice-bg:#3a3018;--notice-ink:#e0b45a;--toast-bg:#dce6d6;--toast-ink:#1a2218;
+  --segment-active-bg:#2a3329;--segment-active-ink:#d5e4cf;
+  --input-bg:#151815;--table-head:#171a17;--row-line:#242924;
+  --source-bg:#243024;--source-ink:#a7c2a0;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);font:14px/1.6 'Helvetica Neue',Arial,sans-serif;color:var(--ink)}
+button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:wait}
+button,input,select,a{outline-offset:4px}
+header{position:sticky;top:0;z-index:6;height:84px;background:var(--header-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(28px,calc((100vw - 1360px)/2));gap:20px}
+.brand{display:flex;gap:13px;align-items:center}.brand svg{width:30px;height:30px}
+.brand strong{font-size:17px;font-weight:600;letter-spacing:-.6px}
+.brand small{display:block;font-size:10px;letter-spacing:1.7px;text-transform:uppercase;color:var(--muted)}
+.header-meta{display:flex;gap:14px;align-items:center;font-size:12px;color:var(--muted)}
+.live{display:flex;gap:7px;align-items:center}
+.status-dot{width:7px;height:7px;background:var(--green);border-radius:50%;box-shadow:0 0 0 0 color-mix(in srgb,var(--green) 55%,transparent)}
+.status-dot.on{animation:live-pulse 2.4s ease-out infinite}
+.status-dot.off{background:#777;animation:none;box-shadow:none}
+.button{border:1px solid var(--line);background:var(--white);color:var(--ink);border-radius:5px;padding:8px 15px;font-size:12px;font-weight:600}
+.button.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.button:hover{filter:brightness(1.05)}.button.primary:hover{filter:brightness(1.12)}.button:active{transform:scale(.98)}
+.theme-toggle{width:38px;height:38px;padding:0;display:grid;place-items:center;border-radius:6px}
+.theme-toggle svg{width:18px;height:18px}
+.theme-toggle .icon-moon{display:none}[data-theme="dark"] .theme-toggle .icon-sun{display:none}[data-theme="dark"] .theme-toggle .icon-moon{display:block}
+main{max-width:1416px;margin:auto;padding:36px 28px 60px}
+.intro{display:flex;justify-content:space-between;align-items:flex-end;gap:25px;margin-bottom:27px}
+.eyebrow{font-size:10px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}
+h1,h2,h3,p{margin:0}h1,h2{font-family:Georgia,'Times New Roman',serif;font-weight:400;letter-spacing:-1.2px}
+h1{font-size:42px;line-height:1.2;margin:7px 0 9px}h2{font-size:26px;line-height:1.25}
+.intro p{color:var(--muted);font-size:13px;max-width:650px}
+.stamp{text-align:right;white-space:nowrap;color:var(--muted);font-size:11px}.stamp strong{display:block;color:var(--ink);font-weight:500}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:22px}
+.metric,.card{border:1px solid var(--line);background:var(--white);border-radius:8px}
+.metric{padding:18px 23px}.metric .label{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted)}
+.metric strong{font-size:29px;letter-spacing:-1px;font-weight:500;display:block;margin:2px 0}
+.metric .sub{font-size:10px;color:var(--muted)}
+.layout{display:grid;grid-template-columns:minmax(0,1.35fr) 255px;gap:18px}
+.map-card{overflow:hidden;position:relative}
+.card-top{padding:21px 24px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.card-top .eyebrow{margin-bottom:5px}
+.map-label{color:var(--muted);font-size:11px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.live-badge{display:inline-flex;align-items:center;gap:6px;font:10px/1 'SFMono-Regular',Consolas,monospace;letter-spacing:1.2px;text-transform:uppercase;color:var(--green);background:var(--pale);border:1px solid color-mix(in srgb,var(--green) 28%,var(--line));border-radius:4px;padding:5px 8px}
+.live-badge i{width:6px;height:6px;border-radius:50%;background:var(--green);animation:live-pulse 2s ease-out infinite}
+.live-badge.idle{color:var(--muted);background:transparent;border-color:var(--line)}
+.live-badge.idle i{background:var(--muted);animation:none}
+.map-wrap{position:relative;background:radial-gradient(ellipse at 50% 42%,color-mix(in srgb,var(--map-bg) 70%,var(--green) 8%),var(--map-bg));padding:8px 12px 0;min-height:320px}
+.world-map{width:100%;height:auto;min-height:300px;display:block}
+.country{fill:var(--map-land);stroke:var(--map-land-stroke);stroke-width:.55;cursor:pointer;transition:fill .25s ease}
+.country:hover{fill:var(--map-land-hover)}
+.country.heat-1{fill:var(--heat-1)}.country.heat-2{fill:var(--heat-2)}.country.heat-3{fill:var(--heat-3)}.country.heat-4{fill:var(--heat-4)}.country.heat-5{fill:var(--heat-5)}
+.country.selected{fill:var(--map-land-selected);stroke:var(--green);stroke-width:1.1}
+.grid{stroke:var(--map-grid);stroke-width:.5;fill:none;opacity:.85}
+.peer-dot{fill:var(--map-dot);stroke:var(--map-dot-stroke);stroke-width:1.2;cursor:pointer;opacity:.9;transform-box:fill-box;transform-origin:center}
+.peer-dot.selected{fill:var(--map-dot-hot);stroke:var(--ink);stroke-width:2}
+.peer-dot.fresh{animation:dot-pop .9s ease-out}
+.peer-halo{fill:var(--map-dot);opacity:.18;pointer-events:none}
+.peer-halo.fresh{animation:halo-fade 1.4s ease-out}
+.map-footer{border-top:1px solid var(--line);padding:12px 24px;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);gap:15px}
+.legend{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.legend .swatch{display:inline-flex;gap:3px;margin-right:4px}
+.legend .swatch b{display:block;width:10px;height:10px;border-radius:2px}
+.legend .swatch b:nth-child(1){background:var(--heat-1)}.legend .swatch b:nth-child(2){background:var(--heat-2)}.legend .swatch b:nth-child(3){background:var(--heat-3)}.legend .swatch b:nth-child(4){background:var(--heat-4)}.legend .swatch b:nth-child(5){background:var(--heat-5)}
+.country-popover{position:absolute;pointer-events:none;background:var(--ink);color:var(--paper);border-radius:5px;padding:8px 11px;font-size:11px;z-index:2;display:none;max-width:230px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.sidebar{display:flex;flex-direction:column;gap:18px}
+.region-card{padding:21px 20px;flex:1}.region-card h3{font-size:12px;font-weight:600;margin:6px 0 15px}
+.region{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--row-line);gap:10px;cursor:pointer;width:100%;background:none;border-top:0;border-left:0;border-right:0;text-align:left;font-size:12px;color:var(--ink)}
+.region:hover{color:var(--green)}.region.selected{color:var(--green);font-weight:600}
+.region-name{display:flex;gap:8px;align-items:center;min-width:0}
+.country-code{font:9px 'SFMono-Regular',Consolas,monospace;color:var(--muted);width:21px}
+.region-count{color:var(--muted);font-variant-numeric:tabular-nums}
+.region-delta{font:9px/1 Consolas,monospace;color:var(--green);margin-left:4px}
+.quiet{color:var(--muted);font-size:11px}
+.method{padding:20px}.method p{font-size:11px;color:var(--muted);margin-top:8px}.method .tag{margin-top:12px;display:inline-block}
+.tag{font-size:9px;letter-spacing:.8px;text-transform:uppercase;background:var(--pale);color:var(--green);padding:3px 7px;border-radius:4px}
+.feed{margin-top:22px;overflow:hidden}
+.feed-head{padding:23px 24px 17px;display:flex;justify-content:space-between;align-items:center;gap:18px}
+.feed-head p{margin-top:5px;font-size:11px;color:var(--muted)}
+.feed-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.segmented{display:inline-flex;border:1px solid var(--line);border-radius:5px;padding:3px;gap:2px}
+.segmented button{border:0;background:none;border-radius:3px;padding:5px 10px;font-size:11px;color:var(--muted)}
+.segmented button.active{background:var(--segment-active-bg);color:var(--segment-active-ink)}
+.tools{padding:0 24px 17px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.search{position:relative;flex:1;min-width:190px}
+.search svg{position:absolute;width:15px;height:15px;top:11px;left:11px;color:var(--muted)}
+.search input{width:100%;padding:8px 12px 8px 34px;background:var(--input-bg);border:1px solid var(--line);border-radius:5px;font-size:12px;color:var(--ink)}
+select{border:1px solid var(--line);background:var(--white);border-radius:5px;padding:8px 10px;color:var(--muted);font-size:11px}
+label.check{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10px;white-space:nowrap}
+input[type=checkbox]{accent-color:var(--green)}
+.filter-chip{font-size:10px;background:var(--pale);color:var(--green);padding:5px 9px;border:0;border-radius:4px;cursor:pointer}
+.table-scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;text-align:left;table-layout:fixed}
+th{background:var(--table-head);color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:1.2px;font-weight:500;padding:11px 15px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child{padding-left:25px;width:52px}th:nth-child(2){width:auto}th:nth-child(3){width:90px}th:nth-child(4){width:100px}th:nth-child(5){width:170px}th:last-child{width:115px}
+td{border-bottom:1px solid var(--row-line);padding:15px;font-size:11px;vertical-align:middle}
+td:first-child{padding-left:25px;color:var(--muted);font:10px Consolas,monospace}
+.name-cell{overflow:hidden}
+.torrent-name{font-size:12px;color:var(--ink);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;border:0;background:none;padding:0;max-width:100%;text-align:left}
+.torrent-name:hover{text-decoration:underline;text-underline-offset:3px}
+.torrent-meta{display:flex;gap:8px;font-size:9px;color:var(--muted);align-items:center;margin-top:3px;flex-wrap:wrap}
+.hash{font-family:Consolas,monospace;letter-spacing:.3px}
+.num{font-variant-numeric:tabular-nums;font-size:12px}
+.country-list{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:10px}
+.age{color:var(--muted);font-size:10px}
+.empty{padding:47px 22px 51px;text-align:center;display:none}
+.empty h3{font:23px Georgia,serif;letter-spacing:-.7px;margin:8px 0;color:var(--ink)}
+.empty p{font-size:12px;color:var(--muted)}.empty .tiny{font-size:10px;margin-top:9px}
+.feed-footer{padding:12px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;font-size:10px;color:var(--muted);gap:12px 20px}
+.feed-footer .button{font-size:12px;padding:7px 14px}
+.notice{padding:15px 18px;background:var(--notice-bg);color:var(--notice-ink);font-size:12px;border-radius:5px;margin-bottom:20px;display:none}
+footer{padding-top:25px;display:flex;gap:20px;justify-content:space-between;color:var(--muted);font-size:10px}
+footer a{color:inherit;text-underline-offset:3px}
+.drawer-backdrop{position:fixed;inset:0;background:var(--drawer-scrim);z-index:8;display:none}
+.drawer{position:absolute;top:0;right:0;bottom:0;width:460px;max-width:95vw;background:var(--white);padding:30px;overflow:auto;border-left:1px solid var(--line)}
+.drawer h2{margin:22px 0 14px;font-size:27px;overflow-wrap:anywhere}
+.drawer dl{display:grid;grid-template-columns:110px 1fr;font-size:12px;gap:12px 10px;margin-top:25px}
+.drawer dt{color:var(--muted)}.drawer dd{margin:0;overflow-wrap:anywhere}
+.drawer ul{font-size:11px;color:var(--muted);padding-left:18px;overflow-wrap:anywhere}
+.drawer li{margin-bottom:8px}.drawer .close{float:right}.drawer .copy{margin:16px 0 6px}
+.toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);padding:9px 18px;background:var(--toast-bg);color:var(--toast-ink);border-radius:5px;font-size:12px;z-index:20;display:none}
+.spinner{width:24px;height:24px;border:1px solid var(--line);border-top-color:var(--green);border-radius:50%;animation:spin 1.4s linear infinite;margin:auto}
+.reveal{animation:appear .45s ease both}
+.resolver-card{padding:16px 22px;margin-bottom:22px;display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
+.resolver-card h3{font-size:12px;font-weight:600}.resolver-card p{font-size:11px;color:var(--muted)}
+.resolver-stats{display:flex;gap:22px;flex-wrap:wrap;font-size:11px;color:var(--muted);max-width:670px}
+.resolver-stats strong{display:block;font-size:16px;font-weight:500;color:var(--ink)}
+.rate-meter{margin-top:10px;font-size:10px;color:var(--muted)}
+.rate-meter label{display:flex;justify-content:space-between;gap:12px}
+.rate-meter progress{display:block;margin-top:5px;width:240px;max-width:100%;height:5px;border:0;accent-color:var(--green)}
+progress::-webkit-progress-bar{background:var(--pale);border-radius:2px}
+progress::-webkit-progress-value{background:var(--green);border-radius:2px}
+.paging{display:flex;align-items:center;gap:8px}
+.feed.loading tbody{opacity:.55}.feed.loading{cursor:progress}
+.torrent-meta .name-source{color:var(--source-ink);background:var(--source-bg);padding:1px 5px;border-radius:3px}
+.table-scroll{scroll-margin-top:20px}
+#search-status{font-size:10px;color:var(--muted);padding:0 24px 10px}
+#rows{transition:opacity .12s}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes live-pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--green) 45%,transparent)}70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@keyframes dot-pop{0%{transform:scale(.55);opacity:.35}55%{transform:scale(1.18);opacity:1}100%{transform:scale(1);opacity:.9}}
+@keyframes halo-fade{0%{opacity:.35;r:inherit}100%{opacity:0}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+@media(max-width:950px){
+  .layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}
+  .header-meta .local-label{display:none}.metrics{gap:9px}.metric{padding:14px}.metric strong{font-size:25px}
+  .intro .stamp{display:none}th:nth-child(5),td:nth-child(5){display:none}th:last-child{width:95px}
+  .map-wrap{min-height:280px}.world-map{min-height:260px}
+}
+@media(max-width:650px){.resolver-card{align-items:flex-start;flex-direction:column}.resolver-stats{gap:12px 24px;display:grid;grid-template-columns:1fr 1fr;width:100%}}
+@media(max-width:620px){
+  header{height:72px;padding:0 17px}main{padding:25px 13px 40px}h1{font-size:33px}
+  .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.intro{margin-bottom:20px}
+  .header-meta{gap:8px}.header-meta .live{font-size:0}.brand strong{font-size:15px}
+  .feed-head{align-items:flex-start;flex-direction:column}.feed-head,.tools{padding-left:17px;padding-right:17px}
+  .sidebar{grid-template-columns:1fr}.method{display:none}.map-wrap{padding:4px 0 0;min-height:220px}
+  .world-map{min-height:200px}.map-label .button{display:none}.card-top{padding:18px}
+  .map-footer{padding:12px 18px}.map-footer>span{max-width:70%}
+  th:first-child,td:first-child{width:32px;padding-left:15px;padding-right:4px}
+  th:nth-child(3),td:nth-child(3){display:none}th:nth-child(4){width:63px}th:last-child{width:75px}
+  th,td{padding:11px 8px}.feed-footer{padding:12px 17px;flex-wrap:wrap}footer{flex-direction:column;gap:8px}
+  .tools label{font-size:10px}.drawer{padding:22px}.drawer dl{grid-template-columns:85px 1fr}
+  .rate-meter,.rate-meter progress{width:100%}.paging{order:3;width:100%;justify-content:space-between}
+}
 </style>
 </head>
 <body>
-<header><div class="brand"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="13" stroke="#54684a" stroke-width="1.5"/><ellipse cx="16" cy="16" rx="6" ry="13" stroke="#54684a" stroke-width="1.2"/><path d="M3 16h26M6 8.5h20M6 23.5h20" stroke="#54684a" stroke-width="1.1"/><circle cx="24.4" cy="7.1" r="3" fill="#617c54" stroke="white" stroke-width="1.5"/></svg><div><strong>Torrent Atlas</strong><small>Public network observatory</small></div></div><div class="header-meta"><span class="local-label">RUNNING ON THIS PC</span><span class="live"><i id="status-dot" class="status-dot"></i><span id="connection">Connecting</span></span><button id="control" class="button primary" type="button">Pause discovery</button></div></header>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="13" stroke="#54684a" stroke-width="1.5"/><ellipse cx="16" cy="16" rx="6" ry="13" stroke="#54684a" stroke-width="1.2"/><path d="M3 16h26M6 8.5h20M6 23.5h20" stroke="#54684a" stroke-width="1.1"/><circle cx="24.4" cy="7.1" r="3" fill="#617c54" stroke="white" stroke-width="1.5"/></svg>
+    <div><strong>Torrent Atlas</strong><small>Public network observatory</small></div>
+  </div>
+  <div class="header-meta">
+    <span class="local-label">RUNNING ON THIS PC</span>
+    <span class="live"><i id="status-dot" class="status-dot"></i><span id="connection">Connecting</span></span>
+    <button id="theme-toggle" class="button theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.1 5.1l1.6 1.6M17.3 17.3l1.6 1.6M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M19.5 13.4A7.5 7.5 0 1 1 10.6 4.5 6 6 0 0 0 19.5 13.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="control" class="button primary" type="button">Pause discovery</button>
+  </div>
+</header>
 <main>
 <div id="notice" class="notice" role="status"></div>
 <section class="intro reveal"><div><div class="eyebrow">A small window into a distributed world</div><h1>See what the network is sharing.</h1><p>Live torrent discovery, real metadata, and the countries where peers are observed.</p></div><div class="stamp">LAST UPDATED<strong id="last-updated">Waiting for data</strong></div></section>
-<section class="metrics reveal" aria-label="Discovery totals"><div class="metric"><div class="label">CATALOG SIZE</div><strong id="hashes">0</strong><div class="sub" id="retention" title="Distinct retained hashes. Sample receipts may include repeated hashes.">Stored names and public hashes</div></div><div class="metric"><div class="label">NAMES RESOLVED</div><strong id="resolved">0</strong><div class="sub" id="attempts">Waiting for metadata</div></div><div class="metric"><div class="label">PENDING TO RESOLVE</div><strong id="unresolved">0</strong><div class="sub" id="unresolved-sub">Hashes waiting for a name</div></div><div class="metric"><div class="label">EMPTY LOOKUPS</div><strong id="empty-lookups">0</strong><div class="sub">Checked, no name returned</div></div><div class="metric"><div class="label">PEER OBSERVATIONS</div><strong id="peers">0</strong><div class="sub">Same peer may appear in several swarms</div></div><div class="metric"><div class="label">COUNTRIES OBSERVED</div><strong id="country-count">0</strong><div class="sub" id="unknown">Offline country lookup</div></div></section>
-<section class="card resolver-card reveal" aria-label="Name resolver performance"><div><h3>Live name resolution</h3><p id="resolver-work">Connecting metadata sources…</p><div class="rate-meter"><label for="name-goal">Fresh names goal <span id="name-goal-label">0 / 1,000 per minute</span></label><progress id="name-goal" max="1000" value="0">0</progress></div></div><div class="resolver-stats"><span><strong id="resolver-lookups">0</strong>completed lookups / min</span><span><strong id="resolver-speed">0</strong>new live names / min</span><span><strong id="resolver-indexed">0</strong>index names added / min</span><span><strong id="resolver-verified">0</strong>peer/cache verified / min</span><span><strong id="resolver-latency">—</strong>mean network lookup</span></div></section><section class="layout reveal"><div class="card map-card"><div class="card-top"><div><div class="eyebrow">Where peers were found</div><h2>The peer atlas</h2></div><div class="map-label"><span>Click a country to filter</span><button id="reset-country" class="button" type="button">All countries</button></div></div><div class="map-wrap"><svg id="map" class="world-map" viewBox="0 0 1000 470" role="img" aria-label="World map of observed peers by country"><g id="grid"></g><g id="countries"></g><g id="dots"></g></svg><div id="tooltip" class="country-popover"></div></div><div class="map-footer"><span id="map-caption">Locations appear when the network returns peer addresses.</span><div class="legend"><i></i><i></i><i></i><span>More observations</span></div></div></div><aside class="sidebar"><div class="card region-card"><div class="eyebrow">In this sample</div><h3>Most observed countries</h3><div id="regions"><p class="quiet">Waiting for located peers.</p></div></div><div class="card method"><div class="eyebrow">What you are seeing</div><p>A sample of public torrents. Counts reflect this computer’s observations, not a worldwide ranking or a person’s download history.</p><span class="tag" id="payload">METADATA ONLY · 0 B MOVIE DATA</span></div></aside></section>
-<section class="card feed reveal" id="feed"><div class="feed-head"><div><h2>Explore stored torrents</h2><p id="collector-status">Connecting to DHT nodes and resolving torrent names.</p></div><div class="feed-controls"><div class="segmented" aria-label="Trending window"><button id="trend-all" type="button" class="active">All stored</button><button id="trend-today" type="button">Today trending</button><button id="trend-week" type="button">Week trending</button></div><div class="segmented" aria-label="Result count"><button id="all-rows" type="button" class="active">Browse</button><button id="top-rows" type="button">Top 10</button></div></div></div><div class="tools"><div class="search"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="1.6"/><path d="m12 12 5 5" stroke="currentColor" stroke-width="1.6"/></svg><input id="search" aria-label="Search torrent names or hashes" placeholder="Search titles, files, hashes or magnets…" autocomplete="off"></div><select id="sort" aria-label="Sort discoveries"><option value="trending">Best score (seeds+peers+fresh)</option><option value="peers">Most peers observed</option><option value="seeds">Most seeding</option><option value="recent">Recently checked</option><option value="name">Name A–Z</option></select><select id="kind" aria-label="Content type"><option value="all">All types</option><option value="Video">Videos</option><option value="Other">Other files</option></select><select id="source" aria-label="Name source"><option value="all">All name sources</option><option value="observed">DHT sightings</option><option value="verified">Peer / cache verified</option><option value="indexed">Public catalog</option></select><label class="check"><input id="pending" type="checkbox">Show unresolved</label><label class="check"><input id="located-only" type="checkbox">Located only</label><label class="check"><input id="hide-adult" type="checkbox" checked>Hide adult names</label><button id="country-filter" class="filter-chip" hidden type="button"></button></div><p id="search-status" role="status" aria-live="polite">Search words in any order, or paste a hash or magnet link.</p><div class="table-scroll"><table><thead><tr><th>#</th><th>Torrent / name</th><th>Size</th><th>Peers / seeds</th><th>Countries</th><th>Last checked</th></tr></thead><tbody id="rows"></tbody></table></div><div class="empty" id="empty"><div class="spinner" id="empty-spinner"></div><h3 id="empty-title">Finding names in the noise.</h3><p id="empty-text">Discovery is live. Metadata can take a moment to arrive.</p><p class="tiny">Movie files are never downloaded.</p></div><div class="feed-footer"><span id="result-count">No names yet</span><div class="paging"><button id="previous-page" class="button" type="button" disabled>Previous</button><span id="page-number">Page 1</span><button id="load-more" class="button" type="button">Next</button></div><span id="query-count">Starting DHT</span></div></section>
-<footer><span>LOCAL OBSERVATIONS · COUNTRY LOCATIONS ARE APPROXIMATE · UNKNOWN LOCATIONS STAY UNKNOWN</span><span>Map: Natural Earth · GeoIP: <a href="https://db-ip.com/db/lite.php" target="_blank" rel="noreferrer">DB-IP</a> (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>) · <a href="https://www.bittorrent.org/beps/bep_0051.html" target="_blank" rel="noreferrer">How DHT discovery works</a> · <a href="https://www.bittorrent.org/beps/bep_0009.html" target="_blank" rel="noreferrer">Metadata exchange</a></span></footer>
+<section class="metrics reveal" aria-label="Discovery totals">
+  <div class="metric"><div class="label">CATALOG SIZE</div><strong id="hashes">0</strong><div class="sub" id="retention" title="Distinct retained hashes. Sample receipts may include repeated hashes.">Stored names and public hashes</div></div>
+  <div class="metric"><div class="label">NAMES RESOLVED</div><strong id="resolved">0</strong><div class="sub" id="attempts">Waiting for metadata</div></div>
+  <div class="metric"><div class="label">PENDING TO RESOLVE</div><strong id="unresolved">0</strong><div class="sub" id="unresolved-sub">Hashes waiting for a name</div></div>
+  <div class="metric"><div class="label">EMPTY LOOKUPS</div><strong id="empty-lookups">0</strong><div class="sub">Checked, no name returned</div></div>
+  <div class="metric"><div class="label">PEER OBSERVATIONS</div><strong id="peers">0</strong><div class="sub">Same peer may appear in several swarms</div></div>
+  <div class="metric"><div class="label">COUNTRIES OBSERVED</div><strong id="country-count">0</strong><div class="sub" id="unknown">Offline country lookup</div></div>
+</section>
+<section class="card resolver-card reveal" aria-label="Name resolver performance">
+  <div>
+    <h3>Live name resolution</h3>
+    <p id="resolver-work">Connecting metadata sources…</p>
+    <div class="rate-meter"><label for="name-goal">Fresh names goal <span id="name-goal-label">0 / 1,000 per minute</span></label><progress id="name-goal" max="1000" value="0">0</progress></div>
+  </div>
+  <div class="resolver-stats">
+    <span><strong id="resolver-lookups">0</strong>completed lookups / min</span>
+    <span><strong id="resolver-speed">0</strong>new live names / min</span>
+    <span><strong id="resolver-indexed">0</strong>index names added / min</span>
+    <span><strong id="resolver-verified">0</strong>peer/cache verified / min</span>
+    <span><strong id="resolver-latency">—</strong>mean network lookup</span>
+  </div>
+</section>
+<section class="layout reveal">
+  <div class="card map-card">
+    <div class="card-top">
+      <div><div class="eyebrow">Where peers were found</div><h2>The peer atlas</h2></div>
+      <div class="map-label">
+        <span id="map-live" class="live-badge idle" aria-live="polite"><i></i><span>Idle</span></span>
+        <span>Click a country to filter</span>
+        <button id="reset-country" class="button" type="button">All countries</button>
+      </div>
+    </div>
+    <div class="map-wrap">
+      <svg id="map" class="world-map" viewBox="0 0 1000 500" role="img" aria-label="Live world map of observed peers by country">
+        <g id="grid"></g>
+        <g id="countries"></g>
+        <g id="halos"></g>
+        <g id="dots"></g>
+      </svg>
+      <div id="tooltip" class="country-popover"></div>
+    </div>
+    <div class="map-footer">
+      <span id="map-caption">Locations appear when the network returns peer addresses.</span>
+      <div class="legend"><span class="swatch" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b></span><span>Heat by observations</span></div>
+    </div>
+  </div>
+  <aside class="sidebar">
+    <div class="card region-card">
+      <div class="eyebrow">In this sample</div>
+      <h3>Most observed countries</h3>
+      <div id="regions"><p class="quiet">Waiting for located peers.</p></div>
+    </div>
+    <div class="card method">
+      <div class="eyebrow">What you are seeing</div>
+      <p>A sample of public torrents. Counts reflect this computer’s observations, not a worldwide ranking or a person’s download history.</p>
+      <span class="tag" id="payload">METADATA ONLY · 0 B MOVIE DATA</span>
+    </div>
+  </aside>
+</section>
+<section class="card feed reveal" id="feed">
+  <div class="feed-head">
+    <div>
+      <h2>Explore stored torrents</h2>
+      <p id="collector-status">Connecting to DHT nodes and resolving torrent names.</p>
+    </div>
+    <div class="feed-controls">
+      <div class="segmented" aria-label="Trending window">
+        <button id="trend-all" type="button" class="active">All stored</button>
+        <button id="trend-today" type="button">Today trending</button>
+        <button id="trend-week" type="button">Week trending</button>
+      </div>
+      <div class="segmented" aria-label="Result count">
+        <button id="all-rows" type="button" class="active">Browse</button>
+        <button id="top-rows" type="button">Top 10</button>
+      </div>
+    </div>
+  </div>
+  <div class="tools">
+    <div class="search">
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="1.6"/><path d="m12 12 5 5" stroke="currentColor" stroke-width="1.6"/></svg>
+      <input id="search" aria-label="Search torrent names or hashes" placeholder="Search titles, files, hashes or magnets…" autocomplete="off">
+    </div>
+    <select id="sort" aria-label="Sort discoveries">
+      <option value="trending">Best score (seeds+peers+fresh)</option>
+      <option value="peers">Most peers observed</option>
+      <option value="seeds">Most seeding</option>
+      <option value="recent">Recently checked</option>
+      <option value="name">Name A–Z</option>
+    </select>
+    <select id="kind" aria-label="Content type"><option value="all">All types</option><option value="Video">Videos</option><option value="Other">Other files</option></select>
+    <select id="source" aria-label="Name source"><option value="all">All name sources</option><option value="observed">DHT sightings</option><option value="verified">Peer / cache verified</option><option value="indexed">Public catalog</option></select>
+    <label class="check"><input id="pending" type="checkbox">Show unresolved</label>
+    <label class="check"><input id="located-only" type="checkbox">Located only</label>
+    <label class="check"><input id="hide-adult" type="checkbox" checked>Hide adult names</label>
+    <button id="country-filter" class="filter-chip" hidden type="button"></button>
+  </div>
+  <p id="search-status" role="status" aria-live="polite">Search words in any order, or paste a hash or magnet link.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>#</th><th>Torrent / name</th><th>Size</th><th>Peers / seeds</th><th>Countries</th><th>Last checked</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="empty" id="empty">
+    <div class="spinner" id="empty-spinner"></div>
+    <h3 id="empty-title">Finding names in the noise.</h3>
+    <p id="empty-text">Discovery is live. Metadata can take a moment to arrive.</p>
+    <p class="tiny">Movie files are never downloaded.</p>
+  </div>
+  <div class="feed-footer">
+    <span id="result-count">No names yet</span>
+    <div class="paging">
+      <button id="previous-page" class="button" type="button" disabled>Previous</button>
+      <span id="page-number">Page 1</span>
+      <button id="load-more" class="button" type="button">Next</button>
+    </div>
+    <span id="query-count">Starting DHT</span>
+  </div>
+</section>
+<footer>
+  <span>LOCAL OBSERVATIONS · COUNTRY LOCATIONS ARE APPROXIMATE · UNKNOWN LOCATIONS STAY UNKNOWN</span>
+  <span>Map: Natural Earth · GeoIP: <a href="https://db-ip.com/db/lite.php" target="_blank" rel="noreferrer">DB-IP</a> (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>) · <a href="https://www.bittorrent.org/beps/bep_0051.html" target="_blank" rel="noreferrer">How DHT discovery works</a> · <a href="https://www.bittorrent.org/beps/bep_0009.html" target="_blank" rel="noreferrer">Metadata exchange</a></span>
+</footer>
 </main>
-<div id="detail" class="drawer-backdrop"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="detail-name"><button id="close-detail" class="button close" type="button" aria-label="Close details">Close</button><div class="eyebrow">Observed torrent</div><h2 id="detail-name"></h2><span id="detail-kind" class="tag"></span><dl id="detail-facts"></dl><button id="copy-hash" class="button copy" type="button">Copy torrent hash</button><button id="copy-magnet" class="button copy" type="button">Copy magnet link</button><h3 style="margin:22px 0 12px;font-size:12px">Files in metadata</h3><ul id="detail-files"></ul><p class="quiet">A peer announcement indicates availability, not proof that someone downloaded or watched a file.</p></section></div><div id="toast" class="toast" role="status"></div>
-<script type="application/json" id="world-data">__WORLD_MAP__</script><script type="application/json" id="initial-data">__INITIAL_STATE__</script>
+<div id="detail" class="drawer-backdrop">
+  <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="detail-name">
+    <button id="close-detail" class="button close" type="button" aria-label="Close details">Close</button>
+    <div class="eyebrow">Observed torrent</div>
+    <h2 id="detail-name"></h2>
+    <span id="detail-kind" class="tag"></span>
+    <dl id="detail-facts"></dl>
+    <button id="copy-hash" class="button copy" type="button">Copy torrent hash</button>
+    <button id="copy-magnet" class="button copy" type="button">Copy magnet link</button>
+    <h3 style="margin:22px 0 12px;font-size:12px">Files in metadata</h3>
+    <ul id="detail-files"></ul>
+    <p class="quiet">A peer announcement indicates availability, not proof that someone downloaded or watched a file.</p>
+  </section>
+</div>
+<div id="toast" class="toast" role="status"></div>
+<script type="application/json" id="world-data">__WORLD_MAP__</script>
+<script type="application/json" id="initial-data">__INITIAL_STATE__</script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';
 const world=JSON.parse($('world-data').textContent),countryByCode=new Map(world.map(c=>[c.code,c]));
 let current=JSON.parse($('initial-data').textContent),selectedCountry=null,topOnly=false,trendWindow='all',detailHash=null,online=true,busy=false,polling=false,detailTrigger=null,toastTimer,pageLimit=150,prevCountryTotals=null;
 let pageOffset=0,requestSequence=0,activeRequest=null,detailRecord=null;
+let previousMapCounts={},freshCountries=new Set(),mapLiveUntil=0,mapLiveTimer=null;
 const fmt=new Intl.NumberFormat(),adult=/(?:porn|sex8|xvideos|xxx|creampie|uncensored|44x\.me|\b(?:SONE|SSIS|IPX|DBER|JUQ|JUL|MIAA|MIDE|FSDSS)[- _]?\d{3,})/i;
+const THEME_KEY='torrent-atlas-theme';
+
+function preferredTheme(){
+  const saved=localStorage.getItem(THEME_KEY);
+  if(saved==='light'||saved==='dark')return saved;
+  return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+}
+function applyTheme(theme){
+  document.documentElement.setAttribute('data-theme',theme);
+  localStorage.setItem(THEME_KEY,theme);
+  const dark=theme==='dark';
+  $('theme-toggle').setAttribute('aria-label',dark?'Switch to light mode':'Switch to dark mode');
+  $('theme-toggle').title=dark?'Light mode':'Dark mode';
+}
+applyTheme(preferredTheme());
+$('theme-toggle').onclick=()=>applyTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark');
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{
+  if(!localStorage.getItem(THEME_KEY))applyTheme(preferredTheme());
+});
+
 function el(tag,attrs={},text){const n=document.createElement(tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n}
 function svg(tag,attrs){const n=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);return n}
-function project(lon,lat){return[(lon+180)*1000/360,(90-lat)*470/180]}
-const regionNames=new Intl.DisplayNames(['en'],{type:'region'});function countryName(c){if(c==='ZZ'||c==='Unlocated')return 'Unlocated';return countryByCode.get(c)?.name||(/^[A-Z]{2}$/.test(c)?regionNames.of(c):null)||c}
+function project(lon,lat){return[(lon+180)*1000/360,(90-lat)*500/180]}
+const regionNames=new Intl.DisplayNames(['en'],{type:'region'});
+function countryName(c){if(c==='ZZ'||c==='Unlocated')return 'Unlocated';return countryByCode.get(c)?.name||(/^[A-Z]{2}$/.test(c)?regionNames.of(c):null)||c}
 function shownName(r){if(!r.resolved)return 'Resolving metadata…';return $('hide-adult').checked&&adult.test(r.name)?'Adult release · name hidden':r.name}
 function normalizeSearch(value){return value.normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim()}
 function matchesSearch(r,query){const hash=query.match(/(?:urn:btih:)?([a-f0-9]{40})/i);if(hash)return r.hash.includes(hash[1].toLowerCase());if(r.hash.includes(query))return true;const tokens=normalizeSearch(query).split(/\s+/).filter(Boolean),text=normalizeSearch([r.name||'',...(r.files||[])].join(' '));return tokens.every(token=>text.includes(token))}
@@ -43,43 +396,278 @@ function seedCount(r){return r.seeds===null||r.seeds===undefined?-1:r.seeds}
 function locatedCount(r){return Object.keys(r.countries||{}).filter(c=>c&&c!=='ZZ'&&c!=='Unlocated').length}
 function trendScore(r){const peers=Math.max(r.peers||0,0);const seeds=Math.max(seedCount(r),0);const ageH=Math.max(0,(Date.now()-Date.parse(r.lastSeen||r.checkedAt||r.firstSeen||0))/36e5);const fresh=Math.max(0,72-Math.min(ageH,72));return seeds*5+peers*2+locatedCount(r)*4+fresh+(r.resolved?15:0)+Math.min(r.sampleHits||0,10)}
 function magnetFor(r){const dn=encodeURIComponent((r&&r.name)||(r&&r.hash)||detailHash||'');const hash=(r&&r.hash)||detailHash||'';return 'magnet:?xt=urn:btih:'+hash+'&dn='+dn}
-for(let lon=-120;lon<=120;lon+=60){const[x]=project(lon,0);$('grid').append(svg('path',{d:`M${x} 0V470`,class:'grid'}))}
-for(let lat=-60;lat<=60;lat+=30){const[,y]=project(0,lat);$('grid').append(svg('path',{d:`M0 ${y}H1000`,class:'grid'}))}
-for(const c of world){let d='';for(const ring of c.rings){let previous=null;for(const[lon,lat]of ring){const[x,y]=project(lon,lat);d+=(previous===null||Math.abs(lon-previous)>180?'M':'L')+x.toFixed(2)+' '+y.toFixed(2);previous=lon}d+='Z'}const path=svg('path',{d,class:'country','data-country':c.code,tabindex:'0','aria-label':c.name});path.addEventListener('click',()=>chooseCountry(c.code));path.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();chooseCountry(c.code)}});path.addEventListener('pointermove',e=>showTooltip(e,c.code));path.addEventListener('pointerleave',()=>{$('tooltip').style.display='none'});$('countries').append(path)}
-function aggregates(){const out={},locatedOnly=$('located-only').checked,src=current.countryTotals||{};for(const[c,n]of Object.entries(src)){if(locatedOnly&&(c==='ZZ'||c==='Unlocated'))continue;out[c]=(out[c]||0)+n}if(!Object.keys(out).length){for(const r of current.records||[])for(const[c,n]of Object.entries(r.countries||{})){if(locatedOnly&&(c==='ZZ'||c==='Unlocated'))continue;out[c]=(out[c]||0)+n}}return out}
-function showTooltip(event,code){const counts=aggregates(),box=$('map').parentElement.getBoundingClientRect(),tip=$('tooltip');tip.textContent=countryName(code)+' · '+fmt.format(counts[code]||0)+' peer observations';tip.style.display='block';tip.style.left=Math.min(event.clientX-box.left+10,box.width-200)+'px';tip.style.top=Math.max(0,event.clientY-box.top-30)+'px'}
-function chooseCountry(code){pageOffset=0;selectedCountry=selectedCountry===code?null:code;if(selectedCountry&&!(current.countryTotals||{})[selectedCountry])$('pending').checked=true;render();poll(true)}
-function renderMap(counts){const active=Object.entries(counts).filter(([c,n])=>c!=='ZZ'&&n>0).sort((a,b)=>b[1]-a[1]);for(const p of $('countries').children){const c=p.dataset.country;p.classList.toggle('active',!!counts[c]);p.classList.toggle('selected',c===selectedCountry)}$('dots').replaceChildren();for(const[c,n]of active){const country=countryByCode.get(c);if(!country)continue;const[x,y]=project(country.longitude,country.latitude),dot=svg('circle',{cx:x,cy:y,r:Math.min(17,3+Math.log2(n+1)*1.5),class:'peer-dot'+(selectedCountry===c?' selected':''),'data-country':c});dot.append(svg('title',{}));dot.firstChild.textContent=country.name+': '+fmt.format(n)+' observations';dot.addEventListener('click',()=>chooseCountry(c));dot.addEventListener('pointermove',e=>showTooltip(e,c));dot.addEventListener('pointerleave',()=>{$('tooltip').style.display='none'});$('dots').append(dot)}$('regions').replaceChildren();if(!active.length)$('regions').append(el('p',{class:'quiet'},'Waiting for located peers.'));for(const[c,n]of active.slice(0,7)){const button=el('button',{class:'region',type:'button'}),name=el('span',{class:'region-name'});name.append(el('span',{class:'country-code'},c),el('span',{},countryName(c)));button.append(name,el('span',{class:'region-count'},fmt.format(n)));button.onclick=()=>chooseCountry(c);$('regions').append(button)}$('country-count').textContent=fmt.format(active.length);$('unknown').textContent=counts.ZZ?fmt.format(counts.ZZ)+' observations unlocated':'Offline country lookup';$('map-caption').textContent=selectedCountry?countryName(selectedCountry)+' selected. Click again to show all.':active.length?'Peer locations aggregated by country. Select a country to explore.':'Locations appear when the network returns peer addresses.'}
-function render(){const records=current.records||[],counts=aggregates();$('resolver-work').textContent=(current.active||0)+' active checks · '+fmt.format(current.pending||0)+' hashes due · rates count the last 60 seconds';$('resolver-lookups').textContent=fmt.format(current.lookupsPerMinute||0);$('resolver-speed').textContent=fmt.format(current.liveNamesPerMinute||0);$('resolver-indexed').textContent=fmt.format(current.indexNamesPerMinute||0);$('resolver-verified').textContent=fmt.format(current.verifiedNamesPerMinute||0);$('name-goal').value=Math.min(1000,current.liveNamesPerMinute||0);$('name-goal-label').textContent=fmt.format(current.liveNamesPerMinute||0)+' / 1,000 per minute';$('resolver-latency').textContent=current.completed?((current.averageLookupMs||0)/1000).toFixed(1)+' s':'—';$('hashes').textContent=fmt.format(current.hashes||0);$('retention').textContent=fmt.format(current.hashSamples||0)+' hash samples this session'+(current.dumpReady?' · local index ready':' · loading local index');$('resolved').textContent=fmt.format(current.resolved||0);$('attempts').textContent=fmt.format(current.attempts||0)+' metadata checks';$('unresolved').textContent=fmt.format(current.unresolved!=null?current.unresolved:Math.max(0,(current.hashes||0)-(current.resolved||0)));$('unresolved-sub').textContent=fmt.format(current.pending||0)+' due now · use Show unresolved to browse';$('empty-lookups').textContent=fmt.format(current.emptyLookups||0);$('peers').textContent=fmt.format(Object.values(current.countryTotals||{}).reduce((n,count)=>n+count,0));$('payload').textContent='METADATA ONLY · '+size(current.payloadBytes||0).replace('—','0 B')+' MOVIE DATA';$('connection').textContent=!online?'Reconnecting':current.running?'Live discovery':'Paused';$('status-dot').classList.toggle('off',!online||!current.running);$('control').textContent=busy?'Please wait…':current.running?'Pause discovery':'Resume discovery';$('control').disabled=busy||!online;$('collector-status').textContent=current.status||'Connecting to DHT';$('last-updated').textContent=new Date(current.updated||Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});$('query-count').textContent=fmt.format(current.queries||0)+' queries · '+fmt.format(current.samplingNodes||0)+' sampling replies · '+(current.activeSamplers||0)+' samplers active';renderMap(counts);const chip=$('country-filter');chip.hidden=!selectedCountry;chip.textContent=selectedCountry?countryName(selectedCountry)+' ×':'';const query=$('search').value.trim().toLowerCase(),locatedOnly=$('located-only').checked;let filtered=records;/* server owns rank/filter */const total=(current.matchCount!=null?current.matchCount:filtered.length);if(topOnly||trendWindow!=='all')filtered=filtered.slice(0,10);$('rows').replaceChildren();for(const[rIndex,r]of filtered.entries()){const tr=el('tr'),name=el('td',{class:'name-cell'}),button=el('button',{class:'torrent-name',type:'button'},shownName(r)),meta=el('div',{class:'torrent-meta'});button.onclick=()=>openDetail(r.hash,button);meta.append(el('span',{class:'hash'},r.hash.slice(0,12)+'…'),el('span',{},r.resolved?(r.kind||'Other'):'Pending'),el('span',{class:'name-source'},r.source==='dump'?'Local index':r.source==='catalog'?'Catalog':r.source==='cache'?'Verified cache':r.source==='peer'?'Verified peer':'Awaiting metadata'));if(r.resolved){const mag=el('button',{class:'button',type:'button'},'Magnet');mag.style.cssText='margin-left:6px;padding:2px 8px;font-size:11px';mag.onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(magnetFor(r));toast('Magnet link copied')}catch{toast('Could not copy magnet link')}};meta.append(mag)}if(r.seeds!==null&&r.seeds!==undefined)meta.append(el('span',{},'≈'+fmt.format(r.seeds)+' seeding'));name.append(button,meta);const codes=Object.entries(r.countries||{}).filter(([c])=>!locatedOnly||(c!=='ZZ'&&c!=='Unlocated')).sort((a,b)=>b[1]-a[1]).map(([c])=>c);const peerSeed=fmt.format(r.peers||0)+(r.seeds===null||r.seeds===undefined?'':' / ≈'+fmt.format(r.seeds));tr.append(el('td',{},String(pageOffset+rIndex+1).padStart(2,'0')),name,el('td',{},size(r.size)),el('td',{class:'num'},peerSeed),el('td',{class:'country-list',title:codes.map(countryName).join(', ')},codes.map(c=>c==='ZZ'?'Unlocated':c).join(' · ')||'—'),el('td',{class:'age',title:r.checkedAt},age(r.checkedAt||r.lastSeen)));$('rows').append(tr)}$('empty').style.display=filtered.length?'none':'block';$('empty-spinner').style.display=(!query&&!selectedCountry&&!(current.resolved||current.hashes)&&current.running&&online)?'block':'none';const trendLabel=trendWindow==='today'?'today':trendWindow==='week'?'this week':'';$('empty-title').textContent=!online?'Loading discovery…':(query||selectedCountry||$('kind').value!=='all'||locatedOnly||trendWindow!=='all'?'No matching observations.':(current.resolved||current.hashes)?'No rows in this window.':'Finding names in the noise.');$('empty-text').textContent=!online?'Waiting for the local collector. The full JSON store stays on disk; this page only loads a ranked window.':(query||selectedCountry||locatedOnly||trendWindow!=='all'?'Try another search, clear location cleaning, or switch the trending window.':(current.resolved||current.hashes)?'Use search or trending to browse the stored names.':'Public hashes are arriving. Some peers never return metadata.');$('result-count').textContent=(filtered.length?fmt.format(pageOffset+1)+'–'+fmt.format(pageOffset+filtered.length):'0')+' of '+fmt.format(total)+' matching'+(trendLabel?' · '+trendLabel:'');const canMore=!topOnly&&trendWindow==='all'&&pageOffset+pageLimit<total&&pageOffset+pageLimit<=20000;$('load-more').disabled=!canMore||polling;$('previous-page').disabled=pageOffset===0||polling;$('page-number').textContent='Page '+fmt.format(Math.floor(pageOffset/pageLimit)+1);if(detailHash)renderDetail();}
-function openDetail(hash,trigger){detailHash=hash;detailRecord=current.records.find(r=>r.hash===hash)||detailRecord;detailTrigger=trigger;$('detail').style.display='block';renderDetail();$('close-detail').focus()}
-function renderDetail(){const r=current.records.find(r=>r.hash===detailHash)||detailRecord;if(!r)return;$('detail-name').textContent=shownName(r);$('detail-kind').textContent=r.resolved?(r.kind||'Other'):'Metadata pending';$('detail-facts').replaceChildren();const sourceLabel=r.source==='dump'?'Local public catalog (not peer-verified)':r.source==='catalog'?'Public torrent catalog':r.source==='cache'?'Verified torrent cache':r.source==='peer'?'Verified peer metadata':r.resolved?'Previously stored name':'Pending';const pairs=[['Hash',r.hash],['Size',size(r.size)],['Name source',sourceLabel],['Resolution time',r.resolutionMs?r.resolutionMs+' ms':'—'],['Lookup attempts',String(r.resolveAttempts||0)],['Next check',r.nextAttempt&&!r.nextAttempt.startsWith('0001')?new Date(r.nextAttempt).toLocaleTimeString():'Scheduled automatically'],['Peers observed',fmt.format(r.peers||0)],['Seeding estimate',r.seeds===null||r.seeds===undefined?'Unavailable':'≈ '+fmt.format(r.seeds)],['First observed',new Date(r.firstSeen).toLocaleString()],['Last checked',!r.checkedAt||r.checkedAt.startsWith('0001')?'Not checked':new Date(r.checkedAt).toLocaleString()],['Countries',Object.entries(r.countries||{}).filter(([c])=>!$('located-only').checked||(c!=='ZZ'&&c!=='Unlocated')).map(([c,n])=>countryName(c)+' ('+n+')').join(', ')||'Unlocated']];for(const[k,v]of pairs)$('detail-facts').append(el('dt',{},k),el('dd',{},v));$('detail-files').replaceChildren();const hide=$('hide-adult').checked&&adult.test(r.name||'');for(const f of r.files||[])$('detail-files').append(el('li',{},hide?'Adult filename hidden':f));if(!r.files?.length)$('detail-files').append(el('li',{},'Metadata has not arrived yet.'))}
-function closeDetail(){detailHash=null;$('detail').style.display='none';detailTrigger?.focus()}
-$('close-detail').onclick=closeDetail;$('detail').onclick=e=>{if(e.target===$('detail'))closeDetail()};document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDetail();if(detailHash&&e.key==='Tab'){const focusable=[$('close-detail'),$('copy-hash'),$('copy-magnet')],first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}});
-$('copy-hash').onclick=async()=>{try{await navigator.clipboard.writeText(detailHash);toast('Torrent hash copied')}catch{toast('Select the hash above to copy it.')}};$('copy-magnet').onclick=async()=>{const r=(current.records||[]).find(x=>x.hash===detailHash)||{hash:detailHash};try{await navigator.clipboard.writeText(magnetFor(r));toast('Magnet link copied')}catch{toast('Could not copy magnet link')}};function toast(s){clearTimeout(toastTimer);$('toast').textContent=s;$('toast').style.display='block';toastTimer=setTimeout(()=>$('toast').style.display='none',2300)}
-let searchTimer=null;$('search').addEventListener('input',()=>{pageLimit=150;pageOffset=0;render();clearTimeout(searchTimer);searchTimer=setTimeout(()=>poll(true),180)});for(const id of ['sort','kind','source','pending','hide-adult','located-only'])$(id).addEventListener('change',()=>{pageLimit=150;pageOffset=0;render();poll(true)});$('country-filter').onclick=$('reset-country').onclick=()=>{selectedCountry=null;pageOffset=0;render();poll(true)};
-function setTrend(windowName){pageLimit=150;pageOffset=0;trendWindow=windowName;for(const[id,value]of [['trend-all','all'],['trend-today','today'],['trend-week','week']])$(id).classList.toggle('active',trendWindow===value);if(trendWindow!=='all'){topOnly=true;$('top-rows').classList.add('active');$('all-rows').classList.remove('active');if($('sort').value==='name')$('sort').value='trending'}$('pending').checked=false;render();poll(true)}
-$('trend-all').onclick=()=>setTrend('all');$('trend-today').onclick=()=>setTrend('today');$('trend-week').onclick=()=>setTrend('week');
-$('all-rows').onclick=()=>{pageLimit=150;pageOffset=0;topOnly=false;$('all-rows').classList.add('active');$('top-rows').classList.remove('active');render();poll(true)};$('top-rows').onclick=()=>{pageLimit=150;pageOffset=0;topOnly=true;$('top-rows').classList.add('active');$('all-rows').classList.remove('active');render();poll(true)};
-$('control').onclick=async()=>{busy=true;render();try{const response=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running:!current.running})});if(!response.ok)throw Error('Control failed');current=await response.json();online=true}catch{toast('Could not change discovery. Try again.')}finally{busy=false;render()}};
-$('load-more').onclick=()=>{if(busy||polling)return;pageOffset+=pageLimit;poll(true)};$('previous-page').onclick=()=>{if(busy||polling)return;pageOffset=Math.max(0,pageOffset-pageLimit);poll(true)};
-function viewParams(){const p=new URLSearchParams();const q=$('search').value.trim();if(q)p.set('q',q);p.set('sort',$('sort').value||'trending');p.set('kind',$('kind').value||'all');p.set('source',$('source').value||'all');p.set('offset',String(pageOffset));p.set('trend',trendWindow||'all');if($('pending').checked)p.set('pending','1');if($('located-only').checked)p.set('located','1');if(selectedCountry)p.set('country',selectedCountry);if(topOnly||trendWindow!=='all')p.set('top','1');p.set('limit',topOnly||trendWindow!=='all'?'10':String(pageLimit));return p}
-async function poll(force=false){
- if(busy)return;if(polling&&!force)return;if(activeRequest)activeRequest.abort();
- const sequence=++requestSequence,controller=new AbortController();activeRequest=controller;polling=true;
- const params=viewParams().toString(),timeout=setTimeout(()=>controller.abort(),20000);
- $('feed').classList.add('loading');$('rows').setAttribute('aria-busy','true');$('search-status').textContent='Updating results…';
- try{
-  const response=await fetch('/api/state?'+params,{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('State unavailable');
-  const next=await response.json();if(sequence!==requestSequence||params!==viewParams().toString())return;
-  if(next.countryTotals&&Object.keys(next.countryTotals).length)prevCountryTotals=next.countryTotals;else if(prevCountryTotals)next.countryTotals=prevCountryTotals;
-  current=next;online=true;$('notice').style.display='none';history.replaceState(null,'','?'+params);
- }catch(error){if(sequence!==requestSequence||error.name==='AbortError')return;online=false;$('notice').textContent='The local collector is unavailable. Showing the last results received.';$('notice').style.display='block'}
- finally{clearTimeout(timeout);if(sequence===requestSequence){polling=false;activeRequest=null;$('feed').classList.remove('loading');$('rows').setAttribute('aria-busy','false');$('search-status').textContent='Search words in any order, or paste a hash or magnet link.';render()}}
+function heatLevel(count,max){if(!count||!max)return 0;const ratio=count/max;if(ratio>=0.55)return 5;if(ratio>=0.28)return 4;if(ratio>=0.12)return 3;if(ratio>=0.04)return 2;return 1}
+function markMapLive(changed){
+  if(!changed)return;
+  mapLiveUntil=Date.now()+4500;
+  const badge=$('map-live');
+  badge.classList.remove('idle');
+  badge.querySelector('span').textContent='Live · +'+fmt.format(changed);
+  clearTimeout(mapLiveTimer);
+  mapLiveTimer=setTimeout(()=>{
+    if(Date.now()>=mapLiveUntil){
+      badge.classList.add('idle');
+      badge.querySelector('span').textContent='Idle';
+    }
+  },4600);
 }
-function restoreView(){const params=new URLSearchParams(location.search);for(const id of ['sort','kind','source'])if(params.has(id)&&[...$(id).options].some(o=>o.value===params.get(id)))$(id).value=params.get(id);$('search').value=params.get('q')||'';$('pending').checked=params.get('pending')==='1';$('located-only').checked=params.get('located')==='1';selectedCountry=params.get('country')||null;pageOffset=Math.max(0,Math.min(20000,Number(params.get('offset'))||0));topOnly=params.get('top')==='1';trendWindow=params.get('trend')||'all';for(const[id,value]of [['trend-all','all'],['trend-today','today'],['trend-week','week']])$(id).classList.toggle('active',trendWindow===value);$('top-rows').classList.toggle('active',topOnly);$('all-rows').classList.toggle('active',!topOnly)}
+
+for(let lon=-120;lon<=120;lon+=60){const[x]=project(lon,0);$('grid').append(svg('path',{d:`M${x} 0V500`,class:'grid'}))}
+for(let lat=-60;lat<=60;lat+=30){const[,y]=project(0,lat);$('grid').append(svg('path',{d:`M0 ${y}H1000`,class:'grid'}))}
+for(const c of world){
+  let d='';
+  for(const ring of c.rings){
+    let previous=null;
+    for(const[lon,lat]of ring){
+      const[x,y]=project(lon,lat);
+      d+=(previous===null||Math.abs(lon-previous)>180?'M':'L')+x.toFixed(2)+' '+y.toFixed(2);
+      previous=lon;
+    }
+    d+='Z';
+  }
+  const path=svg('path',{d,class:'country','data-country':c.code,tabindex:'0','aria-label':c.name});
+  path.addEventListener('click',()=>chooseCountry(c.code));
+  path.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();chooseCountry(c.code)}});
+  path.addEventListener('pointermove',e=>showTooltip(e,c.code));
+  path.addEventListener('pointerleave',()=>{$('tooltip').style.display='none'});
+  $('countries').append(path);
+}
+
+function aggregates(){
+  const out={},locatedOnly=$('located-only').checked,src=current.countryTotals||{};
+  for(const[c,n]of Object.entries(src)){if(locatedOnly&&(c==='ZZ'||c==='Unlocated'))continue;out[c]=(out[c]||0)+n}
+  if(!Object.keys(out).length){
+    for(const r of current.records||[])for(const[c,n]of Object.entries(r.countries||{})){
+      if(locatedOnly&&(c==='ZZ'||c==='Unlocated'))continue;out[c]=(out[c]||0)+n;
+    }
+  }
+  return out;
+}
+function showTooltip(event,code){
+  const counts=aggregates(),box=$('map').parentElement.getBoundingClientRect(),tip=$('tooltip');
+  const n=counts[code]||0,prev=previousMapCounts[code]||0,delta=n-prev;
+  tip.textContent=countryName(code)+' · '+fmt.format(n)+' peer observations'+(delta>0?' · +'+fmt.format(delta)+' this update':'');
+  tip.style.display='block';
+  tip.style.left=Math.min(event.clientX-box.left+10,box.width-220)+'px';
+  tip.style.top=Math.max(0,event.clientY-box.top-30)+'px';
+}
+function chooseCountry(code){
+  pageOffset=0;selectedCountry=selectedCountry===code?null:code;
+  if(selectedCountry&&!(current.countryTotals||{})[selectedCountry])$('pending').checked=true;
+  render();poll(true);
+}
+function renderMap(counts){
+  const active=Object.entries(counts).filter(([c,n])=>c!=='ZZ'&&n>0).sort((a,b)=>b[1]-a[1]);
+  const max=active.length?active[0][1]:0;
+  let changed=0;
+  freshCountries=new Set();
+  for(const[c,n]of active){
+    const prev=previousMapCounts[c]||0;
+    if(n>prev){freshCountries.add(c);changed+=n-prev}
+  }
+  if(Object.keys(previousMapCounts).length)markMapLive(changed);
+  for(const p of $('countries').children){
+    const c=p.dataset.country,n=counts[c]||0,level=heatLevel(n,max);
+    p.setAttribute('class','country'+(level?' heat-'+level:'')+(c===selectedCountry?' selected':''));
+  }
+  $('halos').replaceChildren();
+  $('dots').replaceChildren();
+  for(const[c,n]of active){
+    const country=countryByCode.get(c);if(!country)continue;
+    const[x,y]=project(country.longitude,country.latitude);
+    const radius=Math.min(18,3.2+Math.log2(n+1)*1.65);
+    const fresh=freshCountries.has(c);
+    const halo=svg('circle',{cx:x,cy:y,r:radius+6,class:'peer-halo'+(fresh?' fresh':''),'data-country':c});
+    const dot=svg('circle',{cx:x,cy:y,r:radius,class:'peer-dot'+(selectedCountry===c?' selected':'')+(fresh?' fresh':''),'data-country':c});
+    dot.append(svg('title',{}));
+    dot.firstChild.textContent=country.name+': '+fmt.format(n)+' observations';
+    dot.addEventListener('click',()=>chooseCountry(c));
+    dot.addEventListener('pointermove',e=>showTooltip(e,c));
+    dot.addEventListener('pointerleave',()=>{$('tooltip').style.display='none'});
+    $('halos').append(halo);
+    $('dots').append(dot);
+  }
+  $('regions').replaceChildren();
+  if(!active.length)$('regions').append(el('p',{class:'quiet'},'Waiting for located peers.'));
+  for(const[c,n]of active.slice(0,8)){
+    const button=el('button',{class:'region'+(selectedCountry===c?' selected':''),type:'button'});
+    const name=el('span',{class:'region-name'});
+    name.append(el('span',{class:'country-code'},c),el('span',{},countryName(c)));
+    const countWrap=el('span',{class:'region-count'},fmt.format(n));
+    const delta=n-(previousMapCounts[c]||0);
+    if(delta>0&&Object.keys(previousMapCounts).length)countWrap.append(el('span',{class:'region-delta'},'+'+fmt.format(delta)));
+    button.append(name,countWrap);
+    button.onclick=()=>chooseCountry(c);
+    $('regions').append(button);
+  }
+  $('country-count').textContent=fmt.format(active.length);
+  $('unknown').textContent=counts.ZZ?fmt.format(counts.ZZ)+' observations unlocated':'Offline country lookup';
+  $('map-caption').textContent=selectedCountry
+    ?countryName(selectedCountry)+' selected. Click again to show all.'
+    :active.length
+      ?(changed?'Live map · '+fmt.format(changed)+' new observations this tick.':'Peer locations aggregated by country. Select a country to explore.')
+      :'Locations appear when the network returns peer addresses.';
+  previousMapCounts={...counts};
+}
+function render(){
+  const records=current.records||[],counts=aggregates();
+  $('resolver-work').textContent=(current.active||0)+' active checks · '+fmt.format(current.pending||0)+' hashes due · rates count the last 60 seconds';
+  $('resolver-lookups').textContent=fmt.format(current.lookupsPerMinute||0);
+  $('resolver-speed').textContent=fmt.format(current.liveNamesPerMinute||0);
+  $('resolver-indexed').textContent=fmt.format(current.indexNamesPerMinute||0);
+  $('resolver-verified').textContent=fmt.format(current.verifiedNamesPerMinute||0);
+  $('name-goal').value=Math.min(1000,current.liveNamesPerMinute||0);
+  $('name-goal-label').textContent=fmt.format(current.liveNamesPerMinute||0)+' / 1,000 per minute';
+  $('resolver-latency').textContent=current.completed?((current.averageLookupMs||0)/1000).toFixed(1)+' s':'—';
+  $('hashes').textContent=fmt.format(current.hashes||0);
+  $('retention').textContent=fmt.format(current.hashSamples||0)+' hash samples this session'+(current.dumpReady?' · local index ready':' · loading local index');
+  $('resolved').textContent=fmt.format(current.resolved||0);
+  $('attempts').textContent=fmt.format(current.attempts||0)+' metadata checks';
+  $('unresolved').textContent=fmt.format(current.unresolved!=null?current.unresolved:Math.max(0,(current.hashes||0)-(current.resolved||0)));
+  $('unresolved-sub').textContent=fmt.format(current.pending||0)+' due now · use Show unresolved to browse';
+  $('empty-lookups').textContent=fmt.format(current.emptyLookups||0);
+  $('peers').textContent=fmt.format(Object.values(current.countryTotals||{}).reduce((n,count)=>n+count,0));
+  $('payload').textContent='METADATA ONLY · '+size(current.payloadBytes||0).replace('—','0 B')+' MOVIE DATA';
+  $('connection').textContent=!online?'Reconnecting':current.running?'Live discovery':'Paused';
+  $('status-dot').classList.toggle('off',!online||!current.running);
+  $('status-dot').classList.toggle('on',online&&!!current.running);
+  $('control').textContent=busy?'Please wait…':current.running?'Pause discovery':'Resume discovery';
+  $('control').disabled=busy||!online;
+  $('collector-status').textContent=current.status||'Connecting to DHT';
+  $('last-updated').textContent=new Date(current.updated||Date.now()).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  $('query-count').textContent=fmt.format(current.queries||0)+' queries · '+fmt.format(current.samplingNodes||0)+' sampling replies · '+(current.activeSamplers||0)+' samplers active';
+  renderMap(counts);
+  const chip=$('country-filter');chip.hidden=!selectedCountry;chip.textContent=selectedCountry?countryName(selectedCountry)+' ×':'';
+  const query=$('search').value.trim().toLowerCase(),locatedOnly=$('located-only').checked;
+  let filtered=records;
+  const total=(current.matchCount!=null?current.matchCount:filtered.length);
+  if(topOnly||trendWindow!=='all')filtered=filtered.slice(0,10);
+  $('rows').replaceChildren();
+  for(const[rIndex,r]of filtered.entries()){
+    const tr=el('tr'),name=el('td',{class:'name-cell'}),button=el('button',{class:'torrent-name',type:'button'},shownName(r)),meta=el('div',{class:'torrent-meta'});
+    button.onclick=()=>openDetail(r.hash,button);
+    meta.append(el('span',{class:'hash'},r.hash.slice(0,12)+'…'),el('span',{},r.resolved?(r.kind||'Other'):'Pending'),el('span',{class:'name-source'},r.source==='dump'?'Local index':r.source==='catalog'?'Catalog':r.source==='cache'?'Verified cache':r.source==='peer'?'Verified peer':'Awaiting metadata'));
+    if(r.resolved){
+      const mag=el('button',{class:'button',type:'button'},'Magnet');
+      mag.style.cssText='margin-left:6px;padding:2px 8px;font-size:11px';
+      mag.onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(magnetFor(r));toast('Magnet link copied')}catch{toast('Could not copy magnet link')}};
+      meta.append(mag);
+    }
+    if(r.seeds!==null&&r.seeds!==undefined)meta.append(el('span',{},'≈'+fmt.format(r.seeds)+' seeding'));
+    name.append(button,meta);
+    const codes=Object.entries(r.countries||{}).filter(([c])=>!locatedOnly||(c!=='ZZ'&&c!=='Unlocated')).sort((a,b)=>b[1]-a[1]).map(([c])=>c);
+    const peerSeed=fmt.format(r.peers||0)+(r.seeds===null||r.seeds===undefined?'':' / ≈'+fmt.format(r.seeds));
+    tr.append(el('td',{},String(pageOffset+rIndex+1).padStart(2,'0')),name,el('td',{},size(r.size)),el('td',{class:'num'},peerSeed),el('td',{class:'country-list',title:codes.map(countryName).join(', ')},codes.map(c=>c==='ZZ'?'Unlocated':c).join(' · ')||'—'),el('td',{class:'age',title:r.checkedAt},age(r.checkedAt||r.lastSeen)));
+    $('rows').append(tr);
+  }
+  $('empty').style.display=filtered.length?'none':'block';
+  $('empty-spinner').style.display=(!query&&!selectedCountry&&!(current.resolved||current.hashes)&&current.running&&online)?'block':'none';
+  const trendLabel=trendWindow==='today'?'today':trendWindow==='week'?'this week':'';
+  $('empty-title').textContent=!online?'Loading discovery…':(query||selectedCountry||$('kind').value!=='all'||locatedOnly||trendWindow!=='all'?'No matching observations.':(current.resolved||current.hashes)?'No rows in this window.':'Finding names in the noise.');
+  $('empty-text').textContent=!online?'Waiting for the local collector. The full JSON store stays on disk; this page only loads a ranked window.':(query||selectedCountry||locatedOnly||trendWindow!=='all'?'Try another search, clear location cleaning, or switch the trending window.':(current.resolved||current.hashes)?'Use search or trending to browse the stored names.':'Public hashes are arriving. Some peers never return metadata.');
+  $('result-count').textContent=(filtered.length?fmt.format(pageOffset+1)+'–'+fmt.format(pageOffset+filtered.length):'0')+' of '+fmt.format(total)+' matching'+(trendLabel?' · '+trendLabel:'');
+  const canMore=!topOnly&&trendWindow==='all'&&pageOffset+pageLimit<total&&pageOffset+pageLimit<=20000;
+  $('load-more').disabled=!canMore||polling;$('previous-page').disabled=pageOffset===0||polling;
+  $('page-number').textContent='Page '+fmt.format(Math.floor(pageOffset/pageLimit)+1);
+  if(detailHash)renderDetail();
+}
+function openDetail(hash,trigger){detailHash=hash;detailRecord=current.records.find(r=>r.hash===hash)||detailRecord;detailTrigger=trigger;$('detail').style.display='block';renderDetail();$('close-detail').focus()}
+function renderDetail(){
+  const r=current.records.find(r=>r.hash===detailHash)||detailRecord;if(!r)return;
+  $('detail-name').textContent=shownName(r);$('detail-kind').textContent=r.resolved?(r.kind||'Other'):'Metadata pending';
+  $('detail-facts').replaceChildren();
+  const sourceLabel=r.source==='dump'?'Local public catalog (not peer-verified)':r.source==='catalog'?'Public torrent catalog':r.source==='cache'?'Verified torrent cache':r.source==='peer'?'Verified peer metadata':r.resolved?'Previously stored name':'Pending';
+  const pairs=[['Hash',r.hash],['Size',size(r.size)],['Name source',sourceLabel],['Resolution time',r.resolutionMs?r.resolutionMs+' ms':'—'],['Lookup attempts',String(r.resolveAttempts||0)],['Next check',r.nextAttempt&&!r.nextAttempt.startsWith('0001')?new Date(r.nextAttempt).toLocaleTimeString():'Scheduled automatically'],['Peers observed',fmt.format(r.peers||0)],['Seeding estimate',r.seeds===null||r.seeds===undefined?'Unavailable':'≈ '+fmt.format(r.seeds)],['First observed',new Date(r.firstSeen).toLocaleString()],['Last checked',!r.checkedAt||r.checkedAt.startsWith('0001')?'Not checked':new Date(r.checkedAt).toLocaleString()],['Countries',Object.entries(r.countries||{}).filter(([c])=>!$('located-only').checked||(c!=='ZZ'&&c!=='Unlocated')).map(([c,n])=>countryName(c)+' ('+n+')').join(', ')||'Unlocated']];
+  for(const[k,v]of pairs)$('detail-facts').append(el('dt',{},k),el('dd',{},v));
+  $('detail-files').replaceChildren();
+  const hide=$('hide-adult').checked&&adult.test(r.name||'');
+  for(const f of r.files||[])$('detail-files').append(el('li',{},hide?'Adult filename hidden':f));
+  if(!r.files?.length)$('detail-files').append(el('li',{},'Metadata has not arrived yet.'));
+}
+function closeDetail(){detailHash=null;$('detail').style.display='none';detailTrigger?.focus()}
+$('close-detail').onclick=closeDetail;$('detail').onclick=e=>{if(e.target===$('detail'))closeDetail()};
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape')closeDetail();
+  if(detailHash&&e.key==='Tab'){
+    const focusable=[$('close-detail'),$('copy-hash'),$('copy-magnet')],first=focusable[0],last=focusable[focusable.length-1];
+    if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}
+    else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
+  }
+});
+$('copy-hash').onclick=async()=>{try{await navigator.clipboard.writeText(detailHash);toast('Torrent hash copied')}catch{toast('Select the hash above to copy it.')}};
+$('copy-magnet').onclick=async()=>{const r=(current.records||[]).find(x=>x.hash===detailHash)||{hash:detailHash};try{await navigator.clipboard.writeText(magnetFor(r));toast('Magnet link copied')}catch{toast('Could not copy magnet link')}};
+function toast(s){clearTimeout(toastTimer);$('toast').textContent=s;$('toast').style.display='block';toastTimer=setTimeout(()=>$('toast').style.display='none',2300)}
+let searchTimer=null;
+$('search').addEventListener('input',()=>{pageLimit=150;pageOffset=0;render();clearTimeout(searchTimer);searchTimer=setTimeout(()=>poll(true),180)});
+for(const id of ['sort','kind','source','pending','hide-adult','located-only'])$(id).addEventListener('change',()=>{pageLimit=150;pageOffset=0;render();poll(true)});
+$('country-filter').onclick=$('reset-country').onclick=()=>{selectedCountry=null;pageOffset=0;render();poll(true)};
+function setTrend(windowName){
+  pageLimit=150;pageOffset=0;trendWindow=windowName;
+  for(const[id,value]of [['trend-all','all'],['trend-today','today'],['trend-week','week']])$(id).classList.toggle('active',trendWindow===value);
+  if(trendWindow!=='all'){topOnly=true;$('top-rows').classList.add('active');$('all-rows').classList.remove('active');if($('sort').value==='name')$('sort').value='trending'}
+  $('pending').checked=false;render();poll(true);
+}
+$('trend-all').onclick=()=>setTrend('all');$('trend-today').onclick=()=>setTrend('today');$('trend-week').onclick=()=>setTrend('week');
+$('all-rows').onclick=()=>{pageLimit=150;pageOffset=0;topOnly=false;$('all-rows').classList.add('active');$('top-rows').classList.remove('active');render();poll(true)};
+$('top-rows').onclick=()=>{pageLimit=150;pageOffset=0;topOnly=true;$('top-rows').classList.add('active');$('all-rows').classList.remove('active');render();poll(true)};
+$('control').onclick=async()=>{
+  busy=true;render();
+  try{
+    const response=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running:!current.running})});
+    if(!response.ok)throw Error('Control failed');
+    current=await response.json();online=true;
+  }catch{toast('Could not change discovery. Try again.')}
+  finally{busy=false;render()}
+};
+$('load-more').onclick=()=>{if(busy||polling)return;pageOffset+=pageLimit;poll(true)};
+$('previous-page').onclick=()=>{if(busy||polling)return;pageOffset=Math.max(0,pageOffset-pageLimit);poll(true)};
+function viewParams(){
+  const p=new URLSearchParams();
+  const q=$('search').value.trim();if(q)p.set('q',q);
+  p.set('sort',$('sort').value||'trending');p.set('kind',$('kind').value||'all');p.set('source',$('source').value||'all');
+  p.set('offset',String(pageOffset));p.set('trend',trendWindow||'all');
+  if($('pending').checked)p.set('pending','1');if($('located-only').checked)p.set('located','1');
+  if(selectedCountry)p.set('country',selectedCountry);
+  if(topOnly||trendWindow!=='all')p.set('top','1');
+  p.set('limit',topOnly||trendWindow!=='all'?'10':String(pageLimit));
+  return p;
+}
+async function poll(force=false){
+  if(busy)return;if(polling&&!force)return;if(activeRequest)activeRequest.abort();
+  const sequence=++requestSequence,controller=new AbortController();activeRequest=controller;polling=true;
+  const params=viewParams().toString(),timeout=setTimeout(()=>controller.abort(),20000);
+  $('feed').classList.add('loading');$('rows').setAttribute('aria-busy','true');$('search-status').textContent='Updating results…';
+  try{
+    const response=await fetch('/api/state?'+params,{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('State unavailable');
+    const next=await response.json();if(sequence!==requestSequence||params!==viewParams().toString())return;
+    if(next.countryTotals&&Object.keys(next.countryTotals).length)prevCountryTotals=next.countryTotals;else if(prevCountryTotals)next.countryTotals=prevCountryTotals;
+    current=next;online=true;$('notice').style.display='none';history.replaceState(null,'','?'+params);
+  }catch(error){
+    if(sequence!==requestSequence||error.name==='AbortError')return;
+    online=false;$('notice').textContent='The local collector is unavailable. Showing the last results received.';$('notice').style.display='block';
+  }finally{
+    clearTimeout(timeout);
+    if(sequence===requestSequence){
+      polling=false;activeRequest=null;$('feed').classList.remove('loading');$('rows').setAttribute('aria-busy','false');
+      $('search-status').textContent='Search words in any order, or paste a hash or magnet link.';render();
+    }
+  }
+}
+function restoreView(){
+  const params=new URLSearchParams(location.search);
+  for(const id of ['sort','kind','source'])if(params.has(id)&&[...$(id).options].some(o=>o.value===params.get(id)))$(id).value=params.get(id);
+  $('search').value=params.get('q')||'';
+  $('pending').checked=params.get('pending')==='1';
+  $('located-only').checked=params.get('located')==='1';
+  selectedCountry=params.get('country')||null;
+  pageOffset=Math.max(0,Math.min(20000,Number(params.get('offset'))||0));
+  topOnly=params.get('top')==='1';
+  trendWindow=params.get('trend')||'all';
+  for(const[id,value]of [['trend-all','all'],['trend-today','today'],['trend-week','week']])$(id).classList.toggle('active',trendWindow===value);
+  $('top-rows').classList.toggle('active',topOnly);$('all-rows').classList.toggle('active',!topOnly);
+}
 restoreView();
 document.addEventListener('keydown',event=>{if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){event.preventDefault();$('search').focus()}});
-
 render();poll(true);setInterval(()=>{if(!document.hidden)poll()},3000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
 </script>
 </body></html>
