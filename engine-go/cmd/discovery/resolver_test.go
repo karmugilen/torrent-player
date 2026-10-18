@@ -92,11 +92,13 @@ func TestCacheMissDoesNotDisableSourceAndOutageBacksOff(t *testing.T) {
 	defer c.close()
 	_, hash := torrentFixture(t, false)
 	c.fetch(context.Background(), hash)
+	hash[0] ^= 1 // Another hash must still reach this healthy source.
 	c.fetch(context.Background(), hash)
 	if calls != 2 {
 		t.Fatal("ordinary miss suppressed healthy source")
 	}
 	status = http.StatusTooManyRequests
+	hash[0] ^= 2
 	c.fetch(context.Background(), hash)
 	c.fetch(context.Background(), hash)
 	if calls != 3 {

@@ -77,6 +77,10 @@ type state struct {
 	VerifiedNamesPerMinute int            `json:"verifiedNamesPerMinute"`
 	Successes              int            `json:"successes"`
 	CacheHits              int            `json:"cacheHits"`
+	CacheRequests          int64          `json:"cacheRequests"`
+	CacheMissReuses        int64          `json:"cacheMissReuses"`
+	CacheActive            int            `json:"cacheActive"`
+	CacheCapacity          int            `json:"cacheCapacity"`
 	CatalogHits            int            `json:"catalogHits"`
 	DumpHits               int            `json:"dumpHits"`
 	DumpLookups            int            `json:"dumpLookups"`
@@ -113,6 +117,7 @@ type dashboard struct {
 	nativeSearch    nativeSearchIndex
 	nameRates       [60]nameRateBucket
 	persistMu       sync.Mutex
+	metadataCaches  *metadataCaches
 }
 
 const namedRetention = 30 * 24 * time.Hour

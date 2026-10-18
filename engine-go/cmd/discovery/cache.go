@@ -18,7 +18,7 @@ import (
 )
 
 const maxMetadataBytes = 8 << 20
-const cacheSourceSlots = 12
+const cacheSourceSlots = 48
 const cacheFetchTimeout = 2500 * time.Millisecond
 
 // Inspired by the sibling seen-in-the-swarm resolver: race bounded sources,
@@ -35,10 +35,14 @@ type cacheSource struct {
 	mu       sync.Mutex
 	next     time.Time
 	failures int
+	misses   metadataMissCache
 }
 type metadataCaches struct {
-	client  *http.Client
-	sources []*cacheSource
+	client     *http.Client
+	sources    []*cacheSource
+	jobs       chan struct{}
+	requests   atomic.Int64
+	missReuses atomic.Int64
 }
 
 func newMetadataCaches(templates []string) *metadataCaches {
@@ -54,7 +58,7 @@ func newMetadataCaches(templates []string) *metadataCaches {
 		TLSHandshakeTimeout: 2 * time.Second, ResponseHeaderTimeout: 2500 * time.Millisecond,
 		MaxResponseHeaderBytes: 32 << 10,
 	}
-	c := &metadataCaches{client: &http.Client{Transport: transport, Timeout: 3 * time.Second}}
+	c := &metadataCaches{client: &http.Client{Transport: transport, Timeout: 3 * time.Second}, jobs: make(chan struct{}, cacheSourceSlots)}
 	for _, template := range templates {
 		c.sources = append(c.sources, &cacheSource{template: template, slots: make(chan struct{}, cacheSourceSlots)})
 	}
@@ -63,12 +67,27 @@ func newMetadataCaches(templates []string) *metadataCaches {
 func (c *metadataCaches) close() { c.client.CloseIdleConnections() }
 
 func (c *metadataCaches) available() bool {
+	if len(c.jobs) >= cap(c.jobs) {
+		return false
+	}
 	for _, source := range c.sources {
 		if source.available() {
 			return true
 		}
 	}
 	return false
+}
+
+func (c *metadataCaches) knownMissing(hash metainfo.Hash) bool {
+	if len(c.sources) == 0 {
+		return false
+	}
+	for _, source := range c.sources {
+		if !source.misses.has(hash, time.Now()) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseCacheMetadata(blob []byte, expected metainfo.Hash) (*metainfo.Info, error) {
@@ -138,6 +157,15 @@ func (c *metadataCaches) fetchWithin(parent context.Context, hash metainfo.Hash,
 // attempted distinguishes a real network lookup from all mirrors cooling down
 // or the entire deadline spent waiting for a source's concurrency slot.
 func (c *metadataCaches) fetchAttempt(parent context.Context, hash metainfo.Hash, timeout time.Duration) (info *metainfo.Info, attempted bool) {
+	// Admit an entire hash before starting its network deadline. The shared
+	// hash limit matches each source's capacity, so races cannot queue behind
+	// unrelated hashes and spend the entire deadline waiting for a slot.
+	select {
+	case c.jobs <- struct{}{}:
+		defer func() { <-c.jobs }()
+	case <-parent.Done():
+		return nil, false
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	results := make(chan *metainfo.Info, len(c.sources))
 	var work sync.WaitGroup
@@ -161,8 +189,7 @@ func (c *metadataCaches) fetchAttempt(parent context.Context, hash metainfo.Hash
 			if !s.available() {
 				return
 			}
-			calls.Add(1)
-			info := c.fetchSource(ctx, s, hash)
+			info := c.fetchSource(ctx, s, hash, &calls)
 			if info != nil {
 				select {
 				case results <- info:
@@ -191,7 +218,11 @@ func (c *metadataCaches) fetchAttempt(parent context.Context, hash metainfo.Hash
 	}
 }
 
-func (c *metadataCaches) fetchSource(ctx context.Context, source *cacheSource, hash metainfo.Hash) *metainfo.Info {
+func (c *metadataCaches) fetchSource(ctx context.Context, source *cacheSource, hash metainfo.Hash, calls *atomic.Int32) *metainfo.Info {
+	if source.misses.has(hash, time.Now()) {
+		c.missReuses.Add(1)
+		return nil
+	}
 	u := strings.ReplaceAll(source.template, "{hash}", strings.ToUpper(hash.HexString()))
 	u = strings.ReplaceAll(u, "{hash_lower}", hash.HexString())
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
@@ -204,6 +235,8 @@ func (c *metadataCaches) fetchSource(ctx context.Context, source *cacheSource, h
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/x-bittorrent, application/octet-stream, */*")
 	req.Header.Set("Accept-Encoding", "identity")
+	calls.Add(1)
+	c.requests.Add(1)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		// Deadlines, cancels and ordinary dial noise stay healthy so a burst of
@@ -213,6 +246,9 @@ func (c *metadataCaches) fetchSource(ctx context.Context, source *cacheSource, h
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			source.misses.put(hash, time.Now())
+		}
 		// Rate limits and gateway failures back off briefly; other statuses are misses.
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode >= 500 {
 			source.outcome(false)

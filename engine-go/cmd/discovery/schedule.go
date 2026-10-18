@@ -9,8 +9,8 @@ import (
 // Cache workers only hit HTTP .torrent mirrors. Peer workers finish BEP 9 for
 // hashes the mirrors miss. Keep both pools small so naming leans on
 // torrents-csv and does not flood the uplink with peer handshakes.
-const cacheWorkers = 48
-const peerWorkers = 8
+const cacheWorkers = 96
+const peerWorkers = 24
 const resolverWorkers = cacheWorkers + peerWorkers
 
 type jobKind int

@@ -100,7 +100,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	cfg.Conn = conn
 	cfg.Passive = true
 	// Quiet DHT: enough for sampling geography, far below a swarm client.
-	cfg.SendLimiter = rate.NewLimiter(24, 8)
+	cfg.SendLimiter = rate.NewLimiter(64, 16)
 	server, e := dht.NewServer(cfg)
 	if e != nil {
 		conn.Close()
@@ -121,8 +121,8 @@ func (d *dashboard) collect(ctx context.Context) error {
 	// Metadata-only peer dials stay rare; torrents-csv supplies most names.
 	tc.EstablishedConnsPerTorrent = 3
 	tc.HalfOpenConnsPerTorrent = 2
-	tc.TotalHalfOpenConns = 24
-	tc.DialRateLimiter = rate.NewLimiter(12, 4)
+	tc.TotalHalfOpenConns = 48
+	tc.DialRateLimiter = rate.NewLimiter(24, 8)
 	tc.NominalDialTimeout = 3 * time.Second
 	tc.MinDialTimeout = 1500 * time.Millisecond
 	tc.HandshakesTimeout = 3 * time.Second
@@ -136,6 +136,7 @@ func (d *dashboard) collect(ctx context.Context) error {
 	defer s.caches.close()
 	d.mu.Lock()
 	d.state.Workers = resolverWorkers
+	d.metadataCaches = s.caches
 	d.mu.Unlock()
 	s.bootstrapNodes(ctx)
 	var work sync.WaitGroup
@@ -303,7 +304,7 @@ func (s *sampler) publishResolved(j discoveryJob, rec observation, wasResolved b
 // resolveCache returns whether a source request was attempted, for lookup rates.
 func (s *sampler) resolveCache(parent context.Context, j discoveryJob, hash metainfo.Hash, rec observation, wasResolved bool, started time.Time) bool {
 	info, attempted := s.caches.fetchAttempt(parent, hash, cacheFetchTimeout)
-	if !attempted {
+	if !attempted && !s.caches.knownMissing(hash) {
 		// A source outage is not a miss for this hash. Retry the cache soon,
 		// without consuming its retry budget or filling the peer backlog.
 		s.d.mu.Lock()
@@ -324,13 +325,13 @@ func (s *sampler) resolveCache(parent context.Context, j discoveryJob, hash meta
 			s.d.records[j.hash] = latest
 		}
 		s.d.mu.Unlock()
-		return true
+		return attempted
 	}
 	if !applyMetadata(&rec, info, "cache", time.Since(started)) {
-		return true
+		return attempted
 	}
 	s.publishResolved(j, rec, wasResolved, started)
-	return true
+	return attempted
 }
 
 func (s *sampler) clearCacheTried(hash string) {
@@ -498,7 +499,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		s.publishResolved(j, rec, wasResolved, started)
 		return true
 	}
-	noPeerTimer := time.NewTimer(8 * time.Second)
+	noPeerTimer := time.NewTimer(3 * time.Second)
 	defer noPeerTimer.Stop()
 	noPeerDeadline, emptyExit := false, false
 loop:

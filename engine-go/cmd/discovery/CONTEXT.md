@@ -136,6 +136,14 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
 - Cache workers skip admission while all mirrors are cooling down. A cooldown
   race or timeout waiting for source slots is not a completed network lookup or
   a healthy miss; it retries cache work without consuming a hash retry attempt.
+- HTTP admission bounds active hash races to 48, with 96 cache workers and 24
+  peer workers. Queue waiting no longer consumes the 2.5s network deadline.
+  DHT sends are capped at 64/s, peer dials at 24/s. Empty unresponsive swarms
+  release after 3s; active peers keep the 12s metadata deadline.
+- Per-mirror HTTP 404/410 miss caches expire after 2 minutes and cap at 8,192
+  hashes each. Cached handoffs never inflate network lookup rates. API fields
+  `cacheRequests`, `cacheMissReuses`, `cacheActive`, `cacheCapacity` expose actual
+  HTTP activity and admission occupancy.
 - CSV misses are remembered per loaded dump. Pending matching skips unchanged
   pending revisions; loading a new dump automatically invalidates old misses.
 - Rust catalog parsing uses serde_json, preserves Unicode/escaped punctuation,

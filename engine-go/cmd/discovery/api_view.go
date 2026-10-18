@@ -309,6 +309,12 @@ func (d *dashboard) snapshotForAPI(q viewQuery) state {
 	defer d.mu.RUnlock()
 	now := time.Now().UTC()
 	s := d.state
+	if caches := d.metadataCaches; caches != nil {
+		s.CacheRequests = caches.requests.Load()
+		s.CacheMissReuses = caches.missReuses.Load()
+		s.CacheActive = len(caches.jobs)
+		s.CacheCapacity = cap(caches.jobs)
+	}
 	s.Updated = now
 	d.applyNameRatesLocked(&s, now)
 	s.Hashes = len(d.records)

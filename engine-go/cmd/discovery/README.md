@@ -44,19 +44,19 @@ magnet link for download in another client.
 
 The resolver takes inspiration from the sibling `seen-in-the-swarm` project:
 parallel sources, bounded requests, source cooldowns and scheduled retries.
-Forty-eight cache workers and eight peer workers stay small on purpose so the
-uplink is not clogged. Cache workers only query HTTPS `.torrent` mirrors and
+Ninety-six cache workers and twenty-four peer workers run with bounded network
+admission. Cache workers only query HTTPS `.torrent` mirrors and
 release immediately on a miss. Peer workers handle BEP 9 for cache misses only.
 Four sampling slots refill independently of slow nodes. Random routing lookups
 refresh discovery every three seconds. Advertised sampling intervals remain
-respected. A DHT limit of 24 sends/second and peer dial limit of 12/second keep
-traffic light. HTTP connections are reused, with up to 12 requests per cache
+respected. A DHT limit of 64 sends/second and peer dial limit of 24/second bound
+network traffic. HTTP connections are reused, with up to 48 requests per cache
 source. Challenge HTML and ordinary misses leave mirrors healthy; HTTP rate limits
 and server failures back them off. Names appear immediately from catalog or
 cache hits. Cache deadlines are 2.5 seconds. Losing HTTP requests are canceled
 and joined before a peer job finishes. Completed empty lookups release their
 slot as soon as cache and source checks finish. Lookups with no peer sightings
-or active connections stop after eight seconds and remain eligible for scheduled
+or active connections stop after three seconds and remain eligible for scheduled
 retries; live peer lookups retain the twelve-second deadline.
 
 A bounded RAM cache retains up to 24 peer addresses for each of 2,048 swarms for
@@ -177,6 +177,25 @@ The synthetic 100,000-hash waiting-backlog benchmark measured roughly 42ms per
 dispatch before batching versus 0.15ms afterward, including periodic refreshes
 under a simulated worker polling clock. This measures scheduling overhead, not
 public-network metadata availability or a guaranteed new-name rate.
+
+Cache admission now reserves an entire hash before starting its 2.5-second
+network deadline. Up to 48 hashes can race the three mirrors concurrently;
+waiting hashes retain their request budget, and cancellation interrupts admission.
+Each mirror remembers confirmed HTTP 404/410 misses for two minutes in a bounded
+8,192-entry RAM cache. Cached misses can hand off to peers, but do not count as
+new network lookups. HTML challenges, errors and timeouts are never negative
+cached. The API exposes `cacheRequests`, `cacheMissReuses`, `cacheActive` and
+`cacheCapacity` for checking actual HTTP activity and capacity use.
+
+A controlled batch of 96 hashes against three 40ms local mirrors took roughly
+330ms before these changes and 85ms afterward (about 3.9x throughput). This is a
+transport benchmark; live results depend on source availability and throttling.
+
+On 2026-10-18, sequential live windows showed 1,239–1,310 completed lookups/min
+before this tuning and 4,230–5,450 afterward. The final window resolved four new
+verified names/min and transferred zero torrent payload bytes. Cached misses
+were not counted as network lookups. These public-network samples are variable;
+the controlled local benchmark above isolates the transport improvement.
 
 Rust now provides compact token/prefix search postings and parallel pending-hash
 lookup in batches. The Go fallback remains supported. A 100,000-row browse test
