@@ -46,8 +46,12 @@ func (s *sampler) streamPeerLookup(ctx context.Context, hash metainfo.Hash, dela
 			s.pipeline.lookups.Add(1)
 			defer s.pipeline.lookups.Add(-1)
 		}
-		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		lookupCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		emptyTimer := time.NewTimer(3 * time.Second)
+		defer emptyTimer.Stop()
+		var emptyDeadline <-chan time.Time = emptyTimer.C
+		foundPeers := false
 		ann, err := s.server.AnnounceTraversal(hash, dht.Scrape())
 		if err != nil {
 			return
@@ -57,9 +61,22 @@ func (s *sampler) streamPeerLookup(ctx context.Context, hash metainfo.Hash, dela
 			select {
 			case <-lookupCtx.Done():
 				return
+			case <-emptyDeadline:
+				// Reachable swarms may return better peers in later replies.
+				// Only empty traversals use the short deadline.
+				if !foundPeers {
+					return
+				}
+				emptyDeadline = nil
 			case peers, ok := <-ann.Peers:
 				if !ok {
 					return
+				}
+				for _, peer := range peers.Peers {
+					if publicIP(peer.IP) && peer.Port > 0 {
+						foundPeers = true
+						break
+					}
 				}
 				select {
 				case results <- peers:

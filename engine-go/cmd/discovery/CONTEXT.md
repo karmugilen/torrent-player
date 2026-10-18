@@ -162,10 +162,13 @@ go test -tags=nosqlite,noboltdb,rustdump ./...   # needs libwebtor_discovery.a
   network lookup or a healthy miss; it retries cache work without consuming a hash retry attempt.
 - HTTP admission bounds active hash races to 48, with 96 cache workers. Queue
   waiting no longer consumes the 2.5s network deadline.
-  There are 64 peer metadata jobs with an independent 24-traversal DHT budget;
+  There are 64 peer metadata jobs with an independent 8-traversal DHT budget;
+  DHT admission waits do not consume the 12s metadata-fetch deadline (45s total
+  queue residence bound). Eight traversals share the 64-query/s wire budget,
+  leaving each traversal more room to reach its target than 24 parallel searches.
   known endpoints dial immediately, with a 350ms hedge before DHT fallback.
-  Traversals stream peers and end after 3s, while connected metadata downloads
-  retain the 12s deadline. Tracker results also stream individually; one slow
+  Empty traversals end after 3s; reachable swarms continue streaming alternative
+  peers within the 12s metadata deadline. Tracker results stream individually; one slow
   tracker never blocks another's peers. Metadata completion immediately releases
   the job instead of waiting another 1.2s for geography. Stalled connected peers
   yield after 4s without metadata progress once source discovery finishes.

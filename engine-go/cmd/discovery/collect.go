@@ -416,7 +416,9 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 		defer s.pipeline.active.Add(-1)
 	}
 	defer s.clearCacheTried(j.hash)
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	// Bound queue residence separately; a queued DHT search must not spend its
+	// metadata-fetch deadline before it has even been admitted to the network.
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	t, _, err := s.client.AddTorrentSpec(&torrent.TorrentSpec{AddTorrentOpts: torrent.AddTorrentOpts{InfoHash: hash, DisallowDataDownload: true, DisallowDataUpload: true, DisableInitialPieceCheck: true}})
 	if err != nil {
@@ -426,8 +428,8 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 
 	// All work for this hash is joined before its slot is released or collection
 	// is paused. Winning metadata immediately cancels its HTTP competitors.
-	var work sync.WaitGroup
-	defer func() { cancel(); work.Wait() }()
+	var work, lookupWork sync.WaitGroup
+	defer func() { cancel(); work.Wait(); lookupWork.Wait() }()
 	cacheCtx, cancelCache := context.WithCancel(ctx)
 	defer cancelCache()
 	cacheEvents := make(chan *metainfo.Info, 2)
@@ -500,7 +502,7 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 			}
 		}(source)
 	}
-	peerEvents, lookupStarted := s.streamPeerLookup(ctx, hash, len(knownPeers) > 0, &work)
+	peerEvents, lookupStarted := s.streamPeerLookup(ctx, hash, len(knownPeers) > 0, &lookupWork)
 	prefetchDone := make(chan struct{})
 	go func() { work.Wait(); close(prefetchDone) }()
 	var prefetchEvents <-chan struct{} = prefetchDone
@@ -545,6 +547,14 @@ func (s *sampler) resolve(parent context.Context, j discoveryJob) {
 	}
 	noPeerTimer := time.NewTimer(3 * time.Second)
 	defer noPeerTimer.Stop()
+	metadataTimer := time.NewTimer(12 * time.Second)
+	defer metadataTimer.Stop()
+	var metadataDeadline <-chan time.Time
+	if len(knownPeers) > 0 || len(j.sources) > 0 {
+		metadataDeadline = metadataTimer.C
+	} else {
+		metadataTimer.Stop()
+	}
 	// Queueing for DHT admission is not an empty network lookup. Start the
 	// empty-swarm clock only after actual admission (or immediate hinted dials).
 	if len(knownPeers) == 0 {
@@ -584,6 +594,10 @@ loop:
 		select {
 		case <-lookupStarted:
 			lookupStarted = nil
+			if metadataDeadline == nil {
+				metadataTimer.Reset(12 * time.Second)
+				metadataDeadline = metadataTimer.C
+			}
 			if len(knownPeers) == 0 {
 				noPeerTimer.Reset(3 * time.Second)
 			}
@@ -594,6 +608,8 @@ loop:
 			prefetchEvents = nil
 			prefetchComplete = true
 		case <-ctx.Done():
+			break loop
+		case <-metadataDeadline:
 			break loop
 		case reply := <-initialReplies:
 			addPeers(reply.Values)

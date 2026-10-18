@@ -11,7 +11,7 @@ import (
 // DHT traversal and dial budgets; extra workers do not increase wire rate limits.
 const cacheWorkers = 96
 const peerWorkers = 64
-const peerLookupConcurrency = 24
+const peerLookupConcurrency = 8
 const resolverWorkers = cacheWorkers + peerWorkers
 
 type jobKind int
