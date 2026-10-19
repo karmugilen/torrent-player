@@ -99,6 +99,9 @@ func (s *EngineServer) seedTick() {
 		s.applySeedPolicy(rec, active, true)
 		account := seedTotals(rec)
 		s.seedMu.Lock()
+		if s.seedAccounts == nil {
+			s.seedAccounts = make(map[string]seedAccount)
+		}
 		s.seedAccounts[rec.InfoHash] = account
 		s.seedMu.Unlock()
 		rec.mu.Unlock()

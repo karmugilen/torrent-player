@@ -192,6 +192,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	if maxPeers <= 0 {
 		maxPeers = 100
 	}
+	maxPeers = min(maxPeers, 500)
 	cfg.EstablishedConnsPerTorrent = maxPeers
 	cfg.HalfOpenConnsPerTorrent = 24
 	cfg.TotalHalfOpenConns = 48
@@ -964,6 +965,9 @@ func (s *EngineServer) handleAdd(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.records[id] = rec
+	if s.maxPeers > 0 {
+		t.SetMaxEstablishedConns(s.maxPeers)
+	}
 	s.recordsByHash[hashHex] = rec
 	s.mu.Unlock()
 	go s.watchMetadata(rec)
@@ -1297,7 +1301,7 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 	if direct {
 		st.mu.Lock()
 		if req.StreamCacheBytes > 0 {
-			st.streamMaxBytes = max(int64(16<<20), min(int64(96<<20), req.StreamCacheBytes))
+			st.streamMaxBytes = max(int64(16<<20), min(int64(MaxRamCacheBytes), req.StreamCacheBytes))
 		}
 		st.onStreamEvict = func(index int) {
 			rec.mu.RLock()
@@ -1612,6 +1616,7 @@ func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request)
 	up := limiterRate(s.uploadLimiter)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, SettingsResponse{
+		RamCacheBytes:  s.storage.CacheLimit(),
 		SeedingEnabled: s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
 		DownloadRateBytesSec:    down,
@@ -1650,7 +1655,22 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	if req.RamCacheBytes != nil && (*req.RamCacheBytes < DefaultMaxCacheBytes || *req.RamCacheBytes > MaxRamCacheBytes) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "RAM cache must be between 64 and 1024 MiB"})
+		return
+	}
+	if req.MaxPeers != 0 && (req.MaxPeers < 8 || req.MaxPeers > 500) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "maxPeers must be between 8 and 500"})
+		return
+	}
 	s.mu.Lock()
+	if req.RamCacheBytes != nil {
+		if err := s.storage.SetCacheLimit(*req.RamCacheBytes); err != nil {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	if req.SeedingEnabled != nil {
 		s.seedingEnabled.Store(*req.SeedingEnabled)
 	}
@@ -1663,7 +1683,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	if req.SeedTimeMinutes != nil && *req.SeedTimeMinutes >= 1 && *req.SeedTimeMinutes <= 1440 {
 		s.seedTimeMinutes.Store(*req.SeedTimeMinutes)
 	}
-	if req.MaxPeers >= 8 && req.MaxPeers <= 80 {
+	if req.MaxPeers >= 8 && req.MaxPeers <= 500 {
 		s.maxPeers = req.MaxPeers
 		for _, rec := range s.records {
 			rec.Torrent.SetMaxEstablishedConns(req.MaxPeers)
@@ -1703,6 +1723,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		DownloadRateBytesSec:    down,
 		UploadRateBytesSec:      up,
 		PayloadTransfersAllowed: payloadAllowed,
+		RamCacheBytes:           s.storage.CacheLimit(),
 	})
 	s.notifyChange()
 }

@@ -1373,9 +1373,6 @@ func (cl *Client) gotMetadataExtensionMsg(payload []byte, t *Torrent, c *PeerCon
 		if begin < 0 || begin >= len(payload) {
 			return fmt.Errorf("data has bad offset in payload: %d", begin)
 		}
-		if !t.haveMetadataPiece(piece) {
-			c.pendingMetadata++
-		}
 		t.saveMetadataPiece(piece, payload[begin:])
 		c.lastUsefulChunkReceived = time.Now()
 		err = t.maybeCompleteMetadata()

@@ -283,11 +283,20 @@ class EngineClientTest {
 
     @Test
     fun setMaxPeersHitsSettings() {
-        transport.enqueue(TestResponse().setBody("""{"maxPeers":24}"""))
-        assertEquals(24, client.setMaxPeers(24))
+        transport.enqueue(TestResponse().setBody("""{"maxPeers":500}"""))
+        assertEquals(500, client.setMaxPeers(500))
         val req = transport.takeRequest()
         assertEquals("/settings", req.path)
-        assertEquals(24, JSONObject(req.body.readUtf8()).getInt("maxPeers"))
+        assertEquals(500, JSONObject(req.body.readUtf8()).getInt("maxPeers"))
+    }
+
+    @Test
+    fun ramCacheSettingConvertsMiBToBytesAndReadsAppliedLimit() {
+        transport.enqueue(TestResponse().setBody("""{"ramCacheBytes":268435456}"""))
+        assertEquals(256, client.setRamCacheMiB(512))
+        val req = transport.takeRequest()
+        assertEquals("/settings", req.path)
+        assertEquals(536870912L, JSONObject(req.body.readUtf8()).getLong("ramCacheBytes"))
     }
 
     @Test

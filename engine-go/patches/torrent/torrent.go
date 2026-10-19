@@ -1863,16 +1863,8 @@ func (t *Torrent) maybeCompleteMetadata() error {
 	}
 	err := t.setInfoBytesLocked(t.metadataBytes)
 	if err != nil {
-		for peer := range t.conns {
-			peer.pendingMetadata = 0
-		}
 		t.invalidateMetadata()
 		return fmt.Errorf("error setting info bytes: %w", err)
-	}
-	for peer := range t.conns {
-		n := peer.pendingMetadata
-		peer.modifyRelevantConnStats(add(n, func(s *ConnStats) *Count { return &s.MetadataChunksVerified }))
-		peer.pendingMetadata = 0
 	}
 	if t.cl.config.Debug {
 		t.logger.Printf("%s: got metadata from peers", t)
@@ -2648,13 +2640,6 @@ func (t *Torrent) pieceHashed(piece pieceIndex, passed bool, hashIoErr error) {
 	}()
 
 	if passed {
-		for peer, contribution := range p.contributions {
-			if peer.Discovery == PeerSourcePex {
-				peer.modifyRelevantConnStats(add(contribution.bytes, func(s *ConnStats) *Count { return &s.BytesReadVerifiedPex }))
-			}
-			peer.modifyRelevantConnStats(add(contribution.bytes, func(s *ConnStats) *Count { return &s.BytesReadVerified }))
-			peer.modifyRelevantConnStats(add(contribution.urgent, func(s *ConnStats) *Count { return &s.BytesReadUrgentVerified }))
-		}
 		t.incrementPiecesDirtiedStats(p, (*ConnStats).incrementPiecesDirtiedGood)
 		t.clearPieceTouchers(piece)
 		t.cl.unlock()
@@ -2910,7 +2895,6 @@ func (t *Torrent) finishHash(index pieceIndex) {
 // Return the connections that touched a piece, and clear the entries while doing it.
 func (t *Torrent) clearPieceTouchers(pi pieceIndex) {
 	p := t.piece(pi)
-	p.contributions = nil
 	for c := range p.dirtiers {
 		delete(c.peerTouchedPieces, pi)
 		delete(p.dirtiers, c)

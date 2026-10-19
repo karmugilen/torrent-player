@@ -13,7 +13,6 @@ import (
 type worseConnInput struct {
 	BadDirection        bool
 	Useful              bool
-	ContributionRate    int64
 	LastHelpful         time.Time
 	CompletedHandshake  time.Time
 	GetPeerPriority     func() (peerPriority, error)
@@ -36,14 +35,7 @@ type worseConnLensOpts struct {
 }
 
 func worseConnInputFromPeer(p *PeerConn, opts worseConnLensOpts) *worseConnInput {
-	age := max(int64(time.Since(p.completedHandshake).Seconds()), 1)
-	var contribution int64
-	if time.Since(p.lastHelpful()) < 30*time.Second {
-		contribution = (p._stats.BytesReadVerified.Int64() + 3*p._stats.BytesReadUrgentVerified.Int64() + min(p._stats.MetadataChunksVerified.Int64(), int64(32))*16384) / age
-		contribution -= p._stats.PiecesDirtiedBad.Int64() * 1024 * 1024 / age
-	}
 	ret := &worseConnInput{
-		ContributionRate:   contribution,
 		Useful:             p.useful(),
 		LastHelpful:        p.lastHelpful(),
 		CompletedHandshake: p.completedHandshake,
@@ -61,7 +53,7 @@ func worseConnInputFromPeer(p *PeerConn, opts worseConnLensOpts) *worseConnInput
 func (l *worseConnInput) Less(r *worseConnInput) bool {
 	less, ok := multiless.New().Bool(
 		r.BadDirection, l.BadDirection).Bool(
-		l.Useful, r.Useful).CmpInt64(l.ContributionRate-r.ContributionRate).CmpInt64(
+		l.Useful, r.Useful).CmpInt64(
 		l.LastHelpful.Sub(r.LastHelpful).Nanoseconds()).CmpInt64(
 		l.CompletedHandshake.Sub(r.CompletedHandshake).Nanoseconds()).LazySameLess(
 		func() (same, less bool) {

@@ -136,6 +136,8 @@ class MainActivity : ComponentActivity() {
                                 onBack = session::closeSettings,
                                 onMaxPeers = session::setMaxPeers,
                                 onMaxPeersCommit = session::commitMaxPeers,
+                                onRamCache = session::setRamCacheMiB,
+                                onAutoRamCache = session::setAutoRamCache,
                                 onSeeding = session::setSeedingEnabled,
                                 onSeedRatio = session::setSeedRatio,
                                 onSeedTime = session::setSeedTime,

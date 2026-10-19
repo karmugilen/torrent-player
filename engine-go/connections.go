@@ -12,17 +12,12 @@ import (
 // Connections are read only on demand by the visible details screen. Candidate
 // addresses from DHT/trackers are deliberately excluded: they are not connected.
 type PeerConnectionView struct {
-	Address             string `json:"address"`
-	Transport           string `json:"transport"`
-	Client              string `json:"client"`
-	Downloaded          int64  `json:"downloaded"`
-	Uploaded            int64  `json:"uploaded"`
-	Country             string `json:"country,omitempty"`
-	Source              string `json:"source"`
-	VerifiedBytes       int64  `json:"verifiedBytes"`
-	UrgentVerifiedBytes int64  `json:"urgentVerifiedBytes"`
-	MetadataChunks      int64  `json:"metadataChunks"`
-	BadPieces           int64  `json:"badPieces"`
+	Address    string `json:"address"`
+	Transport  string `json:"transport"`
+	Client     string `json:"client"`
+	Downloaded int64  `json:"downloaded"`
+	Uploaded   int64  `json:"uploaded"`
+	Country    string `json:"country,omitempty"`
 }
 
 type ConnectionsResponse struct {
@@ -50,7 +45,6 @@ func peerConnectionView(peer *torrent.PeerConn) PeerConnectionView {
 	return PeerConnectionView{
 		Address: address, Transport: transport, Client: client,
 		Downloaded: stats.BytesReadData.Int64(), Uploaded: stats.BytesWrittenData.Int64(),
-		Source: string(peer.Discovery), VerifiedBytes: stats.BytesReadVerified.Int64(), UrgentVerifiedBytes: stats.BytesReadUrgentVerified.Int64(), MetadataChunks: stats.MetadataChunksVerified.Int64(), BadPieces: stats.PiecesDirtiedBad.Int64(),
 	}
 }
 

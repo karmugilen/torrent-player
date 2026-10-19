@@ -28,11 +28,7 @@ type ConnStats struct {
 	ChunksReadUseful Count
 	ChunksReadWasted Count
 
-	MetadataChunksVerified  Count
-	BytesReadVerifiedPex    Count
-	MetadataChunksRead      Count
-	BytesReadVerified       Count
-	BytesReadUrgentVerified Count
+	MetadataChunksRead Count
 
 	// Number of pieces data was written to, that subsequently passed verification.
 	PiecesDirtiedGood Count

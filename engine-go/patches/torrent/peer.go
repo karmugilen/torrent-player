@@ -38,7 +38,6 @@ type (
 		callbacks *Callbacks
 
 		RemoteAddr              PeerRemoteAddr
-		pendingMetadata         int64
 		Discovery               PeerSource
 		trusted                 bool
 		closed                  chansync.SetOnce
@@ -379,7 +378,6 @@ func (c *Peer) receiveChunk(msg *pp.Message) error {
 	}
 
 	piece := t.piece(ppReq.Index.Int())
-	urgentContribution := piece.effectivePriority() >= PiecePriorityNow
 
 	c.modifyRelevantConnStats(add(1, func(cs *ConnStats) *Count { return &cs.ChunksReadUseful }))
 	c.modifyRelevantConnStats(add(int64(len(msg.Piece)), func(cs *ConnStats) *Count { return &cs.BytesReadUsefulData }))
@@ -436,15 +434,6 @@ func (c *Peer) receiveChunk(msg *pp.Message) error {
 	}
 
 	c.onDirtiedPiece(pieceIndex(ppReq.Index))
-	if piece.contributions == nil {
-		piece.contributions = make(map[*Peer]pieceContribution)
-	}
-	contribution := piece.contributions[c]
-	contribution.bytes += int64(len(msg.Piece))
-	if urgentContribution {
-		contribution.urgent += int64(len(msg.Piece))
-	}
-	piece.contributions[c] = contribution
 
 	// We need to ensure the piece is only queued once, so only the last chunk writer gets this job.
 	if t.pieceAllDirty(pieceIndex(ppReq.Index)) && piece.pendingWrites == 0 {

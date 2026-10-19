@@ -92,11 +92,6 @@ data class PeerConnection(
     val downloaded: Long,
     val uploaded: Long,
     val country: String? = null,
-    val source: String = "",
-    val verifiedBytes: Long = 0L,
-    val urgentVerifiedBytes: Long = 0L,
-    val metadataChunks: Long = 0L,
-    val badPieces: Long = 0L,
 )
 
 data class TorrentConnections(
@@ -224,11 +219,6 @@ class EngineClient(
                     downloaded = peer.optLong("downloaded"),
                     uploaded = peer.optLong("uploaded"),
                     country = peer.nullableString("country"),
-                    source = peer.optString("source"),
-                    verifiedBytes = peer.optLong("verifiedBytes"),
-                    urgentVerifiedBytes = peer.optLong("urgentVerifiedBytes"),
-                    metadataChunks = peer.optLong("metadataChunks"),
-                    badPieces = peer.optLong("badPieces"),
                 )
             },
         )
@@ -274,6 +264,12 @@ class EngineClient(
 
     fun setMaxPeers(maxPeers: Int): Int =
         post("/settings", JSONObject().put("maxPeers", maxPeers)).optInt("maxPeers", maxPeers)
+
+    fun setRamCacheMiB(sizeMiB: Int): Int {
+        val bytes = sizeMiB.toLong() * 1024L * 1024L
+        return (post("/settings", JSONObject().put("ramCacheBytes", bytes))
+            .getLong("ramCacheBytes") / (1024L * 1024L)).toInt()
+    }
 
     fun transferRates(): Pair<Long, Long> {
         val j = get("/settings")

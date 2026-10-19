@@ -3,6 +3,8 @@ package webtor.app
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,7 +31,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,7 +44,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     state: UiState,
@@ -69,6 +70,8 @@ fun SettingsScreen(
     onSeedUpload: (Int) -> Unit = {},
     onSeedWiFi: (Boolean) -> Unit = {},
     onSeedCharging: (Boolean) -> Unit = {},
+    onRamCache: (Int) -> Unit = {},
+    onAutoRamCache: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -290,6 +293,14 @@ fun SettingsScreen(
                                     color = colors.onSurfaceVariant,
                                 )
                             }
+                            Slider(
+                                value = state.maxPeers.toFloat(),
+                                onValueChange = { onMaxPeers(it.toInt()) },
+                                onValueChangeFinished = onMaxPeersCommit,
+                                valueRange = 8f..500f,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text("Seed completed downloads", style = MaterialTheme.typography.bodyLarge)
@@ -328,19 +339,22 @@ fun SettingsScreen(
                                 Text("Upload totals and ratio survive restarts. Connection limits remain unchanged.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             }
                             HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
-                            Slider(
-                                value = state.maxPeers.toFloat(),
-                                onValueChange = { onMaxPeers(it.toInt()) },
-                                onValueChangeFinished = onMaxPeersCommit,
-                                valueRange = 8f..80f,
-                                steps = 17,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = colors.primary,
-                                    activeTrackColor = colors.primary,
-                                    inactiveTrackColor = colors.outlineVariant,
-                                    ),
-                                modifier = Modifier.fillMaxWidth(),
+                            Text("RAM cache · ${if (state.ramCacheAuto) "Auto · " else ""}${state.ramCacheMiB} MiB", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                if (state.ramCacheAuto) "Auto chooses a limit from available memory and active transfers. Used for downloads and Direct Play."
+                                else "Cache limit per transfer for downloads and Direct Play. Total memory use grows with active transfers.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
                             )
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf(0, 64, 128, 256, 512, 1024).forEach { size ->
+                                    FilterChip(
+                                        selected = if (size == 0) state.ramCacheAuto else !state.ramCacheAuto && state.ramCacheMiB == size,
+                                        onClick = { if (size == 0) onAutoRamCache() else onRamCache(size) },
+                                        label = { Text(if (size == 0) "Auto" else "$size MiB") },
+                                    )
+                                }
+                            }
                             HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.4f))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),

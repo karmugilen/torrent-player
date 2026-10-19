@@ -20,6 +20,8 @@ import (
 // stall receive.
 const DefaultMaxCacheBytes = 64 * 1024 * 1024
 
+const MaxRamCacheBytes = 1024 * 1024 * 1024
+
 // DefaultStreamCacheMaxBytes caps Watch-mode pieces kept in RAM only (no
 // .stream disk files). Pieces farthest from the playhead are dropped first.
 const DefaultStreamCacheMaxBytes = 50 * 1024 * 1024
@@ -30,9 +32,10 @@ const streamCacheKeepBytes int64 = 24 * 1024 * 1024
 const pieceDiskFlushDelay = 20 * time.Millisecond
 
 type DocumentStorageClient struct {
-	mu       sync.Mutex
-	baseDir  string
-	torrents map[string]*DocumentTorrentStorage
+	mu              sync.Mutex
+	baseDir         string
+	cacheLimitBytes int64
+	torrents        map[string]*DocumentTorrentStorage
 }
 
 func NewDocumentStorageClient(baseDir string) *DocumentStorageClient {
@@ -45,6 +48,9 @@ func (c *DocumentStorageClient) OpenTorrent(_ context.Context, info *metainfo.In
 	st := c.torrents[key]
 	if st == nil || st.isClosed() {
 		st = newDocumentTorrentStorage(info, hash, c.baseDir)
+		if c.cacheLimitBytes > 0 {
+			st.setCacheLimit(c.cacheLimitBytes)
+		}
 		c.torrents[key] = st
 	} else if info != nil {
 		st.updateInfo(info)
@@ -84,6 +90,46 @@ func (c *DocumentStorageClient) GetStorage(key string) *DocumentTorrentStorage {
 	return c.torrents[key]
 }
 
+func (c *DocumentStorageClient) CacheLimit() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cacheLimitBytes == 0 {
+		return DefaultMaxCacheBytes
+	}
+	return c.cacheLimitBytes
+}
+
+// SetCacheLimit applies to existing storage and torrents opened later. Shrinking
+// is enforced by normal allocation/eviction so dirty and verifying pieces are
+// never discarded just because the setting changed.
+func (c *DocumentStorageClient) SetCacheLimit(bytes int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, st := range c.torrents {
+		st.mu.Lock()
+		tooSmall := !st.closed && st.attached && st.stream && !st.previewTemp && bytes/4 < st.chunkLength
+		st.mu.Unlock()
+		if tooSmall {
+			return fmt.Errorf("RAM cache is too small for an active Direct Play torrent's pieces")
+		}
+	}
+	c.cacheLimitBytes = bytes
+	for _, st := range c.torrents {
+		st.setCacheLimit(bytes)
+	}
+	return nil
+}
+
+func (st *DocumentTorrentStorage) setCacheLimit(bytes int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.downloadMaxBytes = bytes
+	st.streamMaxBytes = bytes
+	if !st.previewTemp {
+		st.maxCacheBytes = bytes
+	}
+}
+
 type FileDescriptor struct {
 	File           *os.File
 	Offset, Length int64
@@ -112,6 +158,7 @@ type DocumentTorrentStorage struct {
 	cacheOrder                []int // LRU: index 0 is oldest
 	cacheBytes, maxCacheBytes int64
 	streamMaxBytes            int64
+	downloadMaxBytes          int64
 	startupPieces             map[int]bool
 	startupSaved              map[int]bool
 	streamDemand              map[int]bool
@@ -178,14 +225,15 @@ func DeleteEngineOwnedStorage(baseDir, infoHashHex string) error {
 
 func newDocumentTorrentStorage(info *metainfo.Info, hash metainfo.Hash, baseDir string) *DocumentTorrentStorage {
 	st := &DocumentTorrentStorage{
-		infoHash:       hash,
-		baseDir:        baseDir,
-		maxCacheBytes:  DefaultMaxCacheBytes,
-		streamMaxBytes: DefaultStreamCacheMaxBytes,
-		cache:          make(map[int][]byte),
-		cacheDirty:     make(map[int]bool),
-		completed:      make(map[int]bool),
-		pendingSync:    make(map[*os.File]struct{}),
+		infoHash:         hash,
+		baseDir:          baseDir,
+		maxCacheBytes:    DefaultMaxCacheBytes,
+		downloadMaxBytes: DefaultMaxCacheBytes,
+		streamMaxBytes:   DefaultStreamCacheMaxBytes,
+		cache:            make(map[int][]byte),
+		cacheDirty:       make(map[int]bool),
+		completed:        make(map[int]bool),
+		pendingSync:      make(map[*os.File]struct{}),
 	}
 	if info != nil {
 		st.updateInfo(info)

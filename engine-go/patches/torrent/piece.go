@@ -21,11 +21,9 @@ import (
 )
 
 // Why is it an int64?
-type pieceContribution struct{ bytes, urgent int64 }
 type pieceVerifyCount = int64
 
 type Piece struct {
-	contributions map[*Peer]pieceContribution
 	// The completed piece SHA1 hash, from the metainfo "pieces" field. Nil if the info is not V1
 	// compatible.
 	hash *metainfo.Hash

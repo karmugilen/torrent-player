@@ -47,6 +47,7 @@ See [the desktop page notes](engine-go/cmd/discovery/README.md).
 ## Key Features
 
 - **Two storage choices**: Download selected files to `Downloads/Webtor` for offline use, or choose **Direct Play** to keep video in bounded RAM and save only a small verified startup cache. Choose the default in Settings; both actions remain available when adding a torrent.
+  - Settings offers Auto RAM or a manual cache limit of 64, 128, 256, 512 or 1,024 MiB per transfer, and a peer connection limit from 8 to 500 (default 55). Auto chooses 64–512 MiB from available memory and active transfers when starting, returning to the app, or configuring a transfer. Both settings survive restarts and apply to active and future transfers. Cache reductions take effect as pieces are replaced; preview tasks retain their separate memory budget. Peer selection uses the original usefulness and recency rules.
 - **In-Progress Streaming & Per-File Playback**: Launch directly into your favorite Android video player (VLC, Nova Player, Just Player, MPV, etc.) while downloading progresses, or play finished videos anytime.
 - **External-player extras**: Naturally ordered episode playlists, matching selected subtitle files, and saved resume positions for players that support the corresponding Android intent/result contracts.
 - **Selective File Downloads**: Choose exactly which files, episodes, or bonus materials to download from multi-file torrents.

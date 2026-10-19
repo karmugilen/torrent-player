@@ -161,6 +161,7 @@ type MetadataResponse struct {
 }
 
 type SettingsResponse struct {
+	RamCacheBytes        int64 `json:"ramCacheBytes"`
 	SeedingEnabled       bool  `json:"seedingEnabled"`
 	SeedRatioMilli       int64 `json:"seedRatioMilli"`
 	SeedTimeMinutes      int64 `json:"seedTimeMinutes"`
@@ -173,6 +174,7 @@ type SettingsResponse struct {
 }
 
 type SettingsRequest struct {
+	RamCacheBytes        *int64 `json:"ramCacheBytes,omitempty"`
 	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`
 	SeedingAllowed       *bool  `json:"seedingAllowed,omitempty"`
 	SeedRatioMilli       *int64 `json:"seedRatioMilli,omitempty"`

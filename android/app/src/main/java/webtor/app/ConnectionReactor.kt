@@ -43,7 +43,7 @@ internal fun ConnectionReactor(
         peers.groupBy { it.transport }
             .toSortedMap()
             .mapValues { (_, list) ->
-                list.sortedWith(compareByDescending<PeerConnection> { it.urgentVerifiedBytes }.thenByDescending { it.verifiedBytes }.thenBy { it.address })
+                list.sortedWith(compareBy({ it.address }, { it.client }))
             }
     }
     val activeCount = remember(peers, activity) {
@@ -267,8 +267,6 @@ private fun RectangularPeerTile(
             Text(peer.address, Modifier.fillMaxWidth(),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = hud.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${if (peer.source == "X") "PEX" else peer.source.ifBlank { "Peer" }} · verified ${formatBytes(peer.verifiedBytes)} · urgent ${formatBytes(peer.urgentVerifiedBytes)} · metadata ${peer.metadataChunks}",
-                style = MaterialTheme.typography.labelSmall, color = hud.muted, maxLines = 2)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("↓ ${formatBytes(peer.downloaded)}   ↑ ${formatBytes(peer.uploaded)}", Modifier.weight(1f),

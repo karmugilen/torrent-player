@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +19,8 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -574,6 +577,10 @@ private fun TorrentFileRow(
     val complete = !directPlay && file.isVerifiedComplete
     val canPlayVideo = isVideo && (directPlay || !file.uri.isNullOrBlank()) && (isSelected || complete)
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
+    val showPriority = isSelected && !directPlay && !complete
+    val hasBookmark = canPlayVideo && file.playbackPositionMs > 0
+    val showFileMenu = !directPlay || hasBookmark
+    var menuExpanded by remember(file.index) { mutableStateOf(false) }
     val statusText = when {
         !isSelected -> "Not selected"
         directPlay -> if (paused) "Direct Play · paused" else "Direct Play"
@@ -583,101 +590,132 @@ private fun TorrentFileRow(
         else -> "Downloading"
     }
 
-    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Checkbox(
-                checked = isSelected,
-                onCheckedChange = { if (canToggle) onToggle() },
-                enabled = canToggle,
-                modifier = Modifier.size(32.dp),
-            )
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Text(
-                    file.name,
-                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                    color = colors.onSurface,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow),
+        border = BorderStroke(1.dp, if (focused && showPriority) colors.primary else colors.outlineVariant.copy(alpha = 0.6f)),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Checkbox(
+                    checked = isSelected,
+                    onCheckedChange = { if (canToggle) onToggle() },
+                    enabled = canToggle,
+                    modifier = Modifier.size(48.dp),
                 )
-                Text(
-                    if (directPlay) "${formatBytes(file.length)} · $statusText"
-                    else "${formatBytes((file.length * file.progress).toLong())} of ${formatBytes(file.length)} · $statusText",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                )
-                if (pairedSubtitles.isNotEmpty()) {
+                Column(Modifier.weight(1f).padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        "Subtitles: ${pairedSubtitles.joinToString(", ")}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.primary,
-                        maxLines = 1,
+                        file.name,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = colors.onSurface,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                } else if (isSub) {
+                    if (focused && showPriority) {
+                        Text("Priority download", style = MaterialTheme.typography.labelSmall, color = colors.primary)
+                    }
+                    if (hasBookmark) {
+                        Text("Resume at ${playbackTime(file.playbackPositionMs)}", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    }
                     Text(
-                        "External subtitle",
+                        if (directPlay) "${formatBytes(file.length)} · $statusText"
+                        else "${formatBytes((file.length * file.progress).toLong())} of ${formatBytes(file.length)} · $statusText",
                         style = MaterialTheme.typography.labelSmall,
-                        color = colors.tertiary,
+                        color = colors.onSurfaceVariant,
                     )
-                }
-            }
-            if (isSelected && !directPlay) {
-                FilledTonalButton(
-                    onClick = if (focused) onClearFocus else onFocus,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .width(88.dp)
-                        .heightIn(min = 48.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    colors = if (focused) {
-                        ButtonDefaults.filledTonalButtonColors(
-                            containerColor = colors.primary,
-                            contentColor = colors.onPrimary,
+                    if (pairedSubtitles.isNotEmpty()) {
+                        Text(
+                            "Subtitles: ${pairedSubtitles.joinToString(", ")}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                    } else {
-                        ButtonDefaults.filledTonalButtonColors()
-                    },
-                ) {
-                    Text(
-                        if (focused) "Clear" else "Priority",
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                    )
+                    } else if (isSub) {
+                        Text(
+                            "External subtitle",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.tertiary,
+                        )
+                    }
+                }
+                if (showFileMenu) {
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More actions for ${file.name}")
+                        }
+                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            if (hasBookmark) {
+                                DropdownMenuItem(
+                                    text = { Text("Play from start") },
+                                    enabled = canPlay,
+                                    onClick = { menuExpanded = false; onStartOver() },
+                                )
+                            }
+                            if (!directPlay) {
+                                DropdownMenuItem(
+                                    text = { Text("Locate existing file") },
+                                    enabled = canToggle,
+                                    onClick = { menuExpanded = false; onLocate() },
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            if (canPlayVideo || canOpenOther) {
-                FilledTonalButton(
-                    onClick = onPlay,
-                    enabled = canPlay,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.heightIn(min = 48.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                ) {
-                    Text(
-                        if (isVideo && file.playbackPositionMs > 0) "Resume ${playbackTime(file.playbackPositionMs)}" else if (isVideo) "Play" else "Open",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+            if (isSelected && !complete && !directPlay) {
+                LinearProgressIndicator(
+                    progress = { file.progress.toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(3.dp).clip(MaterialTheme.shapes.extraSmall),
+                    color = colors.primary,
+                    trackColor = colors.surfaceContainerHighest,
+                )
+            }
+            if (showPriority || canPlayVideo || canOpenOther) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (showPriority) {
+                        OutlinedButton(
+                            onClick = if (focused) onClearFocus else onFocus,
+                            enabled = canToggle,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                            border = BorderStroke(1.dp, if (focused) colors.primary else colors.outlineVariant),
+                        ) {
+                            Text(
+                                if (focused) "Clear priority" else "Priority",
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                    if (canPlayVideo || canOpenOther) {
+                        Button(
+                            onClick = onPlay,
+                            enabled = canPlay,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        ) {
+                            if (isVideo) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(
+                                if (hasBookmark) "Resume" else if (isVideo) "Play" else "Open",
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
-        if (isSelected && !complete && !directPlay) {
-            LinearProgressIndicator(
-                progress = { file.progress.toFloat().coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
-                    .clip(MaterialTheme.shapes.extraSmall),
-                color = colors.primary,
-                trackColor = colors.surface,
-            )
-        }
-        if (!directPlay) TextButton(onClick = onLocate, enabled = canToggle) { Text("Locate existing file") }
-        if (canPlayVideo && file.playbackPositionMs > 0) TextButton(onClick = onStartOver, enabled = canPlay) { Text("Play from start") }
-        HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(top = 2.dp))
     }
 }
 

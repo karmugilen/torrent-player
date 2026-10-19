@@ -74,6 +74,12 @@ class LibrarySession(
 
     fun onForeground() {
         reopenAfterShutdown()
+        scope.launchCommand {
+            runCatching { refreshAutoRamCache() }.onFailure {
+                if (it is CancellationException) throw it
+                Log.w(EngineHost.TAG, "Could not refresh automatic RAM cache", it)
+            }
+        }
     }
 
     private fun shutdownInProgress(): Boolean = isShuttingDown.get() && !shutdownComplete
@@ -133,7 +139,9 @@ class LibrarySession(
                     it.copy(
                         library = loaded,
                         loadWarning = storage.loadWarning,
-                        maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 80),
+                        maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 500),
+                        ramCacheMiB = settings.getInt("ramCacheMiB", 64).coerceIn(64, 1024),
+                        ramCacheAuto = settings.getBoolean("ramCacheAuto", !settings.contains("ramCacheMiB")),
                         seedingEnabled = settings.getBoolean("seedingEnabled", false),
                         seedRatioMilli = settings.getInt("seedRatioMilli", 1000).coerceIn(100, 10000),
                         seedTimeMinutes = settings.getInt("seedTimeMinutes", 60).coerceIn(1, 1440),
@@ -163,6 +171,14 @@ class LibrarySession(
                 waitForEngine()
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
+                    runCatching {
+                        if (_ui.value.ramCacheAuto) refreshAutoRamCache()
+                        else withContext(io) { client.setRamCacheMiB(_ui.value.ramCacheMiB) }
+                    }
+                        .onFailure { failure ->
+                            if (failure is CancellationException) throw failure
+                            _ui.update { it.copy(error = readableError(failure)) }
+                        }
                     applySeedingSettings(force = true)
                     runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
                     setAntiDpi(_ui.value.antiDpiEnabled)
@@ -392,7 +408,7 @@ class LibrarySession(
 
     fun closeSettings() = _ui.update { it.copy(screen = Screen.Library, clearAllConfirm = false) }
     fun setMaxPeers(value: Int) {
-        val n = value.coerceIn(8, 80)
+        val n = value.coerceIn(8, 500)
         settings.edit().putInt("maxPeers", n).apply()
         _ui.update { it.copy(maxPeers = n) }
     }
@@ -401,6 +417,65 @@ class LibrarySession(
         val n = _ui.value.maxPeers
         scope.launch {
             if (_ui.value.engineReady) runCatching { withContext(io) { client.setMaxPeers(n) } }
+        }
+    }
+
+    fun setRamCacheMiB(value: Int) {
+        val size = value.coerceIn(64, 1024)
+        scope.launchCommand {
+            try {
+                val applied = if (_ui.value.engineReady) {
+                    withContext(io) { client.setRamCacheMiB(size) }
+                } else size
+                settings.edit().putInt("ramCacheMiB", applied).putBoolean("ramCacheAuto", false).apply()
+                _ui.update { it.copy(ramCacheMiB = applied, ramCacheAuto = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _ui.update { it.copy(error = readableError(failure)) }
+            }
+        }
+    }
+
+    fun setAutoRamCache() {
+        scope.launchCommand {
+            try {
+                val applied = applyAutoRamCache()
+                settings.edit().putBoolean("ramCacheAuto", true).apply()
+                _ui.update { it.copy(ramCacheMiB = applied, ramCacheAuto = true) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _ui.update { it.copy(error = readableError(failure)) }
+            }
+        }
+    }
+
+    private suspend fun refreshAutoRamCache() {
+        if (!_ui.value.ramCacheAuto || !_ui.value.engineReady) return
+        val applied = applyAutoRamCache()
+        _ui.update { it.copy(ramCacheMiB = applied) }
+    }
+
+    private suspend fun applyAutoRamCache(): Int {
+        val state = _ui.value
+        val active = state.library.count {
+            !it.paused && !it.isDeleting && (!it.complete || it.liveStatus()?.seeding == true)
+        }.coerceAtLeast(1)
+        val size = withContext(io) {
+            val manager = app.getSystemService(android.app.ActivityManager::class.java)
+            val memory = android.app.ActivityManager.MemoryInfo()
+            manager.getMemoryInfo(memory)
+            autoRamCacheMiB(memory.totalMem, memory.availMem, memory.threshold, manager.isLowRamDevice || memory.lowMemory, active)
+        }
+        if (!state.engineReady) return size
+        return try {
+            withContext(io) { client.setRamCacheMiB(size) }
+        } catch (failure: EngineException) {
+            // An active Direct Play torrent may need larger buffers to verify
+            // its pieces. Retain the working limit until that session closes.
+            if (size < state.ramCacheMiB && failure.message?.contains("active Direct Play torrent") == true) state.ramCacheMiB
+            else throw failure
         }
     }
     private var lastSeedSignature: String? = null
@@ -652,8 +727,7 @@ class LibrarySession(
     }
 
     private fun directPlayMemoryBytes(): Long {
-        val manager = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        return (manager.memoryClass / 4).coerceIn(16, 64).toLong() * 1024 * 1024
+        return _ui.value.ramCacheMiB.toLong() * 1024 * 1024
     }
 
     fun startDownload() = commitPreparedDownload()
@@ -781,6 +855,7 @@ class LibrarySession(
                         val pfds = if (directPlay) emptyList() else withContext(io) { storage.openFiles(created, draft.selected) }
                         try {
                             val descriptors = if (directPlay) List<Int?>(created.size) { null } else descriptorsFor(created, pfds, draft.selected)
+                            refreshAutoRamCache()
                             withContext(io) { client.configure(draft.engineId, descriptors, draft.selected, if (directPlay) "stream" else "download", directPlayMemoryBytes()) }
                         } finally {
                             pfds.forEach { runCatching { it?.close() } }
@@ -2057,6 +2132,7 @@ class LibrarySession(
             val pfds = if (current.directPlay) emptyList() else withContext(io) { storage.openFiles(effectiveFiles, current.selected) }
             try {
                 val descriptors = if (current.directPlay) List<Int?>(effectiveFiles.size) { null } else descriptorsFor(effectiveFiles, pfds, current.selected)
+                refreshAutoRamCache()
                 withContext(io) { client.configure(added.id, descriptors, current.selected, if (current.directPlay) "stream" else "download", directPlayMemoryBytes()) }
             } catch (e: EngineException) {
                 if (e.message?.contains("already configured", ignoreCase = true) != true) throw e
