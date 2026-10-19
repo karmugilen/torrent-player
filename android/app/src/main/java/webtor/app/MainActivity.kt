@@ -175,14 +175,10 @@ class MainActivity : ComponentActivity() {
                                     error = state.error,
                                     onBack = session::closeFiles,
                                     onPlay = { index -> session.play(entry, index) },
-                                    onStartOver = { index -> session.play(entry, index, fromStart = true) },
                                     onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
                                     onPause = { session.pause(entry) },
                                     onResume = { session.resume(entry) },
                                     onDelete = { session.requestDelete(entry) },
-                                    onFocus = { index -> session.focusEntryFile(entry.key, index) },
-                                    onClearFocus = { session.focusEntryFile(entry.key, null) },
-                                    onLocateFile = { index -> session.requestRepairFile(entry.key, index) },
                                 )
                             }
                             Screen.Library -> LibraryLayer(state)

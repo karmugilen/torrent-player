@@ -19,7 +19,6 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -57,10 +56,6 @@ fun TorrentFilesScreen(
     onPause: () -> Unit,
     onResume: () -> Unit,
     onDelete: () -> Unit,
-    onFocus: (Int) -> Unit = {},
-    onClearFocus: () -> Unit = {},
-    onStartOver: (Int) -> Unit = {},
-    onLocateFile: (Int) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -279,14 +274,10 @@ fun TorrentFilesScreen(
                     canPlay = !busy && (!entry.checking || completedPlayFile(entry, file.index) != null),
                     directPlay = entry.directPlay,
                     onPlay = { onPlay(file.index) },
-                    onStartOver = { onStartOver(file.index) },
                     onToggle = { onToggleFile(file.index) },
                     focused = entry.focusedFile == file.index,
-                    onFocus = { onFocus(file.index) },
-                    onClearFocus = onClearFocus,
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
-                    onLocate = { onLocateFile(file.index) },
                 )
             }
             // Diagnostics follow files
@@ -564,12 +555,8 @@ private fun TorrentFileRow(
     onToggle: () -> Unit,
     canToggle: Boolean,
     focused: Boolean = false,
-    onFocus: () -> Unit = {},
-    onClearFocus: () -> Unit = {},
     directPlay: Boolean = false,
-    onStartOver: () -> Unit = {},
     pairedSubtitles: List<String> = emptyList(),
-    onLocate: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -578,9 +565,6 @@ private fun TorrentFileRow(
     val canPlayVideo = isVideo && (directPlay || !file.uri.isNullOrBlank()) && (isSelected || complete)
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
     val showPriority = isSelected && !directPlay && !complete
-    val hasBookmark = canPlayVideo && file.playbackPositionMs > 0
-    val showFileMenu = !directPlay || hasBookmark
-    var menuExpanded by remember(file.index) { mutableStateOf(false) }
     val statusText = when {
         !isSelected -> "Not selected"
         directPlay -> if (paused) "Direct Play · paused" else "Direct Play"
@@ -619,9 +603,6 @@ private fun TorrentFileRow(
                     if (focused && showPriority) {
                         Text("Priority download", style = MaterialTheme.typography.labelSmall, color = colors.primary)
                     }
-                    if (hasBookmark) {
-                        Text("Resume at ${playbackTime(file.playbackPositionMs)}", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    }
                     Text(
                         if (directPlay) "${formatBytes(file.length)} · $statusText"
                         else "${formatBytes((file.length * file.progress).toLong())} of ${formatBytes(file.length)} · $statusText",
@@ -642,36 +623,6 @@ private fun TorrentFileRow(
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.tertiary,
                         )
-                    }
-                }
-                if (showFileMenu) {
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More actions for ${file.name}")
-                        }
-                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                            if (showPriority) {
-                                DropdownMenuItem(
-                                    text = { Text(if (focused) "Clear priority" else "Prioritize download") },
-                                    enabled = canToggle,
-                                    onClick = { menuExpanded = false; if (focused) onClearFocus() else onFocus() },
-                                )
-                            }
-                            if (hasBookmark) {
-                                DropdownMenuItem(
-                                    text = { Text("Play from start") },
-                                    enabled = canPlay,
-                                    onClick = { menuExpanded = false; onStartOver() },
-                                )
-                            }
-                            if (!directPlay) {
-                                DropdownMenuItem(
-                                    text = { Text("Locate existing file") },
-                                    enabled = canToggle,
-                                    onClick = { menuExpanded = false; onLocate() },
-                                )
-                            }
-                        }
                     }
                 }
             }
@@ -697,7 +648,7 @@ private fun TorrentFileRow(
                             Spacer(Modifier.width(6.dp))
                         }
                         Text(
-                            if (hasBookmark) "Resume" else if (isVideo) "Play" else "Open",
+                            if (isVideo) "Play" else "Open",
                             style = MaterialTheme.typography.labelMedium,
                             maxLines = 1,
                         )

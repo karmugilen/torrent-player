@@ -120,7 +120,7 @@ fun SettingsScreen(
                     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Playback method", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "Choose how Play, Resume and Play from start send streaming video to your player. Completed downloads open locally.",
+                            "Choose how Play sends streaming video to your player. Completed downloads open locally.",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
                         )

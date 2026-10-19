@@ -2,7 +2,7 @@
 
 Checkpoint before this experiment: `003365e` (Android 2.1.6).
 
-Open **Settings → Playback method** and select **Standard** or **HTTP stream (experimental)**. The choice is saved across restarts and applies to Play, Resume and Play from start for incomplete video and Direct Play. Standard is the initial default and uses the Android content provider. Priority, file repair and play-from-start actions remain in the episode menu; the HTTP-specific episode action has been removed. Completed downloaded files continue to open directly through their saved descriptors.
+Open **Settings → Playback method** and select **Standard** or **HTTP stream (experimental)**. The choice is saved across restarts and applies to Play for incomplete video and Direct Play. Standard is the initial default and uses the Android content provider. Video playback buttons always show Play and continue to pass saved positions to compatible players. The episode three-dot menu and separate play-from-start action have been removed. Completed downloaded files continue to open directly through their saved descriptors.
 
 ## What changes
 

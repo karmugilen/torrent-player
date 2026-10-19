@@ -522,7 +522,7 @@ private fun TorrentRow(
                         ) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
-                            Text(if (isVideo && currentResumePosition(entry) > 0) "Resume" else if (isVideo) "Play" else "Open")
+                            Text(if (isVideo) "Play" else "Open")
                         }
                     }
 
