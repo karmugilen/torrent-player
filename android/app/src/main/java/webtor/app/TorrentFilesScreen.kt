@@ -61,7 +61,6 @@ fun TorrentFilesScreen(
     onClearFocus: () -> Unit = {},
     onStartOver: (Int) -> Unit = {},
     onLocateFile: (Int) -> Unit = {},
-    onPlayHttp: (Int) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -288,7 +287,6 @@ fun TorrentFilesScreen(
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
                     onLocate = { onLocateFile(file.index) },
-                    onPlayHttp = { onPlayHttp(file.index) },
                 )
             }
             // Diagnostics follow files
@@ -572,7 +570,6 @@ private fun TorrentFileRow(
     onStartOver: () -> Unit = {},
     pairedSubtitles: List<String> = emptyList(),
     onLocate: () -> Unit = {},
-    onPlayHttp: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -582,8 +579,7 @@ private fun TorrentFileRow(
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
     val showPriority = isSelected && !directPlay && !complete
     val hasBookmark = canPlayVideo && file.playbackPositionMs > 0
-    val showHttpOption = canPlayVideo && !complete
-    val showFileMenu = !directPlay || hasBookmark || showHttpOption
+    val showFileMenu = !directPlay || hasBookmark
     var menuExpanded by remember(file.index) { mutableStateOf(false) }
     val statusText = when {
         !isSelected -> "Not selected"
@@ -659,13 +655,6 @@ private fun TorrentFileRow(
                                     text = { Text(if (focused) "Clear priority" else "Prioritize download") },
                                     enabled = canToggle,
                                     onClick = { menuExpanded = false; if (focused) onClearFocus() else onFocus() },
-                                )
-                            }
-                            if (showHttpOption) {
-                                DropdownMenuItem(
-                                    text = { Text("Play via HTTP (experimental)") },
-                                    enabled = canPlay,
-                                    onClick = { menuExpanded = false; onPlayHttp() },
                                 )
                             }
                             if (hasBookmark) {

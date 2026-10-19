@@ -3,6 +3,8 @@ package webtor.app
 /** Content-provider grants travel with the playlist, including sidecar subtitles. */
 data class PlaybackItem(val uri: String, val name: String)
 
+enum class PlaybackMethod { CONTENT_URI, HTTP }
+
 internal fun naturalMediaKey(path: String): String = Regex("\\d+").replace(path.lowercase(java.util.Locale.ROOT)) {
     it.value.trimStart('0').ifEmpty { "0" }.padStart(20, '0')
 }

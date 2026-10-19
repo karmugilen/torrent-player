@@ -55,6 +55,7 @@ data class UiState(
     val dynamicColors: Boolean = true,
     val reducedEffects: Boolean = false,
     val directPlayDefault: Boolean = false,
+    val playbackMethod: PlaybackMethod = PlaybackMethod.CONTENT_URI,
     val diagnosticsPreview: String? = null,
     val networkPolicy: TransferNetworkPolicy = TransferNetworkPolicy.ANY,
     val networkAllowed: Boolean = true,

@@ -2,7 +2,7 @@
 
 Checkpoint before this experiment: `003365e` (Android 2.1.6).
 
-For an incomplete video or Direct Play episode, open its three-dot menu and choose **Play via HTTP (experimental)**. The compact **Play / Resume** button continues to use the Android content provider. Priority, file repair and play-from-start actions are in the menu. Completed downloaded files continue to open directly through their saved descriptors.
+Open **Settings → Playback method** and select **Standard** or **HTTP stream (experimental)**. The choice is saved across restarts and applies to Play, Resume and Play from start for incomplete video and Direct Play. Standard is the initial default and uses the Android content provider. Priority, file repair and play-from-start actions remain in the episode menu; the HTTP-specific episode action has been removed. Completed downloaded files continue to open directly through their saved descriptors.
 
 ## What changes
 
@@ -25,4 +25,4 @@ An HTTP launch holds a process-owned playback lease until the player returns, la
 
 Automated checks cover ordered HTTP playlist construction, subtitle and resume preservation, canonical bookmark mappings, loopback endpoint validation, and playback-lease replacement and cleanup. Engine checks cover HEAD, verified partial and complete ranges, suffix ranges, unsatisfiable ranges, and disconnecting a request waiting on missing data before successfully reading another range.
 
-These are correctness checks. No Android player is connected in this environment, and no claim of improved seek speed or player cache behavior has been measured. Compare the two menu paths on the same episode, swarm and player. Record first-play delay, seek-to-picture delay, repeated backward seeks, player buffer settings, and behavior when returning from playback. A player may reject cleartext localhost URLs or use different network-buffer settings for HTTP.
+These are correctness checks. No Android player is connected in this environment, and no claim of improved seek speed or player cache behavior has been measured. Compare the two settings on the same episode, swarm and player. Record first-play delay, seek-to-picture delay, repeated backward seeks, player buffer settings, and behavior when returning from playback. A player may reject cleartext localhost URLs or use different network-buffer settings for HTTP.

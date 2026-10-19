@@ -1,6 +1,8 @@
 package webtor.app
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -29,6 +31,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -43,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -72,6 +76,7 @@ fun SettingsScreen(
     onSeedCharging: (Boolean) -> Unit = {},
     onRamCache: (Int) -> Unit = {},
     onAutoRamCache: () -> Unit = {},
+    onPlaybackMethod: (PlaybackMethod) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -108,6 +113,44 @@ fun SettingsScreen(
                         supportingContent = { Text("On: video stays in RAM; only a small startup cache is saved. Off: download selected files for offline use. Both choices remain available when adding a torrent.") },
                         trailingContent = { Switch(checked = state.directPlayDefault, onCheckedChange = onDirectPlayDefault) },
                     )
+                }
+            }
+            item {
+                ThemedCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Playback method", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Choose how Play, Resume and Play from start send streaming video to your player. Completed downloads open locally.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Column(Modifier.selectableGroup()) {
+                            PlaybackMethod.entries.forEach { method ->
+                                val selected = state.playbackMethod == method
+                                Row(
+                                    modifier = Modifier.fillMaxWidth()
+                                        .selectable(selected = selected, role = Role.RadioButton, onClick = { onPlaybackMethod(method) })
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    RadioButton(selected = selected, onClick = null)
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            if (method == PlaybackMethod.CONTENT_URI) "Standard" else "HTTP stream (experimental)",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                        )
+                                        Text(
+                                            if (method == PlaybackMethod.CONTENT_URI) "Open as a media file. Supported by most players."
+                                            else "Open as a local network stream. Player choices and buffering may differ.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             item {

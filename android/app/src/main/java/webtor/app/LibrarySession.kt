@@ -155,6 +155,9 @@ class LibrarySession(
                         dynamicColors = settings.getBoolean("dynamicColors", true),
                         reducedEffects = settings.getBoolean("reducedEffects", false),
                         directPlayDefault = settings.getBoolean("directPlayDefault", false),
+                        playbackMethod = PlaybackMethod.entries.firstOrNull {
+                            it.name == settings.getString("playbackMethod", PlaybackMethod.CONTENT_URI.name)
+                        } ?: PlaybackMethod.CONTENT_URI,
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
                     )
@@ -726,6 +729,11 @@ class LibrarySession(
         _ui.update { it.copy(directPlayDefault = enabled) }
     }
 
+    fun setPlaybackMethod(method: PlaybackMethod) {
+        settings.edit().putString("playbackMethod", method.name).apply()
+        _ui.update { it.copy(playbackMethod = method) }
+    }
+
     private fun directPlayMemoryBytes(): Long {
         return _ui.value.ramCacheMiB.toLong() * 1024 * 1024
     }
@@ -1177,7 +1185,7 @@ class LibrarySession(
         }
     }
 
-    fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false, viaHttp: Boolean = false) {
+    fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand
             try {
@@ -1224,7 +1232,7 @@ class LibrarySession(
                 val file = current.files.first { it.index == targetIndex }
                 val info = withContext(io) { client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint()) }
                 val content = playbackEvent(current, file)
-                _events.send(if (viaHttp) httpPlaybackEvent(content, current, file, info.streamUrl) else content)
+                _events.send(if (_ui.value.playbackMethod == PlaybackMethod.HTTP) httpPlaybackEvent(content, current, file, info.streamUrl) else content)
                 persist()
                 syncService()
             } catch (t: Throwable) {

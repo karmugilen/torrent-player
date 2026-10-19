@@ -111,7 +111,7 @@ adb install -r torrent-player.apk
   - Native Go shared library based on `anacrolix/torrent`.
   - Supports TCP, uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, and HTTP/WebSocket trackers.
   - Android commands run through JNI; there is no Android control listener on port 18080 and no OkHttp dependency.
-  - External players receive a read-only Android content URI. Incomplete files use a seekable proxy descriptor backed by verified Go torrent reads; completed files use their saved descriptor.
+  - Settings saves the preferred playback method: Standard sends a read-only Android content URI, while HTTP stream (experimental) sends a loopback media URL for incomplete video and Direct Play. Standard's incomplete files use a seekable proxy descriptor backed by verified Go torrent reads; completed files use their saved descriptor with either setting.
   - A loopback HTTP media endpoint remains available for streaming compatibility. The standalone host engine also provides an HTTP control adapter for development.
 
 ---
