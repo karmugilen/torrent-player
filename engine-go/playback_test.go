@@ -634,6 +634,9 @@ func TestCompletedAndStreamingHTTPRanges(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
+		if code < 400 && (resp.Header.Get("Accept-Ranges") != "bytes" || resp.Header.Get("Cache-Control") != "private, max-age=3600") {
+			t.Fatalf("unexpected streaming headers: %v", resp.Header)
+		}
 		got, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -660,6 +663,80 @@ func TestCompletedAndStreamingHTTPRanges(t *testing.T) {
 	}
 	if code != 200 || !status.Done || status.Files[1].VerifiedBytes != status.Files[1].Length {
 		t.Fatalf("not completed: %s", body)
+	}
+}
+
+func TestHTTPDisconnectCancelsMissingRangeAndAnotherRequestStillWorks(t *testing.T) {
+	s, rec, data := playbackFixture(t)
+	writeVerifiedPiece(t, s, rec, data, 0)
+	writeVerifiedPiece(t, s, rec, data, 1)
+	finished := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { finished <- struct{}{} }()
+		s.handleStream(w, r)
+	}))
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 3 * time.Second
+	url := server.URL + "/torrent/" + rec.ID + "/file/1"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	request.Header.Set("Range", "bytes=20-25")
+	result := make(chan error, 1)
+	go func() {
+		response, err := client.Do(request)
+		if err == nil {
+			_, err = io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+		}
+		result <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		owner := s.ensurePlaybackCoordinator(rec.Torrent)
+		owner.mu.Lock()
+		active := len(owner.readers) > 0
+		owner.mu.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("HTTP range did not open a playback reader")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("missing-data request completed without cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client cancellation stalled")
+	}
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disconnected HTTP handler retained its blocked playback read")
+	}
+	owner := s.ensurePlaybackCoordinator(rec.Torrent)
+	owner.mu.Lock()
+	active := len(owner.readers)
+	owner.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("disconnected request retained %d readers", active)
+	}
+	request, _ = http.NewRequest("GET", url, nil)
+	request.Header.Set("Range", "bytes=0-5")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	got, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != 206 || !bytes.Equal(got, data[5:11]) {
+		t.Fatalf("new range failed after disconnect: %d %x %v", response.StatusCode, got, err)
 	}
 }
 

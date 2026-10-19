@@ -23,3 +23,26 @@ class PlaybackLeases(private val onChanged: () -> Unit = {}) {
         }
     }
 }
+
+/** Process-owned lease spans HTTP request gaps and Activity recreation. */
+class HttpPlaybackLease(private val leases: PlaybackLeases) {
+    private var launchedUri: String? = null
+    private var lease: AutoCloseable? = null
+
+    @Synchronized fun begin(uri: String, key: String) {
+        val next = leases.acquire(key)
+        lease?.close()
+        lease = next
+        launchedUri = uri
+    }
+
+    @Synchronized fun finish(uri: String?) {
+        if (uri != null && uri == launchedUri) clear()
+    }
+
+    @Synchronized fun clear() {
+        lease?.close()
+        lease = null
+        launchedUri = null
+    }
+}

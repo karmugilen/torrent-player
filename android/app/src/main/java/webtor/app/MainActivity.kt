@@ -36,19 +36,25 @@ class MainActivity : ComponentActivity() {
 
     private var launchedPlaybackUri: String? = null
     private var launchedPlaybackItems: Set<String> = emptySet()
+    private var launchedBookmarkUris: Map<String, String> = emptyMap()
     private val viewer = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         @Suppress("DEPRECATION")
         fun number(key: String): Long? = (data?.extras?.get(key) as? Number)?.toLong()
         val position = number("extra_position") ?: number("position")
         val uri = returnedPlaybackUri(data?.data?.toString(), launchedPlaybackUri, launchedPlaybackItems)
-        if (position != null && uri != null) session.recordPlaybackPosition(uri, position, number("extra_duration") ?: number("duration") ?: 0L)
+        if (position != null && uri != null) session.recordPlaybackPosition(launchedBookmarkUris[uri] ?: uri, position, number("extra_duration") ?: number("duration") ?: 0L)
+        (application as WebtorApp).httpPlaybackLease.finish(launchedPlaybackUri)
         launchedPlaybackUri = null
+        launchedPlaybackItems = emptySet()
+        launchedBookmarkUris = emptyMap()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("playbackUri", launchedPlaybackUri)
         outState.putStringArrayList("playbackItems", ArrayList(launchedPlaybackItems))
+        outState.putStringArrayList("bookmarkUrisFrom", ArrayList(launchedBookmarkUris.keys))
+        outState.putStringArrayList("bookmarkUrisTo", ArrayList(launchedBookmarkUris.values))
         val currentUi = session.ui.value
         if (currentUi.screen == Screen.Settings) {
             outState.putString("savedScreen", Screen.Settings.name)
@@ -81,6 +87,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         launchedPlaybackUri = savedInstanceState?.getString("playbackUri")
         launchedPlaybackItems = savedInstanceState?.getStringArrayList("playbackItems")?.toSet().orEmpty()
+        launchedBookmarkUris = savedInstanceState?.getStringArrayList("bookmarkUrisFrom").orEmpty()
+            .zip(savedInstanceState?.getStringArrayList("bookmarkUrisTo").orEmpty()).toMap()
         val savedScreen = savedInstanceState?.getString("savedScreen")
         val savedOpenKey = savedInstanceState?.getString("savedOpenKey")
         if (savedScreen == Screen.Settings.name) {
@@ -166,6 +174,7 @@ class MainActivity : ComponentActivity() {
                                     error = state.error,
                                     onBack = session::closeFiles,
                                     onPlay = { index -> session.play(entry, index) },
+                                    onPlayHttp = { index -> session.play(entry, index, viaHttp = true) },
                                     onStartOver = { index -> session.play(entry, index, fromStart = true) },
                                     onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
                                     onPause = { session.pause(entry) },
@@ -354,10 +363,12 @@ class MainActivity : ComponentActivity() {
         val uri = Uri.parse(event.uri)
         val view = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, event.mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            clipData = ClipData.newRawUri(event.name, uri).apply {
-                (event.playlist + event.subtitles).distinctBy { it.uri }.filter { it.uri != event.uri }.forEach {
-                    addItem(ClipData.Item(Uri.parse(it.uri)))
+            val grants = (listOf(PlaybackItem(event.uri, event.name)) + event.playlist + event.subtitles)
+                .distinctBy { it.uri }.filter { Uri.parse(it.uri).scheme == "content" }
+            if (grants.isNotEmpty()) {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = ClipData.newRawUri(grants.first().name, Uri.parse(grants.first().uri)).apply {
+                    grants.drop(1).forEach { addItem(ClipData.Item(Uri.parse(it.uri))) }
                 }
             }
             putExtra(Intent.EXTRA_TITLE, event.name)
@@ -376,7 +387,14 @@ class MainActivity : ComponentActivity() {
         }
         launchedPlaybackUri = event.uri
         launchedPlaybackItems = event.playlist.map { it.uri }.toSet()
-        if (!launchViewer(view)) launchedPlaybackUri = null
+        launchedBookmarkUris = event.bookmarkUris
+        event.playbackLeaseKey?.let { (application as WebtorApp).httpPlaybackLease.begin(event.uri, it) }
+        if (!launchViewer(view)) {
+            (application as WebtorApp).httpPlaybackLease.finish(event.uri)
+            launchedPlaybackUri = null
+            launchedPlaybackItems = emptySet()
+            launchedBookmarkUris = emptyMap()
+        }
     }
 
     private fun launchViewer(intent: Intent): Boolean {

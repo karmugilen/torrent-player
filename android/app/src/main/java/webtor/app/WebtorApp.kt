@@ -9,6 +9,7 @@ import android.util.Log
 
 class WebtorApp : Application() {
     val playbackLeases = PlaybackLeases { if (::session.isInitialized) session.refreshTransferNotification() }
+    val httpPlaybackLease = HttpPlaybackLease(playbackLeases)
     private var networkMonitor: NetworkMonitor? = null
     lateinit var engine: EngineHost
         private set

@@ -83,7 +83,9 @@ sealed class UiEvent {
     data object RequestNotifications : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String,
         val playlist: List<PlaybackItem> = emptyList(), val subtitles: List<PlaybackItem> = emptyList(),
-        val positionMs: Long = 0L) : UiEvent()
+        val positionMs: Long = 0L,
+        val bookmarkUris: Map<String, String> = emptyMap(),
+        val playbackLeaseKey: String? = null) : UiEvent()
     data object ExitApp : UiEvent()
     data class ShareText(val text: String) : UiEvent()
 }

@@ -1818,7 +1818,7 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "*")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
 
 	http.ServeContent(w, r, filepath.Base(file.DisplayPath()), time.Time{}, reader)
 }

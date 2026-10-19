@@ -1177,7 +1177,7 @@ class LibrarySession(
         }
     }
 
-    fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false) {
+    fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false, viaHttp: Boolean = false) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand
             try {
@@ -1222,8 +1222,9 @@ class LibrarySession(
                     patch(current.key) { it.copy(paused = false) }
                 }
                 val file = current.files.first { it.index == targetIndex }
-                withContext(io) { client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint()) }
-                _events.send(playbackEvent(current, file))
+                val info = withContext(io) { client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint()) }
+                val content = playbackEvent(current, file)
+                _events.send(if (viaHttp) httpPlaybackEvent(content, current, file, info.streamUrl) else content)
                 persist()
                 syncService()
             } catch (t: Throwable) {
@@ -1580,6 +1581,7 @@ class LibrarySession(
     }
 
     fun stopAll(onFinished: (() -> Unit)? = null) {
+        (app as? WebtorApp)?.httpPlaybackLease?.clear()
         serviceSuppressed = true
         settings.edit().putBoolean("serviceSuppressed", true).apply()
         scope.launch {
@@ -1643,6 +1645,7 @@ class LibrarySession(
     }
 
     fun stopAllAndExit(onFinished: (() -> Unit)? = null) {
+        (app as? WebtorApp)?.httpPlaybackLease?.clear()
         if (isShuttingDown.getAndSet(true)) return
         serviceSuppressed = true
         settings.edit().putBoolean("serviceSuppressed", true).apply()

@@ -61,6 +61,7 @@ fun TorrentFilesScreen(
     onClearFocus: () -> Unit = {},
     onStartOver: (Int) -> Unit = {},
     onLocateFile: (Int) -> Unit = {},
+    onPlayHttp: (Int) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -287,6 +288,7 @@ fun TorrentFilesScreen(
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
                     onLocate = { onLocateFile(file.index) },
+                    onPlayHttp = { onPlayHttp(file.index) },
                 )
             }
             // Diagnostics follow files
@@ -570,6 +572,7 @@ private fun TorrentFileRow(
     onStartOver: () -> Unit = {},
     pairedSubtitles: List<String> = emptyList(),
     onLocate: () -> Unit = {},
+    onPlayHttp: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -579,7 +582,8 @@ private fun TorrentFileRow(
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
     val showPriority = isSelected && !directPlay && !complete
     val hasBookmark = canPlayVideo && file.playbackPositionMs > 0
-    val showFileMenu = !directPlay || hasBookmark
+    val showHttpOption = canPlayVideo && !complete
+    val showFileMenu = !directPlay || hasBookmark || showHttpOption
     var menuExpanded by remember(file.index) { mutableStateOf(false) }
     val statusText = when {
         !isSelected -> "Not selected"
@@ -650,6 +654,20 @@ private fun TorrentFileRow(
                             Icon(Icons.Default.MoreVert, contentDescription = "More actions for ${file.name}")
                         }
                         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            if (showPriority) {
+                                DropdownMenuItem(
+                                    text = { Text(if (focused) "Clear priority" else "Prioritize download") },
+                                    enabled = canToggle,
+                                    onClick = { menuExpanded = false; if (focused) onClearFocus() else onFocus() },
+                                )
+                            }
+                            if (showHttpOption) {
+                                DropdownMenuItem(
+                                    text = { Text("Play via HTTP (experimental)") },
+                                    enabled = canPlay,
+                                    onClick = { menuExpanded = false; onPlayHttp() },
+                                )
+                            }
                             if (hasBookmark) {
                                 DropdownMenuItem(
                                     text = { Text("Play from start") },
@@ -676,42 +694,24 @@ private fun TorrentFileRow(
                     trackColor = colors.surfaceContainerHighest,
                 )
             }
-            if (showPriority || canPlayVideo || canOpenOther) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (showPriority) {
-                        OutlinedButton(
-                            onClick = if (focused) onClearFocus else onFocus,
-                            enabled = canToggle,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                            border = BorderStroke(1.dp, if (focused) colors.primary else colors.outlineVariant),
-                        ) {
-                            Text(
-                                if (focused) "Clear priority" else "Priority",
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1,
-                            )
+            if (canPlayVideo || canOpenOther) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(
+                        onClick = onPlay,
+                        enabled = canPlay,
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        if (isVideo) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
                         }
-                    }
-                    if (canPlayVideo || canOpenOther) {
-                        Button(
-                            onClick = onPlay,
-                            enabled = canPlay,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                        ) {
-                            if (isVideo) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                            }
-                            Text(
-                                if (hasBookmark) "Resume" else if (isVideo) "Play" else "Open",
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1,
-                            )
-                        }
+                        Text(
+                            if (hasBookmark) "Resume" else if (isVideo) "Play" else "Open",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                        )
                     }
                 }
             }

@@ -30,6 +30,25 @@ fun playbackEvent(entry: DownloadEntry, file: SavedFile, positionMs: Long = file
         files.videos.map(::item), files.subtitles.map(::item), positionMs)
 }
 
+/** HTTP is an explicit comparison path; canonical content URIs still own bookmarks. */
+fun httpPlaybackEvent(content: UiEvent.OpenContent, entry: DownloadEntry, file: SavedFile, streamUrl: String): UiEvent.OpenContent {
+    val endpoint = java.net.URI(streamUrl)
+    val id = requireNotNull(entry.engineId) { "The torrent must be running for HTTP playback." }
+    require(endpoint.scheme == "http" && endpoint.host == "127.0.0.1" && endpoint.port in 1..65535 &&
+        endpoint.rawUserInfo == null && endpoint.rawQuery == null && endpoint.rawFragment == null &&
+        endpoint.path == "/torrent/$id/file/${file.index}") { "Invalid local playback endpoint." }
+    fun url(index: Int) = java.net.URI("http", null, "127.0.0.1", endpoint.port, "/torrent/$id/file/$index", null, null).toASCIIString()
+    val videos = playbackFiles(entry, file).videos
+    require(videos.size == content.playlist.size) { "Playback playlist changed." }
+    val bookmarks = mutableMapOf(streamUrl to content.uri)
+    val playlist = content.playlist.zip(videos).map { (item, video) ->
+        val httpUri = url(video.index)
+        bookmarks[httpUri] = item.uri
+        item.copy(uri = httpUri)
+    }
+    return content.copy(uri = streamUrl, playlist = playlist, bookmarkUris = bookmarks, playbackLeaseKey = entry.key)
+}
+
 fun playbackTime(positionMs: Long): String {
     val seconds = positionMs.coerceAtLeast(0L)/1000
     return if (seconds >= 3600) "%d:%02d:%02d".format(java.util.Locale.ROOT, seconds/3600, seconds/60%60, seconds%60)
