@@ -383,6 +383,14 @@ func (s *EngineServer) statusFingerprint() [sha256.Size]byte {
 			stats.ActivePeers, stats.PiecesComplete, stats.BytesHashed.Int64(),
 			stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64(),
 			rec.rates.down, rec.rates.up, err)
+		if rec.DirectPlay {
+			if st := s.storage.GetStorage(rec.InfoHash); st != nil {
+				st.mu.Lock()
+				revision := st.streamRevision
+				st.mu.Unlock()
+				fmt.Fprintf(h, "ram:%d;", revision)
+			}
+		}
 		rec.mu.RUnlock()
 	}
 	var result [sha256.Size]byte
@@ -1586,7 +1594,11 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 	pieceLength := t.Info().PieceLength
 	lastPieceLength := t.Length() - int64(totalPieces-1)*pieceLength
 
-	bucketList, err := pieceBuckets(t, rec.Selected, maxBuckets)
+	var streamStorage *DocumentTorrentStorage
+	if rec.DirectPlay {
+		streamStorage = s.storage.GetStorage(rec.InfoHash)
+	}
+	bucketList, err := pieceBuckets(t, rec.Selected, maxBuckets, streamStorage)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

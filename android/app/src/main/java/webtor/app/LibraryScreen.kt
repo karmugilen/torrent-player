@@ -507,15 +507,6 @@ private fun TorrentRow(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    entry.leftOffCaption()?.let { caption ->
-                        Text(
-                            text = caption,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
                 }
             }
             if (!entry.complete && !entry.directPlay) {

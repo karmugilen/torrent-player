@@ -56,13 +56,14 @@ fun PieceHeatGridSection(
     map: PieceTelemetry?,
     frozen: Boolean,
     files: List<SavedFile> = emptyList(),
+    memoryBuffer: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (map == null || map.buckets.isEmpty()) {
             Text(
-                "Pieces",
+                if (memoryBuffer) "RAM pieces" else "Pieces",
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = colors.onBackground,
             )
@@ -99,8 +100,8 @@ fun PieceHeatGridSection(
         val heightDp = remember(layout, canvasWidthPx, density) {
             pieceHeatHeightDp(layout, canvasWidthPx, density.density).dp
         }
-        val a11y = remember(summary, frozen) {
-            accessibilityPieceHeatSummary(summary) + if (frozen) " Map frozen." else ""
+        val a11y = remember(summary, frozen, memoryBuffer) {
+            accessibilityPieceHeatSummary(summary, memoryBuffer) + if (frozen) " Map paused." else ""
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -108,7 +109,7 @@ fun PieceHeatGridSection(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "Pieces",
+                if (memoryBuffer) "RAM pieces" else "Pieces",
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = colors.onBackground,
                 modifier = Modifier.weight(1f),
@@ -152,7 +153,7 @@ fun PieceHeatGridSection(
                 val verifiedColor = colors.primary
                 val receivingColor = Color(0xFFFFB300)
                 val receivingGlow = Color(0xFFFF6F00)
-                val missingColor = colors.outlineVariant.copy(alpha = 0.72f)
+                val missingColor = Color.Transparent
                 val missingStroke = colors.outline.copy(alpha = 0.35f)
                 val excludedStroke = colors.outline.copy(alpha = 0.55f)
                 val excludedFill = colors.surfaceVariant.copy(alpha = 0.25f)
@@ -224,18 +225,8 @@ fun PieceHeatGridSection(
                             fun band(fraction: Float): Float =
                                 (cell * fraction.coerceIn(0f, 1f)).coerceAtLeast(0f)
 
-                            var vH = band(bucket.verifiedFraction)
-                            // Keep a visible amber band whenever workers are active on this tile.
-                            var rH = if (working) {
-                                band(bucket.receivingFraction).coerceAtLeast(cell * 0.38f)
-                            } else {
-                                band(bucket.receivingFraction)
-                            }
-                            if (vH + rH > cell) {
-                                val scale = cell / (vH + rH)
-                                vH *= scale
-                                rH *= scale
-                            }
+                            val vH = band(bucket.verifiedFraction)
+                            val rH = band(bucket.receivingFraction)
                             val remain = (cell - vH - rH).coerceAtLeast(0f)
                             val mH = if (bucket.missing > 0 || bucket.excluded > 0) {
                                 remain * bucket.missingFraction /
@@ -330,7 +321,14 @@ fun PieceHeatGridSection(
                     }
                 }
 
-                PieceHeatLegend(summary = summary)
+                PieceHeatLegend(summary = summary, memoryBuffer = memoryBuffer)
+                if (memoryBuffer) {
+                    Text(
+                        "Filled = held in RAM. Evicted pieces become empty. Blocks can group several pieces.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
 
                 val peek = peekIndex?.let { idx -> buckets.getOrNull(idx)?.let { peekForBucket(it) } }
                 if (peek != null) {
@@ -341,7 +339,7 @@ fun PieceHeatGridSection(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
-                            peek.line(),
+                            peek.line(memoryBuffer),
                             style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                         )
@@ -353,7 +351,7 @@ fun PieceHeatGridSection(
 }
 
 @Composable
-private fun PieceHeatLegend(summary: PieceHeatSummary) {
+private fun PieceHeatLegend(summary: PieceHeatSummary, memoryBuffer: Boolean) {
     val colors = MaterialTheme.colorScheme
     Row(
         Modifier.fillMaxWidth(),
@@ -363,7 +361,7 @@ private fun PieceHeatLegend(summary: PieceHeatSummary) {
         LegendPill(
             color = colors.primary,
             hollow = false,
-            label = "Done",
+            label = if (memoryBuffer) "Buffered" else "Done",
             count = summary.selectedVerified,
             modifier = Modifier.weight(1f),
         )
@@ -376,8 +374,8 @@ private fun PieceHeatLegend(summary: PieceHeatSummary) {
         )
         LegendPill(
             color = colors.outlineVariant,
-            hollow = false,
-            label = "Waiting",
+            hollow = true,
+            label = if (memoryBuffer) "Empty" else "Waiting",
             count = summary.missing,
             modifier = Modifier.weight(1f),
         )

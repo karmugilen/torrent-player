@@ -92,6 +92,7 @@ func (st *DocumentTorrentStorage) attachDirectPlay(descriptors []*int, selected 
 	// Prepared transfers do not own payload data. Discard any unverified
 	// preparation buffers rather than trusting their old write bookkeeping.
 	st.cache, st.cacheDirty, st.cacheOrder, st.cacheBytes = make(map[int][]byte), make(map[int]bool), nil, 0
+	st.streamRevision++
 	pruneStartupCaches(st.baseDir, st.infoHash.HexString())
 	return nil
 }
@@ -269,6 +270,7 @@ func (st *DocumentTorrentStorage) ensureStreamSlotLocked(index int, expected int
 	}
 	st.cache[index] = make([]byte, expected)
 	st.cacheBytes += expected
+	st.streamRevision++
 	st.touchCacheLocked(index)
 	return true, nil
 }

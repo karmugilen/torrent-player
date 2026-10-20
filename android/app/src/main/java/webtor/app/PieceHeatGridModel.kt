@@ -92,8 +92,8 @@ data class PieceHeatPeek(
     val missing: Int,
     val excluded: Int,
 ) {
-    fun line(): String =
-        "Bucket $bucketIndex · pieces $start–$end · $selectedVerified verified · " +
+    fun line(memoryBuffer: Boolean = false): String =
+        "Bucket $bucketIndex · pieces $start–$end · $selectedVerified ${if (memoryBuffer) "buffered" else "verified"} · " +
             "$selectedReceiving receiving · $missing missing" +
             if (excluded > 0) " · $excluded excluded" else ""
 }
@@ -323,7 +323,11 @@ fun peekForBucket(bucket: NormalizedPieceBucket): PieceHeatPeek =
         excluded = bucket.excluded,
     )
 
-fun accessibilityPieceHeatSummary(summary: PieceHeatSummary): String {
+fun accessibilityPieceHeatSummary(summary: PieceHeatSummary, memoryBuffer: Boolean = false): String {
+    if (memoryBuffer) {
+        return "RAM pieces map. ${summary.selectedVerified} buffered, ${summary.selectedReceiving} receiving, " +
+            "${summary.missing} empty, ${summary.excluded} excluded. Evicted pieces become empty."
+    }
     val head = when (val pct = summary.verifiedPercent) {
         null -> "Pieces map. No selected pieces."
         else -> "Pieces map. $pct percent verified. ${summary.selectedReceiving} receiving."

@@ -162,6 +162,10 @@ type DocumentTorrentStorage struct {
 	startupPieces             map[int]bool
 	startupSaved              map[int]bool
 	streamDemand              map[int]bool
+	streamRevision            uint64
+	streamGridRevision        uint64
+	streamGridTotal           int
+	streamGridRuns            []pieceRun
 	onStreamEvict             func(int)
 	startupPending            map[int][]byte
 	startupWriting            bool
@@ -992,6 +996,8 @@ func (st *DocumentTorrentStorage) Close() error {
 		}
 	}
 	st.attached, st.cache, st.cacheDirty, st.cacheOrder, st.completed, st.cacheBytes = false, nil, nil, nil, nil, 0
+	st.streamRevision++
+	st.streamGridRuns = nil
 	st.pendingSync = nil
 	st.identities = nil
 	st.freezeTrusted.Store(false)
@@ -1016,6 +1022,9 @@ func (st *DocumentTorrentStorage) dropCacheLocked(index int) {
 			st.cacheBytes = 0
 		}
 		delete(st.cache, index)
+		if st.stream {
+			st.streamRevision++
+		}
 	}
 	delete(st.cacheDirty, index)
 	for i, v := range st.cacheOrder {
@@ -1320,6 +1329,7 @@ func (p *documentPiece) MarkComplete() error {
 			return errStreamEvicted
 		}
 		p.storage.completed[index] = true
+		p.storage.streamRevision++
 		p.storage.saveStartupPieceLocked(index)
 		p.storage.notifyStreamReadyLocked()
 		return nil
