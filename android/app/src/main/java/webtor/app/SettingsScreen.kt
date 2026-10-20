@@ -81,6 +81,7 @@ fun SettingsScreen(
     onAutoRamCache: () -> Unit = {},
     onPlaybackMethod: (PlaybackMethod) -> Unit = {},
     onPlayBoost: (Boolean) -> Unit = {},
+    onAdaptiveBuffer: (Boolean) -> Unit = {},
     onFileOnlyPlayback: (Boolean) -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
@@ -558,6 +559,13 @@ fun SettingsScreen(
                             }
                             Switch(checked = state.playBoost, onCheckedChange = onPlayBoost)
                         }
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Adaptive buffer",
+                            supporting = "Experimental. Adds look-ahead when read demand varies and reduces it when demand settles. Keeps the same RAM limit. Applies next time you press Play.",
+                            checked = state.adaptiveBuffer,
+                            onCheckedChange = onAdaptiveBuffer,
+                        )
                         SectionDivider()
                         SwitchRow(
                             title = "Play this file only",

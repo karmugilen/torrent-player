@@ -78,7 +78,8 @@ type playbackPriorityCoordinator struct {
 	resumeSuspended  bool
 	// playBoost is the latest /play boost flag per file index. Readers copy it
 	// at open so a later play does not resize an already-open window.
-	playBoost map[int]bool
+	playBoost       map[int]bool
+	adaptiveBuffers map[int]bool
 }
 
 func newPlaybackPriorityCoordinator(t *torrent.Torrent) *playbackPriorityCoordinator {
@@ -103,6 +104,19 @@ func (c *playbackPriorityCoordinator) setPlayBoost(fileIndex int, boost bool) {
 		return
 	}
 	delete(c.playBoost, fileIndex)
+}
+
+func (c *playbackPriorityCoordinator) setAdaptiveBuffer(fileIndex int, enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if enabled {
+		if c.adaptiveBuffers == nil {
+			c.adaptiveBuffers = make(map[int]bool)
+		}
+		c.adaptiveBuffers[fileIndex] = true
+	} else {
+		delete(c.adaptiveBuffers, fileIndex)
+	}
 }
 
 func (c *playbackPriorityCoordinator) update(owner *playbackReader, demand map[int]torrent.PiecePriority) {
@@ -242,6 +256,7 @@ type playbackReader struct {
 	forwardBytes    int64
 	lastReadTime    time.Time
 	readRate        float64
+	bufferControl   *demandBufferController
 
 	positioned bool
 	cursor     int64
@@ -355,6 +370,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	p.priorityOwner = s.ensurePlaybackCoordinator(rec.Torrent)
 	p.priorityOwner.mu.Lock()
 	boost := p.priorityOwner.playBoost[index]
+	adaptiveBuffer := p.priorityOwner.adaptiveBuffers[index]
 	if rec.DirectPlay && len(p.priorityOwner.readers) >= 4 {
 		p.priorityOwner.mu.Unlock()
 		cancel()
@@ -372,6 +388,9 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	p.priorityOwner.mu.Unlock()
 	if boost {
 		p.forwardBytes = playbackUrgentBytes + playbackBoostReadaheadBytes
+	}
+	if adaptiveBuffer {
+		p.bufferControl = &demandBufferController{window: p.forwardBytes}
 	}
 	if rec.FileOnly && focusChanged {
 		s.applySavedFilePriorities(rec)
@@ -452,6 +471,9 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 					limit = playbackUrgentBytes + playbackBoostReadaheadBytes
 				}
 				p.forwardBytes = max(int64(4<<20), min(limit, int64(p.readRate*8)))
+				if p.bufferControl != nil {
+					p.forwardBytes = p.bufferControl.observe(rate, limit)
+				}
 			}
 		}
 		p.lastReadTime = now

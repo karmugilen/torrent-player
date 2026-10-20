@@ -123,6 +123,7 @@ class EngineClientTest {
         assertEquals(2, json.getInt("fileIndex"))
         assertEquals(75L, json.getLong("offset"))
         assertFalse(json.has("boost"))
+        assertFalse(json.has("adaptiveBuffer"))
     }
 
     @Test
@@ -155,6 +156,17 @@ class EngineClientTest {
         val body = JSONObject(clear.body.readUtf8())
         assertEquals("abc", body.getString("id"))
         assertFalse(body.getBoolean("enabled"))
+    }
+
+    @Test
+    fun playCanOptIntoAdaptiveBuffering() {
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","fileIndex":1,"name":"a.mp4","length":100,"streamUrl":"http://127.0.0.1:8000/x"}"""))
+        client.play("abc", 1, adaptiveBuffer = true)
+        val request = transport.takeRequest()
+        assertEquals("/play", request.path)
+        val body = JSONObject(request.body.readUtf8())
+        assertTrue(body.getBoolean("adaptiveBuffer"))
+        assertFalse(body.has("boost"))
     }
 
     @Test

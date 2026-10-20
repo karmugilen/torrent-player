@@ -178,12 +178,13 @@ class EngineClient(
         return parseTorrent(json)
     }
 
-    fun play(id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false): PlayInfo {
+    fun play(id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false, adaptiveBuffer: Boolean = false): PlayInfo {
         val body = JSONObject().put("id", id)
         if (fileIndex != null) body.put("fileIndex", fileIndex)
         if (offset != null) body.put("offset", offset.coerceAtLeast(0L))
         if (boost) body.put("boost", true)
         if (fileOnly) body.put("fileOnly", true)
+        if (adaptiveBuffer) body.put("adaptiveBuffer", true)
         return parsePlay(post("/play", body))
     }
 

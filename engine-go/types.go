@@ -81,6 +81,8 @@ type PlayRequest struct {
 	Boost bool `json:"boost,omitempty"`
 	// FileOnly limits a saved download to the played file until playback ends.
 	FileOnly bool `json:"fileOnly,omitempty"`
+	// AdaptiveBuffer enables experimental demand-variation headroom per play.
+	AdaptiveBuffer bool `json:"adaptiveBuffer,omitempty"`
 }
 
 // FocusRequest changes the background download focus. A null fileIndex clears

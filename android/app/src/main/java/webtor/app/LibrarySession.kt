@@ -173,6 +173,7 @@ class LibrarySession(
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
                         playBoost = settings.getBoolean("playBoost", false),
+                        adaptiveBuffer = settings.getBoolean("adaptiveBuffer", false),
                         fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", true),
                         fastPeerSearch = settings.getBoolean("fastPeerSearch", false),
                         pauseOnLowBattery = pauseOnLowBattery,
@@ -333,6 +334,11 @@ class LibrarySession(
     fun setPlayBoost(enabled: Boolean) {
         settings.edit().putBoolean("playBoost", enabled).apply()
         _ui.update { it.copy(playBoost = enabled) }
+    }
+
+    fun setAdaptiveBuffer(enabled: Boolean) {
+        settings.edit().putBoolean("adaptiveBuffer", enabled).apply()
+        _ui.update { it.copy(adaptiveBuffer = enabled) }
     }
 
     fun setFileOnlyPlayback(enabled: Boolean) {
@@ -1411,7 +1417,10 @@ class LibrarySession(
                 val content = playbackEvent(current, file)
                 val fileOnly = _ui.value.fileOnlyPlayback && !current.directPlay
                 val info = withContext(io) {
-                    client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint(), boost = _ui.value.playBoost, fileOnly = fileOnly)
+                    client.play(
+                        id, targetIndex, if (fromStart) 0L else file.resumeByteHint(),
+                        boost = _ui.value.playBoost, fileOnly = fileOnly, adaptiveBuffer = _ui.value.adaptiveBuffer,
+                    )
                 }
                 if (fileOnly) activeFileOnlyPlayback = content.uri to id
                 if (_ui.value.preloadStart) awaitPlaybackPreload(id, targetIndex, file.length)

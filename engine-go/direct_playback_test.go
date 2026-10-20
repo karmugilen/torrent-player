@@ -15,6 +15,11 @@ import (
 )
 
 func TestDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T) {
+	t.Run("default", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, false) })
+	t.Run("adaptive buffer", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, true) })
+}
+
+func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive bool) {
 	if testing.Short() {
 		t.Skip("local peer transfer")
 	}
@@ -87,6 +92,12 @@ func TestDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T) {
 	}
 	if rec.Torrent.AddClientPeer(seed.client) == 0 {
 		t.Fatal("no seed address")
+	}
+	if adaptive {
+		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": true})
+		if code, response := leech.DispatchControl("POST", "/play", string(body)); code != 200 {
+			t.Fatalf("adaptive play: %d %s", code, response)
+		}
 	}
 	p, err := leech.OpenPlayback(rec.ID, 0)
 	if err != nil {

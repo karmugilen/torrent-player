@@ -1267,6 +1267,7 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	s.applyBackgroundFocus(rec)
 	coordinator := s.ensurePlaybackCoordinator(t)
 	coordinator.setPlayBoost(fileIdx, req.Boost)
+	coordinator.setAdaptiveBuffer(fileIdx, req.AdaptiveBuffer)
 	coordinator.prepareResume(targetFile, req.Offset)
 
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/torrent/%s/file/%d", s.streamPort, rec.ID, fileIdx)

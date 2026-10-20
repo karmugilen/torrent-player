@@ -168,6 +168,7 @@ class MainActivity : ComponentActivity() {
                                 onPickFolder = session::pickFolder,
                                 onClearFolder = session::clearFolder,
                                 onPlayBoost = session::setPlayBoost,
+                                onAdaptiveBuffer = session::setAdaptiveBuffer,
                                 onFileOnlyPlayback = session::setFileOnlyPlayback,
                                 onNetworkPolicy = session::setNetworkPolicy,
                                 onDownloadRateKiB = session::setDownloadRateKiB,

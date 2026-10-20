@@ -67,6 +67,7 @@ data class UiState(
     val hasCustomFolder: Boolean = false,
     val storageAccessWarning: String? = null,
     val playBoost: Boolean = false,
+    val adaptiveBuffer: Boolean = false,
     val fileOnlyPlayback: Boolean = true,
     val downloadRateKiB: Int = 0,
     val fastPeerSearch: Boolean = false,
