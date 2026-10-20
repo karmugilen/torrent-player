@@ -147,6 +147,7 @@ fun TorrentFilesScreen(
             list
         }
     }
+    val leftOff = leftOffChoice(entry.files, entry.selected)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -197,6 +198,7 @@ fun TorrentFilesScreen(
                     entry, error,
                     magnetAvailable = magnetUri != null,
                     copiedMagnet = copiedMagnet,
+                    leftOff = leftOff,
                     onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
                     onCopyMagnet = {
                         magnetUri?.let {
@@ -278,6 +280,7 @@ fun TorrentFilesScreen(
                     focused = entry.focusedFile == file.index,
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
+                    comeBack = leftOff?.file?.index == file.index,
                 )
             }
             // Diagnostics follow files
@@ -304,6 +307,7 @@ private fun DownloadSummary(
     copiedMagnet: Boolean,
     onShareMagnet: () -> Unit,
     onCopyMagnet: () -> Unit,
+    leftOff: LeftOffChoice?,
 ) {
     val colors = MaterialTheme.colorScheme
     val isPaused = entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
@@ -326,6 +330,15 @@ private fun DownloadSummary(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+            leftOff?.let { choice ->
+                Text(
+                    leftOffSummaryLine(choice.file, choice.qualifyingCount),
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                    color = colors.secondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(
                 label,
                 Modifier
@@ -557,6 +570,7 @@ private fun TorrentFileRow(
     focused: Boolean = false,
     directPlay: Boolean = false,
     pairedSubtitles: List<String> = emptyList(),
+    comeBack: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -565,6 +579,18 @@ private fun TorrentFileRow(
     val canPlayVideo = isVideo && (directPlay || !file.uri.isNullOrBlank()) && (isSelected || complete)
     val canOpenOther = !isVideo && (isSelected || complete) && !file.uri.isNullOrBlank() && complete
     val showPriority = isSelected && !directPlay && !complete
+    val priorityDownload = focused && showPriority
+    val folder = parentFolderLabel(file.name, file.path)
+    val leftOffText = if (isVideo && showsLeftOffTime(file.playbackPositionMs, file.playbackDurationMs)) {
+        leftOffLine(file.playbackPositionMs)
+    } else {
+        null
+    }
+    val watched = if (isVideo && showsPlaybackBar(file.playbackPositionMs, file.playbackDurationMs)) {
+        playbackFraction(file.playbackPositionMs, file.playbackDurationMs)
+    } else {
+        null
+    }
     val statusText = when {
         !isSelected -> "Not selected"
         directPlay -> if (paused) "Direct Play · paused" else "Direct Play"
@@ -578,7 +604,14 @@ private fun TorrentFileRow(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow),
-        border = BorderStroke(1.dp, if (focused && showPriority) colors.primary else colors.outlineVariant.copy(alpha = 0.6f)),
+        border = BorderStroke(
+            1.dp,
+            when (detailFileBorder(priorityDownload, comeBack)) {
+                DetailFileBorder.PRIORITY -> colors.primary
+                DetailFileBorder.LEFT_OFF -> colors.secondary
+                DetailFileBorder.NEUTRAL -> colors.outlineVariant.copy(alpha = 0.6f)
+            },
+        ),
     ) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
@@ -593,15 +626,63 @@ private fun TorrentFileRow(
                     modifier = Modifier.size(48.dp),
                 )
                 Column(Modifier.weight(1f).padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        file.name,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = colors.onSurface,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (focused && showPriority) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            file.name,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            detailTypeLabel(file.name, file.path),
+                            modifier = Modifier.padding(top = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    folder?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (priorityDownload) {
                         Text("Priority download", style = MaterialTheme.typography.labelSmall, color = colors.primary)
+                    }
+                    if (comeBack) {
+                        Text(
+                            "Left off here",
+                            modifier = Modifier
+                                .background(colors.secondaryContainer, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.onSecondaryContainer,
+                        )
+                    }
+                    leftOffText?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = colors.secondary)
+                    }
+                    watched?.let { fraction ->
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(2.dp)
+                                .clip(MaterialTheme.shapes.extraSmall)
+                                .background(colors.surfaceContainerHighest),
+                        ) {
+                            Box(
+                                Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(fraction)
+                                    .background(colors.secondary),
+                            )
+                        }
                     }
                     Text(
                         if (directPlay) "${formatBytes(file.length)} · $statusText"

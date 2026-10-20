@@ -87,3 +87,27 @@ fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String>
         multiple = active.size > 1,
     )
 }
+
+/** One library status line, or null when nothing is transferring or blocked. */
+fun libraryActivityLine(entries: List<DownloadEntry>): String? {
+    val downloads = entries.count { !it.directPlay && it.hasActiveTransfer() }
+    val directPlays = entries.count { it.directPlay && it.hasActiveTransfer() }
+    val attention = entries.count { it.matchesFilter(LibraryFilter.NEEDS_ATTENTION) }
+    val speed = entries.sumOf { entry ->
+        val live = entry.liveDownloadSpeed()
+        if (live != null && live > 0L) live else 0L
+    }
+    val parts = listOfNotNull(
+        activityCount(downloads, "download", "downloads"),
+        activityCount(directPlays, "direct play", "direct plays"),
+        if (speed > 0L) formatSpeed(speed) else null,
+        activityCount(attention, "needs attention", "need attention"),
+    )
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
+private fun activityCount(count: Int, singular: String, plural: String): String? = when (count) {
+    0 -> null
+    1 -> "1 $singular"
+    else -> "$count $plural"
+}

@@ -8,11 +8,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -87,11 +89,18 @@ fun LibraryScreen(
     }
 
     val colors = MaterialTheme.colorScheme
+    val filterCounts = remember(state.library, query) {
+        val searched = state.library.filterLibrary(query)
+        LibraryFilter.entries.associateWith { kind -> searched.count { it.matchesFilter(kind) } }
+    }
     val visible by produceState(state.library, state.library, sort, filter, query) {
         value = withContext(Dispatchers.Default) {
             state.library.stableLibrarySort(sort).applyFilter(filter).filterLibrary(query)
         }
     }
+    val showContinue = query.isBlank() && filter == LibraryFilter.ALL && !inSelectionMode
+    val continueTargets = if (showContinue) state.library.continueWatchingTargets() else emptyList()
+    val activityLine = libraryActivityLine(state.library)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -188,6 +197,21 @@ fun LibraryScreen(
             if (!state.engineReady || state.restoring) item { LibraryNotice(state.statusLine) }
             state.error?.takeIf { !state.addSheetOpen }?.let { item { LibraryNotice(it, true) } }
             state.loadWarning?.let { item { LibraryNotice(it, true) } }
+            activityLine?.let { line ->
+                item {
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            if (continueTargets.isNotEmpty()) {
+                item { ContinueWatchingSection(continueTargets, onPlay) }
+            }
 
             if (state.library.isNotEmpty()) item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -233,17 +257,16 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            listOf(
-                                LibraryFilter.ALL to "All",
-                                LibraryFilter.ACTIVE to "Active",
-                                LibraryFilter.READY to "Ready",
-                                LibraryFilter.NEEDS_ATTENTION to "Attention",
-                            ).forEach { (f, label) ->
-                                val isSelected = filter == f
+                            LibraryFilter.entries.forEach { kind ->
                                 FilterChip(
-                                    selected = isSelected,
-                                    onClick = { filter = f },
-                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                    selected = filter == kind,
+                                    onClick = { filter = kind },
+                                    label = {
+                                        Text(
+                                            "${kind.label()} ${filterCounts[kind] ?: 0}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    },
                                 )
                             }
                         }
@@ -253,7 +276,7 @@ fun LibraryScreen(
                         Box {
                             TextButton(onClick = { sortMenuOpen = true }) {
                                 Text(
-                                    "Sort: ${sort.name.lowercase().replaceFirstChar { it.uppercase() }}",
+                                    "Sort: ${sort.label()}",
                                     style = MaterialTheme.typography.labelSmall,
                                 )
                             }
@@ -263,7 +286,7 @@ fun LibraryScreen(
                             ) {
                                 LibrarySort.entries.forEach { s ->
                                     DropdownMenuItem(
-                                        text = { Text(s.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                                        text = { Text(s.label()) },
                                         onClick = {
                                             sort = s
                                             sortMenuOpen = false
@@ -321,7 +344,7 @@ fun LibraryScreen(
                                 }
                                 else -> {
                                     Text(
-                                        text = "No ${filter.name.lowercase().replace('_', ' ')} downloads",
+                                        text = filter.emptyTitle(),
                                         style = MaterialTheme.typography.titleMedium,
                                         textAlign = TextAlign.Center,
                                     )
@@ -349,7 +372,13 @@ fun LibraryScreen(
                     },
                     onPause = { onPause(entry) },
                     onResume = { onResume(entry) },
-                    onPlay = { onPlay(entry, null) },
+                    onPlay = {
+                        val selectedVideos = entry.files.count {
+                            it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName())
+                        }
+                        val resume = entry.resumeFile()
+                        onPlay(entry, if (selectedVideos > 1) resume?.index else null)
+                    },
                     onOpen = {
                         if (inSelectionMode) {
                             selectedKeys = if (isSelected) selectedKeys - entry.key else selectedKeys + entry.key
@@ -399,6 +428,81 @@ fun LibraryScreen(
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun ContinueWatchingSection(
+    targets: List<ContinueWatchingTarget>,
+    onPlay: (DownloadEntry, Int?) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            "Continue",
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(targets, key = { "${it.entry.key}:${it.file.index}" }) { target ->
+                ContinueWatchingCard(target) { onPlay(target.entry, target.file.index) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContinueWatchingCard(
+    target: ContinueWatchingTarget,
+    onPlay: () -> Unit,
+) {
+    val entry = target.entry
+    val file = target.file
+    ThemedCard(
+        modifier = Modifier
+            .width(232.dp)
+            .clickable(onClick = onPlay),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                entry.title,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (entry.hasMultipleVideos()) {
+                Text(
+                    file.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                "Left off at ${playbackTime(file.playbackPositionMs)}",
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (file.playbackDurationMs > 0L) {
+                val fraction = (file.playbackPositionMs.toFloat() / file.playbackDurationMs.toFloat()).coerceIn(0f, 1f)
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surface,
+                )
+            }
+            Button(onClick = onPlay) {
+                Icon(Icons.Default.PlayArrow, contentDescription = null)
+                Spacer(Modifier.width(4.dp))
+                Text("Play")
+            }
+        }
     }
 }
 
@@ -485,6 +589,15 @@ private fun TorrentRow(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    entry.leftOffCaption()?.let { caption ->
+                        Text(
+                            text = caption,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
             if (!entry.complete && !entry.directPlay) {
@@ -512,13 +625,21 @@ private fun TorrentRow(
                 ) {
                     val selectedVideos = entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
                     val isMultiVideo = selectedVideos.size > 1
+                    val resumeIndex = if (isMultiVideo) entry.resumeFile()?.index else null
+                    val playsResume = resumeIndex != null
                     val canPlay = entry.canPlay()
                     val isVideo = mediaType(entry) == "Video"
+                    val playIndex = resumeIndex ?: pickPlayIndex(entry)
 
                     if (canPlay || entry.complete) {
                         Button(
-                            onClick = if (isMultiVideo) onOpen else if (canPlay) onPlay else onOpen,
-                            enabled = !busy && (!entry.checking || completedPlayFile(entry, pickPlayIndex(entry)) != null),
+                            onClick = when {
+                                playsResume -> onPlay
+                                isMultiVideo -> onOpen
+                                canPlay -> onPlay
+                                else -> onOpen
+                            },
+                            enabled = !busy && (!entry.checking || completedPlayFile(entry, playIndex) != null),
                         ) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null)
                             Spacer(Modifier.width(4.dp))

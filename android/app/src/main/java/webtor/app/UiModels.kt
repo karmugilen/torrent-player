@@ -70,6 +70,13 @@ data class UiState(
 
 /** User-facing library ordering. Kept pure so it is deterministic across restore/recomposition. */
 enum class LibrarySort { RECENT, NAME, PROGRESS, STATUS }
+
+fun LibrarySort.label(): String = when (this) {
+    LibrarySort.RECENT -> "Recent"
+    LibrarySort.NAME -> "Name"
+    LibrarySort.PROGRESS -> "Progress"
+    LibrarySort.STATUS -> "Status"
+}
 enum class TransferNetworkPolicy { ANY, WIFI_ONLY, UNMETERED }
 fun transferAllowed(policy: TransferNetworkPolicy, connected: Boolean, wifi: Boolean, metered: Boolean) = connected && when (policy) {
     TransferNetworkPolicy.ANY -> true
@@ -108,6 +115,20 @@ fun List<DownloadEntry>.filterLibrary(query: String): List<DownloadEntry> {
 
 enum class LibraryFilter { ALL, ACTIVE, READY, NEEDS_ATTENTION }
 
+fun LibraryFilter.label(): String = when (this) {
+    LibraryFilter.ALL -> "All"
+    LibraryFilter.ACTIVE -> "Active"
+    LibraryFilter.READY -> "Ready"
+    LibraryFilter.NEEDS_ATTENTION -> "Attention"
+}
+
+fun LibraryFilter.emptyTitle(): String = when (this) {
+    LibraryFilter.ALL -> "No downloads"
+    LibraryFilter.ACTIVE -> "No active downloads"
+    LibraryFilter.READY -> "No ready downloads"
+    LibraryFilter.NEEDS_ATTENTION -> "Nothing needs attention"
+}
+
 fun DownloadEntry.matchesFilter(filter: LibraryFilter): Boolean = when (filter) {
     LibraryFilter.ALL -> true
     LibraryFilter.ACTIVE -> !paused && !complete && (lifecycleState == EntryLifecycleState.DOWNLOADING || lifecycleState == EntryLifecycleState.PREPARING || checking)
@@ -123,46 +144,42 @@ data class ContinueWatchingTarget(
     val file: SavedFile,
 )
 
-fun List<DownloadEntry>.findContinueWatchingTarget(): ContinueWatchingTarget? {
-    var bestTarget: ContinueWatchingTarget? = null
-    var bestBookmarkTime: Long = -1L
-    var bestAddedAt: Long = -1L
+private val continueWatchingOrder = compareByDescending<ContinueWatchingTarget> { it.file.bookmarkUpdatedAt }
+    .thenByDescending { it.entry.addedAt }
+    .thenByDescending { it.entry.key }
+    .thenBy { it.file.index }
 
-    for (entry in this) {
-        if (entry.controlsBusy() || !entry.metadataReady) continue
-        for (file in entry.files) {
-            // Must be a playable video file
-            if (!file.name.isVideoName() && !file.path.isVideoName()) continue
-            if (file.playbackPositionMs <= 0L) continue
-            if (file.index !in entry.selected && !file.isVerifiedComplete) continue
-            if (!entry.directPlay && file.uri.isNullOrBlank()) continue
-            if (file.playbackDurationMs > 0L && file.playbackPositionMs >= file.playbackDurationMs - 3000L) {
-                continue
-            }
-
-            val bTime = file.bookmarkUpdatedAt
-            val aTime = entry.addedAt
-
-            val isBetter = when {
-                bestTarget == null -> true
-                bTime > bestBookmarkTime -> true
-                bTime == bestBookmarkTime && bTime > 0L -> {
-                    if (aTime != bestAddedAt) aTime > bestAddedAt
-                    else entry.key > bestTarget.entry.key || (entry.key == bestTarget.entry.key && file.index < bestTarget.file.index)
-                }
-                bTime == 0L && bestBookmarkTime == 0L -> {
-                    if (aTime != bestAddedAt) aTime > bestAddedAt
-                    else entry.key > bestTarget.entry.key || (entry.key == bestTarget.entry.key && file.index < bestTarget.file.index)
-                }
-                else -> false
-            }
-
-            if (isBetter) {
-                bestTarget = ContinueWatchingTarget(entry, file)
-                bestBookmarkTime = bTime
-                bestAddedAt = aTime
-            }
+fun List<DownloadEntry>.continueWatchingTargets(limit: Int = 8): List<ContinueWatchingTarget> {
+    if (limit <= 0) return emptyList()
+    return flatMap { entry ->
+        if (entry.controlsBusy() || !entry.metadataReady) emptyList()
+        else entry.files.mapNotNull { file ->
+            if (!file.isContinueCandidate(entry)) null else ContinueWatchingTarget(entry, file)
         }
-    }
-    return bestTarget
+    }.sortedWith(continueWatchingOrder).take(limit)
+}
+
+fun List<DownloadEntry>.findContinueWatchingTarget(): ContinueWatchingTarget? =
+    continueWatchingTargets(limit = Int.MAX_VALUE).firstOrNull()
+
+/** Best unfinished bookmark inside this torrent, using the continue-watching order. */
+fun DownloadEntry.resumeFile(): SavedFile? =
+    listOf(this).continueWatchingTargets(limit = 1).firstOrNull()?.file
+
+fun DownloadEntry.hasMultipleVideos(): Boolean =
+    files.count { it.name.isVideoName() || it.path.isVideoName() } > 1
+
+fun DownloadEntry.leftOffCaption(): String? {
+    val file = resumeFile() ?: return null
+    val leftOff = "Left off at ${playbackTime(file.playbackPositionMs)}"
+    return if (hasMultipleVideos()) "$leftOff · ${file.name}" else leftOff
+}
+
+private fun SavedFile.isContinueCandidate(entry: DownloadEntry): Boolean {
+    if (!name.isVideoName() && !path.isVideoName()) return false
+    if (playbackPositionMs <= 0L) return false
+    if (index !in entry.selected && !isVerifiedComplete) return false
+    if (!entry.directPlay && uri.isNullOrBlank()) return false
+    if (playbackDurationMs > 0L && playbackPositionMs >= playbackDurationMs - 3000L) return false
+    return true
 }

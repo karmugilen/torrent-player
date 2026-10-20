@@ -99,6 +99,82 @@ class DownloadEntryTest {
     }
 
     @Test
+    fun continueWatchingTargetsAreNewestFirstAndAgreeWithTheSingleTarget() {
+        fun mark(index: Int, name: String, position: Long, updated: Long, duration: Long = 100_000L) =
+            file(index, 100, 1.0, name).copy(
+                uri = "content://downloads/$name",
+                playbackPositionMs = position,
+                playbackDurationMs = duration,
+                bookmarkUpdatedAt = updated,
+            )
+
+        val older = entry(listOf(mark(0, "old.mkv", 12_000L, 1_000L)), setOf(0))
+            .copy(key = "b-older", title = "Older", addedAt = 10L)
+        val finished = mark(1, "done.mkv", 97_000L, 9_000L)
+        val middle = mark(2, "mid.mkv", 20_000L, 4_000L)
+        val newest = mark(0, "new.mkv", 724_000L, 8_000L, duration = 3_600_000L)
+        val series = entry(listOf(newest, finished, middle), setOf(0, 1, 2))
+            .copy(key = "a-series", title = "Show", addedAt = 5L)
+        val sameTimeLowerKey = entry(listOf(mark(0, "later.mkv", 8_000L, 4_000L)), setOf(0))
+            .copy(key = "m-add", title = "Later add", addedAt = 50L)
+        val sameTimeHigherKey = entry(listOf(mark(0, "key.mkv", 8_000L, 4_000L)), setOf(0))
+            .copy(key = "z-key", title = "Key", addedAt = 50L)
+        val tied = entry(listOf(
+            mark(4, "high.mkv", 6_000L, 3_000L),
+            mark(1, "low.mkv", 5_000L, 3_000L),
+        ), setOf(1, 4)).copy(key = "tie", title = "Tie", addedAt = 1L)
+        val busy = series.copy(key = "busy", isDeleting = true, lifecycleState = EntryLifecycleState.DELETING)
+        val all = listOf(older, series, sameTimeLowerKey, sameTimeHigherKey, tied, busy)
+
+        val targets = all.continueWatchingTargets()
+        assertEquals(
+            listOf("a-series", "z-key", "m-add", "a-series", "tie", "tie", "b-older"),
+            targets.map { it.entry.key },
+        )
+        assertEquals(listOf(0, 0, 0, 2, 1, 4, 0), targets.map { it.file.index })
+        assertFalse(targets.any { it.file.name == "done.mkv" })
+        assertEquals(targets.first(), all.findContinueWatchingTarget())
+        assertEquals(targets.take(2), all.continueWatchingTargets(limit = 2))
+        assertEquals(0, series.resumeFile()?.index)
+        assertEquals("Left off at 12:04 · new.mkv", series.leftOffCaption())
+        assertEquals("Left off at 0:12", older.leftOffCaption())
+        assertNull(entry(listOf(finished), setOf(1)).resumeFile())
+
+        val many = (0 until 9).map { i ->
+            entry(listOf(mark(0, "e$i.mkv", 5_000L, 1_000L + i)), setOf(0))
+                .copy(key = "k$i", title = "Many $i", addedAt = i.toLong())
+        }
+        val listed = many.continueWatchingTargets()
+        assertEquals((8 downTo 1).map { "k$it" }, listed.map { it.entry.key })
+        assertEquals(listed.first(), many.findContinueWatchingTarget())
+    }
+
+    @Test
+    fun continueWatchingSkipsBusyMissingUriAndUnselectedIncomplete() {
+        val marked = file(0, 100, 0.4, "movie.mkv").copy(
+            playbackPositionMs = 8_000L, playbackDurationMs = 90_000L, bookmarkUpdatedAt = 20L,
+        )
+        val saved = entry(listOf(marked), setOf(0))
+        assertNull(listOf(saved).findContinueWatchingTarget())
+        val direct = saved.copy(directPlay = true, key = "dp")
+        assertEquals("dp", listOf(direct).findContinueWatchingTarget()?.entry?.key)
+        assertNull(listOf(direct.copy(metadataReady = false)).findContinueWatchingTarget())
+        assertNull(listOf(direct.copy(isDeleting = true, lifecycleState = EntryLifecycleState.DELETING)).findContinueWatchingTarget())
+
+        val unselectedPartial = entry(listOf(marked.copy(uri = "content://partial")), emptySet())
+        assertNull(listOf(unselectedPartial).findContinueWatchingTarget())
+        val unselectedDone = entry(listOf(file(0, 100, 1.0, "done.mkv").copy(
+            uri = "content://done", playbackPositionMs = 8_000L, bookmarkUpdatedAt = 20L,
+        )), emptySet())
+        assertEquals(0, listOf(unselectedDone).findContinueWatchingTarget()?.file?.index)
+
+        val atEnd = marked.copy(uri = "content://end", playbackPositionMs = 87_000L)
+        assertNull(listOf(entry(listOf(atEnd), setOf(0))).findContinueWatchingTarget())
+        val justBefore = atEnd.copy(playbackPositionMs = 86_999L)
+        assertEquals(86_999L, listOf(entry(listOf(justBefore), setOf(0))).findContinueWatchingTarget()?.file?.playbackPositionMs)
+    }
+
+    @Test
     fun naturalEpisodeOrderingSortsEpisodesProperly() {
         val ep1 = file(0, 100, 1.0, "Show.S01E01.mkv")
         val ep2 = file(1, 100, 1.0, "Show.S01E02.mkv")

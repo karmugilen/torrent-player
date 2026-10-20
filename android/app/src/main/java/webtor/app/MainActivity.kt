@@ -208,6 +208,7 @@ class MainActivity : ComponentActivity() {
                             onToggle = session::toggleFile,
                             onSelectAll = session::selectAllFiles,
                             onSelectNone = session::selectNoFiles,
+                            onSelectVideos = session::selectVideoFiles,
                             onDownload = session::startDownload,
                             onDirectPlay = session::startDirectPlay,
                             directPlayDefault = state.directPlayDefault,

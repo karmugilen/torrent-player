@@ -37,6 +37,7 @@ fun AddSheet(
     onOpenFile: () -> Unit, onDismiss: () -> Unit, draft: PrepareDraft? = null,
     freeBytes: Long = 0, onToggle: ((Int) -> Unit)? = null,
     onSelectAll: (() -> Unit)? = null, onSelectNone: (() -> Unit)? = null,
+    onSelectVideos: (() -> Unit)? = null,
     onDownload: (() -> Unit)? = null,
     onDirectPlay: (() -> Unit)? = null, directPlayDefault: Boolean = false,
     destination: String = "Downloads/Webtor",
@@ -54,6 +55,8 @@ fun AddSheet(
     val visibleFiles = remember(files, query, videosOnly) {
         files.filter { (!videosOnly || it.name.isVideoName()) && (query.isBlank() || it.path.contains(query.trim(), ignoreCase = true) || it.name.contains(query.trim(), ignoreCase = true)) }
     }
+    val hasVideo = files.any { it.name.isVideoName() }
+    val hiddenByVideosOnly = if (videosOnly) files.count { !it.name.isVideoName() } else 0
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedBytes
     val canAddPending = !ready && draft != null && !busy && existingEntry == null && onDownload != null && engineReady
@@ -101,6 +104,11 @@ fun AddSheet(
                             Text("Open existing torrent")
                         }
                     } else {
+                        if (ready) Text(
+                            "Download writes the selected files into the destination folder. Direct Play keeps the video in RAM and does not save the movie.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Button(
                             onClick = { if (directPlayDefault && ready) onDirectPlay?.invoke() else onDownload?.invoke() },
                             enabled = if (directPlayDefault && ready) selection.isNotEmpty() && !busy else canDownload,
@@ -112,7 +120,13 @@ fun AddSheet(
                             onClick = { if (directPlayDefault) onDownload?.invoke() else onDirectPlay?.invoke() },
                             enabled = !busy && selection.isNotEmpty() && (!directPlayDefault || !insufficientSpace),
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text(if (directPlayDefault) "Save for offline (Download full files)" else "Watch now (Direct Play · stream without saving)") }
+                        ) {
+                            Text(
+                                if (directPlayDefault) "Save for offline (Download)" else "Watch now (Direct Play)",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }
@@ -137,12 +151,21 @@ fun AddSheet(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(torrent?.name ?: "Choose files", style = MaterialTheme.typography.titleMedium)
                         Text("${selection.size} of ${files.size} files selected · ${formatBytes(selectedBytes)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("Videos are selected by default when available.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Videos and matching subtitles start selected.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
                             TextButton(onClick = { onSelectAll?.invoke() }, enabled = !busy) { Text("Select all") }
                             TextButton(onClick = { onSelectNone?.invoke() }, enabled = !busy) { Text("Select none") }
+                            TextButton(onClick = { onSelectVideos?.invoke() }, enabled = !busy && hasVideo) { Text("Videos") }
                             FilterChip(selected = videosOnly, onClick = { videosOnly = !videosOnly }, label = { Text("Videos only") })
                         }
+                        if (hiddenByVideosOnly > 0) Text(
+                            if (hiddenByVideosOnly == 1) "Videos only hides 1 file." else "Videos only hides $hiddenByVideosOnly files.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         OutlinedTextField(
                             value = query, onValueChange = { query = it }, singleLine = true,
                             modifier = Modifier.fillMaxWidth(), label = { Text("Search files") },
@@ -169,7 +192,11 @@ fun AddSheet(
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(file.path.ifBlank { file.name }, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-                                Text(formatBytes(file.length), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${fileKindLabel(file.name, file.path)} · ${formatBytes(file.length)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -259,4 +286,11 @@ private fun SourceInput(
             Text(if (ready) "Choose another torrent file" else "Open torrent file")
         }
     }
+}
+
+private fun fileKindLabel(name: String, path: String): String = when {
+    name.isVideoName() || path.isVideoName() -> "Video"
+    name.isSubtitleName() || path.isSubtitleName() -> "Subtitle"
+    name.isAudioName() || path.isAudioName() -> "Audio"
+    else -> "Other"
 }

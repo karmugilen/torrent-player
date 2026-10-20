@@ -666,6 +666,14 @@ class LibrarySession(
         syncPrepareSelection()
     }
 
+    fun selectVideoFiles() {
+        _ui.update { state ->
+            val files = state.prepare?.torrent?.files ?: return@update state
+            state.copy(prepare = state.prepare.copy(selected = defaultVideoSelection(files), error = null))
+        }
+        syncPrepareSelection()
+    }
+
     /** Change selection for an already committed torrent from its details page. */
     fun toggleDownloadFile(entryKey: String, index: Int) {
         scope.launchCommand {

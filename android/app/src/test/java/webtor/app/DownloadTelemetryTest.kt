@@ -80,4 +80,32 @@ class DownloadTelemetryTest {
         assertNull(checking.selectedEta())
         assertFalse(downloadNotification(listOf(entry, active("two").copy(status = null)))!!.text.contains("peers"))
     }
+
+    @Test fun libraryActivityLineCountsDownloadsPlaysSpeedAndAttention() {
+        val moving = active(speed = 100)
+        val stalled = active("stall", speed = 0)
+        val missingStatus = active("miss").copy(status = null)
+        val paused = active("paused", speed = 800).copy(paused = true)
+        val done = active("done", speed = 900).copy(files = active().files.map { it.copy(progress = 1.0, verifiedBytes = it.length) })
+        val playing = active("play", speed = 40).copy(directPlay = true)
+        val checking = active("check").let { entry ->
+            entry.copy(status = entry.status!!.copy(checking = true, checkedPieces = 1, checkTotal = 4))
+        }
+        val attention = active("bad", speed = 500).copy(error = "Storage full", lifecycleState = EntryLifecycleState.ERROR)
+        val attentionToo = attention.copy(key = "bad2", engineId = null, error = "Disk")
+
+        assertNull(libraryActivityLine(emptyList()))
+        assertNull(libraryActivityLine(listOf(paused, done)))
+        assertNull(libraryActivityLine(listOf(playing.copy(paused = true))))
+        assertEquals("1 download", libraryActivityLine(listOf(checking)))
+        assertEquals("2 downloads · 100 B/s", libraryActivityLine(listOf(moving, stalled, paused)))
+        assertEquals("2 downloads · 100 B/s", libraryActivityLine(listOf(moving, missingStatus)))
+        assertEquals("1 direct play · 40 B/s", libraryActivityLine(listOf(playing)))
+        assertEquals("1 needs attention", libraryActivityLine(listOf(attention)))
+        assertEquals("2 need attention", libraryActivityLine(listOf(attention, attentionToo)))
+        assertEquals(
+            "1 download · 1 direct play · 140 B/s · 1 needs attention",
+            libraryActivityLine(listOf(moving, playing, attention, paused)),
+        )
+    }
 }
