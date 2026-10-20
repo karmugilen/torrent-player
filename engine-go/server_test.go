@@ -36,6 +36,8 @@ func testEngine(t *testing.T, configure ...func(*torrent.ClientConfig)) *EngineS
 		client: client, storage: store, downloadDir: cfg.DataDir,
 		records: make(map[string]*TorrentRecord), recordsByHash: make(map[string]*TorrentRecord),
 		done: make(chan struct{}), bypass: bypassController{mode: bypassModeOff},
+		dialLimiter: cfg.DialRateLimiter, dialRatePerSec: defaultDialRate,
+		downloadLimiter: cfg.DownloadRateLimiter, uploadLimiter: cfg.UploadRateLimiter,
 	}
 	// NewEngineServer enables payload traffic by default. Unit tests build the
 	// server directly so they mirror that production default explicitly.

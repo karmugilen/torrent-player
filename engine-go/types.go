@@ -169,20 +169,24 @@ type MetadataResponse struct {
 }
 
 type SettingsResponse struct {
-	PeerExploration      bool  `json:"peerExploration"`
-	RamCacheBytes        int64 `json:"ramCacheBytes"`
-	SeedingEnabled       bool  `json:"seedingEnabled"`
-	SeedRatioMilli       int64 `json:"seedRatioMilli"`
-	SeedTimeMinutes      int64 `json:"seedTimeMinutes"`
-	MaxPeers             int   `json:"maxPeers"`
-	DownloadRateBytesSec int64 `json:"downloadRateBytesSec"`
-	UploadRateBytesSec   int64 `json:"uploadRateBytesSec"`
+	GhostMode               bool  `json:"ghostMode"`
+	DialRatePerSec          int   `json:"dialRatePerSec"`
+	EffectiveDialRatePerSec int64 `json:"effectiveDialRatePerSec"`
+	PeerExploration         bool  `json:"peerExploration"`
+	RamCacheBytes           int64 `json:"ramCacheBytes"`
+	SeedingEnabled          bool  `json:"seedingEnabled"`
+	SeedRatioMilli          int64 `json:"seedRatioMilli"`
+	SeedTimeMinutes         int64 `json:"seedTimeMinutes"`
+	MaxPeers                int   `json:"maxPeers"`
+	DownloadRateBytesSec    int64 `json:"downloadRateBytesSec"`
+	UploadRateBytesSec      int64 `json:"uploadRateBytesSec"`
 	// PayloadTransfersAllowed controls torrent file bytes only. Tracker, DHT,
 	// PEX, and metadata discovery keep running while it is false.
 	PayloadTransfersAllowed bool `json:"payloadTransfersAllowed"`
 }
 
 type SettingsRequest struct {
+	GhostMode            *bool  `json:"ghostMode,omitempty"`
 	PeerExploration      *bool  `json:"peerExploration,omitempty"`
 	RamCacheBytes        *int64 `json:"ramCacheBytes,omitempty"`
 	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`

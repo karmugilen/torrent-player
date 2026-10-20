@@ -84,6 +84,7 @@ fun SettingsScreen(
     onAdaptiveBuffer: (Boolean) -> Unit = {},
     onBurstAwareBuffer: (Boolean) -> Unit = {},
     onPeerExploration: (Boolean) -> Unit = {},
+    onGhostMode: (Boolean) -> Unit = {},
     onFileOnlyPlayback: (Boolean) -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
@@ -583,9 +584,16 @@ fun SettingsScreen(
                             onCheckedChange = onPeerExploration,
                         )
                         Text(
-                            "For comparison, try one experiment at a time with the same torrent and network. Compare time to play, stalls and transfer speed. All three are off by default.",
+                            "For comparison, try one experiment at a time with the same torrent and network. Compare time to play, stalls and transfer speed. These experiments are off by default.",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
+                        )
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Ghost mode",
+                            supporting = "Ghost Downloader-inspired experiment. Tests small increases in peer dialing and keeps them only when useful download speed improves. Stays within your connection limit. Applies now; turning off restores normal dialing. Fast peer search already uses the maximum dial rate.",
+                            checked = state.ghostMode,
+                            onCheckedChange = onGhostMode,
                         )
                         SectionDivider()
                         SwitchRow(

@@ -307,6 +307,9 @@ class EngineClient(
     fun setPeerExploration(enabled: Boolean): Boolean =
         post("/settings", JSONObject().put("peerExploration", enabled)).optBoolean("peerExploration", enabled)
 
+    fun setGhostMode(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("ghostMode", enabled)).getBoolean("ghostMode")
+
     /**
      * Gates torrent payload bytes globally while preserving tracker, DHT and
      * magnet metadata discovery. Older engines simply reject the optional

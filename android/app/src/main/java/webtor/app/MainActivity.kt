@@ -171,6 +171,7 @@ class MainActivity : ComponentActivity() {
                                 onAdaptiveBuffer = session::setAdaptiveBuffer,
                                 onBurstAwareBuffer = session::setBurstAwareBuffer,
                                 onPeerExploration = session::setPeerExploration,
+                                onGhostMode = session::setGhostMode,
                                 onFileOnlyPlayback = session::setFileOnlyPlayback,
                                 onNetworkPolicy = session::setNetworkPolicy,
                                 onDownloadRateKiB = session::setDownloadRateKiB,

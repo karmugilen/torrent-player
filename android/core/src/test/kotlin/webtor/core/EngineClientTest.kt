@@ -196,6 +196,19 @@ class EngineClientTest {
     }
 
     @Test
+    fun ghostModeCanBeToggledWithoutChangingOtherSettings() {
+        for (enabled in listOf(true, false)) {
+            transport.enqueue(TestResponse().setBody("""{"ghostMode":$enabled}"""))
+            assertEquals(enabled, client.setGhostMode(enabled))
+            val request = transport.takeRequest()
+            assertEquals("/settings", request.path)
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals(enabled, body.getBoolean("ghostMode"))
+            assertEquals(1, body.length())
+        }
+    }
+
+    @Test
     fun setDownloadRateBytesSecOmitsUploadRate() {
         transport.enqueue(TestResponse().setBody("""{"downloadRateBytesSec":1048576,"uploadRateBytesSec":99}"""))
         assertEquals(1048576L, client.setDownloadRateBytesSec(1024L * 1024L))

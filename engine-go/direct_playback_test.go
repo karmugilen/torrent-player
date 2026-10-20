@@ -8,6 +8,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/time/rate"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,9 +29,15 @@ func TestDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T) {
 	t.Run("all four", func(t *testing.T) {
 		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{adaptive: true, burst: true, boost: true, explore: true})
 	})
+	t.Run("ghost mode", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{ghost: true})
+	})
+	t.Run("all five", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{adaptive: true, burst: true, boost: true, explore: true, ghost: true})
+	})
 }
 
-type playbackExperimentTestConfig struct{ adaptive, burst, boost, explore bool }
+type playbackExperimentTestConfig struct{ adaptive, burst, boost, explore, ghost bool }
 
 func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playbackExperimentTestConfig) {
 	if testing.Short() {
@@ -64,6 +71,7 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 			cfg.AcceptPeerConnections = true
 			cfg.Seed = seed
 			cfg.PieceHashersPerTorrent = backgroundWorkers()
+			cfg.DialRateLimiter = rate.NewLimiter(defaultDialRate, defaultDialRate)
 		})
 		request, _ := json.Marshal(AddRequest{Prepare: true, TorrentData: base64.StdEncoding.EncodeToString(metadata.Bytes())})
 		code, response := s.DispatchControl("POST", "/add", string(request))
@@ -111,6 +119,11 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 			t.Fatalf("peer exploration: %d %s", code, response)
 		}
 	}
+	if experiment.ghost {
+		if code, response := leech.DispatchControl("POST", "/settings", `{"ghostMode":true}`); code != 200 {
+			t.Fatalf("ghost mode: %d %s", code, response)
+		}
+	}
 	if experiment.adaptive || experiment.burst || experiment.boost {
 		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": experiment.adaptive, "burstAwareBuffer": experiment.burst, "boost": experiment.boost})
 		if code, response := leech.DispatchControl("POST", "/play", string(body)); code != 200 {
@@ -123,6 +136,9 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 	}
 	defer p.Close()
 	for iteration, offset := range []int64{0, 25 << 20, 4 << 20, 32 << 20, 4 << 20} {
+		if experiment.ghost {
+			leech.ghostModeTick(time.Unix(1000, 0).Add(time.Duration(iteration) * 10 * time.Second))
+		}
 		if experiment.explore {
 			leech.peerExplorationTick(time.Unix(1000, 0).Add(time.Duration(iteration) * 90 * time.Second))
 		}

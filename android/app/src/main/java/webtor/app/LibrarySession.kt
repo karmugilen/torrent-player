@@ -176,6 +176,7 @@ class LibrarySession(
                         adaptiveBuffer = settings.getBoolean("adaptiveBuffer", false),
                         burstAwareBuffer = settings.getBoolean("burstAwareBuffer", false),
                         peerExploration = settings.getBoolean("peerExploration", false),
+                        ghostMode = settings.getBoolean("ghostMode", false),
                         fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", true),
                         fastPeerSearch = settings.getBoolean("fastPeerSearch", false),
                         pauseOnLowBattery = pauseOnLowBattery,
@@ -199,10 +200,11 @@ class LibrarySession(
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
                     runCatching { withContext(io) { client.setDownloadRateBytesSec(_ui.value.downloadRateKiB.toLong() * 1024L) } }
-                    runCatching { withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) 80 else 30) } }
                     runCatching {
                         mutex.withLock {
+                            withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) 80 else 30) }
                             withContext(io) { client.setPeerExploration(_ui.value.peerExploration) }
+                            withContext(io) { client.setGhostMode(_ui.value.ghostMode) }
                         }
                     }
                     runCatching {
@@ -366,6 +368,19 @@ class LibrarySession(
         }
     }
 
+    fun setGhostMode(enabled: Boolean) {
+        scope.launchCommand {
+            try {
+                if (_ui.value.engineReady) withContext(io) { client.setGhostMode(enabled) }
+                settings.edit().putBoolean("ghostMode", enabled).apply()
+                _ui.update { it.copy(ghostMode = enabled) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
     fun setFileOnlyPlayback(enabled: Boolean) {
         settings.edit().putBoolean("fileOnlyPlayback", enabled).apply()
         _ui.update { it.copy(fileOnlyPlayback = enabled) }
@@ -394,11 +409,14 @@ class LibrarySession(
     }
 
     fun setFastPeerSearch(enabled: Boolean) {
-        settings.edit().putBoolean("fastPeerSearch", enabled).apply()
-        _ui.update { it.copy(fastPeerSearch = enabled) }
-        if (_ui.value.engineReady) {
-            scope.launch {
-                runCatching { withContext(io) { client.setDialRatePerSec(if (enabled) 80 else 30) } }
+        scope.launchCommand {
+            try {
+                if (_ui.value.engineReady) withContext(io) { client.setDialRatePerSec(if (enabled) 80 else 30) }
+                settings.edit().putBoolean("fastPeerSearch", enabled).apply()
+                _ui.update { it.copy(fastPeerSearch = enabled) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
             }
         }
     }

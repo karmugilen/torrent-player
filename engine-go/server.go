@@ -113,6 +113,10 @@ type EngineServer struct {
 	downloadLimiter *rate.Limiter
 	uploadLimiter   *rate.Limiter
 	dialLimiter     *rate.Limiter
+	dialRatePerSec  int
+	ghostMode       bool
+	ghostGeneration uint64
+	ghostDial       ghostDialController
 	peerExploration atomic.Bool
 	seedingEnabled  atomic.Bool
 	seedingAllowed  atomic.Bool
@@ -184,7 +188,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	cfg.PeriodicallyAnnounceTorrentsToDht = true
 
 	// Balanced peer dialing rate limiter (avoids network/router bufferbloat)
-	cfg.DialRateLimiter = rate.NewLimiter(30, 30)
+	cfg.DialRateLimiter = rate.NewLimiter(defaultDialRate, defaultDialRate)
 	// These limiters are retained so settings can be changed without rebuilding
 	// the torrent client. A zero value means unlimited (the anacrolix default).
 	cfg.DownloadRateLimiter = rate.NewLimiter(rate.Inf, 1024*1024)
@@ -239,6 +243,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 		downloadLimiter: cfg.DownloadRateLimiter,
 		uploadLimiter:   cfg.UploadRateLimiter,
 		dialLimiter:     cfg.DialRateLimiter,
+		dialRatePerSec:  defaultDialRate,
 		ctlPort:         ctlPort,
 		lastRateTime:    time.Now(),
 		done:            make(chan struct{}),
@@ -345,6 +350,7 @@ func (s *EngineServer) rateTrackerLoop() {
 		s.sampleTorrentRates(now)
 		s.seedTick()
 		s.peerExplorationTick(now)
+		s.ghostModeTick(now)
 		seedTicks++
 		if seedTicks%30 == 0 {
 			s.saveSeedAccounts()
@@ -1680,8 +1686,12 @@ func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request)
 	peers := s.maxPeers
 	down := limiterRate(s.downloadLimiter)
 	up := limiterRate(s.uploadLimiter)
+	ghost := s.ghostMode
+	dial := s.baseDialRateLocked()
+	effectiveDial := limiterRate(s.dialLimiter)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, SettingsResponse{
+		GhostMode: ghost, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
 		PeerExploration: s.peerExploration.Load(),
 		RamCacheBytes:   s.storage.CacheLimit(),
 		SeedingEnabled:  s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
@@ -1762,15 +1772,20 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	if req.UploadRateBytesSec != nil && *req.UploadRateBytesSec >= 0 {
 		setLimiterRate(s.uploadLimiter, *req.UploadRateBytesSec)
 	}
-	if req.DialRatePerSec != nil && s.dialLimiter != nil {
+	if req.DialRatePerSec != nil {
 		n := *req.DialRatePerSec
 		if n < 10 {
 			n = 10
 		} else if n > 80 {
 			n = 80
 		}
-		s.dialLimiter.SetLimit(rate.Limit(n))
-		s.dialLimiter.SetBurst(n)
+		s.dialRatePerSec = n
+	}
+	if req.GhostMode != nil {
+		s.ghostMode = *req.GhostMode
+	}
+	if req.GhostMode != nil || req.DialRatePerSec != nil || req.MaxPeers != 0 || req.DownloadRateBytesSec != nil || req.PayloadTransfersAllowed != nil {
+		s.resetGhostLocked()
 	}
 	if req.PayloadTransfersAllowed != nil {
 		s.payloadTransfersAllowed.Store(*req.PayloadTransfersAllowed)
@@ -1786,6 +1801,9 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	down := limiterRate(s.downloadLimiter)
 	up := limiterRate(s.uploadLimiter)
 	payloadAllowed := s.payloadTransfersAllowed.Load()
+	ghost := s.ghostMode
+	dial := s.baseDialRateLocked()
+	effectiveDial := limiterRate(s.dialLimiter)
 	s.mu.Unlock()
 	if req.PeerExploration != nil {
 		for _, rec := range records {
@@ -1805,6 +1823,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, http.StatusOK, SettingsResponse{
+		GhostMode: ghost, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
 		SeedingEnabled: s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
 		DownloadRateBytesSec:    down,

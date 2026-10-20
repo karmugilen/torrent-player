@@ -73,6 +73,9 @@ func (s *EngineServer) handleNetworkChange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.networkKnown, s.networkGeneration = true, req.Generation
+	s.mu.Lock()
+	s.resetGhostLocked()
+	s.mu.Unlock()
 	if s.networkCancel != nil {
 		s.networkCancel()
 	}
