@@ -102,6 +102,15 @@ class EngineClientTest {
         assertEquals(0, s.ctlPort)
         assertEquals(8000, s.streamPort)
         assertEquals(1L, s.downloadSpeed)
+        assertEquals(0, s.listenPort)
+
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"downloadSpeed":1,"uploadSpeed":2,"progress":0.5,"ratio":1.2,
+                    "torrents":1,"ctlPort":0,"streamPort":8000,"path":"/tmp","listenPort":6881}"""
+            )
+        )
+        assertEquals(6881, client.stats().listenPort)
     }
 
     @Test
@@ -113,6 +122,78 @@ class EngineClientTest {
         val json = JSONObject(request.body.readUtf8())
         assertEquals(2, json.getInt("fileIndex"))
         assertEquals(75L, json.getLong("offset"))
+        assertFalse(json.has("boost"))
+    }
+
+    @Test
+    fun playIncludesBoostOnlyWhenEnabled() {
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","fileIndex":1,"name":"a.mp4","length":100,"streamUrl":"http://127.0.0.1:8000/x"}"""))
+        client.play("abc", 1, null, false)
+        val disabled = JSONObject(transport.takeRequest().body.readUtf8())
+        assertFalse(disabled.has("boost"))
+        assertFalse(disabled.has("fileOnly"))
+
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","fileIndex":1,"name":"a.mp4","length":100,"streamUrl":"http://127.0.0.1:8000/x"}"""))
+        client.play("abc", 1, null, true)
+        val enabled = JSONObject(transport.takeRequest().body.readUtf8())
+        assertTrue(enabled.getBoolean("boost"))
+        assertFalse(enabled.has("offset"))
+    }
+
+    @Test
+    fun fileOnlyPlaybackCanBeEnabledAndCleared() {
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","fileIndex":1,"name":"a.mp4","length":100,"streamUrl":"http://127.0.0.1:8000/x"}"""))
+        client.play("abc", 1, fileOnly = true)
+        val play = transport.takeRequest()
+        assertEquals("/play", play.path)
+        assertTrue(JSONObject(play.body.readUtf8()).getBoolean("fileOnly"))
+
+        transport.enqueue(TestResponse().setBody("""{"fileOnly":false}"""))
+        client.clearFileOnly("abc")
+        val clear = transport.takeRequest()
+        assertEquals("/file-only", clear.path)
+        val body = JSONObject(clear.body.readUtf8())
+        assertEquals("abc", body.getString("id"))
+        assertFalse(body.getBoolean("enabled"))
+    }
+
+    @Test
+    fun setDownloadRateBytesSecOmitsUploadRate() {
+        transport.enqueue(TestResponse().setBody("""{"downloadRateBytesSec":1048576,"uploadRateBytesSec":99}"""))
+        assertEquals(1048576L, client.setDownloadRateBytesSec(1024L * 1024L))
+        val request = transport.takeRequest()
+        assertEquals("/settings", request.path)
+        val body = JSONObject(request.body.readUtf8())
+        assertEquals(1048576L, body.getLong("downloadRateBytesSec"))
+        assertFalse(body.has("uploadRateBytesSec"))
+        assertEquals(1, body.length())
+    }
+
+    @Test
+    fun setDialRatePerSecPostsOnlyDialRate() {
+        transport.enqueue(TestResponse().setBody("""{"dialRatePerSec":40}"""))
+        assertEquals(40, client.setDialRatePerSec(40))
+        val request = transport.takeRequest()
+        assertEquals("/settings", request.path)
+        val body = JSONObject(request.body.readUtf8())
+        assertEquals(40, body.getInt("dialRatePerSec"))
+        assertFalse(body.has("uploadRateBytesSec"))
+        assertFalse(body.has("downloadRateBytesSec"))
+        assertEquals(1, body.length())
+
+        transport.enqueue(TestResponse().setBody("{}"))
+        assertEquals(80, client.setDialRatePerSec(200))
+        val high = JSONObject(transport.takeRequest().body.readUtf8())
+        assertEquals(80, high.getInt("dialRatePerSec"))
+        assertFalse(high.has("uploadRateBytesSec"))
+        assertFalse(high.has("downloadRateBytesSec"))
+
+        transport.enqueue(TestResponse().setBody("{}"))
+        assertEquals(10, client.setDialRatePerSec(1))
+        val low = JSONObject(transport.takeRequest().body.readUtf8())
+        assertEquals(10, low.getInt("dialRatePerSec"))
+        assertFalse(low.has("uploadRateBytesSec"))
+        assertFalse(low.has("downloadRateBytesSec"))
     }
 
     @Test

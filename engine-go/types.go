@@ -10,6 +10,7 @@ type StatsResponse struct {
 	StreamPort              int     `json:"streamPort"`
 	Path                    string  `json:"path"`
 	PayloadTransfersAllowed bool    `json:"payloadTransfersAllowed"`
+	ListenPort              int     `json:"listenPort"`
 }
 
 type AddRequest struct {
@@ -76,6 +77,10 @@ type PlayRequest struct {
 	Offset    *int64 `json:"offset,omitempty"`
 	ID        string `json:"id"`
 	FileIndex *int   `json:"fileIndex,omitempty"`
+	// Boost enlarges only this play call's startup window. Absent is false.
+	Boost bool `json:"boost,omitempty"`
+	// FileOnly limits a saved download to the played file until playback ends.
+	FileOnly bool `json:"fileOnly,omitempty"`
 }
 
 // FocusRequest changes the background download focus. A null fileIndex clears
@@ -184,6 +189,8 @@ type SettingsRequest struct {
 	UploadRateBytesSec   *int64 `json:"uploadRateBytesSec,omitempty"`
 	// A pointer distinguishes an omitted setting from an explicit false.
 	PayloadTransfersAllowed *bool `json:"payloadTransfersAllowed,omitempty"`
+	// Nil leaves the dial limiter unchanged. A set value is clamped to 10..80.
+	DialRatePerSec *int `json:"dialRatePerSec,omitempty"`
 }
 
 type OkResponse struct {

@@ -2,6 +2,7 @@ package webtor.app
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -79,6 +80,14 @@ fun SettingsScreen(
     onRamCache: (Int) -> Unit = {},
     onAutoRamCache: () -> Unit = {},
     onPlaybackMethod: (PlaybackMethod) -> Unit = {},
+    onPlayBoost: (Boolean) -> Unit = {},
+    onFileOnlyPlayback: (Boolean) -> Unit = {},
+    onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
+    onDownloadRateKiB: (Int) -> Unit = {},
+    onFastPeerSearch: (Boolean) -> Unit = {},
+    onPauseOnLowBattery: (Boolean) -> Unit = {},
+    onPlayNext: (Boolean) -> Unit = {},
+    onPreloadStart: (Boolean) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -120,51 +129,6 @@ fun SettingsScreen(
                         },
                         colors = settingsListColors(),
                     )
-                    SectionDivider()
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("Playback method", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Completed downloads still open from the saved file. This choice is for incomplete video and Direct Play.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        Column(Modifier.selectableGroup()) {
-                            PlaybackMethod.entries.forEach { method ->
-                                val selected = state.playbackMethod == method
-                                Row(
-                                    modifier = Modifier.fillMaxWidth()
-                                        .selectable(
-                                            selected = selected,
-                                            role = Role.RadioButton,
-                                            onClick = { onPlaybackMethod(method) },
-                                        )
-                                        .padding(vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    RadioButton(selected = selected, onClick = null)
-                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        Text(
-                                            if (method == PlaybackMethod.CONTENT_URI) "Standard" else "HTTP stream (experimental)",
-                                            style = MaterialTheme.typography.bodyLarge,
-                                        )
-                                        Text(
-                                            if (method == PlaybackMethod.CONTENT_URI) {
-                                                "Opens the saved or streaming content URI."
-                                            } else {
-                                                "Experimental loopback streaming for comparison."
-                                            },
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = colors.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             item {
@@ -368,63 +332,6 @@ fun SettingsScreen(
                                 )
                             }
                         }
-                        SectionDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Anti-DPI (experimental)", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    "Experimental. Splits the start of some outgoing TCP writes to peers and HTTP or WebSocket trackers. UDP, uTP, and WebRTC are not changed. Not anonymity, and not a promise that a connection succeeds.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.antiDpiEnabled, onCheckedChange = onAntiDpi)
-                        }
-                        if (state.antiDpiEnabled) {
-                            val status = state.bypassStatus
-                            if (status == null) {
-                                Text(
-                                    if (state.engineReady) "Connecting to backend…" else "Engine starting…",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.secondary,
-                                )
-                            } else if (status.error != null) {
-                                Text(
-                                    "Backend error: ${status.error}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.error,
-                                )
-                            } else {
-                                Text(
-                                    if (status.active) "Active (mode: ${status.mode})" else "Inactive (mode: ${status.mode})",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (status.active) colors.primary else colors.error,
-                                )
-                                if (status.coverage.isNotEmpty()) {
-                                    Text(
-                                        "Adapted paths: ${status.coverage.joinToString(", ")}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = colors.onSurfaceVariant,
-                                    )
-                                } else if (status.active) {
-                                    Text(
-                                        "No adapted paths reported.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = colors.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                            Text(
-                                "Active means the adapter in this app is running. It does not mean a peer or tracker accepted the connection, and it does not hide your network address.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.outline,
-                            )
-                        }
                     }
                 }
             }
@@ -495,6 +402,289 @@ fun SettingsScreen(
                                 color = colors.onSurfaceVariant,
                             )
                         }
+                    }
+                }
+            }
+            item {
+                SettingsSection("Experimental", outlined = true) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Playback method", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Completed downloads still open from the saved file. This choice is for incomplete video and Direct Play.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Column(Modifier.selectableGroup()) {
+                            PlaybackMethod.entries.forEach { method ->
+                                val selected = state.playbackMethod == method
+                                Row(
+                                    modifier = Modifier.fillMaxWidth()
+                                        .selectable(
+                                            selected = selected,
+                                            role = Role.RadioButton,
+                                            onClick = { onPlaybackMethod(method) },
+                                        )
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    RadioButton(selected = selected, onClick = null)
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            if (method == PlaybackMethod.CONTENT_URI) "Standard" else "HTTP stream (experimental)",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                        )
+                                        Text(
+                                            if (method == PlaybackMethod.CONTENT_URI) {
+                                                "Opens the saved or streaming content URI."
+                                            } else {
+                                                "Experimental loopback streaming for comparison."
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    SectionDivider()
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Anti-DPI (experimental)", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    "Experimental. Splits the start of some outgoing TCP writes to peers and HTTP or WebSocket trackers. UDP, uTP, and WebRTC are not changed. Not anonymity, and not a promise that a connection succeeds.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = state.antiDpiEnabled, onCheckedChange = onAntiDpi)
+                        }
+                        if (state.antiDpiEnabled) {
+                            val status = state.bypassStatus
+                            if (status == null) {
+                                Text(
+                                    if (state.engineReady) "Connecting to backend…" else "Engine starting…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.secondary,
+                                )
+                            } else if (status.error != null) {
+                                Text(
+                                    "Backend error: ${status.error}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.error,
+                                )
+                            } else {
+                                Text(
+                                    if (status.active) "Active (mode: ${status.mode})" else "Inactive (mode: ${status.mode})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (status.active) colors.primary else colors.error,
+                                )
+                                if (status.coverage.isNotEmpty()) {
+                                    Text(
+                                        "Adapted paths: ${status.coverage.joinToString(", ")}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                } else if (status.active) {
+                                    Text(
+                                        "No adapted paths reported.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            Text(
+                                "Active means the adapter in this app is running. It does not mean a peer or tracker accepted the connection, and it does not hide your network address.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.outline,
+                            )
+                        }
+                    }
+                    SectionDivider()
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "Optional controls for playback and transfers. Some can use more data and battery.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        SectionDivider()
+                        Text("More peers", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                        Text(
+                            "Raises the same connection limit as Connections. More peers can start a transfer faster and use more battery.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(100, 200, 500).forEach { peers ->
+                                FilterChip(
+                                    selected = state.maxPeers == peers,
+                                    onClick = {
+                                        onMaxPeers(peers)
+                                        onMaxPeersCommit()
+                                    },
+                                    label = { Text("$peers") },
+                                )
+                            }
+                        }
+                        SectionDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Instant play boost", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    "Asks the engine for a larger startup buffer when you press Play, so video can begin sooner. It uses more network and memory.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = state.playBoost, onCheckedChange = onPlayBoost)
+                        }
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Play this file only",
+                            supporting = "While playing a saved torrent, pauses downloads of its other selected files. They resume when you return from the player. Direct Play already streams only the playing file.",
+                            checked = state.fileOnlyPlayback,
+                            onCheckedChange = onFileOnlyPlayback,
+                        )
+                        SectionDivider()
+                        Text("Transfer network", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                        Text(
+                            "Pauses torrent payload until the network matches. Metadata can still be fetched. Any is the normal choice.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(
+                                TransferNetworkPolicy.ANY to "Any",
+                                TransferNetworkPolicy.WIFI_ONLY to "Wi-Fi",
+                                TransferNetworkPolicy.UNMETERED to "Unmetered",
+                            ).forEach { (policy, label) ->
+                                FilterChip(
+                                    selected = state.networkPolicy == policy,
+                                    onClick = { onNetworkPolicy(policy) },
+                                    label = { Text(label) },
+                                )
+                            }
+                        }
+                        SectionDivider()
+                        Text("Download cap", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                        Text(
+                            "Limits download speed only. Seeding upload is unchanged. Unlimited is the normal choice.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(
+                                0 to "Unlimited",
+                                1024 to "1 MB/s",
+                                4096 to "4 MB/s",
+                                8192 to "8 MB/s",
+                            ).forEach { (rate, label) ->
+                                FilterChip(
+                                    selected = state.downloadRateKiB == rate,
+                                    onClick = { onDownloadRateKiB(rate) },
+                                    label = { Text(label) },
+                                )
+                            }
+                        }
+                        SectionDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Faster peer search", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    "Looks for peers faster than the normal dial rate. It can help a slow swarm and can make a busy network less stable.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = state.fastPeerSearch, onCheckedChange = onFastPeerSearch)
+                        }
+                        SectionDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Preload the start", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    "Like TorrServer preload. Waits up to 8 seconds for the first 2 MB before opening the player, so playback is less likely to stall. Play still opens if that data is not ready.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = state.preloadStart, onCheckedChange = onPreloadStart)
+                        }
+                        SectionDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Play next video", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    "When a video ends, starts the next selected video in the same torrent.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = state.playNext, onCheckedChange = onPlayNext)
+                        }
+                        SectionDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Pause on low battery", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    if (state.batteryPaused) {
+                                        "Paused now. Battery is under 15% and the phone is not charging."
+                                    } else {
+                                        "Pauses torrent data under 15% battery unless the phone is charging. Playback pauses too."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = state.pauseOnLowBattery, onCheckedChange = onPauseOnLowBattery)
+                        }
+                        SectionDivider()
+                        Text("Incoming port", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                        Text(
+                            if (state.listenPort > 0) {
+                                "Listening on ${state.listenPort}. The engine already asks the router to forward this port."
+                            } else {
+                                "The listen port is not ready yet. Incoming peers and port forwarding stay on."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -634,8 +824,13 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun SettingsSection(title: String, outlined: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = if (outlined) Modifier.fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.medium)
+            .padding(12.dp) else Modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,

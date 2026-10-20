@@ -33,7 +33,7 @@ func (s *EngineServer) applyVideoStartupHints(rec *TorrentRecord) {
 		if !selected[i] || !isVideoFileName(f.DisplayPath()) {
 			continue
 		}
-		if rec.DirectPlay && (rec.FocusedFile == nil || i != *rec.FocusedFile) {
+		if (rec.DirectPlay || rec.FileOnly) && (rec.FocusedFile == nil || i != *rec.FocusedFile) {
 			continue
 		}
 		length := f.Length()

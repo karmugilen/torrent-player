@@ -32,6 +32,11 @@ const (
 	// reader is active; its own open-phase metadata probes remain Now.
 	videoStartupHeadBytes = int64(5 * 1024 * 1024)
 	videoStartupTailBytes = int64(3 * 1024 * 1024)
+
+	// PlayRequest.Boost only. Default plays keep the constants above.
+	playbackBoostHeadBytes      = int64(16 * 1024 * 1024)
+	playbackBoostTailBytes      = int64(8 * 1024 * 1024)
+	playbackBoostReadaheadBytes = int64(48 * 1024 * 1024)
 )
 
 type pieceSpan struct {
@@ -71,6 +76,9 @@ type playbackPriorityCoordinator struct {
 	previewDemand    map[int]torrent.PiecePriority
 	closed           bool
 	resumeSuspended  bool
+	// playBoost is the latest /play boost flag per file index. Readers copy it
+	// at open so a later play does not resize an already-open window.
+	playBoost map[int]bool
 }
 
 func newPlaybackPriorityCoordinator(t *torrent.Torrent) *playbackPriorityCoordinator {
@@ -80,6 +88,21 @@ func newPlaybackPriorityCoordinator(t *torrent.Torrent) *playbackPriorityCoordin
 		owners:    make(map[*playbackReader]map[int]torrent.PiecePriority),
 		effective: make(map[int]torrent.PiecePriority),
 	}
+}
+
+// setPlayBoost records whether the next reader opened for fileIndex should use
+// the larger startup window. A false play clears a previous boost for that file.
+func (c *playbackPriorityCoordinator) setPlayBoost(fileIndex int, boost bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if boost {
+		if c.playBoost == nil {
+			c.playBoost = make(map[int]bool)
+		}
+		c.playBoost[fileIndex] = true
+		return
+	}
+	delete(c.playBoost, fileIndex)
 }
 
 func (c *playbackPriorityCoordinator) update(owner *playbackReader, demand map[int]torrent.PiecePriority) {
@@ -236,6 +259,10 @@ type playbackReader struct {
 	tailBegin, tailEnd int
 	headBoostActive    bool
 	tailBoostActive    bool
+	// boost selects the larger startup window for this reader only.
+	boost            bool
+	startupHeadBytes int64
+	startupTailBytes int64
 
 	openPhase     bool
 	headRead      bool
@@ -327,13 +354,15 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	}
 	p.priorityOwner = s.ensurePlaybackCoordinator(rec.Torrent)
 	p.priorityOwner.mu.Lock()
+	boost := p.priorityOwner.playBoost[index]
 	if rec.DirectPlay && len(p.priorityOwner.readers) >= 4 {
 		p.priorityOwner.mu.Unlock()
 		cancel()
 		_ = reader.Close()
 		return nil, fmt.Errorf("too many simultaneous playback readers")
 	}
-	if rec.DirectPlay && isVideoFileName(file.DisplayPath()) && (rec.FocusedFile == nil || *rec.FocusedFile != index) {
+	focusChanged := (rec.DirectPlay || rec.FileOnly) && isVideoFileName(file.DisplayPath()) && (rec.FocusedFile == nil || *rec.FocusedFile != index)
+	if focusChanged {
 		focused := index
 		rec.FocusedFile = &focused
 		// The coordinator lock is already held; compute hints after releasing it.
@@ -341,7 +370,15 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	p.priorityOwner.storage = p.storage
 	p.priorityOwner.readers[p] = struct{}{}
 	p.priorityOwner.mu.Unlock()
-	if rec.DirectPlay {
+	if boost {
+		p.forwardBytes = playbackUrgentBytes + playbackBoostReadaheadBytes
+	}
+	if rec.FileOnly && focusChanged {
+		s.applySavedFilePriorities(rec)
+		s.applyBackgroundFocus(rec)
+		p.priorityOwner.prepareResume(file, nil)
+	}
+	if rec.DirectPlay || rec.FileOnly {
 		s.applyVideoStartupHints(rec)
 	}
 	// CACHE-04: reuse a bounded validated resume window before scheduling demand.
@@ -349,9 +386,14 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	// Warm bytes without replacing the current external-player seek intent.
 	s.applyResumeWindowToStorage(rec, index)
 	headBytes, tailBytes := videoStartupHeadBytes, videoStartupTailBytes
-	if p.refreshCompletion {
+	if boost {
+		headBytes, tailBytes = playbackBoostHeadBytes, playbackBoostTailBytes
+	} else if p.refreshCompletion {
 		headBytes, tailBytes = directStartupHead, directStartupTail
 	}
+	p.boost = boost
+	p.startupHeadBytes = headBytes
+	p.startupTailBytes = tailBytes
 	p.headBegin, p.headEnd = filePieceRange(file, 0, minInt64(file.Length(), headBytes))
 	p.headBoostActive = p.headBegin < p.headEnd
 	if file.Length() > tailBytes {
@@ -405,7 +447,11 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 				} else {
 					p.readRate = p.readRate*0.8 + rate*0.2
 				}
-				p.forwardBytes = max(int64(4<<20), min(playbackWindowBytes, int64(p.readRate*8)))
+				limit := playbackWindowBytes
+				if p.boost {
+					limit = playbackUrgentBytes + playbackBoostReadaheadBytes
+				}
+				p.forwardBytes = max(int64(4<<20), min(limit, int64(p.readRate*8)))
 			}
 		}
 		p.lastReadTime = now
@@ -775,9 +821,12 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 
 	now := p.now()
 
-	headBytes, tailBytes := videoStartupHeadBytes, videoStartupTailBytes
-	if p.refreshCompletion {
-		headBytes, tailBytes = directStartupHead, directStartupTail
+	headBytes, tailBytes := p.startupHeadBytes, p.startupTailBytes
+	if headBytes <= 0 {
+		headBytes, tailBytes = videoStartupHeadBytes, videoStartupTailBytes
+		if p.refreshCompletion {
+			headBytes, tailBytes = directStartupHead, directStartupTail
+		}
 	}
 	headLimit := minInt64(p.length, headBytes)
 	hasTail := p.length > tailBytes

@@ -900,3 +900,87 @@ func TestLocalPeerDownloadProducesPlayableMedia(t *testing.T) {
 		}
 	}
 }
+
+func TestPlaybackBoostRequestDecodes(t *testing.T) {
+	if (PlayRequest{}).Boost {
+		t.Fatal("default PlayRequest.Boost must be false")
+	}
+	var absent PlayRequest
+	if err := json.Unmarshal([]byte(`{"id":"abc","fileIndex":1}`), &absent); err != nil {
+		t.Fatal(err)
+	}
+	if absent.Boost || absent.ID != "abc" || absent.FileIndex == nil || *absent.FileIndex != 1 {
+		t.Fatalf("omitted boost decoded as %+v", absent)
+	}
+	var enabled PlayRequest
+	if err := json.Unmarshal([]byte(`{"id":"abc","boost":true}`), &enabled); err != nil {
+		t.Fatal(err)
+	}
+	if !enabled.Boost || enabled.ID != "abc" {
+		t.Fatalf("boost request decoded as %+v", enabled)
+	}
+	var disabled PlayRequest
+	if err := json.Unmarshal([]byte(`{"id":"abc","boost":false}`), &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Boost {
+		t.Fatal("explicit false boost decoded as true")
+	}
+}
+
+func TestPlaybackBoostStartupWindow(t *testing.T) {
+	s, rec, pieceLen := largePlaybackFixture(t, 72)
+	plain, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.testPiecePriority(15); got == torrent.PiecePriorityNow {
+		t.Fatalf("default head must stay 5MiB, piece 15=%v", got)
+	}
+	plain.Close()
+
+	body, _ := json.Marshal(PlayRequest{ID: rec.ID, FileIndex: intPtr(0), Boost: true})
+	code, response := s.DispatchControl("POST", "/play", string(body))
+	if code != 200 {
+		t.Fatalf("boost play: %d %s", code, response)
+	}
+	reader, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityNow {
+		t.Fatalf("16MiB head should cover piece 15, got %v", got)
+	}
+	if got := reader.testPiecePriority(16); got == torrent.PiecePriorityNow {
+		t.Fatalf("piece 16 is past the 16MiB head, got %v", got)
+	}
+	if got := reader.testPiecePriority(64); got != torrent.PiecePriorityNow {
+		t.Fatalf("8MiB tail should cover piece 64, got %v", got)
+	}
+	if got := reader.testPiecePriority(63); got == torrent.PiecePriorityNow {
+		t.Fatalf("piece 63 is before the 8MiB tail, got %v", got)
+	}
+	reader.testApplyOffset(20 * pieceLen)
+	urgent, readahead, _, _, openPhase, _, _ := reader.testWindow()
+	if openPhase {
+		t.Fatal("a body read should leave the open phase")
+	}
+	if urgent.begin != 20 || urgent.end != 22 || readahead.begin != 22 || readahead.end != 70 {
+		t.Fatalf("boost forward readahead urgent=%v readahead=%v", urgent, readahead)
+	}
+	reader.Close()
+
+	body, _ = json.Marshal(PlayRequest{ID: rec.ID, FileIndex: intPtr(0)})
+	code, response = s.DispatchControl("POST", "/play", string(body))
+	if code != 200 {
+		t.Fatalf("plain play: %d %s", code, response)
+	}
+	again, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if got := again.testPiecePriority(15); got == torrent.PiecePriorityNow {
+		t.Fatalf("boost false must restore the 5MiB head, piece 15=%v", got)
+	}
+}

@@ -215,17 +215,7 @@ func (s *EngineServer) applyTransferState(rec *TorrentRecord) {
 	if t.Info() == nil {
 		return
 	}
-	selected := make(map[int]bool, len(rec.Selected))
-	for _, index := range rec.Selected {
-		selected[index] = true
-	}
-	for i, f := range t.Files() {
-		priority := torrent.PiecePriorityNone
-		if active && selected[i] && !rec.DirectPlay {
-			priority = torrent.PiecePriorityNormal
-		}
-		f.SetPriority(priority)
-	}
+	s.applySavedFilePriorities(rec)
 	if active {
 		t.AllowDataDownload()
 		t.AllowDataUpload()
@@ -236,4 +226,26 @@ func (s *EngineServer) applyTransferState(rec *TorrentRecord) {
 	}
 	s.applyBackgroundFocus(rec)
 	s.applySeedPolicy(rec, active, false)
+}
+
+// applySavedFilePriorities sets selected saved files to Normal. While FileOnly
+// is set, only the focused file requests pieces. Called with rec.mu held.
+func (s *EngineServer) applySavedFilePriorities(rec *TorrentRecord) {
+	t := rec.Torrent
+	if t.Info() == nil {
+		return
+	}
+	active := s.payloadTransfersAllowed.Load() && rec.Configured && !rec.Paused && !rec.Checking && !rec.removed && rec.Error == nil
+	selected := make(map[int]bool, len(rec.Selected))
+	for _, index := range rec.Selected {
+		selected[index] = true
+	}
+	only := rec.FileOnly && rec.FocusedFile != nil && !rec.DirectPlay
+	for i, f := range t.Files() {
+		priority := torrent.PiecePriorityNone
+		if active && selected[i] && !rec.DirectPlay && (!only || i == *rec.FocusedFile) {
+			priority = torrent.PiecePriorityNormal
+		}
+		f.SetPriority(priority)
+	}
 }

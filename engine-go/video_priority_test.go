@@ -82,7 +82,7 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 	pieceLen := int64(1024 * 1024)
 	videoLen := int64(20) * pieceLen
 	textLen := int64(4) * pieceLen
-	total := videoLen + textLen
+	total := videoLen + textLen + videoLen
 	data := bytes.Repeat([]byte("abcdefgh"), int(total/8))
 	info := metainfo.Info{
 		Name:        "pack",
@@ -90,6 +90,7 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 		Files: []metainfo.FileInfo{
 			{Length: videoLen, Path: []string{"clip.mp4"}},
 			{Length: textLen, Path: []string{"notes.txt"}},
+			{Length: videoLen, Path: []string{"episode2.mp4"}},
 		},
 	}
 	for start := int64(0); start < total; start += pieceLen {
@@ -123,14 +124,20 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 		t.Fatal(err)
 	}
 	vfd, tfd := int(videoFile.Fd()), int(textFile.Fd())
+	otherFile, err := os.CreateTemp(t.TempDir(), "episode2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ofd := int(otherFile.Fd())
 	body, _ = json.Marshal(ConfigureRequest{
 		ID:          added.ID,
-		Descriptors: []*int{&vfd, &tfd},
-		Selected:    []int{0, 1},
+		Descriptors: []*int{&vfd, &tfd, &ofd},
+		Selected:    []int{0, 1, 2},
 	})
 	code, response = s.DispatchControl("POST", "/configure", string(body))
 	_ = videoFile.Close()
 	_ = textFile.Close()
+	_ = otherFile.Close()
 	if code != 200 {
 		t.Fatalf("configure: %d %s", code, response)
 	}
@@ -156,6 +163,54 @@ func TestVideoStartupHintsSkipNonVideoAndPaused(t *testing.T) {
 	}
 	if video.Priority() != torrent.PiecePriorityNormal {
 		t.Fatalf("selected video file priority=%v want Normal", video.Priority())
+	}
+
+	body, _ = json.Marshal(PlayRequest{ID: added.ID, FileIndex: intPtr(0), FileOnly: true})
+	code, response = s.DispatchControl("POST", "/play", string(body))
+	if code != 200 {
+		t.Fatalf("file-only play: %d %s", code, response)
+	}
+	if video.Priority() != torrent.PiecePriorityNormal {
+		t.Fatalf("file-only video priority=%v want Normal", video.Priority())
+	}
+	if text.Priority() != torrent.PiecePriorityNone {
+		t.Fatalf("file-only other file priority=%v want None", text.Priority())
+	}
+	other := tr.Files()[2]
+	for piece := other.BeginPieceIndex(); piece < other.EndPieceIndex(); piece++ {
+		if got := other.Priority(); got != torrent.PiecePriorityNone {
+			t.Fatalf("other episode file priority=%v want None", got)
+		}
+		if got := rawPiecePriority(tr.Piece(piece)); got != torrent.PiecePriorityNone {
+			t.Fatalf("other episode piece %d priority=%v want None", piece, got)
+		}
+	}
+	// External players can advance the playlist without sending another /play.
+	nextReader, err := s.OpenPlayback(added.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextReader.Close()
+	if video.Priority() != torrent.PiecePriorityNone || other.Priority() != torrent.PiecePriorityNormal {
+		t.Fatalf("playlist advance priorities: previous=%v next=%v", video.Priority(), other.Priority())
+	}
+	for piece := video.BeginPieceIndex(); piece < video.EndPieceIndex(); piece++ {
+		if got := rawPiecePriority(tr.Piece(piece)); got != torrent.PiecePriorityNone {
+			t.Fatalf("previous episode piece %d priority=%v want None", piece, got)
+		}
+	}
+	code, response = s.DispatchControl("POST", "/file-only", `{"id":"`+added.ID+`","enabled":false}`)
+	if code != 200 {
+		t.Fatalf("clear file-only: %d %s", code, response)
+	}
+	if text.Priority() != torrent.PiecePriorityNormal {
+		t.Fatalf("cleared file-only other file priority=%v want Normal", text.Priority())
+	}
+	if got := other.Priority(); got != torrent.PiecePriorityNormal {
+		t.Fatalf("cleared file-only other episode priority=%v want Normal", got)
+	}
+	if got := rawPiecePriority(tr.Piece(other.BeginPieceIndex())); got != torrent.PiecePriorityNow {
+		t.Fatalf("restored other episode startup priority=%v want Now", got)
 	}
 
 	code, response = s.DispatchControl("POST", "/pause", `{"id":"`+added.ID+`"}`)

@@ -112,6 +112,7 @@ adb install -r torrent-player.apk
   - Supports TCP, uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, and HTTP/WebSocket trackers.
   - Android commands run through JNI; there is no Android control listener on port 18080 and no OkHttp dependency.
   - Settings saves the preferred playback method: Standard sends a read-only Android content URI, while HTTP stream (experimental) sends a loopback media URL for incomplete video and Direct Play. Standard's incomplete files use a seekable proxy descriptor backed by verified Go torrent reads; completed files use their saved descriptor with either setting.
+  - The outlined Experimental section groups playback and transfer controls. Play this file only is enabled by default: playing a saved torrent suspends requests for its other selected files, including their startup hints, until you return from the external player. Turning the switch off restores normal downloading. Direct Play already focuses on the playing video.
   - A loopback HTTP media endpoint remains available for streaming compatibility. The standalone host engine also provides an HTTP control adapter for development.
 
 ---

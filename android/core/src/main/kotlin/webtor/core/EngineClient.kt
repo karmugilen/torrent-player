@@ -21,6 +21,7 @@ data class EngineStats(
     val ctlPort: Int,
     val streamPort: Int,
     val path: String,
+    val listenPort: Int = 0,
 )
 
 data class TorrentFile(
@@ -161,6 +162,7 @@ class EngineClient(
             ctlPort = json.optInt("ctlPort"),
             streamPort = json.optInt("streamPort"),
             path = json.optString("path"),
+            listenPort = json.optInt("listenPort"),
         )
     }
 
@@ -176,11 +178,18 @@ class EngineClient(
         return parseTorrent(json)
     }
 
-    fun play(id: String, fileIndex: Int? = null, offset: Long? = null): PlayInfo {
+    fun play(id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false): PlayInfo {
         val body = JSONObject().put("id", id)
         if (fileIndex != null) body.put("fileIndex", fileIndex)
         if (offset != null) body.put("offset", offset.coerceAtLeast(0L))
+        if (boost) body.put("boost", true)
+        if (fileOnly) body.put("fileOnly", true)
         return parsePlay(post("/play", body))
+    }
+
+    /** Restores the other selected files after a file-only playback ends. */
+    fun clearFileOnly(id: String) {
+        post("/file-only", JSONObject().put("id", id).put("enabled", false))
     }
 
     fun remove(id: String, destroyStore: Boolean = true) {
@@ -279,6 +288,18 @@ class EngineClient(
     fun setTransferRates(downloadRateBytesSec: Long, uploadRateBytesSec: Long): Pair<Long, Long> {
         val j = post("/settings", JSONObject().put("downloadRateBytesSec", downloadRateBytesSec.coerceAtLeast(0L)).put("uploadRateBytesSec", uploadRateBytesSec.coerceAtLeast(0L)))
         return j.optLong("downloadRateBytesSec", downloadRateBytesSec) to j.optLong("uploadRateBytesSec", uploadRateBytesSec)
+    }
+
+    /** Caps download only. Omitting uploadRateBytesSec leaves the upload limiter unchanged. */
+    fun setDownloadRateBytesSec(bytesPerSecond: Long): Long {
+        val rate = bytesPerSecond.coerceAtLeast(0L)
+        return post("/settings", JSONObject().put("downloadRateBytesSec", rate)).optLong("downloadRateBytesSec", rate)
+    }
+
+    /** Caps peer dials per second. The body is only dialRatePerSec, so transfer limiters stay unchanged. */
+    fun setDialRatePerSec(perSec: Int): Int {
+        val rate = perSec.coerceIn(10, 80)
+        return post("/settings", JSONObject().put("dialRatePerSec", rate)).optInt("dialRatePerSec", rate)
     }
 
     /**

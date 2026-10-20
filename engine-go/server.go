@@ -60,15 +60,19 @@ var defaultAnnounce = []string{
 }
 
 type TorrentRecord struct {
-	mu                   sync.RWMutex
-	ID                   string
-	InfoHash             string
-	Torrent              *torrent.Torrent
-	Prepared             bool
-	Configured           bool
-	DirectPlay           bool
-	Selected             []int
-	FocusedFile          *int
+	mu          sync.RWMutex
+	ID          string
+	InfoHash    string
+	Torrent     *torrent.Torrent
+	Prepared    bool
+	Configured  bool
+	DirectPlay  bool
+	Selected    []int
+	FocusedFile *int
+	// FileOnly stops every selected file except FocusedFile from requesting
+	// pieces. Direct Play already ignores other files, so this applies to
+	// saved downloads only. Cleared when playback ends.
+	FileOnly             bool
 	Generation           int64
 	Error                *string
 	Warning              *string
@@ -107,6 +111,7 @@ type EngineServer struct {
 	maxPeers        int
 	downloadLimiter *rate.Limiter
 	uploadLimiter   *rate.Limiter
+	dialLimiter     *rate.Limiter
 	seedingEnabled  atomic.Bool
 	seedingAllowed  atomic.Bool
 	seedRatioMilli  atomic.Int64
@@ -231,6 +236,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 		trackerSockets:  trackerSockets,
 		downloadLimiter: cfg.DownloadRateLimiter,
 		uploadLimiter:   cfg.UploadRateLimiter,
+		dialLimiter:     cfg.DialRateLimiter,
 		ctlPort:         ctlPort,
 		lastRateTime:    time.Now(),
 		done:            make(chan struct{}),
@@ -716,6 +722,10 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 			s.handlePlay(w, r)
 			return
 		}
+		if len(parts) == 1 && parts[0] == "file-only" {
+			s.handleFileOnly(w, r)
+			return
+		}
 		if len(parts) == 1 && parts[0] == "focus" {
 			s.handleFocus(w, r)
 			return
@@ -818,6 +828,11 @@ func (s *EngineServer) applyBackgroundFocus(rec *TorrentRecord) {
 }
 
 func (s *EngineServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	// LocalPort can take the torrent client lock. Sample it before s.mu so the locks cannot nest.
+	listenPort := 0
+	if c := s.client; c != nil {
+		listenPort = c.LocalPort()
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -843,6 +858,7 @@ func (s *EngineServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		StreamPort:              s.streamPort,
 		Path:                    s.downloadDir,
 		PayloadTransfersAllowed: s.payloadTransfersAllowed.Load(),
+		ListenPort:              listenPort,
 	}
 
 	writeJSON(w, http.StatusOK, stats)
@@ -1232,12 +1248,17 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	// urgent read regions and therefore wins over this background focus.
 	focused := fileIdx
 	rec.FocusedFile = &focused
-	if !rec.DirectPlay {
+	if rec.DirectPlay {
+		rec.FileOnly = false
+	} else {
+		rec.FileOnly = req.FileOnly
 		targetFile.Download()
 	}
+	s.applySavedFilePriorities(rec)
 	s.applyVideoStartupHints(rec)
 	s.applyBackgroundFocus(rec)
 	coordinator := s.ensurePlaybackCoordinator(t)
+	coordinator.setPlayBoost(fileIdx, req.Boost)
 	coordinator.prepareResume(targetFile, req.Offset)
 
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/torrent/%s/file/%d", s.streamPort, rec.ID, fileIdx)
@@ -1249,6 +1270,35 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 		Length:    targetFile.Length(),
 		StreamURL: streamURL,
 	})
+}
+
+func (s *EngineServer) handleFileOnly(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID      string `json:"id"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	s.mu.RLock()
+	rec, ok := s.records[req.ID]
+	s.mu.RUnlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "torrent not found"})
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.removed || rec.DirectPlay {
+		rec.FileOnly = false
+	} else {
+		rec.FileOnly = req.Enabled
+	}
+	s.applySavedFilePriorities(rec)
+	s.applyVideoStartupHints(rec)
+	s.applyBackgroundFocus(rec)
+	writeJSON(w, http.StatusOK, map[string]bool{"fileOnly": rec.FileOnly})
 }
 
 func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
@@ -1694,6 +1744,16 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	}
 	if req.UploadRateBytesSec != nil && *req.UploadRateBytesSec >= 0 {
 		setLimiterRate(s.uploadLimiter, *req.UploadRateBytesSec)
+	}
+	if req.DialRatePerSec != nil && s.dialLimiter != nil {
+		n := *req.DialRatePerSec
+		if n < 10 {
+			n = 10
+		} else if n > 80 {
+			n = 80
+		}
+		s.dialLimiter.SetLimit(rate.Limit(n))
+		s.dialLimiter.SetBurst(n)
 	}
 	if req.PayloadTransfersAllowed != nil {
 		s.payloadTransfersAllowed.Store(*req.PayloadTransfersAllowed)

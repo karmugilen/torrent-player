@@ -86,7 +86,11 @@ func (c *playbackPriorityCoordinator) expireResume(generation uint64) {
 func (p *playbackReader) noteResumeReadLocked(offset int64) {
 	// Header/tail probes must not replace the useful body position. Small
 	// files are already covered by startup caching and need no extra hold.
-	if p.priorityOwner == nil || offset < videoStartupHeadBytes || offset >= p.length-videoStartupTailBytes {
+	head, tail := videoStartupHeadBytes, videoStartupTailBytes
+	if p.boost && p.startupHeadBytes > 0 {
+		head, tail = p.startupHeadBytes, p.startupTailBytes
+	}
+	if p.priorityOwner == nil || offset < head || offset >= p.length-tail {
 		return
 	}
 	c := p.priorityOwner

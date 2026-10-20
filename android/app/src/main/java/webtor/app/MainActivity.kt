@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
         val uri = returnedPlaybackUri(data?.data?.toString(), launchedPlaybackUri, launchedPlaybackItems)
         if (position != null && uri != null) session.recordPlaybackPosition(launchedBookmarkUris[uri] ?: uri, position, number("extra_duration") ?: number("duration") ?: 0L)
         (application as WebtorApp).httpPlaybackLease.finish(launchedPlaybackUri)
+        session.finishPlayback(launchedBookmarkUris[launchedPlaybackUri] ?: launchedPlaybackUri)
         launchedPlaybackUri = null
         launchedPlaybackItems = emptySet()
         launchedBookmarkUris = emptyMap()
@@ -166,6 +167,14 @@ class MainActivity : ComponentActivity() {
                                 onClearNativeCategory = { session.clearNativeCache(listOf(it)) },
                                 onPickFolder = session::pickFolder,
                                 onClearFolder = session::clearFolder,
+                                onPlayBoost = session::setPlayBoost,
+                                onFileOnlyPlayback = session::setFileOnlyPlayback,
+                                onNetworkPolicy = session::setNetworkPolicy,
+                                onDownloadRateKiB = session::setDownloadRateKiB,
+                                onFastPeerSearch = session::setFastPeerSearch,
+                                onPauseOnLowBattery = session::setPauseOnLowBattery,
+                                onPlayNext = session::setPlayNext,
+                                onPreloadStart = session::setPreloadStart,
                             )
                             Screen.Files -> {
                                 val entry = state.library.find { it.key == state.openTorrentKey }
@@ -388,6 +397,7 @@ class MainActivity : ComponentActivity() {
         event.playbackLeaseKey?.let { (application as WebtorApp).httpPlaybackLease.begin(event.uri, it) }
         if (!launchViewer(view)) {
             (application as WebtorApp).httpPlaybackLease.finish(event.uri)
+            session.finishPlayback(event.bookmarkUris[event.uri] ?: event.uri)
             launchedPlaybackUri = null
             launchedPlaybackItems = emptySet()
             launchedBookmarkUris = emptyMap()

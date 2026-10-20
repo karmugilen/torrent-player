@@ -66,6 +66,15 @@ data class UiState(
     val storageFolderName: String = "Downloads/Webtor",
     val hasCustomFolder: Boolean = false,
     val storageAccessWarning: String? = null,
+    val playBoost: Boolean = false,
+    val fileOnlyPlayback: Boolean = true,
+    val downloadRateKiB: Int = 0,
+    val fastPeerSearch: Boolean = false,
+    val pauseOnLowBattery: Boolean = false,
+    val batteryPaused: Boolean = false,
+    val playNext: Boolean = false,
+    val preloadStart: Boolean = false,
+    val listenPort: Int = 0,
 )
 
 /** User-facing library ordering. Kept pure so it is deterministic across restore/recomposition. */

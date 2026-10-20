@@ -1,7 +1,12 @@
 package webtor.app
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -65,6 +70,11 @@ class LibrarySession(
     @Volatile private var shutdownComplete = false
     private val antiDpiMutex = Mutex()
     private var pendingAntiDpiTarget: Boolean? = null
+    private var batteryReceiverRegistered = false
+    private var batteryPercent: Int = -1
+    private var batteryCharging = false
+    private var playNextLatchedUri: String? = null
+    private var activeFileOnlyPlayback: Pair<String, String>? = null
 
     private val _ui = MutableStateFlow(UiState(networkPolicy = savedNetworkPolicy(), networkAllowed = false))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -114,6 +124,7 @@ class LibrarySession(
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
+        registerBatteryMonitor()
         scope.launch { applyNetworkUpdates() }
         serviceSuppressed = settings.getBoolean("serviceSuppressed", false)
         // Reset previous custom connection tuning once; subsequent user changes persist.
@@ -135,6 +146,7 @@ class LibrarySession(
                         },
                     )
                 }
+                val pauseOnLowBattery = settings.getBoolean("pauseOnLowBattery", false)
                 _ui.update {
                     it.copy(
                         library = loaded,
@@ -160,8 +172,17 @@ class LibrarySession(
                         } ?: PlaybackMethod.CONTENT_URI,
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
+                        playBoost = settings.getBoolean("playBoost", false),
+                        fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", true),
+                        fastPeerSearch = settings.getBoolean("fastPeerSearch", false),
+                        pauseOnLowBattery = pauseOnLowBattery,
+                        batteryPaused = pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging,
+                        playNext = settings.getBoolean("playNext", false),
+                        preloadStart = settings.getBoolean("preloadStart", false),
+                        downloadRateKiB = savedDownloadRateKiB(),
                     )
                 }
+                if (_ui.value.batteryPaused) networkUpdates.trySend(Unit)
                 // Publish the local library before slow metadata and descriptor
                 // recovery so unrelated commands remain responsive.
                 initialized.complete(Unit)
@@ -174,6 +195,8 @@ class LibrarySession(
                 waitForEngine()
                 if (_ui.value.engineReady) {
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
+                    runCatching { withContext(io) { client.setDownloadRateBytesSec(_ui.value.downloadRateKiB.toLong() * 1024L) } }
+                    runCatching { withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) 80 else 30) } }
                     runCatching {
                         if (_ui.value.ramCacheAuto) refreshAutoRamCache()
                         else withContext(io) { client.setRamCacheMiB(_ui.value.ramCacheMiB) }
@@ -183,7 +206,7 @@ class LibrarySession(
                             _ui.update { it.copy(error = readableError(failure)) }
                         }
                     applySeedingSettings(force = true)
-                    runCatching { withContext(io) { client.setPayloadTransfersAllowed(_ui.value.networkAllowed) } }
+                    runCatching { withContext(io) { client.setPayloadTransfersAllowed(payloadAllowed()) } }
                     setAntiDpi(_ui.value.antiDpiEnabled)
                     val nativeCache = runCatching { withContext(io) { client.getCache() } }.getOrNull()
                     if (nativeCache != null) {
@@ -307,6 +330,77 @@ class LibrarySession(
         updateNetworkState(networkSnapshot, policy)
     }
 
+    fun setPlayBoost(enabled: Boolean) {
+        settings.edit().putBoolean("playBoost", enabled).apply()
+        _ui.update { it.copy(playBoost = enabled) }
+    }
+
+    fun setFileOnlyPlayback(enabled: Boolean) {
+        settings.edit().putBoolean("fileOnlyPlayback", enabled).apply()
+        _ui.update { it.copy(fileOnlyPlayback = enabled) }
+        if (!enabled) finishPlayback(null)
+    }
+
+    /** A player return or failed launch releases the saved torrent's file filter. */
+    fun finishPlayback(uri: String?) {
+        scope.launchCommand {
+            if (uri != null && activeFileOnlyPlayback?.first != uri) return@launchCommand
+            try {
+                clearFileOnlyPlayback()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
+    private suspend fun clearFileOnlyPlayback() {
+        val active = activeFileOnlyPlayback ?: return
+        if (_ui.value.library.any { it.engineId == active.second }) {
+            withContext(io) { client.clearFileOnly(active.second) }
+        }
+        activeFileOnlyPlayback = null
+    }
+
+    fun setFastPeerSearch(enabled: Boolean) {
+        settings.edit().putBoolean("fastPeerSearch", enabled).apply()
+        _ui.update { it.copy(fastPeerSearch = enabled) }
+        if (_ui.value.engineReady) {
+            scope.launch {
+                runCatching { withContext(io) { client.setDialRatePerSec(if (enabled) 80 else 30) } }
+            }
+        }
+    }
+
+    fun setPauseOnLowBattery(enabled: Boolean) {
+        settings.edit().putBoolean("pauseOnLowBattery", enabled).apply()
+        _ui.update { it.copy(pauseOnLowBattery = enabled) }
+        publishBatteryPaused()
+        networkUpdates.trySend(Unit)
+    }
+
+    fun setPlayNext(enabled: Boolean) {
+        settings.edit().putBoolean("playNext", enabled).apply()
+        _ui.update { it.copy(playNext = enabled) }
+    }
+
+    fun setPreloadStart(enabled: Boolean) {
+        settings.edit().putBoolean("preloadStart", enabled).apply()
+        _ui.update { it.copy(preloadStart = enabled) }
+    }
+
+    fun setDownloadRateKiB(value: Int) {
+        if (value != 0 && value != 1024 && value != 4096 && value != 8192) return
+        settings.edit().putInt("downloadRateKiB", value).apply()
+        _ui.update { it.copy(downloadRateKiB = value) }
+        if (_ui.value.engineReady) {
+            val bytes = value.toLong() * 1024L
+            scope.launch {
+                runCatching { withContext(io) { client.setDownloadRateBytesSec(bytes) } }
+            }
+        }
+    }
+
     fun updateNetworkState(snapshot: NetworkSnapshot) =
         updateNetworkState(snapshot, _ui.value.networkPolicy)
 
@@ -324,6 +418,43 @@ class LibrarySession(
         }
     }
 
+    private fun payloadAllowed(): Boolean = _ui.value.networkAllowed && !_ui.value.batteryPaused
+
+    private fun registerBatteryMonitor() {
+        if (batteryReceiverRegistered) return
+        batteryReceiverRegistered = true
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
+                onBatteryChanged(intent)
+            }
+        }
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        val sticky = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            app.registerReceiver(receiver, filter)
+        }
+        if (sticky != null) onBatteryChanged(sticky)
+    }
+
+    private fun onBatteryChanged(intent: Intent) {
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level >= 0 && scale > 0) batteryPercent = level * 100 / scale
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        batteryCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        if (publishBatteryPaused()) networkUpdates.trySend(Unit)
+    }
+
+    private fun publishBatteryPaused(): Boolean {
+        val paused = _ui.value.pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging
+        if (paused == _ui.value.batteryPaused) return false
+        _ui.update { it.copy(batteryPaused = paused) }
+        return true
+    }
+
     private suspend fun applyNetworkUpdates() {
         for (ignored in networkUpdates) {
             // One worker serializes JNI updates. Bursts collapse to the latest
@@ -332,7 +463,7 @@ class LibrarySession(
             if (networkSnapshot.connected) delay(750)
             while (networkUpdates.tryReceive().isSuccess) { /* drain superseded events */ }
             val snapshot = networkSnapshot
-            val allowed = _ui.value.networkAllowed
+            val allowed = payloadAllowed()
             try {
                 withContext(io) {
                     client.setPayloadTransfersAllowed(allowed)
@@ -1186,11 +1317,42 @@ class LibrarySession(
         if (positionMs < 0) return
         scope.launchCommand {
             val entry = _ui.value.library.find { e -> e.files.any { PlaybackProvider.uriFor(e, it).toString() == uri } } ?: return@launchCommand
+            val ended = entry.files.find { PlaybackProvider.uriFor(entry, it).toString() == uri }
             patch(entry.key) { e -> e.copy(files = e.files.map { f ->
                 if (PlaybackProvider.uriFor(e, f).toString() != uri) f else f.withPlaybackPosition(positionMs, durationMs)
             }) }
             persist()
+            maybePlayNext(uri, entry.key, ended, positionMs, durationMs)
         }
+    }
+
+    private fun maybePlayNext(uri: String, entryKey: String, ended: SavedFile?, positionMs: Long, durationMs: Long) {
+        val atEnd = durationMs > 0L && positionMs >= durationMs - 3_000L
+        if (!atEnd) {
+            if (playNextLatchedUri == uri) playNextLatchedUri = null
+            return
+        }
+        if (!_ui.value.playNext || ended == null || playNextLatchedUri == uri) return
+        if (!ended.name.isVideoName() && !ended.path.isVideoName()) return
+        val current = _ui.value.library.find { it.key == entryKey } ?: return
+        val next = nextVideoAfter(current, ended) ?: return
+        playNextLatchedUri = uri
+        play(current, next.index)
+    }
+
+    private fun nextVideoAfter(entry: DownloadEntry, ended: SavedFile): SavedFile? {
+        val order = compareBy<SavedFile> { naturalMediaKey(it.path) }.thenBy { it.index }
+        val next = entry.files
+            .filter { file ->
+                (file.name.isVideoName() || file.path.isVideoName()) &&
+                    file.index != ended.index &&
+                    (file.index in entry.selected || file.isVerifiedComplete) &&
+                    order.compare(ended, file) < 0
+            }
+            .minWithOrNull(order)
+            ?: return null
+        if (next.playbackDurationMs > 0L && next.playbackPositionMs >= next.playbackDurationMs - 3_000L) return null
+        return next
     }
 
     fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false) {
@@ -1207,9 +1369,17 @@ class LibrarySession(
                     patch(current.key) { e -> e.copy(files = e.files.map { if (it.index == targetIndex) it.copy(playbackPositionMs = 0) else it }) }
                     current = _ui.value.library.find { it.key == entry.key } ?: current
                 }
+                clearFileOnlyPlayback()
                 completedPlayFile(current, targetIndex)?.let { file ->
                     withContext(io) { storage.prepareForPlayback(file) }
-                    _events.send(playbackEvent(current, file))
+                    val content = playbackEvent(current, file)
+                    val id = current.engineId
+                    if (_ui.value.fileOnlyPlayback && !current.directPlay && !current.paused &&
+                        targetIndex in current.selected && current.status?.checking != true && id != null) {
+                        withContext(io) { client.play(id, targetIndex, fileOnly = true) }
+                        activeFileOnlyPlayback = content.uri to id
+                    }
+                    _events.send(content)
                     if (fromStart) persist()
                     return@launchCommand
                 }
@@ -1238,13 +1408,19 @@ class LibrarySession(
                     patch(current.key) { it.copy(paused = false) }
                 }
                 val file = current.files.first { it.index == targetIndex }
-                val info = withContext(io) { client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint()) }
                 val content = playbackEvent(current, file)
+                val fileOnly = _ui.value.fileOnlyPlayback && !current.directPlay
+                val info = withContext(io) {
+                    client.play(id, targetIndex, if (fromStart) 0L else file.resumeByteHint(), boost = _ui.value.playBoost, fileOnly = fileOnly)
+                }
+                if (fileOnly) activeFileOnlyPlayback = content.uri to id
+                if (_ui.value.preloadStart) awaitPlaybackPreload(id, targetIndex, file.length)
                 _events.send(if (_ui.value.playbackMethod == PlaybackMethod.HTTP) httpPlaybackEvent(content, current, file, info.streamUrl) else content)
                 persist()
                 syncService()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
+                runCatching { clearFileOnlyPlayback() }
                 val msg = readableError(t)
                 patch(entry.key) { it.copy(error = msg) }
                 _ui.update { it.copy(error = msg) }
@@ -2409,6 +2585,11 @@ class LibrarySession(
         ?.let { name -> TransferNetworkPolicy.entries.find { it.name == name } }
         ?: TransferNetworkPolicy.ANY
 
+    private fun savedDownloadRateKiB(): Int {
+        val value = settings.getInt("downloadRateKiB", 0)
+        return if (value == 0 || value == 1024 || value == 4096 || value == 8192) value else 0
+    }
+
     /**
      * Refresh visible transfer reasons from shared policy. Eligible torrents run
      * simultaneously with no slot limits; native selection follows the saved
@@ -2533,10 +2714,24 @@ class LibrarySession(
         }
     }
 
+    private suspend fun awaitPlaybackPreload(id: String, fileIndex: Int, length: Long) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 8_000L
+        val needed = minOf(2L * 1024 * 1024, length.coerceAtLeast(0L))
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val snapshot = withContext(io) { client.torrent(id) }
+            val target = snapshot.files.find { it.index == fileIndex }
+            if (target != null && (target.verifiedBytes >= needed || target.progress >= 1.0)) return
+            val remaining = deadline - android.os.SystemClock.elapsedRealtime()
+            if (remaining <= 0L) return
+            delay(minOf(400L, remaining))
+        }
+    }
+
     private suspend fun waitForEngine() {
         val ready = withContext(io) { engineHost.awaitReady() }
-        if (ready && runCatching { withContext(io) { client.stats() } }.isSuccess) {
-            _ui.update { it.copy(engineReady = true, statusLine = "Ready") }
+        val stats = if (ready) runCatching { withContext(io) { client.stats() } }.getOrNull() else null
+        if (stats != null) {
+            _ui.update { it.copy(engineReady = true, statusLine = "Ready", listenPort = stats.listenPort) }
             return
         }
         _ui.update {
