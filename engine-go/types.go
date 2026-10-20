@@ -82,7 +82,8 @@ type PlayRequest struct {
 	// FileOnly limits a saved download to the played file until playback ends.
 	FileOnly bool `json:"fileOnly,omitempty"`
 	// AdaptiveBuffer enables experimental demand-variation headroom per play.
-	AdaptiveBuffer bool `json:"adaptiveBuffer,omitempty"`
+	AdaptiveBuffer   bool `json:"adaptiveBuffer,omitempty"`
+	BurstAwareBuffer bool `json:"burstAwareBuffer,omitempty"`
 }
 
 // FocusRequest changes the background download focus. A null fileIndex clears
@@ -168,6 +169,7 @@ type MetadataResponse struct {
 }
 
 type SettingsResponse struct {
+	PeerExploration      bool  `json:"peerExploration"`
 	RamCacheBytes        int64 `json:"ramCacheBytes"`
 	SeedingEnabled       bool  `json:"seedingEnabled"`
 	SeedRatioMilli       int64 `json:"seedRatioMilli"`
@@ -181,6 +183,7 @@ type SettingsResponse struct {
 }
 
 type SettingsRequest struct {
+	PeerExploration      *bool  `json:"peerExploration,omitempty"`
 	RamCacheBytes        *int64 `json:"ramCacheBytes,omitempty"`
 	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`
 	SeedingAllowed       *bool  `json:"seedingAllowed,omitempty"`

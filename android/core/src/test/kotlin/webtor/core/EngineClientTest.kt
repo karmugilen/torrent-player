@@ -124,6 +124,7 @@ class EngineClientTest {
         assertEquals(75L, json.getLong("offset"))
         assertFalse(json.has("boost"))
         assertFalse(json.has("adaptiveBuffer"))
+        assertFalse(json.has("burstAwareBuffer"))
     }
 
     @Test
@@ -167,6 +168,31 @@ class EngineClientTest {
         val body = JSONObject(request.body.readUtf8())
         assertTrue(body.getBoolean("adaptiveBuffer"))
         assertFalse(body.has("boost"))
+    }
+
+    @Test
+    fun burstAwareBufferCanBeEnabledIndependently() {
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","fileIndex":1,"name":"a.mp4","length":100,"streamUrl":"http://127.0.0.1:8000/x"}"""))
+        client.play("abc", 1, burstAwareBuffer = true)
+        val request = transport.takeRequest()
+        assertEquals("/play", request.path)
+        val body = JSONObject(request.body.readUtf8())
+        assertTrue(body.getBoolean("burstAwareBuffer"))
+        assertFalse(body.has("adaptiveBuffer"))
+        assertFalse(body.has("boost"))
+    }
+
+    @Test
+    fun peerExplorationSettingOnlyChangesThatExperiment() {
+        for (enabled in listOf(true, false)) {
+            transport.enqueue(TestResponse().setBody("""{"peerExploration":$enabled}"""))
+            assertEquals(enabled, client.setPeerExploration(enabled))
+            val request = transport.takeRequest()
+            assertEquals("/settings", request.path)
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals(enabled, body.getBoolean("peerExploration"))
+            assertEquals(1, body.length())
+        }
     }
 
     @Test

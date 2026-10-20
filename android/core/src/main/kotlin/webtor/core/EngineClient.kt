@@ -178,13 +178,14 @@ class EngineClient(
         return parseTorrent(json)
     }
 
-    fun play(id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false, adaptiveBuffer: Boolean = false): PlayInfo {
+    fun play(id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false, adaptiveBuffer: Boolean = false, burstAwareBuffer: Boolean = false): PlayInfo {
         val body = JSONObject().put("id", id)
         if (fileIndex != null) body.put("fileIndex", fileIndex)
         if (offset != null) body.put("offset", offset.coerceAtLeast(0L))
         if (boost) body.put("boost", true)
         if (fileOnly) body.put("fileOnly", true)
         if (adaptiveBuffer) body.put("adaptiveBuffer", true)
+        if (burstAwareBuffer) body.put("burstAwareBuffer", true)
         return parsePlay(post("/play", body))
     }
 
@@ -302,6 +303,9 @@ class EngineClient(
         val rate = perSec.coerceIn(10, 80)
         return post("/settings", JSONObject().put("dialRatePerSec", rate)).optInt("dialRatePerSec", rate)
     }
+
+    fun setPeerExploration(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("peerExploration", enabled)).optBoolean("peerExploration", enabled)
 
     /**
      * Gates torrent payload bytes globally while preserving tracker, DHT and

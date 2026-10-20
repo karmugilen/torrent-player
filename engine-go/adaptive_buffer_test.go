@@ -11,21 +11,32 @@ import (
 // playback. Changing demand must affect actual scheduled look-ahead.
 func TestAdaptiveBufferAddsHeadroomForVariableDemand(t *testing.T) {
 	variable := []int64{256 << 10, 1792 << 10}
-	plain := measuredPlaybackLookahead(t, variable, false, false, false)
-	adaptive := measuredPlaybackLookahead(t, variable, true, false, false)
+	plain := measuredPlaybackLookahead(t, variable, bufferExperiment{}, false)
+	adaptive := measuredPlaybackLookahead(t, variable, bufferExperiment{adaptive: true}, false)
 	if adaptive <= plain {
 		t.Fatalf("variable demand needs extra look-ahead: adaptive=%d default=%d", adaptive, plain)
 	}
-	settled := measuredPlaybackLookahead(t, variable, true, false, true)
+	settled := measuredPlaybackLookahead(t, variable, bufferExperiment{adaptive: true}, true)
 	if settled >= adaptive {
 		t.Fatalf("stable demand should release extra headroom: stable=%d variable=%d", settled, adaptive)
 	}
 }
 
-func measuredPlaybackLookahead(t *testing.T, pattern []int64, enabled, direct, settle bool) int64 {
+func TestBurstAwareBufferRetainsHeadroomAcrossLongerBursts(t *testing.T) {
+	pattern := []int64{256 << 10, 1792 << 10}
+	adaptive := measuredPlaybackLookahead(t, pattern, bufferExperiment{adaptive: true}, true)
+	burstAware := measuredPlaybackLookahead(t, pattern, bufferExperiment{burst: true}, true)
+	if burstAware <= adaptive {
+		t.Fatalf("longer burst history needs headroom: burst=%d adaptive=%d", burstAware, adaptive)
+	}
+}
+
+type bufferExperiment struct{ adaptive, burst bool }
+
+func measuredPlaybackLookahead(t *testing.T, pattern []int64, experiment bufferExperiment, settle bool) int64 {
 	t.Helper()
-	s, rec, pieceLen := largePlaybackFixtureMode(t, 72, direct)
-	body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": enabled})
+	s, rec, pieceLen := largePlaybackFixture(t, 72)
+	body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": experiment.adaptive, "burstAwareBuffer": experiment.burst})
 	if code, response := s.DispatchControl("POST", "/play", string(body)); code != 200 {
 		t.Fatalf("play: %d %s", code, response)
 	}
@@ -59,12 +70,6 @@ func measuredPlaybackLookahead(t *testing.T, pattern []int64, enabled, direct, s
 		clock = clock.Add(time.Second)
 		if n, err := reader.ReadAt(make([]byte, 1), offset); err != nil || n != 1 {
 			t.Fatalf("read: %d %v", n, err)
-		}
-		st.mu.Lock()
-		used, limit := st.cacheBytes, st.maxCacheBytes
-		st.mu.Unlock()
-		if direct && used > limit {
-			t.Fatalf("adaptive buffering exceeded RAM budget: %d/%d", used, limit)
 		}
 	}
 	urgent, ahead, _, _, _, _, _ := reader.testWindow()

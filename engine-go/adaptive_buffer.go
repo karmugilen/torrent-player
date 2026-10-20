@@ -6,8 +6,11 @@ import "math"
 // The feedback uses measured rates, not constants borrowed from natural
 // patterns. It is an experimental policy, not a universality theorem.
 type demandBufferController struct {
-	mean, variance float64
-	window         int64
+	mean, variance         float64
+	window                 int64
+	burstAware             bool
+	fastMean, fastVariance float64
+	slowMean, slowVariance float64
 }
 
 func (c *demandBufferController) observe(bytesPerSecond float64, limit int64) int64 {
@@ -20,7 +23,22 @@ func (c *demandBufferController) observe(bytesPerSecond float64, limit int64) in
 	}
 	// Eight seconds of demand plus a variability margin. Scale comes from
 	// consumption, so the same policy works for different file bitrates.
-	target := int64(min(float64(limit), 8*(c.mean+2*math.Sqrt(c.variance))))
+	forecast := c.mean + 2*math.Sqrt(c.variance)
+	if c.burstAware {
+		update := func(mean, variance *float64, weight float64) {
+			if *mean == 0 {
+				*mean = bytesPerSecond
+				return
+			}
+			delta := bytesPerSecond - *mean
+			*mean += weight * delta
+			*variance = (1 - weight) * (*variance + weight*delta*delta)
+		}
+		update(&c.fastMean, &c.fastVariance, 0.5)
+		update(&c.slowMean, &c.slowVariance, 0.05)
+		forecast = max(forecast, c.fastMean+2*math.Sqrt(c.fastVariance), c.slowMean+2*math.Sqrt(c.slowVariance))
+	}
+	target := int64(min(float64(limit), 8*forecast))
 	target = max(int64(4<<20), target)
 	if c.window <= 0 {
 		c.window = target

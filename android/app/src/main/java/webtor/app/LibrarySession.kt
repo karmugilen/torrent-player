@@ -174,6 +174,8 @@ class LibrarySession(
                         networkPolicy = savedNetworkPolicy(),
                         playBoost = settings.getBoolean("playBoost", false),
                         adaptiveBuffer = settings.getBoolean("adaptiveBuffer", false),
+                        burstAwareBuffer = settings.getBoolean("burstAwareBuffer", false),
+                        peerExploration = settings.getBoolean("peerExploration", false),
                         fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", true),
                         fastPeerSearch = settings.getBoolean("fastPeerSearch", false),
                         pauseOnLowBattery = pauseOnLowBattery,
@@ -198,6 +200,11 @@ class LibrarySession(
                     runCatching { withContext(io) { client.setMaxPeers(_ui.value.maxPeers) } }
                     runCatching { withContext(io) { client.setDownloadRateBytesSec(_ui.value.downloadRateKiB.toLong() * 1024L) } }
                     runCatching { withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) 80 else 30) } }
+                    runCatching {
+                        mutex.withLock {
+                            withContext(io) { client.setPeerExploration(_ui.value.peerExploration) }
+                        }
+                    }
                     runCatching {
                         if (_ui.value.ramCacheAuto) refreshAutoRamCache()
                         else withContext(io) { client.setRamCacheMiB(_ui.value.ramCacheMiB) }
@@ -339,6 +346,24 @@ class LibrarySession(
     fun setAdaptiveBuffer(enabled: Boolean) {
         settings.edit().putBoolean("adaptiveBuffer", enabled).apply()
         _ui.update { it.copy(adaptiveBuffer = enabled) }
+    }
+
+    fun setBurstAwareBuffer(enabled: Boolean) {
+        settings.edit().putBoolean("burstAwareBuffer", enabled).apply()
+        _ui.update { it.copy(burstAwareBuffer = enabled) }
+    }
+
+    fun setPeerExploration(enabled: Boolean) {
+        scope.launchCommand {
+            try {
+                if (_ui.value.engineReady) withContext(io) { client.setPeerExploration(enabled) }
+                settings.edit().putBoolean("peerExploration", enabled).apply()
+                _ui.update { it.copy(peerExploration = enabled) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
+            }
+        }
     }
 
     fun setFileOnlyPlayback(enabled: Boolean) {
@@ -1420,6 +1445,7 @@ class LibrarySession(
                     client.play(
                         id, targetIndex, if (fromStart) 0L else file.resumeByteHint(),
                         boost = _ui.value.playBoost, fileOnly = fileOnly, adaptiveBuffer = _ui.value.adaptiveBuffer,
+                        burstAwareBuffer = _ui.value.burstAwareBuffer,
                     )
                 }
                 if (fileOnly) activeFileOnlyPlayback = content.uri to id

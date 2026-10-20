@@ -15,11 +15,13 @@ import (
 )
 
 func TestDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T) {
-	t.Run("default", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, false) })
-	t.Run("adaptive buffer", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, true) })
+	t.Run("default", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, false, false) })
+	t.Run("adaptive buffer", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, true, false) })
+	t.Run("burst-aware buffer", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, false, true) })
+	t.Run("combined", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, true, true) })
 }
 
-func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive bool) {
+func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive, burst bool) {
 	if testing.Short() {
 		t.Skip("local peer transfer")
 	}
@@ -93,8 +95,8 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive bool) {
 	if rec.Torrent.AddClientPeer(seed.client) == 0 {
 		t.Fatal("no seed address")
 	}
-	if adaptive {
-		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": true})
+	if adaptive || burst {
+		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": adaptive, "burstAwareBuffer": burst})
 		if code, response := leech.DispatchControl("POST", "/play", string(body)); code != 200 {
 			t.Fatalf("adaptive play: %d %s", code, response)
 		}

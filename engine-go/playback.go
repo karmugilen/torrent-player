@@ -80,6 +80,7 @@ type playbackPriorityCoordinator struct {
 	// at open so a later play does not resize an already-open window.
 	playBoost       map[int]bool
 	adaptiveBuffers map[int]bool
+	burstBuffers    map[int]bool
 }
 
 func newPlaybackPriorityCoordinator(t *torrent.Torrent) *playbackPriorityCoordinator {
@@ -106,16 +107,24 @@ func (c *playbackPriorityCoordinator) setPlayBoost(fileIndex int, boost bool) {
 	delete(c.playBoost, fileIndex)
 }
 
-func (c *playbackPriorityCoordinator) setAdaptiveBuffer(fileIndex int, enabled bool) {
+func (c *playbackPriorityCoordinator) setBufferExperiments(fileIndex int, adaptive, burst bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if enabled {
+	if adaptive {
 		if c.adaptiveBuffers == nil {
 			c.adaptiveBuffers = make(map[int]bool)
 		}
 		c.adaptiveBuffers[fileIndex] = true
 	} else {
 		delete(c.adaptiveBuffers, fileIndex)
+	}
+	if burst {
+		if c.burstBuffers == nil {
+			c.burstBuffers = make(map[int]bool)
+		}
+		c.burstBuffers[fileIndex] = true
+	} else {
+		delete(c.burstBuffers, fileIndex)
 	}
 }
 
@@ -371,6 +380,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	p.priorityOwner.mu.Lock()
 	boost := p.priorityOwner.playBoost[index]
 	adaptiveBuffer := p.priorityOwner.adaptiveBuffers[index]
+	burstAwareBuffer := p.priorityOwner.burstBuffers[index]
 	if rec.DirectPlay && len(p.priorityOwner.readers) >= 4 {
 		p.priorityOwner.mu.Unlock()
 		cancel()
@@ -389,8 +399,8 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	if boost {
 		p.forwardBytes = playbackUrgentBytes + playbackBoostReadaheadBytes
 	}
-	if adaptiveBuffer {
-		p.bufferControl = &demandBufferController{window: p.forwardBytes}
+	if adaptiveBuffer || burstAwareBuffer {
+		p.bufferControl = &demandBufferController{window: p.forwardBytes, burstAware: burstAwareBuffer}
 	}
 	if rec.FileOnly && focusChanged {
 		s.applySavedFilePriorities(rec)

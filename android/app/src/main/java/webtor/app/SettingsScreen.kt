@@ -82,6 +82,8 @@ fun SettingsScreen(
     onPlaybackMethod: (PlaybackMethod) -> Unit = {},
     onPlayBoost: (Boolean) -> Unit = {},
     onAdaptiveBuffer: (Boolean) -> Unit = {},
+    onBurstAwareBuffer: (Boolean) -> Unit = {},
+    onPeerExploration: (Boolean) -> Unit = {},
     onFileOnlyPlayback: (Boolean) -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
@@ -565,6 +567,25 @@ fun SettingsScreen(
                             supporting = "Experimental. Adds look-ahead when read demand varies and reduces it when demand settles. Keeps the same RAM limit. Applies next time you press Play.",
                             checked = state.adaptiveBuffer,
                             onCheckedChange = onAdaptiveBuffer,
+                        )
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Burst-aware buffer",
+                            supporting = "Experimental. Uses short and long burst history to adjust look-ahead within the RAM limit. Includes Adaptive buffer feedback. Applies next time you press Play.",
+                            checked = state.burstAwareBuffer,
+                            onCheckedChange = onBurstAwareBuffer,
+                        )
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Peer exploration",
+                            supporting = "Experimental. Tries waiting peers by replacing at most one connection every 30 seconds after 90 seconds without useful transfers. Keeps active peers and the connection limit. Applies to running transfers.",
+                            checked = state.peerExploration,
+                            onCheckedChange = onPeerExploration,
+                        )
+                        Text(
+                            "For comparison, try one experiment at a time with the same torrent and network. Compare time to play, stalls and transfer speed. All three are off by default.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
                         )
                         SectionDivider()
                         SwitchRow(

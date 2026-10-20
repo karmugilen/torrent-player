@@ -60,15 +60,16 @@ var defaultAnnounce = []string{
 }
 
 type TorrentRecord struct {
-	mu          sync.RWMutex
-	ID          string
-	InfoHash    string
-	Torrent     *torrent.Torrent
-	Prepared    bool
-	Configured  bool
-	DirectPlay  bool
-	Selected    []int
-	FocusedFile *int
+	mu           sync.RWMutex
+	ID           string
+	InfoHash     string
+	Torrent      *torrent.Torrent
+	Prepared     bool
+	Configured   bool
+	DirectPlay   bool
+	Selected     []int
+	FocusedFile  *int
+	peerExplorer *peerExplorationState
 	// FileOnly stops every selected file except FocusedFile from requesting
 	// pieces. Direct Play already ignores other files, so this applies to
 	// saved downloads only. Cleared when playback ends.
@@ -112,6 +113,7 @@ type EngineServer struct {
 	downloadLimiter *rate.Limiter
 	uploadLimiter   *rate.Limiter
 	dialLimiter     *rate.Limiter
+	peerExploration atomic.Bool
 	seedingEnabled  atomic.Bool
 	seedingAllowed  atomic.Bool
 	seedRatioMilli  atomic.Int64
@@ -342,6 +344,7 @@ func (s *EngineServer) rateTrackerLoop() {
 		s.mu.Unlock()
 		s.sampleTorrentRates(now)
 		s.seedTick()
+		s.peerExplorationTick(now)
 		seedTicks++
 		if seedTicks%30 == 0 {
 			s.saveSeedAccounts()
@@ -1267,7 +1270,7 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	s.applyBackgroundFocus(rec)
 	coordinator := s.ensurePlaybackCoordinator(t)
 	coordinator.setPlayBoost(fileIdx, req.Boost)
-	coordinator.setAdaptiveBuffer(fileIdx, req.AdaptiveBuffer)
+	coordinator.setBufferExperiments(fileIdx, req.AdaptiveBuffer, req.BurstAwareBuffer)
 	coordinator.prepareResume(targetFile, req.Offset)
 
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/torrent/%s/file/%d", s.streamPort, rec.ID, fileIdx)
@@ -1679,8 +1682,9 @@ func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request)
 	up := limiterRate(s.uploadLimiter)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, SettingsResponse{
-		RamCacheBytes:  s.storage.CacheLimit(),
-		SeedingEnabled: s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
+		PeerExploration: s.peerExploration.Load(),
+		RamCacheBytes:   s.storage.CacheLimit(),
+		SeedingEnabled:  s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
 		DownloadRateBytesSec:    down,
 		UploadRateBytesSec:      up,
@@ -1771,6 +1775,9 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	if req.PayloadTransfersAllowed != nil {
 		s.payloadTransfersAllowed.Store(*req.PayloadTransfersAllowed)
 	}
+	if req.PeerExploration != nil {
+		s.peerExploration.Store(*req.PeerExploration)
+	}
 	records := make([]*TorrentRecord, 0, len(s.records))
 	for _, rec := range s.records {
 		records = append(records, rec)
@@ -1780,6 +1787,13 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	up := limiterRate(s.uploadLimiter)
 	payloadAllowed := s.payloadTransfersAllowed.Load()
 	s.mu.Unlock()
+	if req.PeerExploration != nil {
+		for _, rec := range records {
+			rec.mu.Lock()
+			rec.peerExplorer = nil
+			rec.mu.Unlock()
+		}
+	}
 	// Re-evaluate every torrent after releasing the map lock. This changes only
 	// piece-data admission; it never mutates rec.Paused, so a manual pause is
 	// still in force when the global setting is enabled again.
@@ -1797,6 +1811,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		UploadRateBytesSec:      up,
 		PayloadTransfersAllowed: payloadAllowed,
 		RamCacheBytes:           s.storage.CacheLimit(),
+		PeerExploration:         s.peerExploration.Load(),
 	})
 	s.notifyChange()
 }

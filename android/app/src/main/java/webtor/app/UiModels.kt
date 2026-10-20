@@ -68,6 +68,8 @@ data class UiState(
     val storageAccessWarning: String? = null,
     val playBoost: Boolean = false,
     val adaptiveBuffer: Boolean = false,
+    val burstAwareBuffer: Boolean = false,
+    val peerExploration: Boolean = false,
     val fileOnlyPlayback: Boolean = true,
     val downloadRateKiB: Int = 0,
     val fastPeerSearch: Boolean = false,

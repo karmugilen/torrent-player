@@ -169,6 +169,8 @@ class MainActivity : ComponentActivity() {
                                 onClearFolder = session::clearFolder,
                                 onPlayBoost = session::setPlayBoost,
                                 onAdaptiveBuffer = session::setAdaptiveBuffer,
+                                onBurstAwareBuffer = session::setBurstAwareBuffer,
+                                onPeerExploration = session::setPeerExploration,
                                 onFileOnlyPlayback = session::setFileOnlyPlayback,
                                 onNetworkPolicy = session::setNetworkPolicy,
                                 onDownloadRateKiB = session::setDownloadRateKiB,
