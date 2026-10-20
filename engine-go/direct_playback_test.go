@@ -15,13 +15,24 @@ import (
 )
 
 func TestDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T) {
-	t.Run("default", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, false, false) })
-	t.Run("adaptive buffer", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, true, false) })
-	t.Run("burst-aware buffer", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, false, true) })
-	t.Run("combined", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, true, true) })
+	t.Run("default", func(t *testing.T) { testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{}) })
+	t.Run("adaptive buffer", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{adaptive: true})
+	})
+	t.Run("burst-aware buffer", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{burst: true})
+	})
+	t.Run("combined", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{adaptive: true, burst: true})
+	})
+	t.Run("all four", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{adaptive: true, burst: true, boost: true, explore: true})
+	})
 }
 
-func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive, burst bool) {
+type playbackExperimentTestConfig struct{ adaptive, burst, boost, explore bool }
+
+func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playbackExperimentTestConfig) {
 	if testing.Short() {
 		t.Skip("local peer transfer")
 	}
@@ -95,8 +106,13 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive, burst b
 	if rec.Torrent.AddClientPeer(seed.client) == 0 {
 		t.Fatal("no seed address")
 	}
-	if adaptive || burst {
-		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": adaptive, "burstAwareBuffer": burst})
+	if experiment.explore {
+		if code, response := leech.DispatchControl("POST", "/settings", `{"peerExploration":true}`); code != 200 {
+			t.Fatalf("peer exploration: %d %s", code, response)
+		}
+	}
+	if experiment.adaptive || experiment.burst || experiment.boost {
+		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": experiment.adaptive, "burstAwareBuffer": experiment.burst, "boost": experiment.boost})
 		if code, response := leech.DispatchControl("POST", "/play", string(body)); code != 200 {
 			t.Fatalf("adaptive play: %d %s", code, response)
 		}
@@ -106,7 +122,10 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, adaptive, burst b
 		t.Fatal(err)
 	}
 	defer p.Close()
-	for _, offset := range []int64{0, 25 << 20, 4 << 20, 32 << 20, 4 << 20} {
+	for iteration, offset := range []int64{0, 25 << 20, 4 << 20, 32 << 20, 4 << 20} {
+		if experiment.explore {
+			leech.peerExplorationTick(time.Unix(1000, 0).Add(time.Duration(iteration) * 90 * time.Second))
+		}
 		got := make([]byte, 8<<20)
 		done := make(chan error, 1)
 		go func() {
