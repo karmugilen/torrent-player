@@ -187,11 +187,139 @@ private val RetroDarkColors = darkColorScheme(
     onErrorContainer = Color(0xFFFFD2D6),
 )
 
+// --- 4. WADA THEME ---
+// Sanzo Wada, A Dictionary of Color Combinations (1933-34), combination 166:
+// Grenadine Pink, Naples Yellow and Deep Slate Green. Combination 325 adds
+// Yellow Ocher; other roles use nearby colors from the same book. Values from
+// the MIT-licensed dictionary-of-colour-combinations dataset (Matt DesLauriers).
+private val WadaLightColors = lightColorScheme(
+    primary = Color(0xFF112F2C), // Deep Slate Green
+    onPrimary = Color(0xFFF5ECC2), // Sulpher Yellow
+    primaryContainer = Color(0xFFB5DECC), // Turquoise Green
+    onPrimaryContainer = Color(0xFF0B1F1D),
+    inversePrimary = Color(0xFFF48067), // Grenadine Pink
+    secondary = Color(0xFFC55347), // Etruscan Red, a text-safe Grenadine
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFFDD4BD), // Seashell Pink
+    onSecondaryContainer = Color(0xFF4A1810),
+    tertiary = Color(0xFF986F2D), // Orange Citrine
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFFBE6A0), // Naples Yellow
+    onTertiaryContainer = Color(0xFF3A2A06),
+    background = Color(0xFFFAF4DD),
+    onBackground = Color(0xFF112F2C),
+    surface = Color(0xFFFAF4DD),
+    onSurface = Color(0xFF112F2C),
+    surfaceVariant = Color(0xFFEBD3A2), // Ivory Buff
+    onSurfaceVariant = Color(0xFF4E4A34),
+    surfaceTint = Color(0xFF112F2C),
+    inverseSurface = Color(0xFF112F2C),
+    inverseOnSurface = Color(0xFFF5ECC2),
+    error = Color(0xFFA62C37), // Carmine Red
+    onError = Color(0xFFFFFFFF),
+    errorContainer = Color(0xFFF8B6BA), // Corinthian Pink
+    onErrorContainer = Color(0xFF410009),
+    outline = Color(0xFF8B835B), // Dark Citrine
+    outlineVariant = Color(0xFFD6C99C),
+    scrim = Color(0xFF000000),
+    surfaceBright = Color(0xFFFFFBEA),
+    surfaceContainerLowest = Color(0xFFFFFBEA),
+    surfaceContainerLow = Color(0xFFF8F0D2),
+    surfaceContainer = Color(0xFFF5ECC2), // Sulpher Yellow
+    surfaceContainerHigh = Color(0xFFEFE3B3),
+    surfaceContainerHighest = Color(0xFFEBD3A2), // Ivory Buff
+    surfaceDim = Color(0xFFE3D9AE),
+)
+
+private val WadaDarkColors = darkColorScheme(
+    primary = Color(0xFFF48067), // Grenadine Pink
+    onPrimary = Color(0xFF112F2C), // Deep Slate Green
+    primaryContainer = Color(0xFF5C2A20),
+    onPrimaryContainer = Color(0xFFFDD4BD), // Seashell Pink
+    inversePrimary = Color(0xFFC55347), // Etruscan Red
+    secondary = Color(0xFFFBE6A0), // Naples Yellow
+    onSecondary = Color(0xFF112F2C),
+    secondaryContainer = Color(0xFF3E3A1F),
+    onSecondaryContainer = Color(0xFFFBE6A0),
+    tertiary = Color(0xFFE2B540), // Yellow Ocher
+    onTertiary = Color(0xFF2B2105),
+    tertiaryContainer = Color(0xFF4A3A0E),
+    onTertiaryContainer = Color(0xFFFBE6A0),
+    background = Color(0xFF0B1F1D),
+    onBackground = Color(0xFFF5ECC2), // Sulpher Yellow
+    surface = Color(0xFF0B1F1D),
+    onSurface = Color(0xFFF5ECC2),
+    surfaceVariant = Color(0xFF1E403C),
+    onSurfaceVariant = Color(0xFFC8C2A0),
+    surfaceTint = Color(0xFFF48067),
+    inverseSurface = Color(0xFFF5ECC2),
+    inverseOnSurface = Color(0xFF112F2C),
+    error = Color(0xFFF8B6BA), // Corinthian Pink
+    onError = Color(0xFF5A0F18),
+    errorContainer = Color(0xFF7A1F2A),
+    onErrorContainer = Color(0xFFF8B6BA),
+    outline = Color(0xFFA2B0AD), // Mineral Gray
+    outlineVariant = Color(0xFF34504C),
+    scrim = Color(0xFF000000),
+    surfaceBright = Color(0xFF2A4F4B),
+    surfaceContainerLowest = Color(0xFF071614),
+    surfaceContainerLow = Color(0xFF0F2A27),
+    surfaceContainer = Color(0xFF112F2C), // Deep Slate Green
+    surfaceContainerHigh = Color(0xFF1A3D3A),
+    surfaceContainerHighest = Color(0xFF214643),
+    surfaceDim = Color(0xFF0B1F1D),
+)
+
 fun themeColorScheme(theme: AppTheme, dark: Boolean): ColorScheme = when (theme) {
     AppTheme.AERO -> if (dark) AeroDarkColors else AeroLightColors
     AppTheme.ANTIQUITY -> if (dark) AntiquityDarkColors else AntiquityLightColors
     AppTheme.RETRO -> if (dark) RetroDarkColors else RetroLightColors
+    AppTheme.WADA -> if (dark) WadaDarkColors else WadaLightColors
 }
+
+/**
+ * Pieces grid colors. Null [done] means the scheme's primary. Wada uses book
+ * colors so urgent never matches its Grenadine Pink primary.
+ */
+data class PieceColors(
+    val done: Color?,
+    val getting: Color,
+    val gettingGlow: Color,
+    val urgent: Color,
+    val readahead: Color,
+    val lookahead: Color,
+)
+
+val DefaultPieceColors = PieceColors(
+    done = null,
+    getting = Color(0xFFFFB300),
+    gettingGlow = Color(0xFFFF6F00),
+    urgent = Color(0xFFFF8A80),
+    readahead = Color(0xFF82B1FF),
+    lookahead = Color(0xFFCE93D8),
+)
+
+fun pieceColors(theme: AppTheme, dark: Boolean, dynamicColors: Boolean): PieceColors = when {
+    dynamicColors || theme != AppTheme.WADA -> DefaultPieceColors
+    dark -> PieceColors(
+        done = Color(0xFFFBE6A0), // Naples Yellow
+        getting = Color(0xFFF99D1B), // Yellow Orange
+        gettingGlow = Color(0xFFF37420), // Orange
+        urgent = Color(0xFFF37F94), // Eosine Pink
+        readahead = Color(0xFF78CDD0), // Calamine Blue
+        lookahead = Color(0xFFB984AF), // Lilac
+    )
+    else -> PieceColors(
+        done = Color(0xFF112F2C), // Deep Slate Green
+        getting = Color(0xFFC16B27), // Orange Rufous
+        gettingGlow = Color(0xFFAE5224), // Burnt Sienna
+        urgent = Color(0xFFDA525D), // Eugenia Red
+        readahead = Color(0xFF00939B), // Peacock Blue
+        lookahead = Color(0xFFA36AA5), // Aconite Violet
+    )
+}
+
+val LocalPieceColors = compositionLocalOf { DefaultPieceColors }
 
 
 /** Opaque Material surfaces are shared by the system and optional colour palettes. */
@@ -215,7 +343,8 @@ fun ThemedScreenContainer(modifier: Modifier = Modifier, content: @Composable Bo
 fun GaleTheme(dark: Boolean = true, theme: AppTheme = AppTheme.AERO,
     reducedEffects: Boolean = false, dynamicColors: Boolean = true, content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val colors = if (dynamicColors && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    val dynamic = dynamicColors && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val colors = if (dynamic) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else themeColorScheme(theme, dark)
     val view = LocalView.current
@@ -229,7 +358,11 @@ fun GaleTheme(dark: Boolean = true, theme: AppTheme = AppTheme.AERO,
             }
         }
     }
-    CompositionLocalProvider(LocalAppTheme provides theme, LocalReducedEffects provides reducedEffects) {
+    CompositionLocalProvider(
+        LocalAppTheme provides theme,
+        LocalReducedEffects provides reducedEffects,
+        LocalPieceColors provides pieceColors(theme, dark, dynamic),
+    ) {
         MaterialTheme(colorScheme = colors, shapes = Shapes(), typography = Typography(), content = content)
     }
 }

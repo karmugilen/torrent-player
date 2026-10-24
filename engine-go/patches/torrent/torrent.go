@@ -2214,7 +2214,9 @@ func (t *Torrent) startScrapingTrackerWithInfohash(u *url.URL, urlStr trackerAnn
 			}
 		}
 		t.cl.startTrackerAnnouncer(u, urlStr)
-		t.initRegularTrackerAnnounceState(announcerKey)
+		if !t.initRegularTrackerAnnounceState(announcerKey) {
+			return nil
+		}
 		return torrentRegularTrackerAnnouncer{
 			u: u,
 			getAnnounceState: func() announceState {
@@ -2232,11 +2234,18 @@ func (t *Torrent) startScrapingTrackerWithInfohash(u *url.URL, urlStr trackerAnn
 }
 
 // We need a key in regularTrackerAnnounceState to ensure we propagate next announce state values.
-func (t *Torrent) initRegularTrackerAnnounceState(key torrentTrackerAnnouncerKey) {
+// Webtor: returns false, adding nothing, when the dispatcher did not take the key (the
+// torrent is no longer registered). A half-added key panics in updateTorrentInput.
+func (t *Torrent) initRegularTrackerAnnounceState(key torrentTrackerAnnouncerKey) bool {
 	g.MakeMapIfNil(&t.regularTrackerAnnounceState)
-	t.cl.regularTrackerAnnounceDispatcher.addKey(key)
-	t.regularTrackerAnnounceState[key] = t.cl.regularTrackerAnnounceDispatcher.announceStates[key]
+	dispatcher := &t.cl.regularTrackerAnnounceDispatcher
+	dispatcher.addKey(key)
+	if !dispatcher.announceData.ContainsKey(key) {
+		return false
+	}
+	t.regularTrackerAnnounceState[key] = dispatcher.announceStates[key]
 	t.deferUpdateRegularTrackerAnnouncing()
+	return true
 }
 
 // Adds and starts tracker scrapers for tracker URLs that aren't already

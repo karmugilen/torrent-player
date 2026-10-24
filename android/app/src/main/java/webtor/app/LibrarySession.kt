@@ -147,6 +147,10 @@ class LibrarySession(
                     )
                 }
                 val pauseOnLowBattery = settings.getBoolean("pauseOnLowBattery", false)
+                val burstAware = settings.getBoolean("burstAwareBuffer", false)
+                val ghostPro = settings.getBoolean("ghostProMode", false)
+                val ghost = if (ghostPro) false else settings.getBoolean("ghostMode", false)
+                val ghostActive = ghostPro || ghost
                 _ui.update {
                     it.copy(
                         library = loaded,
@@ -173,12 +177,15 @@ class LibrarySession(
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
                         playBoost = settings.getBoolean("playBoost", false),
-                        adaptiveBuffer = settings.getBoolean("adaptiveBuffer", false),
-                        burstAwareBuffer = settings.getBoolean("burstAwareBuffer", false),
-                        peerExploration = settings.getBoolean("peerExploration", false),
-                        ghostMode = settings.getBoolean("ghostMode", false),
+                        adaptiveBuffer = if (burstAware) false else settings.getBoolean("adaptiveBuffer", false),
+                        burstAwareBuffer = burstAware,
+                        peerExploration = if (ghostPro) false else settings.getBoolean("peerExploration", false),
+                        ghostMode = ghost,
+                        ghostProMode = ghostPro,
+                        claudeSeekMode = settings.getBoolean("claudeSeekMode", false),
+                        idleDropMinutes = settings.getInt("idleDropMinutes", 15).coerceIn(0, 240),
                         fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", true),
-                        fastPeerSearch = settings.getBoolean("fastPeerSearch", false),
+                        fastPeerSearch = if (ghostActive) false else settings.getBoolean("fastPeerSearch", false),
                         pauseOnLowBattery = pauseOnLowBattery,
                         batteryPaused = pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging,
                         playNext = settings.getBoolean("playNext", false),
@@ -205,6 +212,9 @@ class LibrarySession(
                             withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) 80 else 30) }
                             withContext(io) { client.setPeerExploration(_ui.value.peerExploration) }
                             withContext(io) { client.setGhostMode(_ui.value.ghostMode) }
+                            withContext(io) { client.setGhostProMode(_ui.value.ghostProMode) }
+                            withContext(io) { client.setClaudeSeekMode(_ui.value.claudeSeekMode) }
+                            withContext(io) { client.setIdleDropMinutes(_ui.value.idleDropMinutes) }
                         }
                     }
                     runCatching {
@@ -346,21 +356,48 @@ class LibrarySession(
     }
 
     fun setAdaptiveBuffer(enabled: Boolean) {
-        settings.edit().putBoolean("adaptiveBuffer", enabled).apply()
-        _ui.update { it.copy(adaptiveBuffer = enabled) }
+        settings.edit().apply {
+            putBoolean("adaptiveBuffer", enabled)
+            if (enabled) putBoolean("burstAwareBuffer", false)
+        }.apply()
+        _ui.update {
+            it.copy(
+                adaptiveBuffer = enabled,
+                burstAwareBuffer = if (enabled) false else it.burstAwareBuffer,
+            )
+        }
     }
 
     fun setBurstAwareBuffer(enabled: Boolean) {
-        settings.edit().putBoolean("burstAwareBuffer", enabled).apply()
-        _ui.update { it.copy(burstAwareBuffer = enabled) }
+        settings.edit().apply {
+            putBoolean("burstAwareBuffer", enabled)
+            if (enabled) putBoolean("adaptiveBuffer", false)
+        }.apply()
+        _ui.update {
+            it.copy(
+                burstAwareBuffer = enabled,
+                adaptiveBuffer = if (enabled) false else it.adaptiveBuffer,
+            )
+        }
     }
 
     fun setPeerExploration(enabled: Boolean) {
         scope.launchCommand {
             try {
-                if (_ui.value.engineReady) withContext(io) { client.setPeerExploration(enabled) }
-                settings.edit().putBoolean("peerExploration", enabled).apply()
-                _ui.update { it.copy(peerExploration = enabled) }
+                if (_ui.value.engineReady) withContext(io) {
+                    client.setPeerExploration(enabled)
+                    if (enabled) client.setGhostProMode(false)
+                }
+                settings.edit().apply {
+                    putBoolean("peerExploration", enabled)
+                    if (enabled) putBoolean("ghostProMode", false)
+                }.apply()
+                _ui.update {
+                    it.copy(
+                        peerExploration = enabled,
+                        ghostProMode = if (enabled) false else it.ghostProMode,
+                    )
+                }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 _ui.update { it.copy(error = readableError(t)) }
@@ -371,9 +408,112 @@ class LibrarySession(
     fun setGhostMode(enabled: Boolean) {
         scope.launchCommand {
             try {
-                if (_ui.value.engineReady) withContext(io) { client.setGhostMode(enabled) }
-                settings.edit().putBoolean("ghostMode", enabled).apply()
-                _ui.update { it.copy(ghostMode = enabled) }
+                if (_ui.value.engineReady) withContext(io) {
+                    client.setGhostMode(enabled)
+                    if (enabled) {
+                        client.setGhostProMode(false)
+                        client.setDialRatePerSec(30)
+                    }
+                }
+                settings.edit().apply {
+                    putBoolean("ghostMode", enabled)
+                    if (enabled) {
+                        putBoolean("ghostProMode", false)
+                        putBoolean("fastPeerSearch", false)
+                    }
+                }.apply()
+                _ui.update {
+                    it.copy(
+                        ghostMode = enabled,
+                        ghostProMode = if (enabled) false else it.ghostProMode,
+                        fastPeerSearch = if (enabled) false else it.fastPeerSearch,
+                    )
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
+    /** Independent of the Ghost modes and buffers; applies to running playback immediately. */
+    fun setClaudeSeekMode(enabled: Boolean) {
+        scope.launchCommand {
+            try {
+                if (_ui.value.engineReady) withContext(io) { client.setClaudeSeekMode(enabled) }
+                settings.edit().putBoolean("claudeSeekMode", enabled).apply()
+                // The engine starts a fresh comparison window when the mode changes.
+                _ui.update { it.copy(claudeSeekMode = enabled, seekStats = null) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
+    fun setIdleDropMinutes(minutes: Int) {
+        val value = minutes.coerceIn(0, 240)
+        scope.launchCommand {
+            try {
+                if (_ui.value.engineReady) withContext(io) { client.setIdleDropMinutes(value) }
+                settings.edit().putInt("idleDropMinutes", value).apply()
+                _ui.update { it.copy(idleDropMinutes = value) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _ui.update { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
+    /** Engine ids already idle-dropped, so repeated status events drop once. Ids are not reused after removal. */
+    private val pendingIdleDrops = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Ends a Direct Play session: peers disconnect and RAM is freed. Play starts it again. */
+    fun drop(entry: DownloadEntry, idle: Boolean = false) {
+        if (!entry.directPlay) return
+        if (idle) {
+            val id = entry.engineId ?: return
+            if (!pendingIdleDrops.add(id)) return
+        }
+        stop(entry)
+        if (idle) _ui.update { it.copy(message = "Stopped idle Direct Play: ${entry.title}") }
+    }
+
+    fun refreshSeekStats() {
+        if (!_ui.value.engineReady) return
+        scope.launch {
+            val stats = runCatching { withContext(io) { client.seekStats() } }.getOrNull() ?: return@launch
+            _ui.update { it.copy(seekStats = stats) }
+        }
+    }
+
+    fun setGhostProMode(enabled: Boolean) {
+        scope.launchCommand {
+            try {
+                if (_ui.value.engineReady) withContext(io) {
+                    client.setGhostProMode(enabled)
+                    if (enabled) {
+                        client.setGhostMode(false)
+                        client.setPeerExploration(false)
+                        client.setDialRatePerSec(30)
+                    }
+                }
+                settings.edit().apply {
+                    putBoolean("ghostProMode", enabled)
+                    if (enabled) {
+                        putBoolean("ghostMode", false)
+                        putBoolean("peerExploration", false)
+                        putBoolean("fastPeerSearch", false)
+                    }
+                }.apply()
+                _ui.update {
+                    it.copy(
+                        ghostProMode = enabled,
+                        ghostMode = if (enabled) false else it.ghostMode,
+                        peerExploration = if (enabled) false else it.peerExploration,
+                        fastPeerSearch = if (enabled) false else it.fastPeerSearch,
+                    )
+                }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 _ui.update { it.copy(error = readableError(t)) }
@@ -411,9 +551,27 @@ class LibrarySession(
     fun setFastPeerSearch(enabled: Boolean) {
         scope.launchCommand {
             try {
-                if (_ui.value.engineReady) withContext(io) { client.setDialRatePerSec(if (enabled) 80 else 30) }
-                settings.edit().putBoolean("fastPeerSearch", enabled).apply()
-                _ui.update { it.copy(fastPeerSearch = enabled) }
+                if (_ui.value.engineReady) withContext(io) {
+                    client.setDialRatePerSec(if (enabled) 80 else 30)
+                    if (enabled) {
+                        client.setGhostMode(false)
+                        client.setGhostProMode(false)
+                    }
+                }
+                settings.edit().apply {
+                    putBoolean("fastPeerSearch", enabled)
+                    if (enabled) {
+                        putBoolean("ghostMode", false)
+                        putBoolean("ghostProMode", false)
+                    }
+                }.apply()
+                _ui.update {
+                    it.copy(
+                        fastPeerSearch = enabled,
+                        ghostMode = if (enabled) false else it.ghostMode,
+                        ghostProMode = if (enabled) false else it.ghostProMode,
+                    )
+                }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 _ui.update { it.copy(error = readableError(t)) }
@@ -1389,21 +1547,6 @@ class LibrarySession(
         play(current, next.index)
     }
 
-    private fun nextVideoAfter(entry: DownloadEntry, ended: SavedFile): SavedFile? {
-        val order = compareBy<SavedFile> { naturalMediaKey(it.path) }.thenBy { it.index }
-        val next = entry.files
-            .filter { file ->
-                (file.name.isVideoName() || file.path.isVideoName()) &&
-                    file.index != ended.index &&
-                    (file.index in entry.selected || file.isVerifiedComplete) &&
-                    order.compare(ended, file) < 0
-            }
-            .minWithOrNull(order)
-            ?: return null
-        if (next.playbackDurationMs > 0L && next.playbackPositionMs >= next.playbackDurationMs - 3_000L) return null
-        return next
-    }
-
     fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false) {
         scope.launchCommand {
             if (!beginUserWork()) return@launchCommand
@@ -1464,6 +1607,7 @@ class LibrarySession(
                         id, targetIndex, if (fromStart) 0L else file.resumeByteHint(),
                         boost = _ui.value.playBoost, fileOnly = fileOnly, adaptiveBuffer = _ui.value.adaptiveBuffer,
                         burstAwareBuffer = _ui.value.burstAwareBuffer,
+                        nextFileIndex = nextEpisodeToWarm(current, file, _ui.value.playNext)?.index,
                     )
                 }
                 if (fileOnly) activeFileOnlyPlayback = content.uri to id
@@ -2543,6 +2687,7 @@ class LibrarySession(
                         val beforeDownloaded = current.downloaded
                         applyStatus(t, target.key, target.generation)
                         val after = _ui.value.library.find { it.key == target.key }
+                        if (after != null && shouldDropIdleDirectPlay(after, t, _ui.value.idleDropMinutes)) drop(after, idle = true)
                         if (after != null && !after.metadataReady && t.ready && t.files.isNotEmpty()) {
                             schedulePendingMaterialization(after, t)
                         }
@@ -2800,5 +2945,33 @@ class LibrarySession(
 internal fun parseSavedTheme(name: String?): AppTheme = when (name?.uppercase()) {
     "ANTIQUITY" -> AppTheme.ANTIQUITY
     "RETRO" -> AppTheme.RETRO
+    "WADA" -> AppTheme.WADA
     else -> AppTheme.AERO
 }
+
+/** The video Play next opens after [ended], in natural episode order. */
+internal fun nextVideoAfter(entry: DownloadEntry, ended: SavedFile): SavedFile? {
+    val order = compareBy<SavedFile> { naturalMediaKey(it.path) }.thenBy { it.index }
+    val next = entry.files
+        .filter { file ->
+            (file.name.isVideoName() || file.path.isVideoName()) &&
+                file.index != ended.index &&
+                (file.index in entry.selected || file.isVerifiedComplete) &&
+                order.compare(ended, file) < 0
+        }
+        .minWithOrNull(order)
+        ?: return null
+    if (next.playbackDurationMs > 0L && next.playbackPositionMs >= next.playbackDurationMs - 3_000L) return null
+    return next
+}
+
+/** The episode to warm near the end of [playing] when Play next is on; null when nothing needs fetching. */
+internal fun nextEpisodeToWarm(entry: DownloadEntry, playing: SavedFile, playNext: Boolean): SavedFile? {
+    if (!playNext || !(playing.name.isVideoName() || playing.path.isVideoName())) return null
+    return nextVideoAfter(entry, playing)?.takeIf { it.index in entry.selected && !it.isVerifiedComplete }
+}
+
+/** The engine signals readiness only after a rest with no player open; the app still checks its own state. */
+internal fun shouldDropIdleDirectPlay(entry: DownloadEntry, status: TorrentStatus, idleMinutes: Int): Boolean =
+    idleMinutes > 0 && entry.directPlay && status.idleDropReady && status.playbackReaders == 0 &&
+        entry.engineId == status.id && !entry.paused && !entry.controlsBusy()

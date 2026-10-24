@@ -70,6 +70,7 @@ type TorrentRecord struct {
 	Selected     []int
 	FocusedFile  *int
 	peerExplorer *peerExplorationState
+	ghostPro     *ghostProSwarmState
 	// FileOnly stops every selected file except FocusedFile from requesting
 	// pieces. Direct Play already ignores other files, so this applies to
 	// saved downloads only. Cleared when playback ends.
@@ -94,37 +95,45 @@ type TorrentRecord struct {
 	verifiedBytes []int64
 	Seeding       bool
 	seedBase      seedAccount
+	playbackIdle  directPlayIdleState
+	nextPreload   *nextEpisodePreload
 }
 
 type EngineServer struct {
-	mu              sync.RWMutex
-	addMu           sync.Mutex
-	client          *torrent.Client
-	trackers        *trackerPool
-	storage         *DocumentStorageClient
-	records         map[string]*TorrentRecord
-	recordsByHash   map[string]*TorrentRecord
-	ctlListener     net.Listener
-	streamListener  net.Listener
-	ctlPort         int
-	streamPort      int
-	downloadDir     string
-	maxPeers        int
-	downloadLimiter *rate.Limiter
-	uploadLimiter   *rate.Limiter
-	dialLimiter     *rate.Limiter
-	dialRatePerSec  int
-	ghostMode       bool
-	ghostGeneration uint64
-	ghostDial       ghostDialController
-	peerExploration atomic.Bool
-	seedingEnabled  atomic.Bool
-	seedingAllowed  atomic.Bool
-	seedRatioMilli  atomic.Int64
-	seedTimeMinutes atomic.Int64
-	seedMu          sync.Mutex
-	seedSaveMu      sync.Mutex
-	seedAccounts    map[string]seedAccount
+	mu                 sync.RWMutex
+	addMu              sync.Mutex
+	client             *torrent.Client
+	trackers           *trackerPool
+	storage            *DocumentStorageClient
+	records            map[string]*TorrentRecord
+	recordsByHash      map[string]*TorrentRecord
+	ctlListener        net.Listener
+	streamListener     net.Listener
+	ctlPort            int
+	streamPort         int
+	downloadDir        string
+	maxPeers           int
+	downloadLimiter    *rate.Limiter
+	uploadLimiter      *rate.Limiter
+	dialLimiter        *rate.Limiter
+	dialRatePerSec     int
+	ghostMode          bool
+	ghostGeneration    uint64
+	ghostDial          ghostDialController
+	ghostProMode       bool
+	ghostProGeneration uint64
+	ghostProDial       ghostDialController
+	peerExploration    atomic.Bool
+	claudeSeek         atomic.Bool
+	idleDropMinutes    atomic.Int64 // idle Direct Play drop limit; 0 is off
+	seekStats          seekLatencyStats
+	seedingEnabled     atomic.Bool
+	seedingAllowed     atomic.Bool
+	seedRatioMilli     atomic.Int64
+	seedTimeMinutes    atomic.Int64
+	seedMu             sync.Mutex
+	seedSaveMu         sync.Mutex
+	seedAccounts       map[string]seedAccount
 	// This is a global payload-byte gate. It deliberately does not pause or
 	// remove torrents: peer discovery and metadata exchange must continue.
 	payloadTransfersAllowed atomic.Bool
@@ -351,6 +360,8 @@ func (s *EngineServer) rateTrackerLoop() {
 		s.seedTick()
 		s.peerExplorationTick(now)
 		s.ghostModeTick(now)
+		s.ghostProModeTick(now)
+		s.directPlayIdleTick(now)
 		seedTicks++
 		if seedTicks%30 == 0 {
 			s.saveSeedAccounts()
@@ -399,6 +410,10 @@ func (s *EngineServer) statusFingerprint() [sha256.Size]byte {
 				st.mu.Unlock()
 				fmt.Fprintf(h, "ram:%d;", revision)
 			}
+			fmt.Fprintf(h, "idle:%t:%t;", rec.playbackIdle.resting.Load(), rec.playbackIdle.dropReady.Load())
+		}
+		if np := nextPreloadView(rec); np != nil {
+			fmt.Fprintf(h, "next:%d:%t:%t;", np.FileIndex, np.Active, np.Ready)
 		}
 		rec.mu.RUnlock()
 	}
@@ -1160,6 +1175,12 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 		CheckedPieces: rec.CheckedPieces,
 		CheckTotal:    rec.CheckTotal,
 		Warning:       warning,
+		NextPreload:   nextPreloadView(rec),
+	}
+	if rec.DirectPlay {
+		view.PlaybackReaders = s.openPlaybackReaders(rec.Torrent)
+		view.Resting = rec.playbackIdle.resting.Load()
+		view.IdleDropReady = rec.playbackIdle.dropReady.Load()
 	}
 
 	writeJSON(w, http.StatusOK, view)
@@ -1265,6 +1286,7 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	// urgent read regions and therefore wins over this background focus.
 	focused := fileIdx
 	rec.FocusedFile = &focused
+	s.setNextPreloadLocked(rec, fileIdx, req.NextFileIndex)
 	if rec.DirectPlay {
 		rec.FileOnly = false
 	} else {
@@ -1624,6 +1646,19 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 		LastPieceLength: lastPieceLength,
 		MaxBuckets:      maxBuckets,
 		Buckets:         bucketList,
+		GhostProMode:    s.isGhostProEnabled(),
+	}
+	if resp.GhostProMode && !rec.Paused && !rec.removed && !rec.Checking && rec.Error == nil && s.payloadTransfersAllowed.Load() {
+		for _, window := range s.playbackWindows(t) {
+			for _, tier := range []struct {
+				span  pieceSpan
+				label string
+			}{{window.urgent, "U"}, {window.readahead, "R"}, {window.lookahead, "L"}} {
+				if !tier.span.empty() {
+					resp.Playback = append(resp.Playback, PlaybackPieceRange{tier.span.begin, tier.span.end - 1, tier.label})
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -1681,18 +1716,28 @@ func (s *EngineServer) handleMetadata(w http.ResponseWriter, r *http.Request, id
 	})
 }
 
+func (s *EngineServer) isGhostProEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ghostProMode
+}
+
 func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	peers := s.maxPeers
 	down := limiterRate(s.downloadLimiter)
 	up := limiterRate(s.uploadLimiter)
 	ghost := s.ghostMode
+	ghostPro := s.ghostProMode
 	dial := s.baseDialRateLocked()
 	effectiveDial := limiterRate(s.dialLimiter)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, SettingsResponse{
-		GhostMode: ghost, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
+		GhostMode: ghost, GhostProMode: ghostPro, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
 		PeerExploration: s.peerExploration.Load(),
+		ClaudeSeekMode:  s.isClaudeSeekEnabled(),
+		IdleDropMinutes: int(s.idleDropMinutes.Load()),
+		SeekStats:       s.seekStats.snapshot(),
 		RamCacheBytes:   s.storage.CacheLimit(),
 		SeedingEnabled:  s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
@@ -1763,7 +1808,9 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	if req.MaxPeers >= 8 && req.MaxPeers <= 500 {
 		s.maxPeers = req.MaxPeers
 		for _, rec := range s.records {
-			rec.Torrent.SetMaxEstablishedConns(req.MaxPeers)
+			if !rec.playbackIdle.resting.Load() {
+				rec.Torrent.SetMaxEstablishedConns(req.MaxPeers)
+			}
 		}
 	}
 	if req.DownloadRateBytesSec != nil && *req.DownloadRateBytesSec >= 0 {
@@ -1781,17 +1828,39 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		}
 		s.dialRatePerSec = n
 	}
+	if req.GhostProMode != nil {
+		s.ghostProMode = *req.GhostProMode
+		if s.ghostProMode {
+			s.ghostMode = false
+			s.peerExploration.Store(false)
+		}
+	}
 	if req.GhostMode != nil {
 		s.ghostMode = *req.GhostMode
+		if s.ghostMode {
+			s.ghostProMode = false
+		}
 	}
-	if req.GhostMode != nil || req.DialRatePerSec != nil || req.MaxPeers != 0 || req.DownloadRateBytesSec != nil || req.PayloadTransfersAllowed != nil {
-		s.resetGhostLocked()
+	if req.PeerExploration != nil {
+		s.peerExploration.Store(*req.PeerExploration)
+		if *req.PeerExploration {
+			s.ghostProMode = false
+		}
 	}
 	if req.PayloadTransfersAllowed != nil {
 		s.payloadTransfersAllowed.Store(*req.PayloadTransfersAllowed)
 	}
-	if req.PeerExploration != nil {
-		s.peerExploration.Store(*req.PeerExploration)
+	if req.IdleDropMinutes != nil {
+		s.idleDropMinutes.Store(int64(min(max(*req.IdleDropMinutes, 0), 240)))
+	}
+	if req.ClaudeSeekMode != nil {
+		s.setClaudeSeekLocked(*req.ClaudeSeekMode)
+	}
+	if req.GhostMode != nil || req.GhostProMode != nil || req.PeerExploration != nil || req.DialRatePerSec != nil || req.MaxPeers != 0 || req.DownloadRateBytesSec != nil || req.PayloadTransfersAllowed != nil {
+		s.resetGhostLocked()
+	}
+	if req.GhostProMode != nil || req.GhostMode != nil || req.PeerExploration != nil || req.DialRatePerSec != nil || req.MaxPeers != 0 || req.DownloadRateBytesSec != nil || req.PayloadTransfersAllowed != nil {
+		s.resetGhostProLocked()
 	}
 	records := make([]*TorrentRecord, 0, len(s.records))
 	for _, rec := range s.records {
@@ -1802,14 +1871,24 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	up := limiterRate(s.uploadLimiter)
 	payloadAllowed := s.payloadTransfersAllowed.Load()
 	ghost := s.ghostMode
+	ghostPro := s.ghostProMode
 	dial := s.baseDialRateLocked()
 	effectiveDial := limiterRate(s.dialLimiter)
 	s.mu.Unlock()
-	if req.PeerExploration != nil {
+	if req.PeerExploration != nil || req.GhostProMode != nil || req.GhostMode != nil {
 		for _, rec := range records {
 			rec.mu.Lock()
 			rec.peerExplorer = nil
+			rec.ghostPro = nil
 			rec.mu.Unlock()
+		}
+	}
+	if req.GhostProMode != nil || req.GhostMode != nil || req.PeerExploration != nil {
+		for _, rec := range records {
+			rec.mu.Lock()
+			s.applyVideoStartupHints(rec)
+			rec.mu.Unlock()
+			s.refreshPlaybackWindows(rec.Torrent)
 		}
 	}
 	// Re-evaluate every torrent after releasing the map lock. This changes only
@@ -1823,7 +1902,7 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, http.StatusOK, SettingsResponse{
-		GhostMode: ghost, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
+		GhostMode: ghost, GhostProMode: ghostPro, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
 		SeedingEnabled: s.seedingEnabled.Load(), SeedRatioMilli: s.seedRatioMilli.Load(), SeedTimeMinutes: s.seedTimeMinutes.Load(),
 		MaxPeers:                peers,
 		DownloadRateBytesSec:    down,

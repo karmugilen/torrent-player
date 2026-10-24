@@ -267,3 +267,80 @@ func TestEpisodeSwitchMovesStartupBudgetToOpenedEpisode(t *testing.T) {
 	}
 
 }
+
+func TestNextEpisodePreloadHasItsOwnStartupBudget(t *testing.T) {
+	// 4 MiB pieces: the current episode's head and tail fill the whole budget.
+	payload := bytes.Repeat([]byte("abcdefgh"), (4<<20)/8)
+	hash := sha1.Sum(payload)
+	info := &metainfo.Info{Name: "episodes", PieceLength: 4 << 20}
+	for _, name := range []string{"episode1.mkv", "episode2.mkv"} {
+		info.Files = append(info.Files, metainfo.FileInfo{Length: 12 << 20, Path: []string{name}})
+	}
+	for i := 0; i < 6; i++ {
+		info.Pieces = append(info.Pieces, hash[:]...)
+	}
+	base := t.TempDir()
+	st := newDocumentTorrentStorage(info, metainfo.Hash{}, base)
+	st.streamMaxBytes = 16 << 20
+	if err := st.AttachDescriptorsMode([]*int{nil, nil}, []int{0, 1}, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	put := func(index int) {
+		p := &documentPiece{storage: st, piece: info.Piece(index)}
+		if _, err := p.WriteAt(payload, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.MarkComplete(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saved := func(index int) bool {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			st.mu.Lock()
+			ok := st.startupSaved[index]
+			st.mu.Unlock()
+			if ok {
+				return true
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return false
+	}
+	st.setStartupFile(0)
+	put(0)
+	put(2)
+	planned := st.setPreloadFile(1)
+	if len(planned) != 2 || !planned[3] || !planned[5] {
+		t.Fatalf("next episode plan: %v", planned)
+	}
+	put(3)
+	put(5)
+	// A player reopening the current episode must not evict the warmed one.
+	st.setStartupFile(0)
+	for _, index := range []int{0, 2, 3, 5} {
+		if !saved(index) {
+			t.Fatalf("startup piece %d not saved", index)
+		}
+	}
+	for _, index := range []int{3, 5} {
+		raw, err := os.ReadFile(st.startupPiecePath(index))
+		if err != nil || !st.validStartupPiece(index, raw) {
+			t.Fatalf("warmed piece %d not durable: %v", index, err)
+		}
+	}
+	// Playing the next episode keeps its pieces and ends the separate budget.
+	st.setStartupFile(1)
+	if st.preloadPieces != nil {
+		t.Fatal("preload outlived the episode switch")
+	}
+	for _, index := range []int{3, 5} {
+		if !st.PieceComplete(index) {
+			t.Fatalf("next episode lost warm piece %d", index)
+		}
+	}
+	if st.setPreloadFile(-1) != nil || st.preloadPieces != nil {
+		t.Fatal("cancel left a preload plan")
+	}
+}

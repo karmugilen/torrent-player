@@ -35,3 +35,11 @@ ab7ca19a7935e9e9daabb850838d1b0a37cbd685dc6ad99d0cbd7a26be0b9b82  torrent-player
 0f5f90590a81c04bde1fd5ce227df5e9ed28f093166268df77677b8844fb6386  artifacts/torrent-player-1.4.5.apk
 25f2abe8a023db1c0f182085f11b3e28d3ac56b2848c173927beca7d983ad636  /run/media/kar/Turbo/webtor-go/artifacts/torrent-player-1.4.5.apk
 36b314c122709b59a58912a8aa84368462cc629ebb99cbc1538326bcaf47cb68  /run/media/kar/Turbo/webtor-go/artifacts/torrent-player-2.0.0.apk
+5461a824422fa5ae2c3f2aee901e5e86add7da0bfa0b10b9e1077f51e1823d57  artifacts/torrent-player-2.1.16.apk
+aadd47224039ac6479cfecded3ecf629bb0b6538ebb56facc9a8c4b190ec1207  artifacts/torrent-player-2.1.17.apk
+7e11f724797b144af961dc3424ddc11bea09bbbb69b778bb4e7665b0d576a99f  artifacts/torrent-player-2.1.18.apk
+beaa5987ea8852099ad134578adcf1d512d1793accc4e0e7650e1b299fd55468  torrent-player-2.1.19.apk
+e71878bac354f70bc1de2f4bc9b9a15edb51b97aba81a9e57f55cfe6966ab938  torrent-player-2.1.20.apk
+51c04a3e0d77914be316853efec9aadacbf5987e8d9fd3de1772a50c8b91b506  torrent-player-2.1.21.apk
+e84e571af91f56344e798d442cec30816bfce25a6335be36e3d7688865b613fa  torrent-player-2.1.22.apk
+8872663a2745fae1ba4f2e65676de788e67b9fd3ed9669bec3a187b62abd607f  torrent-player-2.1.23.apk

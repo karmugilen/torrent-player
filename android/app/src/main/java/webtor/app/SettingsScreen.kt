@@ -43,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -62,6 +64,7 @@ fun SettingsScreen(
     onAppTheme: (AppTheme) -> Unit,
     onReducedEffects: (Boolean) -> Unit,
     onDirectPlayDefault: (Boolean) -> Unit,
+    onIdleDropMinutes: (Int) -> Unit = {},
     onAntiDpi: (Boolean) -> Unit,
     onCleanup: () -> Unit,
     onClearAll: () -> Unit,
@@ -85,6 +88,9 @@ fun SettingsScreen(
     onBurstAwareBuffer: (Boolean) -> Unit = {},
     onPeerExploration: (Boolean) -> Unit = {},
     onGhostMode: (Boolean) -> Unit = {},
+    onGhostProMode: (Boolean) -> Unit = {},
+    onClaudeSeekMode: (Boolean) -> Unit = {},
+    onRefreshSeekStats: () -> Unit = {},
     onFileOnlyPlayback: (Boolean) -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
@@ -133,6 +139,28 @@ fun SettingsScreen(
                         },
                         colors = settingsListColors(),
                     )
+                    SectionDivider()
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Stop idle Direct Play", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                        Text(
+                            "After 2 minutes without playback, peers are released and reconnect when you play again. " +
+                                "Once the player is closed and nothing has played for this long, the session stops and its RAM is freed. Play starts it again.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(0 to "Off", 5 to "5 min", 15 to "15 min", 30 to "30 min").forEach { (minutes, label) ->
+                                FilterChip(
+                                    selected = state.idleDropMinutes == minutes,
+                                    onClick = { onIdleDropMinutes(minutes) },
+                                    label = { Text(label) },
+                                )
+                            }
+                        }
+                    }
                 }
             }
             item {
@@ -162,23 +190,27 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf(
                                 AppTheme.AERO to "Aero",
                                 AppTheme.ANTIQUITY to "Antiquity",
                                 AppTheme.RETRO to "Retro",
+                                AppTheme.WADA to "Wada",
                             ).forEach { (theme, label) ->
                                 FilterChip(
                                     selected = state.appTheme == theme && !state.dynamicColors,
                                     enabled = !state.dynamicColors,
                                     onClick = { onAppTheme(theme) },
                                     label = { Text(label) },
-                                    modifier = Modifier.weight(1f),
                                 )
                             }
+                        }
+                        if (state.appTheme == AppTheme.WADA && !state.dynamicColors) {
+                            Text(
+                                "Wada: Grenadine Pink, Naples Yellow and Deep Slate Green, combination 166 in Sanzo Wada's A Dictionary of Color Combinations.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
                         }
                     }
                     SectionDivider()
@@ -565,9 +597,14 @@ fun SettingsScreen(
                         SectionDivider()
                         SwitchRow(
                             title = "Adaptive buffer",
-                            supporting = "Experimental. Adds look-ahead when read demand varies and reduces it when demand settles. Keeps the same RAM limit. Applies next time you press Play.",
-                            checked = state.adaptiveBuffer,
+                            supporting = if (state.burstAwareBuffer) {
+                                "Included in Burst-aware buffer. Normal adaptive buffer is superseded."
+                            } else {
+                                "Experimental. Adds look-ahead when read demand varies and reduces it when demand settles. Keeps the same RAM limit. Applies next time you press Play."
+                            },
+                            checked = if (state.burstAwareBuffer) false else state.adaptiveBuffer,
                             onCheckedChange = onAdaptiveBuffer,
+                            enabled = !state.burstAwareBuffer,
                         )
                         SectionDivider()
                         SwitchRow(
@@ -579,9 +616,14 @@ fun SettingsScreen(
                         SectionDivider()
                         SwitchRow(
                             title = "Peer exploration",
-                            supporting = "Experimental. Tries waiting peers by replacing at most one connection every 30 seconds after 90 seconds without useful transfers. Keeps active peers and the connection limit. Applies to running transfers.",
-                            checked = state.peerExploration,
+                            supporting = if (state.ghostProMode) {
+                                "Managed by Ghost Pro mode. Normal peer exploration is disabled."
+                            } else {
+                                "Experimental. Tries waiting peers by replacing at most one connection every 30 seconds after 90 seconds without useful transfers. Keeps active peers and the connection limit. Applies to running transfers."
+                            },
+                            checked = if (state.ghostProMode) false else state.peerExploration,
                             onCheckedChange = onPeerExploration,
+                            enabled = !state.ghostProMode,
                         )
                         Text(
                             "For comparison, try one experiment at a time with the same torrent and network. Compare time to play, stalls and transfer speed. These experiments are off by default.",
@@ -591,9 +633,41 @@ fun SettingsScreen(
                         SectionDivider()
                         SwitchRow(
                             title = "Ghost mode",
-                            supporting = "Ghost Downloader-inspired experiment. Tests small increases in peer dialing and keeps them only when useful download speed improves. Stays within your connection limit. Applies now; turning off restores normal dialing. Fast peer search already uses the maximum dial rate.",
-                            checked = state.ghostMode,
+                            supporting = if (state.ghostProMode) {
+                                "Superseded by Ghost Pro mode. Basic dial feedback is disabled."
+                            } else if (state.fastPeerSearch) {
+                                "Disabled while Faster peer search pins the maximum 80/s dial rate."
+                            } else {
+                                "Ghost Downloader-inspired experiment. Tests small increases in peer dialing and keeps them only when useful download speed improves. Stays within your connection limit. Applies now; turning off restores normal dialing."
+                            },
+                            checked = if (state.ghostProMode || state.fastPeerSearch) false else state.ghostMode,
                             onCheckedChange = onGhostMode,
+                            enabled = !(state.ghostProMode || state.fastPeerSearch),
+                        )
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Ghost Pro mode",
+                            supporting = "Experimental. Focuses startup and seeks, then builds a continuous playback buffer for Download and Instant Play. Recycles idle peers without needed playback pieces. Urgent, readahead and lookahead colors in Pieces show the active windows. Respects your RAM limit.",
+                            checked = state.ghostProMode,
+                            onCheckedChange = onGhostProMode,
+                        )
+                        SectionDivider()
+                        SwitchRow(
+                            title = "Claude optimized seek",
+                            supporting = "Experimental. After a seek, blocks a slow peer has held for over a second move to a peer that is delivering, and stalled reads retry after 3 seconds instead of 8. Works with every other experiment. Applies now.",
+                            checked = state.claudeSeekMode,
+                            onCheckedChange = onClaudeSeekMode,
+                        )
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                onRefreshSeekStats()
+                                delay(2_000)
+                            }
+                        }
+                        Text(
+                            seekStatsLine(state.seekStats, state.claudeSeekMode),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
                         )
                         SectionDivider()
                         SwitchRow(
@@ -644,21 +718,19 @@ fun SettingsScreen(
                             }
                         }
                         SectionDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Faster peer search", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    "Looks for peers faster than the normal dial rate. It can help a slow swarm and can make a busy network less stable.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.fastPeerSearch, onCheckedChange = onFastPeerSearch)
-                        }
+                        SwitchRow(
+                            title = "Faster peer search",
+                            supporting = if (state.ghostProMode) {
+                                "Managed dynamically by Ghost Pro mode. Static 80/s dialing is disabled."
+                            } else if (state.ghostMode) {
+                                "Managed dynamically by Ghost mode. Static 80/s dialing is disabled."
+                            } else {
+                                "Looks for peers faster than the normal dial rate. It can help a slow swarm and can make a busy network less stable."
+                            },
+                            checked = if (state.ghostMode || state.ghostProMode) false else state.fastPeerSearch,
+                            onCheckedChange = onFastPeerSearch,
+                            enabled = !(state.ghostMode || state.ghostProMode),
+                        )
                         SectionDivider()
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -684,7 +756,7 @@ fun SettingsScreen(
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text("Play next video", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                                 Text(
-                                    "When a video ends, starts the next selected video in the same torrent.",
+                                    "When a video ends, starts the next selected video in the same torrent. Near the end, quietly loads the start of the next one so it opens instantly.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = colors.onSurfaceVariant,
                                 )
@@ -898,6 +970,7 @@ private fun SwitchRow(
     supporting: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
     Row(
@@ -906,10 +979,18 @@ private fun SwitchRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-            Text(supporting, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (enabled) colors.onSurface else colors.onSurface.copy(alpha = 0.38f),
+            )
+            Text(
+                supporting,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (enabled) colors.onSurfaceVariant else colors.onSurfaceVariant.copy(alpha = 0.38f),
+            )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
@@ -925,6 +1006,15 @@ private fun DangerOutlineButton(text: String, onClick: () -> Unit) {
     ) {
         Text(text)
     }
+}
+
+/** One-line seek comparison for the current mode's measurement window. */
+internal fun seekStatsLine(stats: webtor.core.SeekStats?, claudeSeek: Boolean): String {
+    val mode = if (claudeSeek) "Claude seek on" else "Claude seek off"
+    if (stats == null || stats.count == 0) return "$mode · seek in a video to measure seek time."
+    fun secs(ms: Long) = String.format(java.util.Locale.US, "%.1f s", ms / 1000.0)
+    val stalls = if (stats.stalls == 1) "1 stall" else "${stats.stalls} stalls"
+    return "$mode · ${stats.count} seeks · median ${secs(stats.medianMs)} · last ${secs(stats.lastMs)} · $stalls"
 }
 
 private fun cacheCategoryLabel(id: String): String = when (id) {

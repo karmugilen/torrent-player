@@ -5,8 +5,40 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import webtor.core.PlaybackPieceRange
 
 class PieceHeatGridModelTest {
+
+    @Test
+    fun playbackBandsPreserveMixedBucketPositionsAndHighestPriority() {
+        val bucket = normalizePieceBucket(0, 10, 19, 10, 10, 4, 2)
+        val bands = playbackBands(bucket, listOf(
+            PlaybackPieceRange(8, 11, "U"),
+            PlaybackPieceRange(10, 15, "R"),
+            PlaybackPieceRange(14, 17, "L"),
+            PlaybackPieceRange(30, 40, "U"),
+        ))
+        assertEquals(8, bands.sumOf { it.pieces })
+        assertEquals(2, bands.filter { it.priority == "U" }.sumOf { it.pieces })
+        assertEquals(4, bands.filter { it.priority == "R" }.sumOf { it.pieces })
+        assertEquals(2, bands.filter { it.priority == "L" }.sumOf { it.pieces })
+        assertEquals(0f, bands.first().startFraction, 0.001f)
+        assertEquals(0.8f, bands.sumOf { it.fraction.toDouble() }.toFloat(), 0.001f)
+        assertEquals(4, bucket.selectedVerified) // Priorities do not change completion.
+    }
+
+    @Test
+    fun playbackBandsDoNotFillGapsOrExcludedCells() {
+        val bucket = normalizePieceBucket(0, 0, 9, 10, 10, 0, 0)
+        val ranges = listOf(PlaybackPieceRange(1, 2, "U"), PlaybackPieceRange(7, 8, "L"))
+        val bands = playbackBands(bucket, ranges)
+        assertEquals(2, bands.size)
+        assertEquals(4, bands.sumOf { it.pieces })
+        assertEquals(0.1f, bands[0].startFraction, 0.001f)
+        assertEquals(0.7f, bands[1].startFraction, 0.001f)
+        assertTrue(playbackBands(normalizePieceBucket(0, 0, 9, 10, 0, 0, 0), ranges).isEmpty())
+        assertTrue(playbackBands(bucket, emptyList()).isEmpty())
+    }
 
     @Test
     fun normalizeClampsSelectedAndDisjointCounts() {

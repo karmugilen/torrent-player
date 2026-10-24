@@ -192,6 +192,10 @@ type DocumentTorrentStorage struct {
 	// Test seams for fault injection through the public drain path.
 	fileSyncFn        func(*os.File) error
 	writeCheckpointFn func(string, *pieceCheckpoint) error
+	// Play next warm-up: the next episode's planned startup pieces, kept out
+	// of RAM eviction until saved. Nil when no preload is active.
+	preloadPieces map[int]bool
+	preloadFile   int
 }
 
 func streamDir(baseDir, infoHashHex string) string {

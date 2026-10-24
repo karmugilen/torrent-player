@@ -172,6 +172,10 @@ class MainActivity : ComponentActivity() {
                                 onBurstAwareBuffer = session::setBurstAwareBuffer,
                                 onPeerExploration = session::setPeerExploration,
                                 onGhostMode = session::setGhostMode,
+                                onGhostProMode = session::setGhostProMode,
+                                onClaudeSeekMode = session::setClaudeSeekMode,
+                                onIdleDropMinutes = session::setIdleDropMinutes,
+                                onRefreshSeekStats = session::refreshSeekStats,
                                 onFileOnlyPlayback = session::setFileOnlyPlayback,
                                 onNetworkPolicy = session::setNetworkPolicy,
                                 onDownloadRateKiB = session::setDownloadRateKiB,
@@ -191,6 +195,7 @@ class MainActivity : ComponentActivity() {
                                     onToggleFile = { index -> session.toggleDownloadFile(entry.key, index) },
                                     onPause = { session.pause(entry) },
                                     onResume = { session.resume(entry) },
+                                    onDrop = { session.drop(entry) },
                                     onDelete = { session.requestDelete(entry) },
                                 )
                             }

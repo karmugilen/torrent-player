@@ -62,6 +62,7 @@ type playbackPriorityCoordinator struct {
 	torrent          *torrent.Torrent
 	server           *EngineServer
 	owners           map[*playbackReader]map[int]torrent.PiecePriority
+	windows          map[*playbackReader]playbackWindowState
 	hints            map[int]torrent.PiecePriority
 	focus            map[int]torrent.PiecePriority
 	effective        map[int]torrent.PiecePriority
@@ -88,6 +89,7 @@ func newPlaybackPriorityCoordinator(t *torrent.Torrent) *playbackPriorityCoordin
 		torrent:   t,
 		readers:   make(map[*playbackReader]struct{}),
 		owners:    make(map[*playbackReader]map[int]torrent.PiecePriority),
+		windows:   make(map[*playbackReader]playbackWindowState),
 		effective: make(map[int]torrent.PiecePriority),
 	}
 }
@@ -128,9 +130,10 @@ func (c *playbackPriorityCoordinator) setBufferExperiments(fileIndex int, adapti
 	}
 }
 
-func (c *playbackPriorityCoordinator) update(owner *playbackReader, demand map[int]torrent.PiecePriority) {
+func (c *playbackPriorityCoordinator) update(owner *playbackReader, demand map[int]torrent.PiecePriority, window playbackWindowState) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.windows[owner] = window
 	if maps.Equal(c.owners[owner], demand) {
 		return
 	}
@@ -150,7 +153,51 @@ func (c *playbackPriorityCoordinator) remove(owner *playbackReader) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.owners, owner)
+	delete(c.windows, owner)
 	c.applyLocked()
+}
+
+// Snapshot published windows without taking reader locks. Readers acquire the
+// coordinator lock while holding their own lock, so observers must not reverse it.
+func (s *EngineServer) playbackWindows(t *torrent.Torrent) []playbackWindowState {
+	s.playbackMu.Lock()
+	c := s.playbackOwners[t]
+	s.playbackMu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	windows := make([]playbackWindowState, 0, len(c.windows))
+	for _, window := range c.windows {
+		windows = append(windows, window)
+	}
+	return windows
+}
+
+func (s *EngineServer) refreshPlaybackWindows(t *torrent.Torrent) {
+	s.playbackMu.Lock()
+	c := s.playbackOwners[t]
+	s.playbackMu.Unlock()
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	readers := make([]*playbackReader, 0, len(c.readers))
+	for p := range c.readers {
+		readers = append(readers, p)
+	}
+	c.mu.Unlock()
+	for _, p := range readers {
+		p.mu.Lock()
+		if !p.closed && p.windowApplied {
+			p.repositionWindowLocked(p.lastOffset, p.haveOffset)
+		}
+		p.mu.Unlock()
+	}
 }
 
 func (c *playbackPriorityCoordinator) setHints(demand map[int]torrent.PiecePriority) {
@@ -202,11 +249,17 @@ func (c *playbackPriorityCoordinator) applyLocked() {
 	for _, demand := range c.owners {
 		raiseDemand(next, demand)
 	}
+	// With no player open, an on-screen thumbnail goes first: its few pieces
+	// must not queue behind every selected episode's startup head and tail.
+	previewFirst := len(c.owners) == 0 && len(c.previewDemand) > 0
 	// Background metadata preparation must yield to active playback. Readers
 	// retain their own urgent head/tail probes until their open phase ends.
 	for index, priority := range c.hints {
 		if len(c.owners) > 0 && priority > torrent.PiecePriorityHigh {
 			priority = torrent.PiecePriorityHigh
+		}
+		if previewFirst && priority > torrent.PiecePriorityNext {
+			priority = torrent.PiecePriorityNext
 		}
 		if priority > next[index] {
 			next[index] = priority
@@ -214,7 +267,14 @@ func (c *playbackPriorityCoordinator) applyLocked() {
 	}
 	raiseDemand(next, c.focus)
 	raiseDemand(next, c.resumeDemand)
-	raiseDemand(next, c.previewDemand)
+	for index, priority := range c.previewDemand {
+		if previewFirst {
+			priority = torrent.PiecePriorityNow
+		}
+		if priority > next[index] {
+			next[index] = priority
+		}
+	}
 	for index := range c.effective {
 		if _, ok := next[index]; !ok {
 			// Clear the override; the selected file's base priority remains.
@@ -240,8 +300,8 @@ func (c *playbackPriorityCoordinator) applyLocked() {
 }
 
 type playbackWindowState struct {
-	urgent, readahead, lookbehind   pieceSpan
-	openPhase, headBoost, tailBoost bool
+	urgent, readahead, lookbehind, lookahead pieceSpan
+	openPhase, headBoost, tailBoost          bool
 }
 
 // Each Android proxy descriptor owns a reader. Its cursor/readahead survive
@@ -271,10 +331,15 @@ type playbackReader struct {
 	cursor     int64
 	lastOffset int64
 	haveOffset bool
+	// Keep the first request after open/seek narrow until verified bytes arrive.
+	focusPending bool
+	// When the latest seek began; cleared once its first bytes are delivered.
+	seekStarted time.Time
 
 	urgent          pieceSpan
 	readahead       pieceSpan
 	lookbehind      pieceSpan
+	lookahead       pieceSpan
 	appliedWindow   playbackWindowState
 	windowApplied   bool
 	readerReadahead int64
@@ -297,6 +362,10 @@ type playbackReader struct {
 	nowFn         func() time.Time
 
 	priorityOwner *playbackPriorityCoordinator
+	record        *TorrentRecord
+	fileIndex     int
+	preloadAsked  bool
+	directPlay    bool
 	storage       *DocumentTorrentStorage
 	waitCancel    context.CancelFunc
 	readSeq       uint64
@@ -357,6 +426,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 	reader.SetReadahead(playbackUrgentBytes)
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &playbackReader{
+		record:  rec,
 		reader:  reader,
 		torrent: rec.Torrent,
 		file:    file,
@@ -364,6 +434,7 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+	p.directPlay, p.fileIndex = rec.DirectPlay, index
 	if st := s.storage.GetStorage(rec.InfoHash); st != nil {
 		p.storage = st
 		if st.StreamMode() {
@@ -430,12 +501,16 @@ func (s *EngineServer) OpenPlayback(id string, index int) (*playbackReader, erro
 		p.tailBoostActive = p.tailBegin < p.tailEnd
 	}
 	p.openPhase = true
+	p.focusPending = true
 	p.updateWindowLocked(resumeOffset)
 	p.armIdleLocked()
 	return p, nil
 }
 
 func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
+	if srv := p.engine(); srv != nil && p.directPlay {
+		defer srv.beginPlaybackRead(p.record)()
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -489,6 +564,7 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 		p.lastReadTime = now
 	}
 	p.updateWindowLocked(offset)
+	p.maybeStartNextPreloadLocked(offset)
 	p.readSeq++
 	seq := p.readSeq
 	st := p.storage
@@ -508,6 +584,7 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 				p.cursor = offset + int64(n)
 				p.positioned = false
 				p.noteResumeReadLocked(offset + int64(n) - 1)
+				p.finishFocusLocked()
 			}
 			p.mu.Unlock()
 			return n, err
@@ -519,8 +596,18 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 	p.readIO.Lock()
 	defer p.readIO.Unlock()
 	attempts := p.readAttempts
+	claudeSeek := false
+	if srv := p.engine(); srv != nil {
+		claudeSeek = srv.isClaudeSeekEnabled()
+	}
 	if len(attempts) == 0 {
 		attempts = []time.Duration{8 * time.Second, 12 * time.Second, 25 * time.Second}
+		if claudeSeek {
+			attempts = claudeSeekReadAttempts
+		}
+	}
+	if claudeSeek {
+		defer startUrgentNudger(p.torrent, claudeSeekNudgeEvery)()
 	}
 	n := 0
 	var err error
@@ -564,6 +651,7 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 		p.cursor = offset + int64(n)
 		if n > 0 {
 			p.noteResumeReadLocked(offset + int64(n) - 1)
+			p.finishFocusLocked()
 		}
 		err = readErr
 		if err == nil || !timedOut || p.ctx.Err() != nil || attempt == len(attempts)-1 {
@@ -571,6 +659,9 @@ func (p *playbackReader) ReadAt(data []byte, offset int64) (int, error) {
 			break
 		}
 		p.stallRecoveries++
+		if srv := p.engine(); srv != nil {
+			srv.seekStats.recordStall()
+		}
 		// Refresh only this stalled reader's urgent request. Reopening drops
 		// the library's stale reader demand and lets its existing scheduler
 		// reconsider peer ownership; no peer is disconnected or duplicate
@@ -810,7 +901,7 @@ func (p *playbackReader) clearPrioritiesLocked() {
 		p.scrubTimer.Stop()
 		p.scrubTimer = nil
 	}
-	p.urgent, p.readahead, p.lookbehind = pieceSpan{}, pieceSpan{}, pieceSpan{}
+	p.urgent, p.readahead, p.lookbehind, p.lookahead = pieceSpan{}, pieceSpan{}, pieceSpan{}, pieceSpan{}
 	p.headBoostActive, p.tailBoostActive = false, false
 	p.openPhase = false
 	p.scrubbing = false
@@ -897,6 +988,8 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	if p.haveOffset {
 		delta := offset - p.lastOffset
 		if !p.openPhase && (delta < 0 || delta >= playbackScrubJumpBytes) {
+			p.focusPending = true
+			p.seekStarted = now
 			p.scrubbing = true
 			p.lastScrubTime = now
 			p.scheduleScrubDebounceLocked()
@@ -907,16 +1000,27 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	}
 	p.lastOffset = offset
 	p.haveOffset = true
+	p.repositionWindowLocked(offset, wasPositioned)
+}
 
-	urgentEndOff := offset + playbackUrgentBytes
-	if urgentEndOff > p.length {
-		urgentEndOff = p.length
-	}
-
-	var newUrgent, newReadahead, newLookbehind pieceSpan
+func (p *playbackReader) repositionWindowLocked(offset int64, wasPositioned bool) {
+	isGhostPro := p.priorityOwner != nil && p.priorityOwner.server != nil && p.priorityOwner.server.isGhostProEnabled()
+	pieceLen := p.torrent.Info().PieceLength
+	urgentBytes := playbackUrgentBytes
+	lookaheadBytes := int64(0)
 	forward := playbackWindowBytes
 	if p.adaptive {
 		forward = p.forwardBytes
+	}
+	if isGhostPro {
+		forward = max(forward, 64<<20, 6*pieceLen)
+		if p.boost {
+			forward = max(forward, 96<<20)
+		}
+		lookaheadBytes = max(32<<20, 4*pieceLen)
+		if !p.openPhase && !p.focusPending {
+			urgentBytes = max(urgentBytes, 16<<20, 2*pieceLen)
+		}
 	}
 	if p.refreshCompletion && p.storage != nil {
 		p.storage.mu.Lock()
@@ -932,12 +1036,25 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 		// Reserve room for startup probes, lookbehind, rounding and in-flight
 		// pieces. Four reader slots prevent a new probe overcommitting RAM.
 		readers = max(4, readers)
-		forward = min(forward, max(pieceLen, (budget-(4<<20))/int64(readers)-pieceLen))
-		urgentEndOff = min(p.length, offset+min(playbackUrgentBytes, forward))
+		maxForward := max(pieceLen, (budget-(4<<20))/int64(readers)-pieceLen)
+		if isGhostPro {
+			// Fit all three tiers into the existing per-reader RAM allowance.
+			// Reserve a quarter for lookahead when the cache can hold it.
+			lookaheadBytes = min(lookaheadBytes, (maxForward/4/pieceLen)*pieceLen)
+			forward = min(forward, maxForward-lookaheadBytes)
+		} else {
+			forward = min(forward, maxForward)
+		}
+		urgentBytes = min(urgentBytes, forward)
+		if isGhostPro {
+			urgentBytes = min(urgentBytes, max(pieceLen, (forward/4/pieceLen)*pieceLen))
+		}
 	}
+	urgentEndOff := min(p.length, offset+urgentBytes)
+	var newUrgent, newReadahead, newLookbehind, newLookahead pieceSpan
 	readerReadahead := forward
 	if p.openPhase {
-		readerReadahead = min(playbackUrgentBytes, forward)
+		readerReadahead = min(urgentBytes, forward)
 		newUrgent = spanFromFile(p.file, offset, urgentEndOff)
 		newReadahead = pieceSpan{}
 		newLookbehind = pieceSpan{}
@@ -953,9 +1070,10 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 		newUrgent = spanFromFile(p.file, offset, urgentEndOff)
 		newReadahead = spanFromFile(p.file, urgentEndOff, forwardEnd)
 		newLookbehind = spanFromFile(p.file, lookStart, offset)
+		newLookahead = spanFromFile(p.file, forwardEnd, min(p.length, forwardEnd+lookaheadBytes))
 	}
 
-	playhead := unionSpan(newUrgent, newReadahead, newLookbehind)
+	playhead := unionSpan(newUrgent, newReadahead, newLookbehind, newLookahead)
 	if !p.openPhase && wasPositioned {
 		p.demoteBoostOutsideLocked(playhead)
 	}
@@ -966,7 +1084,7 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 		p.readerReadahead = readerReadahead
 	}
 	window := playbackWindowState{
-		urgent: newUrgent, readahead: newReadahead, lookbehind: newLookbehind,
+		urgent: newUrgent, readahead: newReadahead, lookbehind: newLookbehind, lookahead: newLookahead,
 		openPhase: p.openPhase, headBoost: p.headBoostActive, tailBoost: p.tailBoostActive,
 	}
 	// Byte reads within the same piece spans do not change download demand.
@@ -974,9 +1092,9 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 	if p.windowApplied && window == p.appliedWindow && !p.refreshCompletion {
 		return
 	}
-	kept := p.currentDemandLocked(newUrgent, newReadahead, newLookbehind)
+	kept := p.currentDemandLocked(newUrgent, newReadahead, newLookbehind, newLookahead)
 	if p.priorityOwner != nil {
-		p.priorityOwner.update(p, kept)
+		p.priorityOwner.update(p, kept, window)
 	}
 	if p.refreshCompletion {
 		for i := range kept {
@@ -984,8 +1102,24 @@ func (p *playbackReader) updateWindowLocked(offset int64) {
 		}
 	}
 
-	p.urgent, p.readahead, p.lookbehind = newUrgent, newReadahead, newLookbehind
+	p.urgent, p.readahead, p.lookbehind, p.lookahead = newUrgent, newReadahead, newLookbehind, newLookahead
 	p.appliedWindow, p.windowApplied = window, true
+}
+
+func (p *playbackReader) finishFocusLocked() {
+	if !p.focusPending {
+		return
+	}
+	p.focusPending = false
+	if !p.seekStarted.IsZero() {
+		if srv := p.engine(); srv != nil {
+			srv.seekStats.recordSeek(p.now().Sub(p.seekStarted))
+		}
+		p.seekStarted = time.Time{}
+	}
+	if !p.openPhase {
+		p.repositionWindowLocked(p.lastOffset, true)
+	}
 }
 
 func (p *playbackReader) demoteBoostOutsideLocked(playhead pieceSpan) {
@@ -1002,10 +1136,11 @@ func (p *playbackReader) demoteBoostOutsideLocked(playhead pieceSpan) {
 	demote(p.tailBegin, p.tailEnd, &p.tailBoostActive)
 }
 
-func (p *playbackReader) currentDemandLocked(urgent, readahead, lookbehind pieceSpan) map[int]torrent.PiecePriority {
+func (p *playbackReader) currentDemandLocked(urgent, readahead, lookbehind, lookahead pieceSpan) map[int]torrent.PiecePriority {
 	demand := make(map[int]torrent.PiecePriority)
 	raiseSpan(demand, urgent, torrent.PiecePriorityNow)
 	raiseSpan(demand, readahead, torrent.PiecePriorityReadahead)
+	raiseSpan(demand, lookahead, torrent.PiecePriorityHigh)
 	raiseSpan(demand, lookbehind, torrent.PiecePriorityHigh)
 	if p.openPhase {
 		if p.headBoostActive {
@@ -1115,7 +1250,7 @@ func (p *playbackReader) testPiecePriority(i int) torrent.PiecePriority {
 	if p.readahead.contains(i) {
 		return torrent.PiecePriorityReadahead
 	}
-	if p.lookbehind.contains(i) {
+	if p.lookbehind.contains(i) || p.lookahead.contains(i) {
 		return torrent.PiecePriorityHigh
 	}
 	if p.headBoostActive && (i >= p.headBegin && i < p.headEnd) {

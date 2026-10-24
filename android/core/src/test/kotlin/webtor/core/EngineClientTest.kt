@@ -81,6 +81,40 @@ class EngineClientTest {
         assertFalse(EngineClient.parseTorrent(JSONObject("""{"id":"a"}""")).checking)
     }
 
+    @Test
+    fun parseNextPreloadAndSendNextEpisode() {
+        val warming = EngineClient.parseTorrent(JSONObject(
+            """{"id":"a","nextPreload":{"fileIndex":2,"active":true,"ready":false}}""",
+        ))
+        assertEquals(NextPreload(2, active = true, ready = false), warming.nextPreload)
+        assertEquals(null, EngineClient.parseTorrent(JSONObject("""{"id":"a"}""")).nextPreload)
+
+        transport.enqueue(TestResponse().setBody("""{"id":"a","fileIndex":1,"name":"e1.mkv","length":10,"streamUrl":"http://x"}"""))
+        client.play("a", 1, nextFileIndex = 2)
+        val body = JSONObject(transport.takeRequest().body.readUtf8())
+        assertEquals(2, body.getInt("nextFileIndex"))
+        transport.enqueue(TestResponse().setBody("""{"id":"a","fileIndex":1,"name":"e1.mkv","length":10,"streamUrl":"http://x"}"""))
+        client.play("a", 1)
+        assertFalse(JSONObject(transport.takeRequest().body.readUtf8()).has("nextFileIndex"))
+    }
+
+    @Test
+    fun parseDirectPlayIdleFieldsAndIdleSetting() {
+        val resting = EngineClient.parseTorrent(JSONObject(
+            """{"id":"a","playbackReaders":1,"resting":true,"idleDropReady":false}""",
+        ))
+        assertEquals(1, resting.playbackReaders)
+        assertTrue(resting.resting)
+        assertFalse(resting.idleDropReady)
+        val older = EngineClient.parseTorrent(JSONObject("""{"id":"a"}"""))
+        assertEquals(0, older.playbackReaders)
+        assertFalse(older.resting || older.idleDropReady)
+
+        transport.enqueue(TestResponse().setBody("""{"idleDropMinutes":30}"""))
+        assertEquals(30, client.setIdleDropMinutes(30))
+        assertEquals("{\"idleDropMinutes\":30}", transport.takeRequest().body.readUtf8())
+    }
+
     private lateinit var transport: FakeEngineTransport
     private lateinit var client: EngineClient
 
@@ -204,6 +238,19 @@ class EngineClientTest {
             assertEquals("/settings", request.path)
             val body = JSONObject(request.body.readUtf8())
             assertEquals(enabled, body.getBoolean("ghostMode"))
+            assertEquals(1, body.length())
+        }
+    }
+
+    @Test
+    fun ghostProModeCanBeToggledWithoutChangingOtherSettings() {
+        for (enabled in listOf(true, false)) {
+            transport.enqueue(TestResponse().setBody("""{"ghostProMode":$enabled}"""))
+            assertEquals(enabled, client.setGhostProMode(enabled))
+            val request = transport.takeRequest()
+            assertEquals("/settings", request.path)
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals(enabled, body.getBoolean("ghostProMode"))
             assertEquals(1, body.length())
         }
     }
@@ -446,6 +493,7 @@ class EngineClientTest {
             TestResponse().setBody(
                 """{"id":"abc","infoHash":"dead","generation":3,"timestamp":1700000000000,
                     "totalPieces":4,"pieceLength":16384,"lastPieceLength":1024,"maxBuckets":256,
+                    "ghostProMode":true,"playback":[{"start":0,"end":0,"priority":"U"},{"start":1,"end":2,"priority":"R"},{"start":3,"end":3,"priority":"L"}],
                     "buckets":[
                       {"start":0,"end":1,"total":2,"selected":2,"verified":1,"receiving":1,"selectedVerified":1,"selectedReceiving":1},
                       {"start":2,"end":3,"total":2,"selected":1,"verified":2,"receiving":0,"selectedVerified":1,"selectedReceiving":0}
@@ -462,6 +510,8 @@ class EngineClientTest {
         assertEquals(1024L, t.lastPieceLength)
         assertEquals(256, t.maxBuckets)
         assertEquals(2, t.buckets.size)
+        assertTrue(t.ghostProMode)
+        assertEquals(listOf(PlaybackPieceRange(0, 0, "U"), PlaybackPieceRange(1, 2, "R"), PlaybackPieceRange(3, 3, "L")), t.playback)
         val first = t.buckets[0]
         assertEquals(0, first.start)
         assertEquals(1, first.end)
@@ -560,5 +610,22 @@ class EngineClientTest {
         assertEquals("{\"categories\":[\"startup\",\"resume\"]}", req.body.readUtf8())
         assertEquals(1, cleared.categories.size)
         assertEquals(0L, cleared.categories[0].bytes)
+    }
+
+    @Test
+    fun claudeSeekModePostsSettingAndSeekStatsParse() {
+        transport.enqueue(TestResponse().setBody("""{"claudeSeekMode":true}"""))
+        assertTrue(client.setClaudeSeekMode(true))
+        val req = transport.takeRequest()
+        assertEquals("/settings", req.path)
+        assertEquals("{\"claudeSeekMode\":true}", req.body.readUtf8())
+
+        transport.enqueue(
+            TestResponse().setBody("""{"seekStats":{"count":4,"lastMs":820,"medianMs":640,"stalls":1}}""")
+        )
+        assertEquals(SeekStats(count = 4, lastMs = 820, medianMs = 640, stalls = 1), client.seekStats())
+
+        transport.enqueue(TestResponse().setBody("""{"maxPeers":55}"""))
+        assertNull(client.seekStats())
     }
 }

@@ -1,5 +1,10 @@
 package webtor.app
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -30,13 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -59,6 +61,7 @@ fun PieceHeatGridSection(
     memoryBuffer: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
+    val pieceColors = LocalPieceColors.current
     val density = LocalDensity.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (map == null || map.buckets.isEmpty()) {
@@ -91,7 +94,21 @@ fun PieceHeatGridSection(
 
         val buckets = remember(map) { normalizePieceBuckets(map) }
         val summary = remember(map, buckets) { summarizePieceHeat(map, buckets) }
+        val playback = remember(map, buckets) {
+            buckets.map { if (map.ghostProMode) playbackBands(it, map.playback) else emptyList() }
+        }
+        val hasPlayback = playback.any { it.isNotEmpty() }
         val layout = remember(buckets.size) { pieceHeatLayout(buckets.size) }
+        // Blocks being fetched breathe between two amber strengths so activity is visible.
+        val pulse = if (summary.selectedReceiving > 0 && !frozen) {
+            val transition = rememberInfiniteTransition(label = "pieceReceiving")
+            transition.animateFloat(
+                initialValue = 0.55f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(durationMillis = 700), RepeatMode.Reverse),
+                label = "pieceReceivingAlpha",
+            )
+        } else null
         val markers = remember(files, map.pieceLength, buckets) {
             fileBoundaryMarkers(files, map.pieceLength, buckets)
         }
@@ -100,8 +117,10 @@ fun PieceHeatGridSection(
         val heightDp = remember(layout, canvasWidthPx, density) {
             pieceHeatHeightDp(layout, canvasWidthPx, density.density).dp
         }
-        val a11y = remember(summary, frozen, memoryBuffer) {
-            accessibilityPieceHeatSummary(summary, memoryBuffer) + if (frozen) " Map paused." else ""
+        val a11y = remember(summary, frozen, memoryBuffer, hasPlayback) {
+            accessibilityPieceHeatSummary(summary, memoryBuffer) +
+                (if (frozen) " Map paused." else "") +
+                (if (hasPlayback) " Ghost Pro playback: coral urgent, blue readahead, purple lookahead. Tinted outline means waiting, solid means downloaded." else "")
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -150,10 +169,9 @@ fun PieceHeatGridSection(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 // Done = primary teal; Getting/working = bright amber so workers pop.
-                val verifiedColor = colors.primary
-                val receivingColor = Color(0xFFFFB300)
-                val receivingGlow = Color(0xFFFF6F00)
-                val missingColor = Color.Transparent
+                val verifiedColor = pieceColors.done ?: colors.primary
+                val receivingColor = pieceColors.getting
+                val receivingGlow = pieceColors.gettingGlow
                 val missingStroke = colors.outline.copy(alpha = 0.35f)
                 val excludedStroke = colors.outline.copy(alpha = 0.55f)
                 val excludedFill = colors.surfaceVariant.copy(alpha = 0.25f)
@@ -194,111 +212,53 @@ fun PieceHeatGridSection(
                             y = (cell * 0.28f).coerceIn(2.5f, 6f),
                         )
                         val stroke = Stroke(width = 1.1f)
-                        val activeStroke = Stroke(width = 2.2f)
+                        val activeStroke = Stroke(width = 1.8f)
+                        val receivingAlpha = pulse?.value ?: 1f
 
+                        // One solid color per tile: state and progress are read from color,
+                        // so tiles stay small and legible at the dense 32-column layout.
                         buckets.forEachIndexed { index, bucket ->
                             val col = index % cols
                             val row = index / cols
-                            val left = col * (cell + gap)
-                            val top = row * (cell + gap)
+                            val origin = Offset(col * (cell + gap), row * (cell + gap))
                             val cellSize = Size(cell, cell)
-                            val origin = Offset(left, top)
-                            val working = bucket.selectedReceiving > 0
 
                             if (bucket.excludedOnly) {
+                                drawRoundRect(color = excludedFill, topLeft = origin, size = cellSize, cornerRadius = radius)
                                 drawRoundRect(
-                                    color = excludedFill,
-                                    topLeft = origin,
-                                    size = cellSize,
-                                    cornerRadius = radius,
-                                )
-                                drawRoundRect(
-                                    color = excludedStroke,
-                                    topLeft = origin,
-                                    size = cellSize,
-                                    cornerRadius = radius,
-                                    style = stroke,
+                                    color = excludedStroke, topLeft = origin, size = cellSize,
+                                    cornerRadius = radius, style = stroke,
                                 )
                                 return@forEachIndexed
                             }
 
-                            fun band(fraction: Float): Float =
-                                (cell * fraction.coerceIn(0f, 1f)).coerceAtLeast(0f)
+                            val progress = if (bucket.selected > 0) {
+                                bucket.selectedVerified.toFloat() / bucket.selected
+                            } else 0f
+                            val working = bucket.selectedReceiving > 0
+                            val priority = playback[index].maxByOrNull { playbackRank(it.priority) }?.priority
+                            val tint = priority?.let { pieceColors.playback(it) } ?: verifiedColor
 
-                            val vH = band(bucket.verifiedFraction)
-                            val rH = band(bucket.receivingFraction)
-                            val remain = (cell - vH - rH).coerceAtLeast(0f)
-                            val mH = if (bucket.missing > 0 || bucket.excluded > 0) {
-                                remain * bucket.missingFraction /
-                                    (bucket.missingFraction + bucket.excludedFraction).coerceAtLeast(0.0001f)
-                            } else {
-                                remain
+                            val fill = when {
+                                working -> receivingColor.copy(alpha = receivingAlpha)
+                                progress >= 1f -> tint
+                                // Partial blocks deepen toward the done color as pieces land.
+                                progress > 0f -> tint.copy(alpha = 0.22f + 0.6f * progress)
+                                priority != null -> tint.copy(alpha = 0.16f)
+                                else -> null
                             }
-                            val eH = (remain - mH).coerceAtLeast(0f)
-                            val clip = Path().apply {
-                                addRoundRect(
-                                    RoundRect(
-                                        left = left,
-                                        top = top,
-                                        right = left + cell,
-                                        bottom = top + cell,
-                                        radiusX = radius.x,
-                                        radiusY = radius.y,
-                                    ),
-                                )
-                            }
-                            clipPath(clip) {
-                                var yCursor = top
-                                if (vH > 0f) {
-                                    drawRect(
-                                        color = verifiedColor,
-                                        topLeft = Offset(left, yCursor),
-                                        size = Size(cell, vH),
-                                    )
-                                    yCursor += vH
-                                }
-                                if (rH > 0f) {
-                                    drawRect(
-                                        color = receivingColor,
-                                        topLeft = Offset(left, yCursor),
-                                        size = Size(cell, rH),
-                                    )
-                                    yCursor += rH
-                                }
-                                if (mH > 0f) {
-                                    drawRect(
-                                        color = missingColor,
-                                        topLeft = Offset(left, yCursor),
-                                        size = Size(cell, mH),
-                                    )
-                                    yCursor += mH
-                                }
-                                if (eH > 0f) {
-                                    drawRect(
-                                        color = excludedFill,
-                                        topLeft = Offset(left, yCursor),
-                                        size = Size(cell, eH),
-                                    )
-                                }
+                            if (fill != null) {
+                                drawRoundRect(color = fill, topLeft = origin, size = cellSize, cornerRadius = radius)
                             }
                             when {
                                 working -> drawRoundRect(
-                                    color = receivingGlow,
-                                    topLeft = origin,
-                                    size = cellSize,
-                                    cornerRadius = radius,
-                                    style = activeStroke,
+                                    color = if (priority != null) tint else receivingGlow,
+                                    topLeft = origin, size = cellSize, cornerRadius = radius, style = activeStroke,
                                 )
-                                bucket.verifiedFraction < 1f || bucket.mixedFill || eH > 0f -> drawRoundRect(
-                                    color = if (bucket.verifiedFraction >= 1f && !bucket.mixedFill) {
-                                        verifiedColor.copy(alpha = 0.15f)
-                                    } else {
-                                        missingStroke
-                                    },
-                                    topLeft = origin,
-                                    size = cellSize,
-                                    cornerRadius = radius,
-                                    style = stroke,
+                                progress < 1f -> drawRoundRect(
+                                    color = if (priority != null) tint.copy(alpha = 0.85f) else missingStroke,
+                                    topLeft = origin, size = cellSize, cornerRadius = radius,
+                                    style = if (priority != null) activeStroke else stroke,
                                 )
                             }
                         }
@@ -322,6 +282,23 @@ fun PieceHeatGridSection(
                 }
 
                 PieceHeatLegend(summary = summary, memoryBuffer = memoryBuffer)
+                if (map.ghostProMode) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for ((priority, label) in listOf("U" to "Urgent", "R" to "Readahead", "L" to "Lookahead")) {
+                            LegendPill(
+                                color = pieceColors.playback(priority), hollow = false, label = label,
+                                count = playback.flatten().filter { it.priority == priority }.sumOf { it.pieces },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    Text(
+                        if (hasPlayback) "Ghost Pro · Playback window tiles fill with their color as pieces arrive; outlined tiles are still waiting. Tap for counts."
+                        else "Ghost Pro · Play a video to see its urgent, readahead and lookahead windows.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
                 if (memoryBuffer) {
                     Text(
                         "Filled = held in RAM. Evicted pieces become empty. Blocks can group several pieces.",
@@ -339,7 +316,10 @@ fun PieceHeatGridSection(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
-                            peek.line(memoryBuffer),
+                            peek.line(memoryBuffer) + playback.getOrNull(peek.bucketIndex).orEmpty()
+                                .groupBy { it.priority }.entries.joinToString(separator = "", transform = { (priority, bands) ->
+                                    " · ${playbackLabel(priority)} ${bands.sumOf { it.pieces }}"
+                                }),
                             style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                         )
@@ -350,23 +330,36 @@ fun PieceHeatGridSection(
     }
 }
 
+private fun playbackLabel(priority: String): String = when (priority) {
+    "U" -> "urgent"
+    "R" -> "readahead"
+    else -> "lookahead"
+}
+
+private fun PieceColors.playback(priority: String): Color = when (priority) {
+    "U" -> urgent
+    "R" -> readahead
+    else -> lookahead
+}
+
 @Composable
 private fun PieceHeatLegend(summary: PieceHeatSummary, memoryBuffer: Boolean) {
     val colors = MaterialTheme.colorScheme
+    val pieceColors = LocalPieceColors.current
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         LegendPill(
-            color = colors.primary,
+            color = pieceColors.done ?: colors.primary,
             hollow = false,
             label = if (memoryBuffer) "Buffered" else "Done",
             count = summary.selectedVerified,
             modifier = Modifier.weight(1f),
         )
         LegendPill(
-            color = Color(0xFFFFB300),
+            color = pieceColors.getting,
             hollow = false,
             label = "Getting",
             count = summary.selectedReceiving,

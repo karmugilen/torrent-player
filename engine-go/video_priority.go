@@ -44,11 +44,17 @@ func (s *EngineServer) applyVideoStartupHints(rec *TorrentRecord) {
 		if rec.DirectPlay {
 			head, tail = directStartupHead, directStartupTail
 		}
+		if s.isGhostProEnabled() && !rec.DirectPlay {
+			pieceLen := info.PieceLength
+			head = max(head, playbackBoostHeadBytes, 2*pieceLen)
+			tail = max(tail, playbackBoostTailBytes, 2*pieceLen)
+		}
 		raiseSpan(demand, spanFromFile(f, 0, minInt64(length, head)), torrent.PiecePriorityNow)
 		if length > tail {
 			raiseSpan(demand, spanFromFile(f, length-tail, length), torrent.PiecePriorityNow)
 		}
 	}
+	raiseNextPreload(rec, demand)
 	c.setHints(demand)
 }
 

@@ -388,7 +388,8 @@ func (p *PeerConn) applyRequestState(next desiredRequestState) {
 			diff := int64(current.Requests.GetCardinality()) + 1 - (int64(existing.uncancelledRequests()) - 1)
 			// Steal a request that leaves us with one more request than the existing peer
 			// connection if the stealer more recently received a chunk.
-			if diff > 1 || (diff == 1 && !p.lastUsefulChunkReceived.After(existing.lastUsefulChunkReceived)) {
+			if (diff > 1 || (diff == 1 && !p.lastUsefulChunkReceived.After(existing.lastUsefulChunkReceived))) &&
+				!p.shouldStealUrgent(req, existing) {
 				continue
 			}
 			t.cancelRequest(req)

@@ -72,7 +72,16 @@ data class TorrentStatus(
     val verifiedBytes: Long = 0L,
     val seeding: Boolean = false,
     val seedRatio: Double = 0.0,
+    /** Direct Play only: open player readers, peers released while idle, and the engine's drop signal. */
+    val playbackReaders: Int = 0,
+    val resting: Boolean = false,
+    val idleDropReady: Boolean = false,
+    /** Play next warm-up of the following episode, when one was named at play. */
+    val nextPreload: NextPreload? = null,
 )
+
+/** [active] once the current episode nears its end; [ready] when its head and tail are verified. */
+data class NextPreload(val fileIndex: Int, val active: Boolean, val ready: Boolean)
 
 data class LivePreviewState(val active: Boolean, val byteOffset: Long, val signature: String)
 
@@ -112,6 +121,11 @@ data class PieceBucket(
     val selectedReceiving: Int = 0,
 )
 
+data class PlaybackPieceRange(val start: Int, val end: Int, val priority: String)
+
+/** Seek-to-first-byte times recorded by the engine since Claude optimized seek last changed. */
+data class SeekStats(val count: Int, val lastMs: Long, val medianMs: Long, val stalls: Int)
+
 data class PieceTelemetry(
     val id: String,
     val infoHash: String?,
@@ -122,6 +136,8 @@ data class PieceTelemetry(
     val lastPieceLength: Long,
     val maxBuckets: Int,
     val buckets: List<PieceBucket>,
+    val ghostProMode: Boolean = false,
+    val playback: List<PlaybackPieceRange> = emptyList(),
 )
 
 data class BypassStatus(
@@ -178,9 +194,13 @@ class EngineClient(
         return parseTorrent(json)
     }
 
-    fun play(id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false, adaptiveBuffer: Boolean = false, burstAwareBuffer: Boolean = false): PlayInfo {
+    fun play(
+        id: String, fileIndex: Int? = null, offset: Long? = null, boost: Boolean = false, fileOnly: Boolean = false,
+        adaptiveBuffer: Boolean = false, burstAwareBuffer: Boolean = false, nextFileIndex: Int? = null,
+    ): PlayInfo {
         val body = JSONObject().put("id", id)
         if (fileIndex != null) body.put("fileIndex", fileIndex)
+        if (nextFileIndex != null) body.put("nextFileIndex", nextFileIndex)
         if (offset != null) body.put("offset", offset.coerceAtLeast(0L))
         if (boost) body.put("boost", true)
         if (fileOnly) body.put("fileOnly", true)
@@ -310,6 +330,21 @@ class EngineClient(
     fun setGhostMode(enabled: Boolean): Boolean =
         post("/settings", JSONObject().put("ghostMode", enabled)).getBoolean("ghostMode")
 
+    fun setGhostProMode(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("ghostProMode", enabled)).getBoolean("ghostProMode")
+
+    /** Minutes an unattended Direct Play session may stay idle before Android drops it; 0 turns this off. */
+    fun setIdleDropMinutes(minutes: Int): Int {
+        val value = minutes.coerceIn(0, 240)
+        return post("/settings", JSONObject().put("idleDropMinutes", value)).optInt("idleDropMinutes", value)
+    }
+
+    fun setClaudeSeekMode(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("claudeSeekMode", enabled)).optBoolean("claudeSeekMode", enabled)
+
+    /** Null when the engine predates seek statistics. */
+    fun seekStats(): SeekStats? = get("/settings").optJSONObject("seekStats")?.let(::parseSeekStats)
+
     /**
      * Gates torrent payload bytes globally while preserving tracker, DHT and
      * magnet metadata discovery. Older engines simply reject the optional
@@ -382,6 +417,13 @@ class EngineClient(
             streamUrl = json.getString("streamUrl"),
         )
 
+        fun parseSeekStats(json: JSONObject): SeekStats = SeekStats(
+            count = json.optInt("count").coerceAtLeast(0),
+            lastMs = json.optLong("lastMs").coerceAtLeast(0L),
+            medianMs = json.optLong("medianMs").coerceAtLeast(0L),
+            stalls = json.optInt("stalls").coerceAtLeast(0),
+        )
+
         fun parsePieces(json: JSONObject): PieceTelemetry {
             val buckets = ArrayList<PieceBucket>()
             val arr: JSONArray = json.optJSONArray("buckets") ?: JSONArray()
@@ -402,6 +444,11 @@ class EngineClient(
                     )
                 )
             }
+            val playback = json.optJSONArray("playback") ?: JSONArray()
+            val ranges = List(playback.length()) { index ->
+                val range = playback.getJSONObject(index)
+                PlaybackPieceRange(range.optInt("start", -1), range.optInt("end", -1), range.optString("priority"))
+            }.filter { it.start >= 0 && it.end >= it.start && it.priority in setOf("U", "R", "L") }
             return PieceTelemetry(
                 id = json.getString("id"),
                 infoHash = json.nullableString("infoHash"),
@@ -412,6 +459,8 @@ class EngineClient(
                 lastPieceLength = json.optLong("lastPieceLength"),
                 maxBuckets = json.optInt("maxBuckets", buckets.size),
                 buckets = buckets,
+                ghostProMode = json.optBoolean("ghostProMode"),
+                playback = ranges,
             )
         }
 
@@ -472,6 +521,12 @@ class EngineClient(
                 uploaded = json.optLong("uploaded"),
                 seeding = json.optBoolean("seeding"),
                 seedRatio = json.optDouble("seedRatio", 0.0),
+                playbackReaders = json.optInt("playbackReaders").coerceAtLeast(0),
+                resting = json.optBoolean("resting"),
+                idleDropReady = json.optBoolean("idleDropReady"),
+                nextPreload = json.optJSONObject("nextPreload")?.let {
+                    NextPreload(it.optInt("fileIndex", -1), it.optBoolean("active"), it.optBoolean("ready"))
+                }?.takeIf { it.fileIndex >= 0 },
                 files = files,
                 trackers = trackers,
                 error = if (json.isNull("error")) null else json.optString("error").ifEmpty { null },

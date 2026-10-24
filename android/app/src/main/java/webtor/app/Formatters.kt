@@ -254,8 +254,12 @@ fun readableError(message: String?): String {
     if (msg.isEmpty()) return "Something went wrong. Try again."
     val lower = msg.lowercase()
     return when {
-        "failed to connect" in lower || "connection refused" in lower || "engine did not start" in lower || "engine down" in lower ->
+        // The engine runs inside the app; only its own start failures mean it is down.
+        "engine did not start" in lower || "engine down" in lower || "native engine initialization failed" in lower ->
             "The download engine is not running. Close Torrent Player and open it again."
+        isNetworkFailure(lower) ->
+            "Couldn't connect on this network. It may block torrent traffic. Try mobile data or another Wi-Fi, " +
+                "or turn on Anti-DPI in Settings."
         "enospc" in lower || "no space" in lower || "not enough storage" in lower ->
             msg
         "unavailable" in lower || "cannot access this folder" in lower || "folder access" in lower || "revoked" in lower ->
@@ -271,6 +275,12 @@ fun readableError(message: String?): String {
         else -> msg
     }
 }
+
+/** Socket errors from trackers, peers or torrent downloads, not from the in-process engine. */
+private fun isNetworkFailure(lower: String): Boolean = listOf(
+    "failed to connect", "connection refused", "connection reset", "network is unreachable",
+    "no route to host", "no such host", "i/o timeout", "dial tcp", "dial udp",
+).any { it in lower }
 
 // Use the same target for local playback and streaming.
 fun completedPlayFile(entry: DownloadEntry, fileIndex: Int? = pickPlayIndex(entry)): SavedFile? =

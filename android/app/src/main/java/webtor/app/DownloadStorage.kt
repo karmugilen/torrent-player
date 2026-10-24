@@ -89,6 +89,8 @@ data class DownloadEntry(
         lifecycleState == EntryLifecycleState.PAUSING -> "Pausing…"
         lifecycleState == EntryLifecycleState.STOPPING -> "Stopping…"
         lifecycleState == EntryLifecycleState.PREPARING -> "Preparing…"
+        directPlay && engineId == null && error == null -> "Stopped"
+        directPlay && !paused && liveStatus()?.resting == true -> "Direct Play · resting"
         paused || lifecycleState == EntryLifecycleState.PAUSED -> "Paused"
         error != null || lifecycleState == EntryLifecycleState.ERROR -> "Needs attention"
         !metadataReady -> "Waiting for peers"
@@ -135,6 +137,7 @@ fun downloadSummaryLabel(entry: DownloadEntry, error: String? = null): String = 
     entry.controlsBusy() -> entry.stateLabel()
     error != null || entry.error != null -> "Needs attention"
     entry.complete -> "Complete"
+    entry.directPlay && entry.engineId == null -> "Stopped"
     entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
         (entry.metadataReady && (entry.lifecycleState == EntryLifecycleState.STOPPED || entry.engineId == null)) -> "Paused"
     else -> entry.stateLabel()

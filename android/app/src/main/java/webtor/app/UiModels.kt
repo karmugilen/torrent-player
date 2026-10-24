@@ -20,7 +20,7 @@ data class DeleteRequest(
     val title: String,
 )
 
-enum class AppTheme { AERO, ANTIQUITY, RETRO }
+enum class AppTheme { AERO, ANTIQUITY, RETRO, WADA }
 
 data class UiState(
     val screen: Screen = Screen.Library,
@@ -71,6 +71,11 @@ data class UiState(
     val burstAwareBuffer: Boolean = false,
     val peerExploration: Boolean = false,
     val ghostMode: Boolean = false,
+    val ghostProMode: Boolean = false,
+    val claudeSeekMode: Boolean = false,
+    /** Minutes before an idle Direct Play session is dropped; 0 is off. */
+    val idleDropMinutes: Int = 15,
+    val seekStats: webtor.core.SeekStats? = null,
     val fileOnlyPlayback: Boolean = true,
     val downloadRateKiB: Int = 0,
     val fastPeerSearch: Boolean = false,

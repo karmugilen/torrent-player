@@ -71,6 +71,13 @@ type TorrentView struct {
 	CheckedPieces int           `json:"checkedPieces"`
 	CheckTotal    int           `json:"checkTotal"`
 	Warning       *string       `json:"warning,omitempty"`
+	// Direct Play only: open player readers, peers released while idle, and
+	// whether Android should drop the idle session.
+	PlaybackReaders int  `json:"playbackReaders"`
+	Resting         bool `json:"resting"`
+	IdleDropReady   bool `json:"idleDropReady"`
+	// Play next warm-up of the following episode, when Android named one.
+	NextPreload *NextPreloadView `json:"nextPreload,omitempty"`
 }
 
 type PlayRequest struct {
@@ -84,6 +91,8 @@ type PlayRequest struct {
 	// AdaptiveBuffer enables experimental demand-variation headroom per play.
 	AdaptiveBuffer   bool `json:"adaptiveBuffer,omitempty"`
 	BurstAwareBuffer bool `json:"burstAwareBuffer,omitempty"`
+	// NextFileIndex is warmed near the end of this file when Play next is on.
+	NextFileIndex *int `json:"nextFileIndex,omitempty"`
 }
 
 // FocusRequest changes the background download focus. A null fileIndex clears
@@ -153,15 +162,24 @@ type PieceBucket struct {
 }
 
 type PieceTelemetryResponse struct {
-	ID              string        `json:"id"`
-	InfoHash        *string       `json:"infoHash"`
-	Generation      int64         `json:"generation"`
-	Timestamp       int64         `json:"timestamp"`
-	TotalPieces     int           `json:"totalPieces"`
-	PieceLength     int64         `json:"pieceLength"`
-	LastPieceLength int64         `json:"lastPieceLength"`
-	MaxBuckets      int           `json:"maxBuckets"`
-	Buckets         []PieceBucket `json:"buckets"`
+	ID              string               `json:"id"`
+	InfoHash        *string              `json:"infoHash"`
+	Generation      int64                `json:"generation"`
+	Timestamp       int64                `json:"timestamp"`
+	TotalPieces     int                  `json:"totalPieces"`
+	PieceLength     int64                `json:"pieceLength"`
+	LastPieceLength int64                `json:"lastPieceLength"`
+	MaxBuckets      int                  `json:"maxBuckets"`
+	Buckets         []PieceBucket        `json:"buckets"`
+	GhostProMode    bool                 `json:"ghostProMode"`
+	Playback        []PlaybackPieceRange `json:"playback,omitempty"`
+}
+
+// Inclusive torrent piece indices, matching PieceBucket's range convention.
+type PlaybackPieceRange struct {
+	Start    int    `json:"start"`
+	End      int    `json:"end"`
+	Priority string `json:"priority"`
 }
 
 type MetadataResponse struct {
@@ -170,9 +188,12 @@ type MetadataResponse struct {
 
 type SettingsResponse struct {
 	GhostMode               bool  `json:"ghostMode"`
+	GhostProMode            bool  `json:"ghostProMode"`
 	DialRatePerSec          int   `json:"dialRatePerSec"`
 	EffectiveDialRatePerSec int64 `json:"effectiveDialRatePerSec"`
 	PeerExploration         bool  `json:"peerExploration"`
+	ClaudeSeekMode          bool  `json:"claudeSeekMode"`
+	IdleDropMinutes         int   `json:"idleDropMinutes"`
 	RamCacheBytes           int64 `json:"ramCacheBytes"`
 	SeedingEnabled          bool  `json:"seedingEnabled"`
 	SeedRatioMilli          int64 `json:"seedRatioMilli"`
@@ -183,11 +204,16 @@ type SettingsResponse struct {
 	// PayloadTransfersAllowed controls torrent file bytes only. Tracker, DHT,
 	// PEX, and metadata discovery keep running while it is false.
 	PayloadTransfersAllowed bool `json:"payloadTransfersAllowed"`
+	// Seek-to-first-byte times since Claude optimized seek last changed.
+	SeekStats SeekStats `json:"seekStats"`
 }
 
 type SettingsRequest struct {
 	GhostMode            *bool  `json:"ghostMode,omitempty"`
+	GhostProMode         *bool  `json:"ghostProMode,omitempty"`
 	PeerExploration      *bool  `json:"peerExploration,omitempty"`
+	ClaudeSeekMode       *bool  `json:"claudeSeekMode,omitempty"`
+	IdleDropMinutes      *int   `json:"idleDropMinutes,omitempty"`
 	RamCacheBytes        *int64 `json:"ramCacheBytes,omitempty"`
 	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`
 	SeedingAllowed       *bool  `json:"seedingAllowed,omitempty"`

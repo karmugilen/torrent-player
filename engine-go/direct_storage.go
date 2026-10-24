@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,6 +23,9 @@ const (
 	directStartupTail        = int64(1 << 20)
 	directStartupBudget      = int64(8 << 20)
 	directStartupTotalBudget = int64(32 << 20)
+	// The next episode's warm start has its own budget so preloading never
+	// displaces the current episode's head and tail.
+	directPreloadBudget = int64(8 << 20)
 )
 
 // Direct Play has no full-sized backing files. Only verified opening/container
@@ -143,7 +147,7 @@ func (st *DocumentTorrentStorage) saveStartupPieceLocked(index int) {
 	for _, pending := range st.startupPending {
 		pendingBytes += int64(len(pending))
 	}
-	if pendingBytes > directStartupBudget {
+	if pendingBytes > directStartupBudget+directPreloadBudget {
 		return
 	}
 	st.startupPending[index] = bytes.Clone(data)
@@ -247,7 +251,7 @@ func (st *DocumentTorrentStorage) ensureStreamSlotLocked(index int, expected int
 				if p == index || (!st.completed[p] && st.streamWhole[p]) {
 					continue
 				}
-				if pass == 0 && st.streamDemand[p] {
+				if pass == 0 && (st.streamDemand[p] || (st.preloadPieces[p] && !st.startupSaved[p])) {
 					continue
 				}
 				victim = p
@@ -418,6 +422,9 @@ func (st *DocumentTorrentStorage) setStartupFile(index int) {
 	if !st.stream || st.closed || index < 0 || index >= len(st.files) {
 		return
 	}
+	if st.preloadPieces != nil && st.preloadFile == index {
+		st.preloadPieces = nil
+	}
 	file := st.files[index]
 	next := make(map[int]bool)
 	var budget int64
@@ -442,6 +449,9 @@ func (st *DocumentTorrentStorage) setStartupFile(index int) {
 		for p := int(span[0] / st.chunkLength); p <= int((span[1]-1)/st.chunkLength); p++ {
 			add(p)
 		}
+	}
+	for p := range st.preloadPieces {
+		next[p] = true
 	}
 	for p := range st.startupPieces {
 		add(p)
@@ -484,6 +494,60 @@ func (st *DocumentTorrentStorage) setStartupFile(index int) {
 			st.saveStartupPieceLocked(p)
 		}
 	}
+}
+
+// setPreloadFile plans the head and tail of the episode expected to play next
+// as durable startup pieces in a separate budget. Returns the planned pieces.
+// A negative index cancels the preload; saved pieces stay until the next plan.
+func (st *DocumentTorrentStorage) setPreloadFile(index int) map[int]bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.preloadPieces = nil
+	if !st.stream || st.closed || st.previewTemp || st.startupPieces == nil || index < 0 || index >= len(st.files) {
+		return nil
+	}
+	file := st.files[index]
+	planned := make(map[int]bool)
+	var budget int64
+	for _, span := range [][2]int64{
+		{file.Offset, file.Offset + min(file.Length, directStartupHead)},
+		{file.Offset + max(int64(0), file.Length-directStartupTail), file.Offset + file.Length},
+	} {
+		if span[1] <= span[0] {
+			continue
+		}
+		for p := int(span[0] / st.chunkLength); p <= int((span[1]-1)/st.chunkLength); p++ {
+			if planned[p] {
+				continue
+			}
+			// Pieces shared with the current plan are already budgeted there.
+			if !st.startupPieces[p] {
+				length := st.info.Piece(p).Length()
+				if budget+length > directPreloadBudget {
+					continue
+				}
+				budget += length
+			}
+			planned[p] = true
+		}
+	}
+	st.preloadFile, st.preloadPieces = index, planned
+	missing := make(map[int]bool)
+	for p := range planned {
+		st.startupPieces[p] = true
+		if !st.startupSaved[p] && !st.completed[p] {
+			missing[p] = true
+		}
+	}
+	if len(missing) != 0 {
+		st.validateStartupPiecesLocked(missing)
+	}
+	for p := range planned {
+		if st.completed[p] {
+			st.saveStartupPieceLocked(p)
+		}
+	}
+	return maps.Clone(planned)
 }
 
 func (st *DocumentTorrentStorage) validateStartupPiecesLocked(planned map[int]bool) {

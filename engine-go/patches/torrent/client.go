@@ -126,6 +126,8 @@ type Client struct {
 
 	// Per-client outgoing TCP wrapper. Stored as hookBox; nil fn clears.
 	outgoingTCPHook atomic.Value
+	// Nanoseconds before a stalled urgent block may move to a faster peer; 0 disables.
+	urgentStealAfter atomic.Int64
 }
 
 type clientWebseedState struct {
@@ -1570,6 +1572,12 @@ func (cl *Client) AddTorrentOpt(opts AddTorrentOpts) (t *Torrent, new bool) {
 		}
 	})
 	cl.torrentsByShortHash[infoHash] = t
+	if opts.InfoHashV2.Ok {
+		// Webtor: tracker announces of a hybrid magnet are keyed by both short
+		// infohashes, and hashInfoBytes only registers the v2 one when it was
+		// learned from metadata. See WEBTOR_PATCH.md.
+		cl.torrentsByShortHash[*opts.InfoHashV2.Value.ToShort()] = t
+	}
 	t.setInfoBytesLocked(opts.InfoBytes)
 	cl.clearAcceptLimits()
 	t.updateWantPeersEvent()

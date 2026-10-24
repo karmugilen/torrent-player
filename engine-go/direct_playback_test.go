@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
@@ -35,23 +36,65 @@ func TestDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T) {
 	t.Run("all five", func(t *testing.T) {
 		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{adaptive: true, burst: true, boost: true, explore: true, ghost: true})
 	})
+	t.Run("ghost pro", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{ghostPro: true})
+	})
+	t.Run("ghost pro boosted burst buffer", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{ghostPro: true, boost: true, burst: true})
+	})
+	t.Run("claude seek", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{claude: true})
+	})
+	t.Run("claude seek with every experiment", func(t *testing.T) {
+		testDirectPlayLocalPeerSeeksBeyondRAMBudget(t, playbackExperimentTestConfig{claude: true, ghostPro: true, boost: true, burst: true, adaptive: true})
+	})
 }
 
-type playbackExperimentTestConfig struct{ adaptive, burst, boost, explore, ghost bool }
+type playbackExperimentTestConfig struct{ adaptive, burst, boost, explore, ghost, ghostPro, claude bool }
 
-func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playbackExperimentTestConfig) {
-	if testing.Short() {
-		t.Skip("local peer transfer")
+// localPeerSwarm builds a 40 MiB single-file torrent with 64 KiB pieces and
+// returns its payload and a factory for loopback seed or Direct Play peers.
+func localPeerSwarm(t *testing.T) ([]byte, func(seed bool, configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord)) {
+	t.Helper()
+	return localFilesSwarm(t, "movie.mp4", nil)
+}
+
+// localFilesSwarm builds seed/leech engines for one torrent. Nil lengths make a
+// single 40 MiB file named name; otherwise name is the folder of numbered files.
+// The returned data is the whole torrent payload.
+func localFilesSwarm(t *testing.T, name string, lengths []int64) ([]byte, func(seed bool, configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord)) {
+	t.Helper()
+	data, newPeer, _ := localFilesSwarmModes(t, name, lengths)
+	return data, newPeer
+}
+
+// localFilesSwarmModes also returns a constructor for a leech saving to files.
+func localFilesSwarmModes(t *testing.T, name string, lengths []int64) (
+	[]byte,
+	func(seed bool, configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord),
+	func(configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord),
+) {
+	t.Helper()
+	total := int64(40 << 20)
+	info := metainfo.Info{Name: name, PieceLength: 64 << 10}
+	if lengths == nil {
+		info.Length = total
+	} else {
+		total = 0
+		for i, length := range lengths {
+			info.Files = append(info.Files, metainfo.FileInfo{Length: length, Path: []string{fmt.Sprintf("Episode %02d.mkv", i+1)}})
+			total += length
+		}
 	}
-	data := make([]byte, 40<<20)
+	data := make([]byte, total)
 	for i := range data {
 		data[i] = byte(i*19 + i/(64<<10))
 	}
-	info := metainfo.Info{Name: "movie.mp4", Length: int64(len(data)), PieceLength: 64 << 10}
 	for start := 0; start < len(data); start += int(info.PieceLength) {
-		hash := sha1.Sum(data[start : start+int(info.PieceLength)])
+		hash := sha1.Sum(data[start:min(start+int(info.PieceLength), len(data))])
 		info.Pieces = append(info.Pieces, hash[:]...)
 	}
+	files := max(1, len(lengths))
 	encoded, err := bencode.Marshal(info)
 	if err != nil {
 		t.Fatal(err)
@@ -61,8 +104,8 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 	if err := mi.Write(&metadata); err != nil {
 		t.Fatal(err)
 	}
-	newPeer := func(seed bool) (*EngineServer, *TorrentRecord) {
-		s := testEngine(t, func(cfg *torrent.ClientConfig) {
+	newPeerMode := func(seed, download bool, configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord) {
+		s := testEngine(t, append([]func(*torrent.ClientConfig){func(cfg *torrent.ClientConfig) {
 			cfg.DisableTCP = false
 			cfg.DisableIPv6 = true
 			cfg.ListenHost = func(string) string { return "127.0.0.1" }
@@ -72,7 +115,7 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 			cfg.Seed = seed
 			cfg.PieceHashersPerTorrent = backgroundWorkers()
 			cfg.DialRateLimiter = rate.NewLimiter(defaultDialRate, defaultDialRate)
-		})
+		}}, configure...)...)
 		request, _ := json.Marshal(AddRequest{Prepare: true, TorrentData: base64.StdEncoding.EncodeToString(metadata.Bytes())})
 		code, response := s.DispatchControl("POST", "/add", string(request))
 		if code != 200 {
@@ -83,15 +126,20 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 			t.Fatal(err)
 		}
 		rec := s.records[added.ID]
-		config := ConfigureRequest{ID: rec.ID, Selected: []int{0}, Descriptors: []*int{nil}, StorageMode: StorageModeStream, StreamCacheBytes: 16 << 20}
-		if seed {
-			f, err := os.CreateTemp(t.TempDir(), "seed")
-			if err != nil {
-				t.Fatal(err)
+		config := ConfigureRequest{ID: rec.ID, Descriptors: make([]*int, files), StorageMode: StorageModeStream, StreamCacheBytes: 16 << 20}
+		for i := 0; i < files; i++ {
+			config.Selected = append(config.Selected, i)
+		}
+		if seed || download {
+			for i := range config.Descriptors {
+				f, err := os.CreateTemp(t.TempDir(), "seed")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close()
+				fd := int(f.Fd())
+				config.Descriptors[i] = &fd
 			}
-			defer f.Close()
-			fd := int(f.Fd())
-			config.Descriptors = []*int{&fd}
 			config.StorageMode = StorageModeDownload
 		}
 		request, _ = json.Marshal(config)
@@ -106,6 +154,20 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 		}
 		return s, rec
 	}
+	newPeer := func(seed bool, configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord) {
+		return newPeerMode(seed, false, configure...)
+	}
+	newDownloader := func(configure ...func(*torrent.ClientConfig)) (*EngineServer, *TorrentRecord) {
+		return newPeerMode(false, true, configure...)
+	}
+	return data, newPeer, newDownloader
+}
+
+func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playbackExperimentTestConfig) {
+	if testing.Short() {
+		t.Skip("local peer transfer")
+	}
+	data, newPeer := localPeerSwarm(t)
 	seed, _ := newPeer(true)
 	leech, rec := newPeer(false)
 	if priority := rec.Torrent.Files()[0].Priority(); priority != torrent.PiecePriorityNone {
@@ -124,6 +186,16 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 			t.Fatalf("ghost mode: %d %s", code, response)
 		}
 	}
+	if experiment.ghostPro {
+		if code, response := leech.DispatchControl("POST", "/settings", `{"ghostProMode":true}`); code != 200 {
+			t.Fatalf("ghost pro mode: %d %s", code, response)
+		}
+	}
+	if experiment.claude {
+		if code, response := leech.DispatchControl("POST", "/settings", `{"claudeSeekMode":true}`); code != 200 {
+			t.Fatalf("claude seek mode: %d %s", code, response)
+		}
+	}
 	if experiment.adaptive || experiment.burst || experiment.boost {
 		body, _ := json.Marshal(map[string]any{"id": rec.ID, "fileIndex": 0, "adaptiveBuffer": experiment.adaptive, "burstAwareBuffer": experiment.burst, "boost": experiment.boost})
 		if code, response := leech.DispatchControl("POST", "/play", string(body)); code != 200 {
@@ -138,6 +210,9 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 	for iteration, offset := range []int64{0, 25 << 20, 4 << 20, 32 << 20, 4 << 20} {
 		if experiment.ghost {
 			leech.ghostModeTick(time.Unix(1000, 0).Add(time.Duration(iteration) * 10 * time.Second))
+		}
+		if experiment.ghostPro {
+			leech.ghostProModeTick(time.Unix(1000, 0).Add(time.Duration(iteration) * 10 * time.Second))
 		}
 		if experiment.explore {
 			leech.peerExplorationTick(time.Unix(1000, 0).Add(time.Duration(iteration) * 90 * time.Second))
@@ -180,6 +255,9 @@ func testDirectPlayLocalPeerSeeksBeyondRAMBudget(t *testing.T, experiment playba
 		if used > limit {
 			t.Fatalf("RAM limit exceeded: %d > %d", used, limit)
 		}
+	}
+	if stats := leech.seekStats.snapshot(); stats.Count < 3 {
+		t.Fatalf("seek stats missed seeks: %+v", stats)
 	}
 	_, raw := leech.DispatchControl("GET", "/torrent/"+rec.ID, "")
 	var view TorrentView
@@ -345,5 +423,110 @@ func TestDirectPlayCancelsWaitOnSeekAndClose(t *testing.T) {
 	}
 	if err := <-second; err == nil {
 		t.Fatal("closed read succeeded")
+	}
+}
+
+// One throttled and one fast seed: the throttled seed can hold urgent blocks
+// after a seek. Both modes must return correct bytes; timings are logged so
+// the effect of Claude optimized seek is visible with -v.
+func TestClaudeSeekWithSlowAndFastSeed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("local peer transfer")
+	}
+	for _, claude := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "claude seek"}[claude], func(t *testing.T) {
+			data, newPeer := localPeerSwarm(t)
+			slow, _ := newPeer(true, func(cfg *torrent.ClientConfig) {
+				cfg.UploadRateLimiter = rate.NewLimiter(48<<10, 16<<10)
+			})
+			fast, _ := newPeer(true)
+			leech, rec := newPeer(false)
+			if claude {
+				if code, response := leech.DispatchControl("POST", "/settings", `{"claudeSeekMode":true}`); code != 200 {
+					t.Fatalf("claude seek mode: %d %s", code, response)
+				}
+			}
+			// The slow seed connects first so it is offered the opening requests.
+			if rec.Torrent.AddClientPeer(slow.client) == 0 {
+				t.Fatal("no slow seed address")
+			}
+			time.Sleep(300 * time.Millisecond)
+			if rec.Torrent.AddClientPeer(fast.client) == 0 {
+				t.Fatal("no fast seed address")
+			}
+			p, err := leech.OpenPlayback(rec.ID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			start := time.Now()
+			for _, offset := range []int64{0, 20 << 20, 6 << 20, 33 << 20, 12 << 20, 27 << 20} {
+				got := make([]byte, 1<<20)
+				began := time.Now()
+				done := make(chan error, 1)
+				go func() {
+					n, err := p.ReadAt(got, offset)
+					if err == nil && n != len(got) {
+						err = os.ErrInvalid
+					}
+					done <- err
+				}()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("read at %d: %v", offset, err)
+					}
+				case <-time.After(60 * time.Second):
+					p.Close()
+					t.Fatalf("read at %d stalled", offset)
+				}
+				if !bytes.Equal(got, data[offset:offset+int64(len(got))]) {
+					t.Fatalf("incorrect bytes after seek to %d", offset)
+				}
+				t.Logf("read at %2d MiB: %v", offset>>20, time.Since(began).Round(time.Millisecond))
+			}
+			t.Logf("total %v, stats %+v", time.Since(start).Round(time.Millisecond), leech.seekStats.snapshot())
+		})
+	}
+}
+
+func TestClaudeSeekSettingTogglesStealingAndResetsStats(t *testing.T) {
+	s := testEngine(t)
+	s.seekStats.recordSeek(1500 * time.Millisecond)
+	s.seekStats.recordSeek(500 * time.Millisecond)
+	s.seekStats.recordSeek(900 * time.Millisecond)
+	s.seekStats.recordStall()
+	var before SettingsResponse
+	_, raw := s.DispatchControl("GET", "/settings", "")
+	if err := json.Unmarshal(raw, &before); err != nil {
+		t.Fatal(err)
+	}
+	if before.ClaudeSeekMode || before.SeekStats != (SeekStats{Count: 3, LastMs: 900, MedianMs: 900, Stalls: 1}) {
+		t.Fatalf("unexpected settings before toggle: %+v", before)
+	}
+	if code, response := s.DispatchControl("POST", "/settings", `{"claudeSeekMode":true}`); code != 200 {
+		t.Fatalf("enable: %d %s", code, response)
+	}
+	var after SettingsResponse
+	_, raw = s.DispatchControl("GET", "/settings", "")
+	if err := json.Unmarshal(raw, &after); err != nil {
+		t.Fatal(err)
+	}
+	if !after.ClaudeSeekMode || after.SeekStats != (SeekStats{}) {
+		t.Fatalf("toggle did not enable and reset: %+v", after)
+	}
+	// Unrelated settings leave the mode and its comparison window alone.
+	s.seekStats.recordSeek(time.Second)
+	if code, response := s.DispatchControl("POST", "/settings", `{"maxPeers":40}`); code != 200 {
+		t.Fatalf("max peers: %d %s", code, response)
+	}
+	if !s.isClaudeSeekEnabled() || s.seekStats.snapshot().Count != 1 {
+		t.Fatal("unrelated setting changed claude seek state")
+	}
+	if code, response := s.DispatchControl("POST", "/settings", `{"claudeSeekMode":false}`); code != 200 {
+		t.Fatalf("disable: %d %s", code, response)
+	}
+	if s.isClaudeSeekEnabled() || s.seekStats.snapshot().Count != 0 {
+		t.Fatal("disable did not turn off and reset")
 	}
 }

@@ -8,6 +8,8 @@ Design note for replacing the current single-row Pieces strip on torrent Details
 **Current code:** `PieceHeatGridSection` (`PieceHeatGrid.kt`) + pure helpers (`PieceHeatGridModel.kt`); wired from `TorrentFilesScreen.kt`. Old `PiecesSection` / `PieceCanvas` removed.  
 **Data:** `EngineClient.pieces(id, maxBuckets)` → `PieceTelemetry` / `PieceBucket` with additive `selectedVerified` / `selectedReceiving`.
 
+**Ghost Pro update (2026-10-22):** `/pieces` also publishes `ghostProMode` and optional inclusive `playback` ranges with `U`, `R` and `L` priorities. While Ghost Pro is enabled, Details refreshes at most once per second in the foreground, including completed files whose seeks do not change transfer counters. Active playback keeps the dense grid layout and encodes state by color only (no letter badges): coral urgent, blue readahead, purple lookahead. A waiting tile in a playback window has a tinted outline, deepens as its pieces verify and turns solid when done; tiles being fetched pulse amber. Mixed buckets use their highest priority color; tapping reports per-tier counts. Overlapping readers use U > R > L without counting pieces twice or coloring gaps between paths. Legend counts include verified scheduled pieces. Stream and download maps share this view; actual sizes reflect the RAM budget in Instant Play. Closing or parking readers removes their ranges. See `DIRECT_PLAY.md` for the buffering policy. The original grid contract below remains the basis for completion rendering.
+
 ---
 
 ## Execution plan — 2026-09-16

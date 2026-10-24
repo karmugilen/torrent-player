@@ -46,6 +46,7 @@ type previewReader struct {
 	admittedN  int64
 	closed     bool
 	cachedOnly bool
+	directPlay bool
 	temp       bool
 	waitCancel context.CancelFunc
 }
@@ -146,6 +147,7 @@ func (s *EngineServer) OpenPreview(id string, index int) (PreviewReader, error) 
 	p.owner.mu.Lock()
 	p.owner.storage = st
 	p.cachedOnly = rec.DirectPlay && len(p.owner.readers) > 0
+	p.directPlay = rec.DirectPlay
 	p.owner.mu.Unlock()
 	if s.shuttingDown.Load() {
 		return fail(fmt.Errorf("engine is closing"))
@@ -262,6 +264,11 @@ func (p *previewReader) ReadAt(data []byte, offset int64) (int, error) {
 		if n, ok := st.readVerifiedPreview(data, abs); ok {
 			return n, nil
 		}
+	}
+	if p.directPlay && p.server != nil && p.rec != nil {
+		// A thumbnail that needs the network wakes an idle-rested session.
+		p.rec.playbackIdle.touch(time.Now())
+		p.server.wakeDirectPlayFromRead(p.rec)
 	}
 	p.reader.SetContext(ctx)
 	if _, err := p.reader.Seek(offset, io.SeekStart); err != nil {

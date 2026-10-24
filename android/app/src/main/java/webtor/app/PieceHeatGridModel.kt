@@ -2,6 +2,7 @@ package webtor.app
 
 import webtor.core.PieceBucket
 import webtor.core.PieceTelemetry
+import webtor.core.PlaybackPieceRange
 import kotlin.math.ceil
 import kotlin.math.max
 
@@ -347,3 +348,38 @@ internal fun shortFileLabel(name: String, maxLen: Int = 10): String {
 const val MAX_PIECE_HEAT_CELLS = 256
 /** Soft guide only; height follows square width-fill and is not clamped. */
 const val MAX_PIECE_HEAT_HEIGHT_DP = 320f
+
+data class PlaybackBand(
+    val priority: String,
+    val startFraction: Float,
+    val fraction: Float,
+    val pieces: Int,
+)
+
+/** Disjoint bands retain true piece positions inside aggregated cells. U wins
+ * over R, then L, including when multiple readers share the same bucket. */
+fun playbackBands(bucket: NormalizedPieceBucket, ranges: List<PlaybackPieceRange>): List<PlaybackBand> {
+    if (bucket.excludedOnly || bucket.total <= 0) return emptyList()
+    val start = bucket.start.toLong()
+    val end = bucket.end.toLong() + 1L
+    if (end <= start) return emptyList()
+    val clipped = ranges.mapNotNull { range ->
+        val begin = maxOf(start, range.start.toLong())
+        val finish = minOf(end, range.end.toLong() + 1L)
+        if (begin < finish && playbackRank(range.priority) > 0) Triple(begin, finish, range.priority) else null
+    }
+    val edges = clipped.flatMap { listOf(it.first, it.second) }.distinct().sorted()
+    return edges.zipWithNext().mapNotNull { (begin, finish) ->
+        val priority = clipped.filter { it.first <= begin && it.second >= finish }
+            .maxByOrNull { playbackRank(it.third) }?.third ?: return@mapNotNull null
+        PlaybackBand(priority, (begin - start).toFloat() / (end - start),
+            (finish - begin).toFloat() / (end - start), (finish - begin).toInt())
+    }
+}
+
+fun playbackRank(priority: String): Int = when (priority) {
+    "U" -> 3
+    "R" -> 2
+    "L" -> 1
+    else -> 0
+}

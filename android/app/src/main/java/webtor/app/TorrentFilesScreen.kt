@@ -55,6 +55,7 @@ fun TorrentFilesScreen(
     onToggleFile: (Int) -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
+    onDrop: () -> Unit = {},
     onDelete: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -63,6 +64,7 @@ fun TorrentFilesScreen(
     val clipboardManager = LocalClipboardManager.current
     val app = context.applicationContext as WebtorApp
     val client = app.engineClient
+    val ghostProMode = app.session.ui.collectAsState().value.ghostProMode
     var telemetry by remember(entry.key) { mutableStateOf<PieceTelemetry?>(null) }
     var copiedMagnet by remember(entry.key) { mutableStateOf(false) }
     val magnetUri = resolveMagnetUri(entry)
@@ -74,7 +76,7 @@ fun TorrentFilesScreen(
     }
     val latestEntry by rememberUpdatedState(entry)
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(entry.key, entry.engineId, lifecycleOwner) {
+    LaunchedEffect(entry.key, entry.engineId, lifecycleOwner, ghostProMode) {
         val engineId = entry.engineId
         // Engine id changes (or going offline) must not keep a stale map.
         telemetry = null
@@ -88,12 +90,14 @@ fun TorrentFilesScreen(
             }
             if (first != null) telemetry = first
             lastFetchElapsed = SystemClock.elapsedRealtime()
-            if (latestEntry.complete) return@repeatOnLifecycle
+            if (latestEntry.complete && !ghostProMode) return@repeatOnLifecycle
             while (true) {
                 val nextVersion = withContext(Dispatchers.IO) {
-                    app.engine.awaitChange(eventVersion)
+                    // Verified-file seeks can move windows without changing any
+                    // transfer counters. Refresh Ghost Pro's visible map at 1 Hz.
+                    app.engine.awaitChange(eventVersion, if (ghostProMode) 1_000 else 30_000)
                 }
-                if (nextVersion == eventVersion) continue
+                if (nextVersion == eventVersion && !ghostProMode) continue
                 eventVersion = nextVersion
                 val elapsed = SystemClock.elapsedRealtime() - lastFetchElapsed
                 if (elapsed < 1_000L) delay(1_000L - elapsed)
@@ -102,7 +106,7 @@ fun TorrentFilesScreen(
                 }
                 if (next != null) telemetry = next
                 lastFetchElapsed = SystemClock.elapsedRealtime()
-                if (latestEntry.complete) break
+                if (latestEntry.complete && !ghostProMode) break
             }
         }
     }
@@ -159,6 +163,11 @@ fun TorrentFilesScreen(
                     }
                 },
                 actions = {
+                    if (!busy && entry.directPlay && entry.engineId != null) {
+                        TextButton(onClick = onDrop) {
+                            Text("Drop")
+                        }
+                    }
                     if (!busy && !entry.complete) {
                         if (entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING)) {
                             TextButton(onClick = onResume) {
@@ -278,6 +287,7 @@ fun TorrentFilesScreen(
                     focused = entry.focusedFile == file.index,
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
+                    upNext = if (entry.paused) null else upNextLabel(entry.liveStatus()?.nextPreload, file.index),
                 )
             }
             // Diagnostics follow files
@@ -338,6 +348,8 @@ private fun DownloadSummary(
             Text(
                 if (entry.checking) "Checking saved data · ${entry.checkPercent}%"
                 else if (!entry.metadataReady) "Fetching file list…"
+                else if (entry.directPlay && entry.engineId == null) "Stopped · peers disconnected and RAM freed. Play starts it again."
+                else if (entry.directPlay && entry.liveStatus()?.resting == true) "Resting · peers released while idle. Reconnects when playback resumes."
                 else if (entry.directPlay) "${formatBytes(entry.downloaded)} cached · video stays in RAM"
                 else "${formatBytes(entry.downloaded)} of ${formatBytes(entry.total)} · $percent%",
                 style = MaterialTheme.typography.bodySmall,
@@ -558,6 +570,7 @@ private fun TorrentFileRow(
     focused: Boolean = false,
     directPlay: Boolean = false,
     pairedSubtitles: List<String> = emptyList(),
+    upNext: String? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -633,6 +646,7 @@ private fun TorrentFileRow(
                     if (priorityDownload) {
                         Text("Priority download", style = MaterialTheme.typography.labelSmall, color = colors.primary)
                     }
+                    upNext?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.tertiary) }
                     watched?.let { fraction ->
                         Box(
                             Modifier
@@ -775,4 +789,12 @@ private fun TechnicalCard(
             )
         }
     }
+}
+
+/** Play next warm-up state for the row of [fileIndex]; null for other rows. */
+internal fun upNextLabel(preload: webtor.core.NextPreload?, fileIndex: Int): String? = when {
+    preload == null || preload.fileIndex != fileIndex -> null
+    preload.ready -> "Up next · start loaded"
+    preload.active -> "Up next · loading start"
+    else -> "Up next · loads near the end"
 }
