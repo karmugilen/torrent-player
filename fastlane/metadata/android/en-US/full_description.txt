@@ -10,6 +10,10 @@
   <li><b>Bitfield Piece Visualizer:</b> Interactive real-time visualizer showing piece distribution and swarm availability.</li>
   <li><b>Optimized Resource & Battery Usage:</b> Adaptive polling back-off and a native Go engine with bounded preparation storage.</li>
   <li><b>Modern Material 3 Interface:</b> Intuitive UI with dynamic colors, dark theme support, and animated video preview cards.</li>
+  <li><b>Direct Play:</b> Stream a video from RAM without saving the whole file. Only each video's start and end are kept (up to 1 GB) so episodes reopen fast.</li>
+  <li><b>Continue Watching and Play Next:</b> Resume where you left off and move on to the next episode, with its start fetched in advance.</li>
+  <li><b>Fast Seeking:</b> A small model learned on your phone predicts when each peer will deliver a block, so the data at the play position is requested from the peers likely to send it first. It runs and is stored only on the device.</li>
+  <li><b>Peer Map:</b> Shows peer countries using an offline database bundled with the app (DB-IP Lite, CC BY 4.0). No lookup requests are made.</li>
 </ul>
 
 <p><b>Privacy & Freedom:</b></p>
@@ -25,5 +29,6 @@
   <li>When the app starts, the engine automatically refreshes a cached public tracker list from https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt. Successful refreshes are scheduled once per day; failed requests may be retried. This request downloads a shared list and does not send torrent hashes or user-supplied tracker URLs.</li>
   <li>Up to 24 additional public BitTorrent trackers are automatically added to each non-private torrent to help discover peers. Cached and built-in fallback trackers are used when the list is unavailable. Private torrents are excluded. Torrent announces share your IP address and torrent info hash with the trackers contacted.</li>
   <li>WebRTC peer connections use STUN servers operated by Google, Twilio, and Cloudflare to discover a public network address for connectivity. These providers can see the source IP address of STUN requests.</li>
-  <li>Version 2.0.0 does not provide settings to disable public tracker-list refresh, extra public trackers, or WebRTC. This build supports arm64-v8a devices.</li>
+  <li>Seeding is on by default: after a download completes, its verified pieces are uploaded to other peers until a share ratio of 1.0 or 60 minutes of seeding, at up to 256 KiB/s and only on Wi-Fi. Seeding pauses during playback. Turn it off or change the limits in Settings, Seeding.</li>
+  <li>The app does not provide settings to disable public tracker-list refresh, extra public trackers, or WebRTC. This build supports arm64-v8a devices.</li>
 </ul>
