@@ -78,13 +78,13 @@ func TestSettingsApplyToExistingAndFutureTorrents(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		`{"maxPeers":501}`, `{"maxPeers":7}`,
-		`{"ramCacheBytes":67108863}`, `{"ramCacheBytes":1073741825}`,
+		`{"ramCacheBytes":16777215}`, `{"ramCacheBytes":1073741825}`,
 	} {
 		if code, body := s.DispatchControl("POST", "/settings", invalid); code != 400 {
 			t.Fatalf("accepted %s: %d %s", invalid, code, body)
 		}
 	}
-	for _, limit := range []int64{64 << 20, 1024 << 20} {
+	for _, limit := range []int64{16 << 20, 64 << 20, 1024 << 20} {
 		if code, body := s.DispatchControl("POST", "/settings", fmt.Sprintf(`{"ramCacheBytes":%d}`, limit)); code != 200 {
 			t.Fatalf("valid cache boundary: %d %s", code, body)
 		}
@@ -156,10 +156,12 @@ func TestCacheResizeKeepsDirectPlayReadableAndPreviewBounded(t *testing.T) {
 	}
 }
 
-func TestCacheShrinkRejectsBudgetTooSmallForActiveDirectPlay(t *testing.T) {
-	info := &metainfo.Info{Name: "large-pieces", PieceLength: 32 << 20, Length: 128 << 20, Pieces: make([]byte, 80)}
+// A small RAM setting must not refuse or break Direct Play: each torrent keeps
+// at least four of its pieces, and the setting itself is kept as chosen.
+func TestSmallRAMSettingKeepsFourDirectPlayPieces(t *testing.T) {
+	info := &metainfo.Info{Name: "large-pieces", PieceLength: 32 << 20, Length: 256 << 20, Pieces: make([]byte, 160)}
 	client := NewDocumentStorageClient(t.TempDir())
-	if err := client.SetCacheLimit(128 << 20); err != nil {
+	if err := client.SetCacheLimit(16 << 20); err != nil {
 		t.Fatal(err)
 	}
 	impl, err := client.OpenTorrent(context.Background(), info, metainfo.Hash{})
@@ -169,12 +171,18 @@ func TestCacheShrinkRejectsBudgetTooSmallForActiveDirectPlay(t *testing.T) {
 	defer impl.Close()
 	st := client.GetStorage(metainfo.Hash{}.HexString())
 	if err := st.AttachDescriptorsMode([]*int{nil}, []int{0}, true); err != nil {
-		t.Fatal(err)
+		t.Fatalf("16 MiB setting refused 32 MiB pieces: %v", err)
 	}
-	if err := client.SetCacheLimit(64 << 20); err == nil {
-		t.Fatal("allowed a cache too small to verify Direct Play pieces")
+	if st.maxCacheBytes != 128<<20 {
+		t.Fatalf("Direct Play cache %d, want four pieces", st.maxCacheBytes)
 	}
-	if client.CacheLimit() != 128<<20 || st.maxCacheBytes != 128<<20 {
-		t.Fatal("rejected setting changed cache limits")
+	if err := client.SetCacheLimit(512 << 20); err != nil || st.maxCacheBytes != 512<<20 {
+		t.Fatalf("larger setting: %v %d", err, st.maxCacheBytes)
+	}
+	if err := client.SetCacheLimit(16 << 20); err != nil {
+		t.Fatalf("shrinking below four pieces was refused: %v", err)
+	}
+	if client.CacheLimit() != 16<<20 || st.maxCacheBytes != 128<<20 {
+		t.Fatalf("setting %d, Direct Play cache %d", client.CacheLimit(), st.maxCacheBytes)
 	}
 }

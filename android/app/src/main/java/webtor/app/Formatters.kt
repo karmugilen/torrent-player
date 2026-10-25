@@ -247,6 +247,16 @@ fun prefetchStatus(draft: PrepareDraft?): String? {
     }
 }
 
+const val LOW_BATTERY_PLAY_MESSAGE =
+    "Battery is under 15% and not charging, so torrent data is paused. Charge the phone or turn off Pause on low battery in Settings."
+
+/** Why Play must not start a torrent, or null when payload transfers are allowed. */
+internal fun playbackDataBlock(batteryPaused: Boolean, networkAllowed: Boolean, networkReason: String?): String? {
+    if (batteryPaused) return LOW_BATTERY_PLAY_MESSAGE
+    if (!networkAllowed) return networkReason ?: "Waiting for an allowed network."
+    return null
+}
+
 fun readableError(t: Throwable): String = readableError(t.message)
 
 fun readableError(message: String?): String {
@@ -257,6 +267,8 @@ fun readableError(message: String?): String {
         // The engine runs inside the app; only its own start failures mean it is down.
         "engine did not start" in lower || "engine down" in lower || "native engine initialization failed" in lower ->
             "The download engine is not running. Close Torrent Player and open it again."
+        "payload transfers are disabled" in lower ->
+            "Torrent data is paused by low battery or the network setting. Charge the phone, or check Settings."
         isNetworkFailure(lower) ->
             "Couldn't connect on this network. It may block torrent traffic. Try mobile data or another Wi-Fi, " +
                 "or turn on Anti-DPI in Settings."
@@ -287,3 +299,12 @@ fun completedPlayFile(entry: DownloadEntry, fileIndex: Int? = pickPlayIndex(entr
     // A fully saved file remains locally playable after the user deselects it
     // from transfer demand. Incomplete files still require selection.
     entry.files.find { !entry.directPlay && it.index == fileIndex && it.uri != null && it.isVerifiedComplete }
+
+/** RAM cache slider stops, 16 MiB to 1 GiB, finer at the small end. */
+val RAM_CACHE_STEPS_MIB = listOf(16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024)
+
+/** Slider stop nearest to [mib]. */
+fun ramCacheStepIndex(mib: Int): Int =
+    RAM_CACHE_STEPS_MIB.indices.minBy { kotlin.math.abs(RAM_CACHE_STEPS_MIB[it] - mib) }
+
+fun formatRamCacheMiB(mib: Int): String = if (mib >= 1024 && mib % 1024 == 0) "${mib / 1024} GiB" else "$mib MiB"

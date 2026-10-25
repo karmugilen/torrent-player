@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +22,10 @@ import (
 const DefaultMaxCacheBytes = 64 * 1024 * 1024
 
 const MaxRamCacheBytes = 1024 * 1024 * 1024
+
+// MinRamCacheBytes is the smallest RAM cache a user can choose. Direct Play
+// raises it per torrent to directPlayMinPieces pieces.
+const MinRamCacheBytes = 16 * 1024 * 1024
 
 // DefaultStreamCacheMaxBytes caps Watch-mode pieces kept in RAM only (no
 // .stream disk files). Pieces farthest from the playhead are dropped first.
@@ -38,6 +43,32 @@ type DocumentStorageClient struct {
 	torrents        map[string]*DocumentTorrentStorage
 }
 
+// memoryLimitManaged is set by the Android host. Go's collector lets the heap
+// reach twice its live size before collecting, so a 1 GiB piece cache could
+// hold about 2 GiB and Android began trimming and swapping the app: a larger
+// RAM setting played slower than a smaller one. With the limit set to what
+// the caches may really hold, the collector runs before that.
+var memoryLimitManaged atomic.Bool
+
+// memoryLimitOverhead covers everything besides piece caches: the torrent
+// library, peer buffers, the HTTP server and the Go runtime.
+const memoryLimitOverhead = 256 << 20
+
+// memoryLimitLocked is the heap the open torrents' caches may need.
+func (c *DocumentStorageClient) memoryLimitLocked() int64 {
+	perTorrent := c.cacheLimitBytes
+	if perTorrent <= 0 {
+		perTorrent = DefaultMaxCacheBytes
+	}
+	return perTorrent*int64(len(c.torrents)) + memoryLimitOverhead
+}
+
+func (c *DocumentStorageClient) updateMemoryLimitLocked() {
+	if memoryLimitManaged.Load() {
+		debug.SetMemoryLimit(c.memoryLimitLocked())
+	}
+}
+
 func NewDocumentStorageClient(baseDir string) *DocumentStorageClient {
 	return &DocumentStorageClient{baseDir: baseDir, torrents: make(map[string]*DocumentTorrentStorage)}
 }
@@ -52,6 +83,7 @@ func (c *DocumentStorageClient) OpenTorrent(_ context.Context, info *metainfo.In
 			st.setCacheLimit(c.cacheLimitBytes)
 		}
 		c.torrents[key] = st
+		c.updateMemoryLimitLocked()
 	} else if info != nil {
 		st.updateInfo(info)
 	}
@@ -77,6 +109,7 @@ func (c *DocumentStorageClient) OpenTorrent(_ context.Context, info *metainfo.In
 			c.mu.Lock()
 			if c.torrents[key] == st {
 				delete(c.torrents, key)
+				c.updateMemoryLimitLocked()
 			}
 			c.mu.Unlock()
 			return err
@@ -105,20 +138,18 @@ func (c *DocumentStorageClient) CacheLimit() int64 {
 func (c *DocumentStorageClient) SetCacheLimit(bytes int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, st := range c.torrents {
-		st.mu.Lock()
-		tooSmall := !st.closed && st.attached && st.stream && !st.previewTemp && bytes/4 < st.chunkLength
-		st.mu.Unlock()
-		if tooSmall {
-			return fmt.Errorf("RAM cache is too small for an active Direct Play torrent's pieces")
-		}
-	}
 	c.cacheLimitBytes = bytes
 	for _, st := range c.torrents {
 		st.setCacheLimit(bytes)
 	}
+	c.updateMemoryLimitLocked()
 	return nil
 }
+
+// directPlayMinPieces is the fewest pieces a Direct Play cache holds: the one
+// being played, the next, one being verified and one arriving. A RAM setting
+// below that is raised for that torrent only.
+const directPlayMinPieces = 4
 
 func (st *DocumentTorrentStorage) setCacheLimit(bytes int64) {
 	st.mu.Lock()
@@ -127,6 +158,9 @@ func (st *DocumentTorrentStorage) setCacheLimit(bytes int64) {
 	st.streamMaxBytes = bytes
 	if !st.previewTemp {
 		st.maxCacheBytes = bytes
+		if !st.closed && st.attached && st.stream {
+			st.maxCacheBytes = max(bytes, directPlayMinPieces*st.chunkLength)
+		}
 	}
 }
 
@@ -155,7 +189,7 @@ type DocumentTorrentStorage struct {
 	freezeTrusted             atomic.Bool
 	cache                     map[int][]byte
 	cacheDirty                map[int]bool
-	cacheOrder                []int // LRU: index 0 is oldest
+	cacheOrder                pieceLRU
 	cacheBytes, maxCacheBytes int64
 	streamMaxBytes            int64
 	downloadMaxBytes          int64
@@ -196,6 +230,21 @@ type DocumentTorrentStorage struct {
 	// of RAM eviction until saved. Nil when no preload is active.
 	preloadPieces map[int]bool
 	preloadFile   int
+
+	// Direct Play metadata cache: planned head and tail pieces of every
+	// selected video in plan order, saved pieces found on disk but not yet
+	// validated, the selection the plan covers, and a hook run after writes.
+	startupOrder   []int
+	startupOnDisk  map[int]bool
+	directSelected []int
+	onStartupSaved func()
+	// startupFile is the file the plan was last rotated for, valid while
+	// startupPlanned. A player reopens the file on every seek.
+	startupFile    int
+	startupPlanned bool
+	// streamWatch holds pieces a blocked playback read waits on. Writes into
+	// them wake the read so it can return the bytes that just arrived.
+	streamWatch map[int]bool
 }
 
 func streamDir(baseDir, infoHashHex string) string {
@@ -407,13 +456,14 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 			st.maxCacheBytes = DefaultStreamCacheMaxBytes
 		}
 		st.cacheDirty = make(map[int]bool)
-		st.cacheOrder = st.cacheOrder[:0]
+		st.cacheOrder.reset()
 		for index := range st.cache {
 			st.cacheDirty[index] = false
 			st.touchCacheLocked(index)
 		}
-		for st.cacheBytes > st.maxCacheBytes && len(st.cacheOrder) > 0 {
-			st.dropCacheLocked(st.cacheOrder[0])
+		for st.cacheBytes > st.maxCacheBytes && st.cacheOrder.len() > 0 {
+			oldest, _ := st.cacheOrder.oldest(-1)
+			st.dropCacheLocked(oldest)
 		}
 	} else {
 		for index, data := range st.cache {
@@ -431,12 +481,13 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 		}
 		// Prepared bytes are on disk; keep them in the hot RAM cache when they fit.
 		st.cacheDirty = make(map[int]bool)
-		st.cacheOrder = st.cacheOrder[:0]
+		st.cacheOrder.reset()
 		for index := range st.cache {
 			st.touchCacheLocked(index)
 		}
 		if st.cacheBytes > st.maxCacheBytes {
-			st.cache, st.cacheBytes, st.cacheOrder = make(map[int][]byte), 0, nil
+			st.cache, st.cacheBytes = make(map[int][]byte), 0
+			st.cacheOrder.reset()
 		}
 	}
 	loaded := st.loadCheckpointLocked(preIdentities)
@@ -999,7 +1050,8 @@ func (st *DocumentTorrentStorage) Close() error {
 			st.files[i].File = nil
 		}
 	}
-	st.attached, st.cache, st.cacheDirty, st.cacheOrder, st.completed, st.cacheBytes = false, nil, nil, nil, nil, 0
+	st.attached, st.cache, st.cacheDirty, st.completed, st.cacheBytes = false, nil, nil, nil, 0
+	st.cacheOrder.reset()
 	st.streamRevision++
 	st.streamGridRuns = nil
 	st.pendingSync = nil
@@ -1010,13 +1062,7 @@ func (st *DocumentTorrentStorage) Close() error {
 }
 
 func (st *DocumentTorrentStorage) touchCacheLocked(index int) {
-	for i, v := range st.cacheOrder {
-		if v == index {
-			st.cacheOrder = append(st.cacheOrder[:i], st.cacheOrder[i+1:]...)
-			break
-		}
-	}
-	st.cacheOrder = append(st.cacheOrder, index)
+	st.cacheOrder.touch(index)
 }
 
 func (st *DocumentTorrentStorage) dropCacheLocked(index int) {
@@ -1031,12 +1077,7 @@ func (st *DocumentTorrentStorage) dropCacheLocked(index int) {
 		}
 	}
 	delete(st.cacheDirty, index)
-	for i, v := range st.cacheOrder {
-		if v == index {
-			st.cacheOrder = append(st.cacheOrder[:i], st.cacheOrder[i+1:]...)
-			break
-		}
-	}
+	st.cacheOrder.remove(index)
 }
 
 // ensureCacheSlotLocked makes sure piece index has a RAM buffer. created is
@@ -1050,15 +1091,9 @@ func (st *DocumentTorrentStorage) ensureCacheSlotLocked(index int, expected int6
 		return st.ensureStreamSlotLocked(index, expected)
 	}
 	for st.cacheBytes+expected > st.maxCacheBytes {
-		if len(st.cacheOrder) == 0 {
+		victim, ok := st.cacheOrder.oldest(index)
+		if !ok {
 			return false, fmt.Errorf("piece cache is full")
-		}
-		victim := st.cacheOrder[0]
-		if victim == index {
-			if len(st.cacheOrder) == 1 {
-				return false, fmt.Errorf("piece cache is full")
-			}
-			victim = st.cacheOrder[1]
 		}
 		if st.cacheDirty[victim] {
 			if err := st.flushPieceLocked(victim); err != nil {
@@ -1315,6 +1350,9 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 	copy(st.cache[index][off:], b)
 	if st.stream {
 		st.recordStreamWriteLocked(index, off, off+int64(len(b)), expected)
+		if st.streamWatch[index] {
+			st.notifyStreamReadyLocked()
+		}
 	}
 	st.cacheDirty[index] = true
 	st.touchCacheLocked(index)

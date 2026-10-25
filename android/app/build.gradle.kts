@@ -6,12 +6,18 @@ plugins {
 
 val repoRoot = rootProject.projectDir.parentFile
 
+// What the engine build reads: tests, docs and stray binaries do not rebuild it.
+val engineSources = fileTree(repoRoot.resolve("engine-go")) {
+    include("**/*.go", "**/go.mod", "**/go.sum", "**/*.c", "**/*.h", "build.sh")
+    exclude("**/*_test.go", "**/testdata/**")
+}
+
 val buildGoEngine by tasks.registering(Exec::class) {
     group = "build"
     description = "Compile Go torrent engine into libengine.so for arm64-v8a"
     workingDir(repoRoot)
     commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
-    inputs.dir(repoRoot.resolve("engine-go"))
+    inputs.files(engineSources)
     inputs.file(repoRoot.resolve("engine-rust/Cargo.toml"))
     inputs.file(repoRoot.resolve("engine-rust/Cargo.lock"))
     inputs.file(repoRoot.resolve("engine-rust/pieces.h"))
@@ -19,8 +25,23 @@ val buildGoEngine by tasks.registering(Exec::class) {
     outputs.file(file("src/main/jniLibs/arm64-v8a/libengine.so"))
 }
 
+// -Pwebtor.emulator=true also packages an x86_64 engine for the emulator.
+val emulatorAbi = providers.gradleProperty("webtor.emulator").map { it.toBoolean() }.getOrElse(false)
+
+val buildGoEngineEmulator by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Compile Go torrent engine into libengine.so for the x86_64 emulator"
+    workingDir(repoRoot)
+    environment("ENGINE_ABI", "x86_64")
+    commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
+    inputs.files(engineSources)
+    inputs.dir(repoRoot.resolve("engine-rust/src"))
+    outputs.file(file("src/main/jniLibs/x86_64/libengine.so"))
+}
+
 tasks.named("preBuild") {
     dependsOn(buildGoEngine)
+    if (emulatorAbi) dependsOn(buildGoEngineEmulator)
 }
 
 android {
@@ -32,11 +53,12 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 53
-        versionName = "2.1.23"
+        versionCode = 82
+        versionName = "2.1.52"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")
+            if (emulatorAbi) abiFilters.add("x86_64")
         }
     }
 
@@ -92,6 +114,11 @@ android {
 
     androidResources {
         noCompress += "mmdb"
+    }
+
+    lint {
+        // The release lint pass took 32 s of every build; run ./gradlew lint when wanted.
+        checkReleaseBuilds = false
     }
 }
 

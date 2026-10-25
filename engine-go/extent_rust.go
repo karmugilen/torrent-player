@@ -5,7 +5,8 @@ package main
 /*
 #cgo CFLAGS: -I${SRCDIR}/../engine-rust
 #cgo android,arm64 LDFLAGS: -L${SRCDIR}/../engine-rust/target/aarch64-linux-android/release -lwebtor_pieces -ldl -lm
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../engine-rust/target/release -lwebtor_pieces -ldl -lm
+#cgo android,amd64 LDFLAGS: -L${SRCDIR}/../engine-rust/target/x86_64-linux-android/release -lwebtor_pieces -ldl -lm
+#cgo linux,!android,amd64 LDFLAGS: -L${SRCDIR}/../engine-rust/target/release -lwebtor_pieces -ldl -lm
 #include "pieces.h"
 */
 import "C"

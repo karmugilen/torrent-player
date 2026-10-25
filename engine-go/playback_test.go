@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -273,18 +274,21 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 
 	mid := 10 * pieceLen // seek: tip Now and full forward window immediately
 	reader.testApplyOffset(mid)
-	urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
+	urgent, readahead, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
 	if urgent.begin != 10 || urgent.end != 12 ||
-		readahead.begin != 12 || readahead.end != 36 || lookbehind.begin != 9 || lookbehind.end != 10 ||
+		readahead.begin != 12 || readahead.end != 36 ||
 		!scrubbing || openPhase || headBoost || tailBoost {
-		t.Fatalf("urgent=%v readahead=%v lookbehind=%v scrubbing=%v openPhase=%v head=%v tail=%v",
-			urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost)
+		t.Fatalf("urgent=%v readahead=%v scrubbing=%v openPhase=%v head=%v tail=%v",
+			urgent, readahead, scrubbing, openPhase, headBoost, tailBoost)
+	}
+	if got := reader.testPiecePriority(9); got != torrent.PiecePriorityNormal {
+		t.Fatalf("nothing behind the playhead is fetched, piece 9 is %v", got)
 	}
 	if got := reader.testPiecePriority(10); got != torrent.PiecePriorityNow {
 		t.Fatalf("tip should be Now, got %v", got)
 	}
-	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityReadahead {
-		t.Fatalf("forward readahead should start immediately during scrub, got %v", got)
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityNext {
+		t.Fatalf("next blocks should start immediately during scrub, got %v", got)
 	}
 	if got := reader.testPiecePriority(0); got != torrent.PiecePriorityNormal {
 		// Old tip cleared immediately; no seek hotspots retained.
@@ -296,16 +300,15 @@ func TestPlaybackWindowFollowsSeekAndDemotesOldNow(t *testing.T) {
 
 	// Settling leaves the already-active full window unchanged.
 	reader.testSettleScrub()
-	urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost = reader.testWindow()
+	urgent, readahead, scrubbing, openPhase, headBoost, tailBoost = reader.testWindow()
 	if urgent.begin != 10 || urgent.end != 12 ||
 		readahead.begin != 12 || readahead.end != 36 ||
-		lookbehind.begin != 9 || lookbehind.end != 10 ||
 		scrubbing || openPhase || headBoost || tailBoost {
-		t.Fatalf("settled: urgent=%v readahead=%v lookbehind=%v scrubbing=%v open=%v head=%v tail=%v",
-			urgent, readahead, lookbehind, scrubbing, openPhase, headBoost, tailBoost)
+		t.Fatalf("settled: urgent=%v readahead=%v scrubbing=%v open=%v head=%v tail=%v",
+			urgent, readahead, scrubbing, openPhase, headBoost, tailBoost)
 	}
-	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityReadahead {
-		t.Fatalf("settled forward should be Readahead, got %v", got)
+	if got := reader.testPiecePriority(15); got != torrent.PiecePriorityNext {
+		t.Fatalf("settled forward should be Next, got %v", got)
 	}
 	_ = rec
 }
@@ -320,21 +323,21 @@ func TestPlaybackScrubHasImmediateFullReadahead(t *testing.T) {
 
 	start := 20 * pieceLen
 	reader.testApplyOffset(start)
-	urgent, readahead, _, scrubbing, _, _, _ := reader.testWindow()
+	urgent, readahead, scrubbing, _, _, _ := reader.testWindow()
 	if !scrubbing || urgent.begin != 20 || urgent.end != 22 || readahead.begin != 22 || readahead.end != 46 {
 		t.Fatalf("expected full readahead immediately, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
 	}
 
 	// Active reads while scrubbing keep resetting debounce
 	reader.testApplyOffset(start + pieceLen/2)
-	urgent, readahead, _, scrubbing, _, _, _ = reader.testWindow()
+	urgent, readahead, scrubbing, _, _, _ = reader.testWindow()
 	if !scrubbing || readahead.end-readahead.begin < 24 {
 		t.Fatalf("still scrubbing, urgent=%v readahead=%v scrubbing=%v", urgent, readahead, scrubbing)
 	}
 
 	// Continuous reads and later settling never hold off the forward window.
 	reader.testSettleScrub()
-	urgent, readahead, _, scrubbing, _, _, _ = reader.testWindow()
+	urgent, readahead, scrubbing, _, _, _ = reader.testWindow()
 	if scrubbing {
 		t.Fatal("expected settle out of scrubbing")
 	}
@@ -398,8 +401,8 @@ func TestPlaybackSeekYieldsStartupHintsToTarget(t *testing.T) {
 	if got := rawPiecePriority(rec.Torrent.Piece(20)); got != torrent.PiecePriorityNow {
 		t.Fatalf("seek target priority=%v want Now", got)
 	}
-	if got := rawPiecePriority(rec.Torrent.Piece(24)); got != torrent.PiecePriorityReadahead {
-		t.Fatalf("seek forward priority=%v want Readahead", got)
+	if got := rawPiecePriority(rec.Torrent.Piece(24)); got != torrent.PiecePriorityNext {
+		t.Fatalf("seek forward priority=%v want Next", got)
 	}
 	// Refreshing download state must not reintroduce competing urgent hints.
 	rec.mu.Lock()
@@ -470,7 +473,7 @@ func TestPlaybackDebounceTimerQuietExpiration(t *testing.T) {
 	defer reader.Close()
 
 	reader.testApplyOffset(15 * pieceLen)
-	_, readahead, _, scrubbing, _, _, _ := reader.testWindow()
+	_, readahead, scrubbing, _, _, _ := reader.testWindow()
 	if !scrubbing || readahead.begin != 17 || readahead.end != 41 {
 		t.Fatalf("expected scrub mode, scrubbing=%v readahead=%v", scrubbing, readahead)
 	}
@@ -478,7 +481,7 @@ func TestPlaybackDebounceTimerQuietExpiration(t *testing.T) {
 	// Allow the 250ms quiet timer to fire
 	time.Sleep(300 * time.Millisecond)
 
-	urgent, readahead, _, scrubbing, _, _, _ := reader.testWindow()
+	urgent, readahead, scrubbing, _, _, _ := reader.testWindow()
 	if scrubbing {
 		t.Fatal("timer should have settled scrubbing mode")
 	}
@@ -496,7 +499,7 @@ func TestPlaybackGatedOpenPhaseDualNowAndMoovProbe(t *testing.T) {
 	defer reader.Close()
 
 	// 1. In open phase: Head and Tail are both at PiecePriorityNow; fat readahead is held
-	_, readahead, _, _, openPhase, headBoost, tailBoost := reader.testWindow()
+	_, readahead, _, openPhase, headBoost, tailBoost := reader.testWindow()
 	if !openPhase || !headBoost || !tailBoost || !readahead.empty() {
 		t.Fatalf("expected open phase with held readahead: open=%v head=%v tail=%v readahead=%v",
 			openPhase, headBoost, tailBoost, readahead)
@@ -516,7 +519,7 @@ func TestPlaybackGatedOpenPhaseDualNowAndMoovProbe(t *testing.T) {
 
 	// 2. Moov probe read at tail: stays in open phase, both head and tail stay Now
 	reader.testApplyOffset(46 * pieceLen)
-	_, readahead, _, _, openPhase, headBoost, tailBoost = reader.testWindow()
+	_, readahead, _, openPhase, headBoost, tailBoost = reader.testWindow()
 	if !openPhase || !headBoost || !tailBoost || !readahead.empty() {
 		t.Fatalf("expected open phase during tail probe: open=%v head=%v tail=%v readahead=%v",
 			openPhase, headBoost, tailBoost, readahead)
@@ -530,7 +533,7 @@ func TestPlaybackGatedOpenPhaseDualNowAndMoovProbe(t *testing.T) {
 
 	// 3. Subsequent playback read at head: exits open phase, demotes unused tail
 	reader.testApplyOffset(0)
-	urgent, readahead, _, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
+	urgent, readahead, scrubbing, openPhase, headBoost, tailBoost := reader.testWindow()
 	if openPhase {
 		t.Fatal("open phase should exit after moov probe completes and playback continues")
 	}
@@ -549,7 +552,7 @@ func TestPlaybackGatedOpenPhaseDualNowAndMoovProbe(t *testing.T) {
 
 	// Settling preserves the full readahead at head.
 	reader.testSettleScrub()
-	_, readahead, _, scrubbing, _, _, _ = reader.testWindow()
+	_, readahead, scrubbing, _, _, _ = reader.testWindow()
 	if scrubbing || readahead.empty() {
 		t.Fatalf("readahead should be populated after settling: scrubbing=%v readahead=%v", scrubbing, readahead)
 	}
@@ -567,7 +570,7 @@ func TestPlaybackOpenPhaseExitOnBodyRead(t *testing.T) {
 
 	// Advance into body (6MB, past 5MB head without tail read)
 	reader.testApplyOffset(6 * pieceLen)
-	_, _, _, _, openPhase, _, tailBoost := reader.testWindow()
+	_, _, _, openPhase, _, tailBoost := reader.testWindow()
 	if openPhase {
 		t.Fatal("expected exit of open phase when read lands in body")
 	}
@@ -961,7 +964,7 @@ func TestPlaybackBoostStartupWindow(t *testing.T) {
 		t.Fatalf("piece 63 is before the 8MiB tail, got %v", got)
 	}
 	reader.testApplyOffset(20 * pieceLen)
-	urgent, readahead, _, _, openPhase, _, _ := reader.testWindow()
+	urgent, readahead, _, openPhase, _, _ := reader.testWindow()
 	if openPhase {
 		t.Fatal("a body read should leave the open phase")
 	}
@@ -982,5 +985,99 @@ func TestPlaybackBoostStartupWindow(t *testing.T) {
 	defer again.Close()
 	if got := again.testPiecePriority(15); got == torrent.PiecePriorityNow {
 		t.Fatalf("boost false must restore the 5MiB head, piece 15=%v", got)
+	}
+}
+
+func TestHTTPPlaybackWritesASeekLogLine(t *testing.T) {
+	s, rec, data := playbackFixture(t)
+	writeVerifiedPiece(t, s, rec, data, 0)
+	writeVerifiedPiece(t, s, rec, data, 1)
+	path := filepath.Join(t.TempDir(), "seek-log.csv")
+	// A log from an older build moves aside.
+	if err := os.WriteFile(path, []byte("time,old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := s.DispatchControl("POST", "/settings", `{"seekLogPath":"`+path+`","seekLogTag":"9.9.9"}`); code != 200 {
+		t.Fatalf("settings: %s", body)
+	}
+	server := httptest.NewServer(http.HandlerFunc(s.handleStream))
+	defer server.Close()
+	req, _ := http.NewRequest("GET", server.URL+"/torrent/"+rec.ID+"/file/1", nil)
+	req.Header.Set("Range", "bytes=0-5")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	var log []byte
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if log, _ = os.ReadFile(path); bytes.Count(log, []byte("\n")) >= 2 {
+			break
+		}
+	}
+	lines := bytes.Split(bytes.TrimSpace(log), []byte("\n"))
+	if len(lines) != 2 || string(lines[0])+"\n" != seekLogHeader {
+		t.Fatalf("log:\n%s", log)
+	}
+	fields := bytes.Split(lines[1], []byte(","))
+	if len(fields) != bytes.Count([]byte(seekLogHeader), []byte(","))+1 {
+		t.Fatalf("fields: %s", lines[1])
+	}
+	if string(fields[1]) != "9.9.9" || string(fields[4]) != "range" || string(fields[11]) != "6" || string(fields[12]) != "1" || len(fields[7]) == 0 || string(fields[16]) != "default" {
+		t.Fatalf("line: %s", lines[1])
+	}
+	if old, _ := os.ReadFile(path + ".old"); string(old) != "time,old\n" {
+		t.Fatalf("old log: %q", old)
+	}
+
+	// The A/B test names the rules each range request ran with.
+	s.DispatchControl("POST", "/settings", `{"seekExperiment":true}`)
+	defer s.DispatchControl("POST", "/settings", `{"seekExperiment":false}`)
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	log, _ = os.ReadFile(path)
+	lines = bytes.Split(bytes.TrimSpace(log), []byte("\n"))
+	for _, line := range lines[2:] {
+		seen[string(bytes.Split(line, []byte(","))[16])] = true
+	}
+	for _, v := range []string{"u-f8", "u-f128", "v-f8", "v-f128"} {
+		if !seen[v] {
+			t.Fatalf("variant %s never picked in 40 requests: %v", v, seen)
+		}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("variants: %v", seen)
+	}
+}
+
+type responsiveSpy struct {
+	torrent.Reader
+	calls []bool
+}
+
+func (r *responsiveSpy) WebtorSetResponsive(on bool) { r.calls = append(r.calls, on) }
+
+func TestUnverifiedReadsSkipTheStartAndEndOfTheFile(t *testing.T) {
+	spy := &responsiveSpy{}
+	p := &playbackReader{length: 100 << 20, reader: spy, unverifiedReads: true}
+	for _, off := range []int64{1 << 20, 50 << 20, 51 << 20, 99 << 20} {
+		p.applyResponsiveLocked(off)
+	}
+	// Head (5 MiB) verified, middle unverified (once), tail (3 MiB) verified.
+	if want := []bool{false, true, false}; !slices.Equal(spy.calls, want) {
+		t.Fatalf("calls %v, want %v", spy.calls, want)
+	}
+	p.unverifiedReads = false
+	p.applyResponsiveLocked(50 << 20)
+	if len(spy.calls) != 3 {
+		t.Fatalf("off and already verified-only: calls %v", spy.calls)
 	}
 }

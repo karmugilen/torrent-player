@@ -32,7 +32,7 @@ fun playbackEvent(entry: DownloadEntry, file: SavedFile, positionMs: Long = file
         files.videos.map(::item), files.subtitles.map(::item), positionMs)
 }
 
-/** HTTP is an explicit comparison path; canonical content URIs still own bookmarks. */
+/** HTTP is the default playback path; canonical content URIs still own bookmarks. */
 fun httpPlaybackEvent(content: UiEvent.OpenContent, entry: DownloadEntry, file: SavedFile, streamUrl: String): UiEvent.OpenContent {
     val endpoint = java.net.URI(streamUrl)
     val id = requireNotNull(entry.engineId) { "The torrent must be running for HTTP playback." }

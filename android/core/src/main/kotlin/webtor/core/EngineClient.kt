@@ -121,7 +121,14 @@ data class PieceBucket(
     val selectedReceiving: Int = 0,
 )
 
+/** Inclusive piece range of one playback tier: U urgent, N fast, R readahead, L lookahead, B rewind. */
 data class PlaybackPieceRange(val start: Int, val end: Int, val priority: String)
+
+/**
+ * The playing reader's window, one state per piece from [start]: v verified,
+ * s saved on storage only, r receiving, m missing.
+ */
+data class PlaybackDetail(val start: Int, val states: String, val playhead: Int)
 
 /** Seek-to-first-byte times recorded by the engine since Claude optimized seek last changed. */
 data class SeekStats(val count: Int, val lastMs: Long, val medianMs: Long, val stalls: Int)
@@ -138,6 +145,8 @@ data class PieceTelemetry(
     val buckets: List<PieceBucket>,
     val ghostProMode: Boolean = false,
     val playback: List<PlaybackPieceRange> = emptyList(),
+    val playheads: List<Int> = emptyList(),
+    val playbackDetail: PlaybackDetail? = null,
 )
 
 data class BypassStatus(
@@ -220,6 +229,11 @@ class EngineClient(
         } catch (e: EngineException) {
             if (e.statusCode != 404) throw e
         }
+    }
+
+    /** Drops saved peer addresses for a torrent that may already have been dropped. */
+    fun forgetPeerHints(infoHash: String) {
+        post("/forget-peers", JSONObject().put("infoHash", infoHash))
     }
 
     fun pieces(id: String, maxBuckets: Int? = null): PieceTelemetry {
@@ -334,6 +348,14 @@ class EngineClient(
         post("/settings", JSONObject().put("ghostProMode", enabled)).getBoolean("ghostProMode")
 
     /** Minutes an unattended Direct Play session may stay idle before Android drops it; 0 turns this off. */
+    /**
+     * One CSV line per HTTP playback request goes to [path]; [tag] marks the build. With
+     * [experiment] each range request runs with seek rules picked at random, named in the log.
+     */
+    fun setSeekLog(path: String, tag: String, experiment: Boolean = false) {
+        post("/settings", JSONObject().put("seekLogPath", path).put("seekLogTag", tag).put("seekExperiment", experiment))
+    }
+
     fun setIdleDropMinutes(minutes: Int): Int {
         val value = minutes.coerceIn(0, 240)
         return post("/settings", JSONObject().put("idleDropMinutes", value)).optInt("idleDropMinutes", value)
@@ -341,6 +363,18 @@ class EngineClient(
 
     fun setClaudeSeekMode(enabled: Boolean): Boolean =
         post("/settings", JSONObject().put("claudeSeekMode", enabled)).optBoolean("claudeSeekMode", enabled)
+
+    /** Experimental: ask a second peer for a block stuck at the playhead. */
+    fun setHedgeRequests(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("hedgeRequests", enabled)).optBoolean("hedgeRequests", enabled)
+
+    /** Experimental: slow peers leave playback pieces to faster peers. */
+    fun setSlowPeerYield(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("slowPeerYield", enabled)).optBoolean("slowPeerYield", enabled)
+
+    /** Experimental: drop peers that keep us choked for 5 s when others wait. */
+    fun setDropChokers(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("dropChokers", enabled)).optBoolean("dropChokers", enabled)
 
     /** Null when the engine predates seek statistics. */
     fun seekStats(): SeekStats? = get("/settings").optJSONObject("seekStats")?.let(::parseSeekStats)
@@ -448,7 +482,15 @@ class EngineClient(
             val ranges = List(playback.length()) { index ->
                 val range = playback.getJSONObject(index)
                 PlaybackPieceRange(range.optInt("start", -1), range.optInt("end", -1), range.optString("priority"))
-            }.filter { it.start >= 0 && it.end >= it.start && it.priority in setOf("U", "R", "L") }
+            }.filter { it.start >= 0 && it.end >= it.start && it.priority in setOf("U", "N", "R", "L", "B") }
+            val heads = json.optJSONArray("playheads") ?: JSONArray()
+            val playheads = List(heads.length()) { heads.optInt(it, -1) }.filter { it >= 0 }
+            val detail = json.optJSONObject("playbackDetail")?.let { d ->
+                val states = d.optString("states")
+                val start = d.optInt("start", -1)
+                if (start < 0 || states.isEmpty() || states.any { it !in "vsrm" }) null
+                else PlaybackDetail(start, states, d.optInt("playhead", start))
+            }
             return PieceTelemetry(
                 id = json.getString("id"),
                 infoHash = json.nullableString("infoHash"),
@@ -461,6 +503,8 @@ class EngineClient(
                 buckets = buckets,
                 ghostProMode = json.optBoolean("ghostProMode"),
                 playback = ranges,
+                playheads = playheads,
+                playbackDetail = detail,
             )
         }
 

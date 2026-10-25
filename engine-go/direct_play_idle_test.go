@@ -32,6 +32,66 @@ func waitConns(t *testing.T, rec *TorrentRecord, want func(int) bool) {
 	t.Fatalf("connection count never matched; last %d", len(rec.Torrent.PeerConns()))
 }
 
+func TestPlaybackRestWaitsForReadaheadNotLookahead(t *testing.T) {
+	window := playbackWindowState{
+		urgent: pieceSpan{10, 12}, readahead: pieceSpan{12, 20}, lookahead: pieceSpan{20, 30},
+	}
+	complete := map[int]bool{}
+	for i := 10; i < 20; i++ {
+		complete[i] = true
+	}
+	filled := func(i int) bool { return complete[i] }
+	if playbackWindowFilling(window, filled) {
+		t.Fatal("an evicted lookahead piece kept the session from resting")
+	}
+	delete(complete, 14)
+	if !playbackWindowFilling(window, filled) {
+		t.Fatal("a missing readahead piece let the session rest")
+	}
+}
+
+func TestRestDoesNotZeroTheConnectionCapAfterWake(t *testing.T) {
+	s, rec := ghostProPlaybackFixture(t, 1<<20, 4, true)
+	const peers = 40
+	rec.Torrent.SetMaxEstablishedConns(peers)
+	s.mu.Lock()
+	s.maxPeers = peers
+	s.mu.Unlock()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	restBeforeLimitTestHook = func() {
+		close(started)
+		<-release
+	}
+	t.Cleanup(func() { restBeforeLimitTestHook = nil })
+	rec.playbackIdle.resting.Store(true)
+	done := make(chan struct{})
+	go func() {
+		restDirectPlay(rec)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rest did not reach the connection-cap update")
+	}
+	if !s.wakeDirectPlay(rec) {
+		t.Fatal("wake did not see the session resting")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rest did not finish")
+	}
+	if rec.playbackIdle.resting.Load() {
+		t.Fatal("session still resting after wake")
+	}
+	if got := rec.Torrent.SetMaxEstablishedConns(peers); got == 0 {
+		t.Fatal("wake restored peers and rest then closed the connection cap")
+	}
+}
+
 func TestIdleDirectPlayRestsWakesAndBecomesDropReady(t *testing.T) {
 	if testing.Short() {
 		t.Skip("local peer transfer")

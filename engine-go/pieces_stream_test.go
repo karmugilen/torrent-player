@@ -110,6 +110,12 @@ func TestStreamPieceGridPartialReplacementAndClose(t *testing.T) {
 	if _, err := piece.WriteAt(data[32:36], 0); err != nil {
 		t.Fatal(err)
 	}
+	// A part-filled piece nothing wants now (left at an earlier seek spot)
+	// is not shown as receiving.
+	if abandoned := buckets(snapshot()); abandoned[4].Receiving != 0 {
+		t.Fatalf("unwanted partial piece shown as receiving: %+v", abandoned[4])
+	}
+	st.setStreamDemand(map[int]bool{4: true})
 	partial := buckets(snapshot())
 	if partial[0].Verified != 0 || partial[0].Receiving != 0 || partial[4].SelectedReceiving != 1 {
 		t.Fatalf("partial replacement not reflected: %+v", partial)

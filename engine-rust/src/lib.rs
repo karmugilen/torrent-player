@@ -2,6 +2,7 @@
 //! Buffers belong to the caller and are never retained across the C ABI.
 
 mod hash;
+mod ranges;
 
 use std::slice;
 

@@ -9,7 +9,7 @@ import (
 )
 
 // Claude optimized seek mode. Three parts, all off unless the mode is on:
-//   - urgent blocks outstanding longer than claudeSeekStealAfter move to a
+//   - urgent blocks outstanding longer than claudeSeekStealAfter (750 ms) move to a
 //     peer that is currently delivering (patched library, Client-wide);
 //   - while a playback read is blocked, peers with spare request slots that
 //     hold an urgent piece are nudged every claudeSeekNudgeEvery so the move
@@ -18,10 +18,12 @@ import (
 //     keeping the existing 45 s total wait.
 //
 // Seek latency stats are recorded in every mode so on and off can be compared.
-const (
-	claudeSeekStealAfter = time.Second
-	claudeSeekNudgeEvery = 500 * time.Millisecond
-	seekStatsWindow      = 20
+const seekStatsWindow = 20
+
+// Seek tuning; variables so the seek search can try other values.
+var (
+	claudeSeekStealAfter = 500 * time.Millisecond
+	claudeSeekNudgeEvery = 100 * time.Millisecond
 )
 
 var claudeSeekReadAttempts = []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second, 24 * time.Second}
@@ -94,6 +96,47 @@ func (s *EngineServer) setClaudeSeekLocked(enabled bool) {
 		s.client.SetUrgentRequestStealing(after)
 	}
 	s.seekStats.reset()
+}
+
+// baseSeekTuning is the shipped seek rules with the user's experimental
+// switches applied.
+func (s *EngineServer) baseSeekTuning() torrent.SeekTuning {
+	tuning := torrent.DefaultSeekTuning
+	tuning.Hedge = s.hedgeRequests.Load()
+	tuning.SlowPeerYield = s.slowPeerYield.Load()
+	return tuning
+}
+
+// chokeTimeout is how long a peer may keep us choked while we want its data
+// before dropChokersLoop frees its slot (WebTorrent's CHOKE_TIMEOUT).
+const chokeTimeout = 5 * time.Second
+
+// dropChokersLoop drops, once a second, peers that keep us choked, when the
+// setting is on.
+func (s *EngineServer) dropChokersLoop() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+		}
+		if !s.dropChokers.Load() {
+			continue
+		}
+		s.mu.RLock()
+		torrents := make([]*torrent.Torrent, 0, len(s.records))
+		for _, rec := range s.records {
+			if rec.Torrent != nil {
+				torrents = append(torrents, rec.Torrent)
+			}
+		}
+		s.mu.RUnlock()
+		for _, t := range torrents {
+			t.WebtorDropChokers(chokeTimeout)
+		}
+	}
 }
 
 func (p *playbackReader) engine() *EngineServer {

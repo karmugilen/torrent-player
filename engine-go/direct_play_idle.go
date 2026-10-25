@@ -81,10 +81,18 @@ func (s *EngineServer) wakeDirectPlay(rec *TorrentRecord) bool {
 		limit = s.maxPeers
 	}
 	s.mu.RUnlock()
+	// The cap change shares rest's lock. Rest checks the resting flag under
+	// that lock, so its SetMax(0) cannot land after this restore.
+	st.peersMu.Lock()
 	rec.Torrent.SetMaxEstablishedConns(max(limit, 1))
+	st.peersMu.Unlock()
 	s.notifyChange()
 	return true
 }
+
+// restBeforeLimitTestHook runs after peer addresses are collected and before
+// the connection cap changes, so a test can wake the session in that window.
+var restBeforeLimitTestHook func()
 
 // restDirectPlay closes rec's peer connections, keeping their dial addresses.
 func restDirectPlay(rec *TorrentRecord) {
@@ -97,10 +105,20 @@ func restDirectPlay(rec *TorrentRecord) {
 			known = append(known, torrent.PeerInfo{Addr: addr, Source: pc.Discovery, Trusted: true})
 		}
 	}
+	if restBeforeLimitTestHook != nil {
+		restBeforeLimitTestHook()
+	}
+	st := &rec.playbackIdle
+	st.peersMu.Lock()
+	defer st.peersMu.Unlock()
+	// Wake won the window after the addresses were collected. Leaving the cap
+	// at zero here would stick: resting is already false, so later reads do
+	// not wake again.
+	if !st.resting.Load() {
+		return
+	}
 	limit := rec.Torrent.SetMaxEstablishedConns(0)
-	rec.playbackIdle.peersMu.Lock()
-	rec.playbackIdle.restPeers, rec.playbackIdle.restLimit = known, limit
-	rec.playbackIdle.peersMu.Unlock()
+	st.restPeers, st.restLimit = known, limit
 }
 
 func (s *EngineServer) openPlaybackReaders(t *torrent.Torrent) int {
@@ -145,10 +163,39 @@ func (s *EngineServer) directPlayIdleTick(now time.Time) {
 		if st.reading.Load() > 0 {
 			continue
 		}
+		// A paused player or one with a full buffer stops reading; keep peers
+		// until the engine has filled its window ahead.
+		if s.playbackBufferFilling(rec.Torrent) {
+			st.dropReady.Store(false)
+			continue
+		}
 		idle := now.Sub(time.Unix(0, st.lastActivity.Load()))
 		if idle >= restAfter && st.resting.CompareAndSwap(false, true) {
 			restDirectPlay(rec)
 		}
 		st.dropReady.Store(st.resting.Load() && idle >= limit && s.openPlaybackReaders(rec.Torrent) == 0)
 	}
+}
+
+// playbackBufferFilling reports whether an open reader's window still misses
+// pieces the player can seek into. Lookahead is outside that set: it is the
+// first RAM evicted, so waiting on it would keep an idle session connected.
+func (s *EngineServer) playbackBufferFilling(t *torrent.Torrent) bool {
+	for _, window := range s.playbackWindows(t) {
+		if playbackWindowFilling(window, func(i int) bool { return t.Piece(i).State().Complete }) {
+			return true
+		}
+	}
+	return false
+}
+
+func playbackWindowFilling(window playbackWindowState, complete func(int) bool) bool {
+	for _, span := range []pieceSpan{window.urgent, window.readahead} {
+		for i := span.begin; i < span.end; i++ {
+			if !complete(i) {
+				return true
+			}
+		}
+	}
+	return false
 }

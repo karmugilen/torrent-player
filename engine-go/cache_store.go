@@ -233,6 +233,9 @@ func (s *EngineServer) clearCacheCategories(categories []string) error {
 	}
 	s.cacheClearGen++
 	gen := s.cacheClearGen
+	if want["resume"] {
+		s.forgetResumeLocked("")
+	}
 	base := s.downloadDir
 	var firstErr error
 	note := func(err error) {
@@ -829,6 +832,7 @@ func (s *EngineServer) saveResumeWindowDetailed(
 		return
 	}
 	_ = os.Remove(filepath.Join(dir, "window.json"))
+	s.rememberResumeLocked(meta)
 }
 
 func (s *EngineServer) loadResumeWindow(infoHash string) (resumeWindowMeta, []byte, bool) {
@@ -861,6 +865,7 @@ func (s *EngineServer) loadResumeWindow(infoHash string) (resumeWindowMeta, []by
 	if err != nil || int64(len(data)) != meta.Length || resumeChecksum(data) != meta.Checksum {
 		return resumeWindowMeta{}, nil, false
 	}
+	s.rememberResumeLocked(meta)
 	return meta, data, true
 }
 
@@ -868,6 +873,7 @@ func (s *EngineServer) deleteResumeWindow(infoHash string) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
 	s.cacheClearGen++
+	s.forgetResumeLocked(infoHash)
 	_ = os.RemoveAll(resumeWindowDir(s.downloadDir, infoHash))
 }
 
@@ -876,6 +882,11 @@ func (s *EngineServer) deleteResumeWindow(infoHash string) {
 func (s *EngineServer) applyResumeWindowToStorage(rec *TorrentRecord, fileIndex int) (offset int64, ok bool) {
 	if rec == nil || rec.Torrent == nil || rec.Torrent.Info() == nil {
 		return 0, false
+	}
+	// A player reopens the file on every seek. When the window is already in
+	// RAM, reading and hashing it from disk again only delays the open.
+	if offset, ok := s.resumeWindowInRAM(rec, fileIndex); ok {
+		return offset, true
 	}
 	meta, data, loaded := s.loadResumeWindow(rec.InfoHash)
 	if !loaded || meta.FileIndex != fileIndex {

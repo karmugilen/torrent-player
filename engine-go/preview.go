@@ -424,7 +424,8 @@ func (st *DocumentTorrentStorage) releasePreviewTempLocked() {
 	st.maxCacheBytes = st.downloadMaxBytes
 	st.attached = false
 	st.stream = false
-	st.cache, st.cacheDirty, st.cacheOrder, st.cacheBytes = make(map[int][]byte), make(map[int]bool), nil, 0
+	st.cache, st.cacheDirty, st.cacheBytes = make(map[int][]byte), make(map[int]bool), 0
+	st.cacheOrder.reset()
 	st.completed = make(map[int]bool)
 	st.startupPieces, st.startupSaved = nil, nil
 	st.streamDemand, st.streamLost, st.streamWhole, st.streamRanges = nil, nil, nil, nil

@@ -44,6 +44,11 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -83,21 +88,15 @@ fun SettingsScreen(
     onRamCache: (Int) -> Unit = {},
     onAutoRamCache: () -> Unit = {},
     onPlaybackMethod: (PlaybackMethod) -> Unit = {},
-    onPlayBoost: (Boolean) -> Unit = {},
-    onAdaptiveBuffer: (Boolean) -> Unit = {},
-    onBurstAwareBuffer: (Boolean) -> Unit = {},
-    onPeerExploration: (Boolean) -> Unit = {},
-    onGhostMode: (Boolean) -> Unit = {},
-    onGhostProMode: (Boolean) -> Unit = {},
-    onClaudeSeekMode: (Boolean) -> Unit = {},
     onRefreshSeekStats: () -> Unit = {},
     onFileOnlyPlayback: (Boolean) -> Unit = {},
+    onHedgeRequests: (Boolean) -> Unit = {},
+    onSlowPeerYield: (Boolean) -> Unit = {},
+    onDropChokers: (Boolean) -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
-    onFastPeerSearch: (Boolean) -> Unit = {},
     onPauseOnLowBattery: (Boolean) -> Unit = {},
     onPlayNext: (Boolean) -> Unit = {},
-    onPreloadStart: (Boolean) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -132,7 +131,7 @@ fun SettingsScreen(
                     ListItem(
                         headlineContent = { Text("Prefer Direct Play") },
                         supportingContent = {
-                            Text("On: video stays in RAM. A small startup cache may be saved, not the full file. Off: selected files are saved for offline play. Both choices stay available when you add a torrent.")
+                            Text("On: video stays in RAM. Only each video's start and end (its length and index) are saved, up to 1 GB in total, so episodes open fast. Off: selected files are saved for offline play. Both choices stay available when you add a torrent.")
                         },
                         trailingContent = {
                             Switch(checked = state.directPlayDefault, onCheckedChange = onDirectPlayDefault)
@@ -346,8 +345,13 @@ fun SettingsScreen(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         SectionDivider()
+                        // The slider moves freely; the engine applies the size when it is released.
+                        var ramStep by remember(state.ramCacheMiB, state.ramCacheAuto) {
+                            mutableFloatStateOf(ramCacheStepIndex(state.ramCacheMiB).toFloat())
+                        }
+                        val ramDraft = RAM_CACHE_STEPS_MIB[ramStep.roundToInt().coerceIn(RAM_CACHE_STEPS_MIB.indices)]
                         Text(
-                            "RAM cache · ${if (state.ramCacheAuto) "Auto · " else ""}${state.ramCacheMiB} MiB",
+                            "RAM cache · ${if (state.ramCacheAuto) "Auto · " else ""}${formatRamCacheMiB(ramDraft)}",
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Text(
@@ -359,14 +363,37 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
                         )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(0, 64, 128, 256, 512, 1024).forEach { size ->
-                                FilterChip(
-                                    selected = if (size == 0) state.ramCacheAuto else !state.ramCacheAuto && state.ramCacheMiB == size,
-                                    onClick = { if (size == 0) onAutoRamCache() else onRamCache(size) },
-                                    label = { Text(if (size == 0) "Auto" else "$size MiB") },
-                                )
-                            }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = state.ramCacheAuto,
+                                onClick = onAutoRamCache,
+                                label = { Text("Auto") },
+                            )
+                            Text(
+                                if (state.ramCacheAuto) "Move the slider to set a size" else "Manual",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        Slider(
+                            value = ramStep,
+                            onValueChange = { ramStep = it },
+                            onValueChangeFinished = { onRamCache(RAM_CACHE_STEPS_MIB[ramStep.roundToInt().coerceIn(RAM_CACHE_STEPS_MIB.indices)]) },
+                            valueRange = 0f..RAM_CACHE_STEPS_MIB.lastIndex.toFloat(),
+                            steps = RAM_CACHE_STEPS_MIB.size - 2,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(Modifier.fillMaxWidth()) {
+                            Text("16 MiB", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
+                            Text("1 GiB", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+                        if (ramDraft < 64) {
+                            Text(
+                                "Small caches keep seeking quick and use little memory. Direct Play always keeps at least " +
+                                    "four pieces, so a torrent with large pieces may use more than this.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -454,7 +481,7 @@ fun SettingsScreen(
                             color = colors.onSurfaceVariant,
                         )
                         Column(Modifier.selectableGroup()) {
-                            PlaybackMethod.entries.forEach { method ->
+                            listOf(PlaybackMethod.HTTP, PlaybackMethod.CONTENT_URI).forEach { method ->
                                 val selected = state.playbackMethod == method
                                 Row(
                                     modifier = Modifier.fillMaxWidth()
@@ -470,14 +497,14 @@ fun SettingsScreen(
                                     RadioButton(selected = selected, onClick = null)
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                         Text(
-                                            if (method == PlaybackMethod.CONTENT_URI) "Standard" else "HTTP stream (experimental)",
+                                            if (method == PlaybackMethod.CONTENT_URI) "Content URI" else "HTTP stream (default)",
                                             style = MaterialTheme.typography.bodyLarge,
                                         )
                                         Text(
                                             if (method == PlaybackMethod.CONTENT_URI) {
-                                                "Opens the saved or streaming content URI."
+                                                "Older method: the player reads through Android's file proxy."
                                             } else {
-                                                "Experimental loopback streaming for comparison."
+                                                "The player streams from the engine on this phone. Faster seeking."
                                             },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = colors.onSurfaceVariant,
@@ -579,84 +606,11 @@ fun SettingsScreen(
                             }
                         }
                         SectionDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Instant play boost", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    "Asks the engine for a larger startup buffer when you press Play, so video can begin sooner. It uses more network and memory.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.playBoost, onCheckedChange = onPlayBoost)
-                        }
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Adaptive buffer",
-                            supporting = if (state.burstAwareBuffer) {
-                                "Included in Burst-aware buffer. Normal adaptive buffer is superseded."
-                            } else {
-                                "Experimental. Adds look-ahead when read demand varies and reduces it when demand settles. Keeps the same RAM limit. Applies next time you press Play."
-                            },
-                            checked = if (state.burstAwareBuffer) false else state.adaptiveBuffer,
-                            onCheckedChange = onAdaptiveBuffer,
-                            enabled = !state.burstAwareBuffer,
-                        )
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Burst-aware buffer",
-                            supporting = "Experimental. Uses short and long burst history to adjust look-ahead within the RAM limit. Includes Adaptive buffer feedback. Applies next time you press Play.",
-                            checked = state.burstAwareBuffer,
-                            onCheckedChange = onBurstAwareBuffer,
-                        )
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Peer exploration",
-                            supporting = if (state.ghostProMode) {
-                                "Managed by Ghost Pro mode. Normal peer exploration is disabled."
-                            } else {
-                                "Experimental. Tries waiting peers by replacing at most one connection every 30 seconds after 90 seconds without useful transfers. Keeps active peers and the connection limit. Applies to running transfers."
-                            },
-                            checked = if (state.ghostProMode) false else state.peerExploration,
-                            onCheckedChange = onPeerExploration,
-                            enabled = !state.ghostProMode,
-                        )
+                        Text("Playback", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                         Text(
-                            "For comparison, try one experiment at a time with the same torrent and network. Compare time to play, stalls and transfer speed. These experiments are off by default.",
+                            "One built-in mode, like YouTube: a seek stops every download for the old place and fetches the new spot first, then the next blocks in order, filling your RAM setting ahead. Nothing behind the playhead is fetched.",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
-                        )
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Ghost mode",
-                            supporting = if (state.ghostProMode) {
-                                "Superseded by Ghost Pro mode. Basic dial feedback is disabled."
-                            } else if (state.fastPeerSearch) {
-                                "Disabled while Faster peer search pins the maximum 80/s dial rate."
-                            } else {
-                                "Ghost Downloader-inspired experiment. Tests small increases in peer dialing and keeps them only when useful download speed improves. Stays within your connection limit. Applies now; turning off restores normal dialing."
-                            },
-                            checked = if (state.ghostProMode || state.fastPeerSearch) false else state.ghostMode,
-                            onCheckedChange = onGhostMode,
-                            enabled = !(state.ghostProMode || state.fastPeerSearch),
-                        )
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Ghost Pro mode",
-                            supporting = "Experimental. Focuses startup and seeks, then builds a continuous playback buffer for Download and Instant Play. Recycles idle peers without needed playback pieces. Urgent, readahead and lookahead colors in Pieces show the active windows. Respects your RAM limit.",
-                            checked = state.ghostProMode,
-                            onCheckedChange = onGhostProMode,
-                        )
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Claude optimized seek",
-                            supporting = "Experimental. After a seek, blocks a slow peer has held for over a second move to a peer that is delivering, and stalled reads retry after 3 seconds instead of 8. Works with every other experiment. Applies now.",
-                            checked = state.claudeSeekMode,
-                            onCheckedChange = onClaudeSeekMode,
                         )
                         LaunchedEffect(Unit) {
                             while (true) {
@@ -665,9 +619,27 @@ fun SettingsScreen(
                             }
                         }
                         Text(
-                            seekStatsLine(state.seekStats, state.claudeSeekMode),
+                            seekStatsLine(state.seekStats),
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
+                        )
+                        SwitchRow(
+                            title = "Hedged requests (experimental)",
+                            supporting = "When a block at the playhead is late, also ask a faster peer for it and use whichever copy comes first. Seek times above restart when you switch, so you can compare.",
+                            checked = state.hedgeRequests,
+                            onCheckedChange = onHedgeRequests,
+                        )
+                        SwitchRow(
+                            title = "Slow peers step aside (experimental)",
+                            supporting = "A peer slower than 48 KB/s skips a piece near the playhead that faster peers would finish first, and fetches further ahead instead.",
+                            checked = state.slowPeerYield,
+                            onCheckedChange = onSlowPeerYield,
+                        )
+                        SwitchRow(
+                            title = "Drop peers that won't share (experimental)",
+                            supporting = "A peer that keeps refusing to send for 5 s is disconnected when other peers are waiting, so a new one can take its place.",
+                            checked = state.dropChokers,
+                            onCheckedChange = onDropChokers,
                         )
                         SectionDivider()
                         SwitchRow(
@@ -716,36 +688,6 @@ fun SettingsScreen(
                                     label = { Text(label) },
                                 )
                             }
-                        }
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Faster peer search",
-                            supporting = if (state.ghostProMode) {
-                                "Managed dynamically by Ghost Pro mode. Static 80/s dialing is disabled."
-                            } else if (state.ghostMode) {
-                                "Managed dynamically by Ghost mode. Static 80/s dialing is disabled."
-                            } else {
-                                "Looks for peers faster than the normal dial rate. It can help a slow swarm and can make a busy network less stable."
-                            },
-                            checked = if (state.ghostMode || state.ghostProMode) false else state.fastPeerSearch,
-                            onCheckedChange = onFastPeerSearch,
-                            enabled = !(state.ghostMode || state.ghostProMode),
-                        )
-                        SectionDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Preload the start", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    "Like TorrServer preload. Waits up to 8 seconds for the first 2 MB before opening the player, so playback is less likely to stall. Play still opens if that data is not ready.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.preloadStart, onCheckedChange = onPreloadStart)
                         }
                         SectionDivider()
                         Row(
@@ -1009,12 +951,10 @@ private fun DangerOutlineButton(text: String, onClick: () -> Unit) {
 }
 
 /** One-line seek comparison for the current mode's measurement window. */
-internal fun seekStatsLine(stats: webtor.core.SeekStats?, claudeSeek: Boolean): String {
-    val mode = if (claudeSeek) "Claude seek on" else "Claude seek off"
-    if (stats == null || stats.count == 0) return "$mode · seek in a video to measure seek time."
-    fun secs(ms: Long) = String.format(java.util.Locale.US, "%.1f s", ms / 1000.0)
+internal fun seekStatsLine(stats: webtor.core.SeekStats?): String {
+    if (stats == null || stats.count == 0) return "Seek time · seek in a video to measure it."
     val stalls = if (stats.stalls == 1) "1 stall" else "${stats.stalls} stalls"
-    return "$mode · ${stats.count} seeks · median ${secs(stats.medianMs)} · last ${secs(stats.lastMs)} · $stalls"
+    return "Seek time · ${stats.count} seeks · median ${stats.medianMs} ms · last ${stats.lastMs} ms · $stalls"
 }
 
 private fun cacheCategoryLabel(id: String): String = when (id) {

@@ -162,17 +162,31 @@ type PieceBucket struct {
 }
 
 type PieceTelemetryResponse struct {
-	ID              string               `json:"id"`
-	InfoHash        *string              `json:"infoHash"`
-	Generation      int64                `json:"generation"`
-	Timestamp       int64                `json:"timestamp"`
-	TotalPieces     int                  `json:"totalPieces"`
-	PieceLength     int64                `json:"pieceLength"`
-	LastPieceLength int64                `json:"lastPieceLength"`
-	MaxBuckets      int                  `json:"maxBuckets"`
-	Buckets         []PieceBucket        `json:"buckets"`
-	GhostProMode    bool                 `json:"ghostProMode"`
-	Playback        []PlaybackPieceRange `json:"playback,omitempty"`
+	ID              string        `json:"id"`
+	InfoHash        *string       `json:"infoHash"`
+	Generation      int64         `json:"generation"`
+	Timestamp       int64         `json:"timestamp"`
+	TotalPieces     int           `json:"totalPieces"`
+	PieceLength     int64         `json:"pieceLength"`
+	LastPieceLength int64         `json:"lastPieceLength"`
+	MaxBuckets      int           `json:"maxBuckets"`
+	Buckets         []PieceBucket `json:"buckets"`
+	GhostProMode    bool          `json:"ghostProMode"`
+	// Playback tiers: U this block (Now, at the playhead), N the next blocks
+	// fetched in order after it. Nothing behind the playhead.
+	Playback []PlaybackPieceRange `json:"playback,omitempty"`
+	// Playheads holds the piece each open reader is at.
+	Playheads []int `json:"playheads,omitempty"`
+	// PlaybackDetail is the playing reader's window at one piece per state.
+	PlaybackDetail *PlaybackDetail `json:"playbackDetail,omitempty"`
+}
+
+// PlaybackDetail lists each piece of a window from Start: v verified, s saved
+// on storage only (Direct Play start and end), r receiving, m missing.
+type PlaybackDetail struct {
+	Start    int    `json:"start"`
+	States   string `json:"states"`
+	Playhead int    `json:"playhead"`
 }
 
 // Inclusive torrent piece indices, matching PieceBucket's range convention.
@@ -193,6 +207,9 @@ type SettingsResponse struct {
 	EffectiveDialRatePerSec int64 `json:"effectiveDialRatePerSec"`
 	PeerExploration         bool  `json:"peerExploration"`
 	ClaudeSeekMode          bool  `json:"claudeSeekMode"`
+	HedgeRequests           bool  `json:"hedgeRequests"`
+	SlowPeerYield           bool  `json:"slowPeerYield"`
+	DropChokers             bool  `json:"dropChokers"`
 	IdleDropMinutes         int   `json:"idleDropMinutes"`
 	RamCacheBytes           int64 `json:"ramCacheBytes"`
 	SeedingEnabled          bool  `json:"seedingEnabled"`
@@ -213,6 +230,9 @@ type SettingsRequest struct {
 	GhostProMode         *bool  `json:"ghostProMode,omitempty"`
 	PeerExploration      *bool  `json:"peerExploration,omitempty"`
 	ClaudeSeekMode       *bool  `json:"claudeSeekMode,omitempty"`
+	HedgeRequests        *bool  `json:"hedgeRequests,omitempty"`
+	SlowPeerYield        *bool  `json:"slowPeerYield,omitempty"`
+	DropChokers          *bool  `json:"dropChokers,omitempty"`
 	IdleDropMinutes      *int   `json:"idleDropMinutes,omitempty"`
 	RamCacheBytes        *int64 `json:"ramCacheBytes,omitempty"`
 	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`
@@ -226,6 +246,13 @@ type SettingsRequest struct {
 	PayloadTransfersAllowed *bool `json:"payloadTransfersAllowed,omitempty"`
 	// Nil leaves the dial limiter unchanged. A set value is clamped to 10..80.
 	DialRatePerSec *int `json:"dialRatePerSec,omitempty"`
+	// SeekLogPath names the CSV file that gets one line per HTTP playback
+	// request; empty stops it. SeekLogTag (the app version) goes on each line.
+	SeekLogPath *string `json:"seekLogPath,omitempty"`
+	SeekLogTag  string  `json:"seekLogTag,omitempty"`
+	// SeekExperiment picks the seek rules at random for each HTTP range
+	// request, and the seek log names them, for A/B tests on the phone.
+	SeekExperiment *bool `json:"seekExperiment,omitempty"`
 }
 
 type OkResponse struct {

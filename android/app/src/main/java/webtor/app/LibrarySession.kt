@@ -146,17 +146,15 @@ class LibrarySession(
                         },
                     )
                 }
-                val pauseOnLowBattery = settings.getBoolean("pauseOnLowBattery", false)
-                val burstAware = settings.getBoolean("burstAwareBuffer", false)
-                val ghostPro = settings.getBoolean("ghostProMode", false)
-                val ghost = if (ghostPro) false else settings.getBoolean("ghostMode", false)
-                val ghostActive = ghostPro || ghost
+                // Unsaved settings follow UiState defaults, so a new install has one source of truth.
+                val defaults = UiState()
+                val pauseOnLowBattery = settings.getBoolean("pauseOnLowBattery", defaults.pauseOnLowBattery)
                 _ui.update {
                     it.copy(
                         library = loaded,
                         loadWarning = storage.loadWarning,
                         maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 500),
-                        ramCacheMiB = settings.getInt("ramCacheMiB", 64).coerceIn(64, 1024),
+                        ramCacheMiB = settings.getInt("ramCacheMiB", 64).coerceIn(RAM_CACHE_STEPS_MIB.first(), RAM_CACHE_STEPS_MIB.last()),
                         ramCacheAuto = settings.getBoolean("ramCacheAuto", !settings.contains("ramCacheMiB")),
                         seedingEnabled = settings.getBoolean("seedingEnabled", false),
                         seedRatioMilli = settings.getInt("seedRatioMilli", 1000).coerceIn(100, 10000),
@@ -172,24 +170,18 @@ class LibrarySession(
                         reducedEffects = settings.getBoolean("reducedEffects", false),
                         directPlayDefault = settings.getBoolean("directPlayDefault", false),
                         playbackMethod = PlaybackMethod.entries.firstOrNull {
-                            it.name == settings.getString("playbackMethod", PlaybackMethod.CONTENT_URI.name)
-                        } ?: PlaybackMethod.CONTENT_URI,
+                            it.name == settings.getString("playbackMethod", PlaybackMethod.HTTP.name)
+                        } ?: PlaybackMethod.HTTP,
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
-                        playBoost = settings.getBoolean("playBoost", false),
-                        adaptiveBuffer = if (burstAware) false else settings.getBoolean("adaptiveBuffer", false),
-                        burstAwareBuffer = burstAware,
-                        peerExploration = if (ghostPro) false else settings.getBoolean("peerExploration", false),
-                        ghostMode = ghost,
-                        ghostProMode = ghostPro,
-                        claudeSeekMode = settings.getBoolean("claudeSeekMode", false),
-                        idleDropMinutes = settings.getInt("idleDropMinutes", 15).coerceIn(0, 240),
-                        fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", true),
-                        fastPeerSearch = if (ghostActive) false else settings.getBoolean("fastPeerSearch", false),
+                        idleDropMinutes = settings.getInt("idleDropMinutes", defaults.idleDropMinutes).coerceIn(0, 240),
+                        fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", defaults.fileOnlyPlayback),
+                        hedgeRequests = settings.getBoolean("hedgeRequests", defaults.hedgeRequests),
+                        slowPeerYield = settings.getBoolean("slowPeerYield", defaults.slowPeerYield),
+                        dropChokers = settings.getBoolean("dropChokers", defaults.dropChokers),
                         pauseOnLowBattery = pauseOnLowBattery,
                         batteryPaused = pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging,
-                        playNext = settings.getBoolean("playNext", false),
-                        preloadStart = settings.getBoolean("preloadStart", false),
+                        playNext = settings.getBoolean("playNext", defaults.playNext),
                         downloadRateKiB = savedDownloadRateKiB(),
                     )
                 }
@@ -200,6 +192,8 @@ class LibrarySession(
                 settings.edit().also { editor ->
                     editor.remove("playerPackage").remove("playerActivity")
                     editor.remove("downloadRateBytesSec").remove("uploadRateBytesSec")
+                    // Playback has one built-in mode; forget the old experiment switches.
+                    RETIRED_EXPERIMENT_PREF_KEYS.forEach(editor::remove)
                     LEGACY_DOWNLOAD_QUEUE_PREF_KEYS.forEach(editor::remove)
                 }.apply()
                 refreshStorageStats()
@@ -214,6 +208,9 @@ class LibrarySession(
                             withContext(io) { client.setGhostMode(_ui.value.ghostMode) }
                             withContext(io) { client.setGhostProMode(_ui.value.ghostProMode) }
                             withContext(io) { client.setClaudeSeekMode(_ui.value.claudeSeekMode) }
+                            withContext(io) { client.setHedgeRequests(_ui.value.hedgeRequests) }
+                            withContext(io) { client.setSlowPeerYield(_ui.value.slowPeerYield) }
+                            withContext(io) { client.setDropChokers(_ui.value.dropChokers) }
                             withContext(io) { client.setIdleDropMinutes(_ui.value.idleDropMinutes) }
                         }
                     }
@@ -254,7 +251,6 @@ class LibrarySession(
         _ui.update { it.copy(magnetDraft = value, error = null) }
         debounceJob?.cancel()
         debounceJob = scope.launch {
-            delay(180)
             val src = _ui.value.magnetDraft.trim()
             if (!looksLikeTorrentSource(src)) {
                 dropUncommittedPrefetch(exceptSource = src)
@@ -350,107 +346,6 @@ class LibrarySession(
         updateNetworkState(networkSnapshot, policy)
     }
 
-    fun setPlayBoost(enabled: Boolean) {
-        settings.edit().putBoolean("playBoost", enabled).apply()
-        _ui.update { it.copy(playBoost = enabled) }
-    }
-
-    fun setAdaptiveBuffer(enabled: Boolean) {
-        settings.edit().apply {
-            putBoolean("adaptiveBuffer", enabled)
-            if (enabled) putBoolean("burstAwareBuffer", false)
-        }.apply()
-        _ui.update {
-            it.copy(
-                adaptiveBuffer = enabled,
-                burstAwareBuffer = if (enabled) false else it.burstAwareBuffer,
-            )
-        }
-    }
-
-    fun setBurstAwareBuffer(enabled: Boolean) {
-        settings.edit().apply {
-            putBoolean("burstAwareBuffer", enabled)
-            if (enabled) putBoolean("adaptiveBuffer", false)
-        }.apply()
-        _ui.update {
-            it.copy(
-                burstAwareBuffer = enabled,
-                adaptiveBuffer = if (enabled) false else it.adaptiveBuffer,
-            )
-        }
-    }
-
-    fun setPeerExploration(enabled: Boolean) {
-        scope.launchCommand {
-            try {
-                if (_ui.value.engineReady) withContext(io) {
-                    client.setPeerExploration(enabled)
-                    if (enabled) client.setGhostProMode(false)
-                }
-                settings.edit().apply {
-                    putBoolean("peerExploration", enabled)
-                    if (enabled) putBoolean("ghostProMode", false)
-                }.apply()
-                _ui.update {
-                    it.copy(
-                        peerExploration = enabled,
-                        ghostProMode = if (enabled) false else it.ghostProMode,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t)) }
-            }
-        }
-    }
-
-    fun setGhostMode(enabled: Boolean) {
-        scope.launchCommand {
-            try {
-                if (_ui.value.engineReady) withContext(io) {
-                    client.setGhostMode(enabled)
-                    if (enabled) {
-                        client.setGhostProMode(false)
-                        client.setDialRatePerSec(30)
-                    }
-                }
-                settings.edit().apply {
-                    putBoolean("ghostMode", enabled)
-                    if (enabled) {
-                        putBoolean("ghostProMode", false)
-                        putBoolean("fastPeerSearch", false)
-                    }
-                }.apply()
-                _ui.update {
-                    it.copy(
-                        ghostMode = enabled,
-                        ghostProMode = if (enabled) false else it.ghostProMode,
-                        fastPeerSearch = if (enabled) false else it.fastPeerSearch,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t)) }
-            }
-        }
-    }
-
-    /** Independent of the Ghost modes and buffers; applies to running playback immediately. */
-    fun setClaudeSeekMode(enabled: Boolean) {
-        scope.launchCommand {
-            try {
-                if (_ui.value.engineReady) withContext(io) { client.setClaudeSeekMode(enabled) }
-                settings.edit().putBoolean("claudeSeekMode", enabled).apply()
-                // The engine starts a fresh comparison window when the mode changes.
-                _ui.update { it.copy(claudeSeekMode = enabled, seekStats = null) }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t)) }
-            }
-        }
-    }
-
     fun setIdleDropMinutes(minutes: Int) {
         val value = minutes.coerceIn(0, 240)
         scope.launchCommand {
@@ -487,37 +382,30 @@ class LibrarySession(
         }
     }
 
-    fun setGhostProMode(enabled: Boolean) {
-        scope.launchCommand {
-            try {
-                if (_ui.value.engineReady) withContext(io) {
-                    client.setGhostProMode(enabled)
-                    if (enabled) {
-                        client.setGhostMode(false)
-                        client.setPeerExploration(false)
-                        client.setDialRatePerSec(30)
-                    }
-                }
-                settings.edit().apply {
-                    putBoolean("ghostProMode", enabled)
-                    if (enabled) {
-                        putBoolean("ghostMode", false)
-                        putBoolean("peerExploration", false)
-                        putBoolean("fastPeerSearch", false)
-                    }
-                }.apply()
-                _ui.update {
-                    it.copy(
-                        ghostProMode = enabled,
-                        ghostMode = if (enabled) false else it.ghostMode,
-                        peerExploration = if (enabled) false else it.peerExploration,
-                        fastPeerSearch = if (enabled) false else it.fastPeerSearch,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t)) }
-            }
+    fun setHedgeRequests(enabled: Boolean) {
+        settings.edit().putBoolean("hedgeRequests", enabled).apply()
+        _ui.update { it.copy(hedgeRequests = enabled) }
+        scope.launch {
+            if (_ui.value.engineReady) runCatching { withContext(io) { client.setHedgeRequests(enabled) } }
+            refreshSeekStats()
+        }
+    }
+
+    fun setSlowPeerYield(enabled: Boolean) {
+        settings.edit().putBoolean("slowPeerYield", enabled).apply()
+        _ui.update { it.copy(slowPeerYield = enabled) }
+        scope.launch {
+            if (_ui.value.engineReady) runCatching { withContext(io) { client.setSlowPeerYield(enabled) } }
+            refreshSeekStats()
+        }
+    }
+
+    fun setDropChokers(enabled: Boolean) {
+        settings.edit().putBoolean("dropChokers", enabled).apply()
+        _ui.update { it.copy(dropChokers = enabled) }
+        scope.launch {
+            if (_ui.value.engineReady) runCatching { withContext(io) { client.setDropChokers(enabled) } }
+            refreshSeekStats()
         }
     }
 
@@ -548,37 +436,6 @@ class LibrarySession(
         activeFileOnlyPlayback = null
     }
 
-    fun setFastPeerSearch(enabled: Boolean) {
-        scope.launchCommand {
-            try {
-                if (_ui.value.engineReady) withContext(io) {
-                    client.setDialRatePerSec(if (enabled) 80 else 30)
-                    if (enabled) {
-                        client.setGhostMode(false)
-                        client.setGhostProMode(false)
-                    }
-                }
-                settings.edit().apply {
-                    putBoolean("fastPeerSearch", enabled)
-                    if (enabled) {
-                        putBoolean("ghostMode", false)
-                        putBoolean("ghostProMode", false)
-                    }
-                }.apply()
-                _ui.update {
-                    it.copy(
-                        fastPeerSearch = enabled,
-                        ghostMode = if (enabled) false else it.ghostMode,
-                        ghostProMode = if (enabled) false else it.ghostProMode,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t)) }
-            }
-        }
-    }
-
     fun setPauseOnLowBattery(enabled: Boolean) {
         settings.edit().putBoolean("pauseOnLowBattery", enabled).apply()
         _ui.update { it.copy(pauseOnLowBattery = enabled) }
@@ -589,11 +446,6 @@ class LibrarySession(
     fun setPlayNext(enabled: Boolean) {
         settings.edit().putBoolean("playNext", enabled).apply()
         _ui.update { it.copy(playNext = enabled) }
-    }
-
-    fun setPreloadStart(enabled: Boolean) {
-        settings.edit().putBoolean("preloadStart", enabled).apply()
-        _ui.update { it.copy(preloadStart = enabled) }
     }
 
     fun setDownloadRateKiB(value: Int) {
@@ -667,7 +519,6 @@ class LibrarySession(
             // One worker serializes JNI updates. Bursts collapse to the latest
             // route, including events received while the engine was starting.
             while (!engineHost.awaitReady()) delay(1_000)
-            if (networkSnapshot.connected) delay(750)
             while (networkUpdates.tryReceive().isSuccess) { /* drain superseded events */ }
             val snapshot = networkSnapshot
             val allowed = payloadAllowed()
@@ -762,7 +613,7 @@ class LibrarySession(
     }
 
     fun setRamCacheMiB(value: Int) {
-        val size = value.coerceIn(64, 1024)
+        val size = value.coerceIn(RAM_CACHE_STEPS_MIB.first(), RAM_CACHE_STEPS_MIB.last())
         scope.launchCommand {
             try {
                 val applied = if (_ui.value.engineReady) {
@@ -1255,7 +1106,6 @@ class LibrarySession(
         }
     }
 
-
     fun pause(entry: DownloadEntry) {
         scope.launchCommand {
             if (isShuttingDown.get()) return@launchCommand
@@ -1578,6 +1428,10 @@ class LibrarySession(
                 if (!current.directPlay && current.files.none { it.index in current.selected && it.uri != null }) {
                     error("Start this download before playing.")
                 }
+                // Refuse before restore. Starting a dropped session and then
+                // showing the battery or network message left that session
+                // downloading on its own once the block lifted.
+                playbackDataBlock(_ui.value.batteryPaused, _ui.value.networkAllowed, _ui.value.networkReason)?.let { error(it) }
                 if (current.engineId == null) {
                     val nextGen = current.generation + 1
                     patch(current.key) {
@@ -1587,6 +1441,8 @@ class LibrarySession(
                     current = _ui.value.library.find { it.key == entry.key } ?: current
                 }
                 val id = current.engineId ?: error(current.error ?: "Could not start this torrent.")
+                // The engine refuses unfinished files while torrent data is paused.
+                playbackDataBlock(_ui.value.batteryPaused, _ui.value.networkAllowed, _ui.value.networkReason)?.let { error(it) }
                 val status = withContext(io) { client.torrent(id) }
                 if (status.checking) {
                     applyStatus(status, current.key, current.generation)
@@ -1631,11 +1487,32 @@ class LibrarySession(
 
     fun showFiles(entry: DownloadEntry) {
         _ui.update { it.copy(screen = Screen.Files, openTorrentKey = entry.key, error = null) }
+        warmDirectPlay(entry.key)
     }
 
     fun openDetails(key: String) {
         closeAddSheet()
         _ui.update { it.copy(screen = Screen.Files, openTorrentKey = key, error = null) }
+        warmDirectPlay(key)
+    }
+
+    /**
+     * Starts a dropped Direct Play session while the episode list is open, so
+     * peers are already connected when an episode is played.
+     */
+    private fun warmDirectPlay(key: String) {
+        fun eligible(entry: DownloadEntry?) = entry != null && entry.directPlay && entry.engineId == null &&
+            !entry.isDeleting && !serviceSuppressed && !shutdownInProgress() && payloadAllowed()
+        if (!eligible(_ui.value.library.find { it.key == key })) return
+        scope.launchCommand {
+            val current = _ui.value.library.find { it.key == key }
+            if (!eligible(current)) return@launchCommand
+            val nextGen = current!!.generation + 1
+            patch(current.key) { it.copy(generation = nextGen, lifecycleState = EntryLifecycleState.PREPARING, error = null) }
+            restoreEntry(current, startPaused = false, commandGeneration = nextGen)
+            persist()
+            syncService()
+        }
     }
 
     fun openDetails(entry: DownloadEntry) = openDetails(entry.key)
@@ -1704,6 +1581,11 @@ class LibrarySession(
                     withContext(io) { client.remove(id, false) }
                     engineRemoved = true
                 }
+                // Drop keeps peer addresses for the next Play. Delete forgets
+                // them even when that drop already cleared the engine id.
+                torrentInfoHash(target)?.let { hash ->
+                    withContext(io) { runCatching { client.forgetPeerHints(hash) } }
+                }
                 withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(target) }
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
@@ -1766,6 +1648,9 @@ class LibrarySession(
                     recentlyInvalidatedIds.add(id)
                     withContext(io) { client.remove(id, destroyStore = true) }
                     engineRemoved = true
+                }
+                torrentInfoHash(target)?.let { hash ->
+                    withContext(io) { runCatching { client.forgetPeerHints(hash) } }
                 }
                 withContext(io) { storage.deleteFiles(target.files); if (target.directPlay) storage.deleteStartupCache(target.key) }
                 withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(target) }

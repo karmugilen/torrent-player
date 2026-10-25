@@ -24,3 +24,9 @@ typedef struct {
 int32_t webtor_hash_extents(const WebtorFileSpan *spans, size_t count, uint8_t out_hash[20]);
 /* Concatenated pread into buf. Returns bytes copied, or -1. */
 int32_t webtor_pread_extents(const WebtorFileSpan *spans, size_t count, uint8_t *buf, size_t len);
+
+/* Prefix is sorted, disjoint and non-adjacent. The last entry is a new range.
+   Merge in place without allocating or retaining the buffer. Returns the new
+   count, or -1 for an invalid buffer/new range. */
+typedef struct { int64_t start, end; } WebtorByteRange;
+ptrdiff_t webtor_merge_received_range(WebtorByteRange *ranges, size_t count);

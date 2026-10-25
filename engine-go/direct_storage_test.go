@@ -177,7 +177,8 @@ func TestStartupPruningKeepsActiveReadersCache(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.Truncate(20 << 20); err != nil {
+		// Sparse files: two of them exceed the overall budget.
+		if err := f.Truncate(directStartupTotalBudget/2 + 1); err != nil {
 			t.Fatal(err)
 		}
 		_ = f.Close()

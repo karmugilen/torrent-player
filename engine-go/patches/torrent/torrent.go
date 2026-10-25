@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 	"unique"
@@ -107,6 +108,20 @@ type Torrent struct {
 	// The size of chunks to request from peers over the wire. This is
 	// normally 16KiB by convention these days.
 	chunkSize pp.Integer
+	// Torrent byte offset plus one that playback reads next; zero when unset.
+	requestFocus atomic.Int64
+	// Webtor: the playing file's pieces, [begin, end) plus one each (0 is
+	// unset). We stay interested in every peer that has one we lack.
+	webtorInterestBegin, webtorInterestEnd atomic.Int64
+	// Webtor: head-of-line blocks moved to a sooner peer (HOLRescue).
+	webtorRescues atomic.Int64
+	// Webtor: duplicate requests sent for overdue head-of-line blocks
+	// (Hedge), by block, with the peer asked. Client lock.
+	webtorHedges    map[RequestIndex]*PeerConn
+	webtorHedgeSent atomic.Int64
+	// Webtor: peers dropped for keeping us choked (WebtorDropChokers).
+	webtorChokersDropped atomic.Int64
+
 	chunkPool sync.Pool
 	// Total length of the torrent in bytes. Stored because it's not O(1) to
 	// get this from the info dict.
@@ -1600,6 +1615,7 @@ func (t *Torrent) updatePiecePriority(piece pieceIndex, reason updateRequestReas
 	if t.updatePiecePriorityNoRequests(piece) && !t.disableTriggers {
 		t.updatePeerRequestsForPiece(piece, reason)
 	}
+	t.webtorWakeWebseedsForPiece(piece)
 }
 
 func (t *Torrent) updateAllPiecePriorities(reason updateRequestReason) {
@@ -2828,14 +2844,22 @@ func (t *Torrent) startHash(pi pieceIndex) {
 }
 
 func (t *Torrent) getPieceToHash() (_ g.Option[pieceIndex]) {
+	// Webtor: a piece a playback read waits on (Now) first. In piece order a
+	// background download's pieces below the playhead were hashed before it.
+	var first g.Option[pieceIndex]
 	for i := range t.piecesQueuedForHash.Iterate {
 		p := t.piece(i)
 		if p.hashing || p.marking {
 			continue
 		}
-		return g.Some(i)
+		if p.purePriority() >= PiecePriorityNow {
+			return g.Some(i)
+		}
+		if !first.Ok {
+			first = g.Some(i)
+		}
 	}
-	return
+	return first
 }
 
 func (t *Torrent) dropBannedPeers() {

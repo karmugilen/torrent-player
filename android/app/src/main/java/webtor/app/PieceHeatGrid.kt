@@ -94,10 +94,12 @@ fun PieceHeatGridSection(
 
         val buckets = remember(map) { normalizePieceBuckets(map) }
         val summary = remember(map, buckets) { summarizePieceHeat(map, buckets) }
-        val playback = remember(map, buckets) {
-            buckets.map { if (map.ghostProMode) playbackBands(it, map.playback) else emptyList() }
-        }
+        val playback = remember(map, buckets) { buckets.map { playbackBands(it, map.playback) } }
         val hasPlayback = playback.any { it.isNotEmpty() }
+        val playheadCells = remember(map, buckets) {
+            map.playheads.mapNotNull { head -> buckets.indexOfFirst { head in it.start..it.end }.takeIf { it >= 0 } }.toSet()
+        }
+        val buffer = remember(map) { map.playbackDetail?.let { playbackBufferModel(it, map.playback) } }
         val layout = remember(buckets.size) { pieceHeatLayout(buckets.size) }
         // Blocks being fetched breathe between two amber strengths so activity is visible.
         val pulse = if (summary.selectedReceiving > 0 && !frozen) {
@@ -120,7 +122,7 @@ fun PieceHeatGridSection(
         val a11y = remember(summary, frozen, memoryBuffer, hasPlayback) {
             accessibilityPieceHeatSummary(summary, memoryBuffer) +
                 (if (frozen) " Map paused." else "") +
-                (if (hasPlayback) " Ghost Pro playback: coral urgent, blue readahead, purple lookahead. Tinted outline means waiting, solid means downloaded." else "")
+                (if (hasPlayback) " Playback windows are tinted by tier; the ringed cell holds the playhead. Tinted outline means waiting, solid means downloaded." else "")
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -236,7 +238,7 @@ fun PieceHeatGridSection(
                                 bucket.selectedVerified.toFloat() / bucket.selected
                             } else 0f
                             val working = bucket.selectedReceiving > 0
-                            val priority = playback[index].maxByOrNull { playbackRank(it.priority) }?.priority
+                            val priority = dominantPlaybackTier(playback[index])
                             val tint = priority?.let { pieceColors.playback(it) } ?: verifiedColor
 
                             val fill = when {
@@ -263,6 +265,15 @@ fun PieceHeatGridSection(
                             }
                         }
 
+                        for (index in playheadCells) {
+                            val origin = Offset((index % cols) * (cell + gap), (index / cols) * (cell + gap))
+                            val ring = minOf(gap, 2f)
+                            drawRoundRect(
+                                color = colors.onSurface, topLeft = origin - Offset(ring, ring),
+                                size = Size(cell + 2 * ring, cell + 2 * ring), cornerRadius = radius, style = Stroke(width = 2.2f),
+                            )
+                        }
+
                         val tickColor = colors.onSurfaceVariant.copy(alpha = 0.75f)
                         for (marker in markers) {
                             val col = marker.bucketIndex % cols
@@ -282,19 +293,11 @@ fun PieceHeatGridSection(
                 }
 
                 PieceHeatLegend(summary = summary, memoryBuffer = memoryBuffer)
-                if (map.ghostProMode) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for ((priority, label) in listOf("U" to "Urgent", "R" to "Readahead", "L" to "Lookahead")) {
-                            LegendPill(
-                                color = pieceColors.playback(priority), hollow = false, label = label,
-                                count = playback.flatten().filter { it.priority == priority }.sumOf { it.pieces },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
+                if (buffer != null) {
+                    PlaybackBufferSection(buffer, map.pieceLength, frozen)
+                } else {
                     Text(
-                        if (hasPlayback) "Ghost Pro · Playback window tiles fill with their color as pieces arrive; outlined tiles are still waiting. Tap for counts."
-                        else "Ghost Pro · Play a video to see its urgent, readahead and lookahead windows.",
+                        "Play a video to see its buffer piece by piece: urgent, fast, readahead, lookahead and rewind.",
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                     )
@@ -331,15 +334,150 @@ fun PieceHeatGridSection(
 }
 
 private fun playbackLabel(priority: String): String = when (priority) {
-    "U" -> "urgent"
+    "U" -> "this block"
+    "N" -> "next"
     "R" -> "readahead"
-    else -> "lookahead"
+    "L" -> "lookahead"
+    else -> "rewind"
 }
 
 private fun PieceColors.playback(priority: String): Color = when (priority) {
     "U" -> urgent
+    "N" -> fast
     "R" -> readahead
-    else -> lookahead
+    "L" -> lookahead
+    else -> rewind
+}
+
+/**
+ * The playing window at true size, one tile per piece (grouped evenly only for
+ * very long windows). Solid tiles are ready, outlined ones are waiting, amber
+ * ones are arriving, and the ringed tile is the playhead.
+ */
+@Composable
+private fun PlaybackBufferSection(model: PlaybackBufferModel, pieceLength: Long, frozen: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    val pieceColors = LocalPieceColors.current
+    val receiving = model.tiles.any { it.receiving > 0 }
+    val pulse = if (receiving && !frozen) {
+        rememberInfiniteTransition(label = "bufferReceiving").animateFloat(
+            initialValue = 0.5f, targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 600), RepeatMode.Reverse),
+            label = "bufferReceivingAlpha",
+        )
+    } else null
+    val layout = remember(model.tiles.size) { pieceHeatLayout(model.tiles.size.coerceAtMost(MAX_PIECE_HEAT_CELLS)).copy(cellCount = model.tiles.size) }
+    val rows = (model.tiles.size + layout.columns - 1) / layout.columns
+    val bufferLayout = layout.copy(rows = rows)
+    var widthPx by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val heightDp = remember(bufferLayout, widthPx, density) { pieceHeatHeightDp(bufferLayout, widthPx, density.density).dp }
+    var peek by remember(model) { mutableStateOf<Int?>(null) }
+    val ahead = model.readyAhead * pieceLength
+    val behind = model.readyBehind * pieceLength
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Playback buffer",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = colors.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "Ready ahead ${formatBytes(ahead)} · rewind ${formatBytes(behind)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.surfaceVariant.copy(alpha = 0.55f))
+                .padding(8.dp),
+        ) {
+            Canvas(
+                Modifier
+                    .fillMaxWidth()
+                    .height(heightDp)
+                    .onSizeChanged { widthPx = it.width.toFloat() }
+                    .pointerInput(model, bufferLayout) {
+                        detectTapGestures { offset ->
+                            peek = hitTestPieceCell(offset.x, offset.y, size.width.toFloat(), size.height.toFloat(), bufferLayout)
+                        }
+                    },
+            ) {
+                val cols = bufferLayout.columns
+                val (cell, gap) = pieceHeatSquareCell(size.width, size.height, bufferLayout)
+                if (cell <= 0f) return@Canvas
+                val radius = CornerRadius((cell * 0.28f).coerceIn(2.5f, 6f))
+                val waiting = Stroke(width = 1.4f)
+                model.tiles.forEachIndexed { index, tile ->
+                    val origin = Offset((index % cols) * (cell + gap), (index / cols) * (cell + gap))
+                    val cellSize = Size(cell, cell)
+                    val tint = tile.tier?.let { pieceColors.playback(it) } ?: (pieceColors.done ?: colors.primary)
+                    when {
+                        tile.receiving > 0 -> {
+                            drawRoundRect(pieceColors.getting.copy(alpha = pulse?.value ?: 1f), origin, cellSize, radius)
+                            drawRoundRect(tint, origin, cellSize, radius, style = waiting)
+                        }
+                        tile.done -> {
+                            drawRoundRect(tint, origin, cellSize, radius)
+                            if (tile.savedOnly) {
+                                // Saved on storage: a small inner mark distinguishes it from RAM.
+                                val inset = cell * 0.32f
+                                drawRoundRect(
+                                    colors.surface.copy(alpha = 0.85f), origin + Offset(inset, inset),
+                                    Size(cell - 2 * inset, cell - 2 * inset), CornerRadius(inset / 2),
+                                )
+                            }
+                        }
+                        tile.ready > 0 -> {
+                            drawRoundRect(tint.copy(alpha = 0.2f + 0.6f * tile.readyFraction), origin, cellSize, radius)
+                            drawRoundRect(tint, origin, cellSize, radius, style = waiting)
+                        }
+                        else -> {
+                            drawRoundRect(tint.copy(alpha = 0.12f), origin, cellSize, radius)
+                            drawRoundRect(tint.copy(alpha = 0.8f), origin, cellSize, radius, style = waiting)
+                        }
+                    }
+                    if (tile.playhead) {
+                        val ring = minOf(gap, 2f)
+                        drawRoundRect(
+                            colors.onSurface, origin - Offset(ring, ring), Size(cell + 2 * ring, cell + 2 * ring),
+                            radius, style = Stroke(width = 2.4f),
+                        )
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            for (tier in model.tiers) {
+                LegendPill(
+                    color = pieceColors.playback(tier.tier), hollow = false,
+                    label = playbackLabel(tier.tier).replaceFirstChar { it.uppercase() },
+                    count = tier.total, detail = "${tier.ready}/${tier.total}",
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+        val tile = peek?.let { model.tiles.getOrNull(it) }
+        Text(
+            if (tile != null) {
+                val pieces = if (tile.start == tile.end) "Piece ${tile.start}" else "Pieces ${tile.start}–${tile.end}"
+                "$pieces · ${tile.tier?.let(::playbackLabel) ?: "outside the window"}" +
+                    (if (tile.playhead) " · playhead" else "") +
+                    " · ${tile.verified} in RAM" + (if (tile.saved > 0) " · ${tile.saved} saved" else "") +
+                    " · ${tile.receiving} arriving · ${tile.total - tile.ready - tile.receiving} waiting"
+            } else {
+                "One tile per piece" + (if (model.piecesPerTile > 1) " (×${model.piecesPerTile})" else "") +
+                    ". Ringed = playhead · solid = ready · amber = arriving · outline = waiting · dot = saved start/end. Tap a tile."
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable
@@ -391,6 +529,7 @@ private fun LegendPill(
     label: String,
     count: Int,
     modifier: Modifier = Modifier,
+    detail: String? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     Surface(
@@ -415,7 +554,7 @@ private fun LegendPill(
                     ),
             )
             Text(
-                "$label $count",
+                if (detail != null) "$label $detail" else "$label $count",
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

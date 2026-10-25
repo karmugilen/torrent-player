@@ -127,13 +127,21 @@ type EngineServer struct {
 	claudeSeek         atomic.Bool
 	idleDropMinutes    atomic.Int64 // idle Direct Play drop limit; 0 is off
 	seekStats          seekLatencyStats
-	seedingEnabled     atomic.Bool
-	seedingAllowed     atomic.Bool
-	seedRatioMilli     atomic.Int64
-	seedTimeMinutes    atomic.Int64
-	seedMu             sync.Mutex
-	seedSaveMu         sync.Mutex
-	seedAccounts       map[string]seedAccount
+	seekLog            seekLog
+	seekExperiment     atomic.Bool
+	// hedgeRequests turns on SeekTuning.Hedge (Settings, experimental).
+	hedgeRequests atomic.Bool
+	// slowPeerYield turns on SeekTuning.SlowPeerYield; dropChokers drops
+	// peers that keep us choked (Settings, experimental).
+	slowPeerYield   atomic.Bool
+	dropChokers     atomic.Bool
+	seedingEnabled  atomic.Bool
+	seedingAllowed  atomic.Bool
+	seedRatioMilli  atomic.Int64
+	seedTimeMinutes atomic.Int64
+	seedMu          sync.Mutex
+	seedSaveMu      sync.Mutex
+	seedAccounts    map[string]seedAccount
 	// This is a global payload-byte gate. It deliberately does not pause or
 	// remove torrents: peer discovery and metadata exchange must continue.
 	payloadTransfersAllowed atomic.Bool
@@ -173,6 +181,10 @@ type EngineServer struct {
 	dhtGen            uint64
 	cacheMu           sync.Mutex
 	cacheClearGen     uint64
+	// resumeKnown is the latest resume window saved or loaded per info hash;
+	// resumeSaves is the pending save per info hash. Both use cacheMu.
+	resumeKnown map[string]resumeWindowMeta
+	resumeSaves map[string]*pendingResumeSave
 }
 
 func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServer, error) {
@@ -306,6 +318,7 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	s.loadDHTContacts()
 	s.warmDHTContacts()
 	go s.rateTrackerLoop()
+	go s.dropChokersLoop()
 
 	return s, nil
 }
@@ -553,6 +566,7 @@ func (s *EngineServer) Close() {
 			stopSavedDataCheck(rec)
 			s.closePlaybackReaders(rec.Torrent)
 		}
+		s.flushResumeSaves()
 		// Capture DHT contacts before the client tears down its servers.
 		s.snapshotDHTContacts()
 		s.seedTick()
@@ -776,6 +790,10 @@ func (s *EngineServer) handleControl(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) == 1 && parts[0] == "remove" {
 			s.handleRemove(w, r)
+			return
+		}
+		if len(parts) == 1 && parts[0] == "forget-peers" {
+			s.handleForgetPeers(w, r)
 			return
 		}
 		if len(parts) == 1 && parts[0] == "settings" {
@@ -1288,6 +1306,18 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 	rec.FocusedFile = &focused
 	s.setNextPreloadLocked(rec, fileIdx, req.NextFileIndex)
 	if rec.DirectPlay {
+		// Reconnect a resting session while the player launches, not on its
+		// first read.
+		rec.playbackIdle.touch(time.Now())
+		rec.playbackIdle.dropReady.Store(false)
+		s.wakeDirectPlayFromRead(rec)
+	}
+	if st := s.directStreamStorage(rec); st != nil {
+		// Validate the episode's saved metadata before its startup hints
+		// would fetch the same pieces from peers.
+		st.setStartupFile(fileIdx)
+	}
+	if rec.DirectPlay {
 		rec.FileOnly = false
 	} else {
 		rec.FileOnly = req.FileOnly
@@ -1310,6 +1340,16 @@ func (s *EngineServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 		Length:    targetFile.Length(),
 		StreamURL: streamURL,
 	})
+}
+
+// refreshStartupHints reapplies startup hints from the storage writer. It
+// takes rec.mu, so it must run on its own goroutine.
+func (s *EngineServer) refreshStartupHints(rec *TorrentRecord) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if !rec.removed {
+		s.applyVideoStartupHints(rec)
+	}
 }
 
 func (s *EngineServer) handleFileOnly(w http.ResponseWriter, r *http.Request) {
@@ -1400,6 +1440,8 @@ func (s *EngineServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 				t.Piece(index).UpdateCompletion()
 			}
 		}
+		// Each written batch of video metadata moves the background fetch on.
+		st.onStartupSaved = func() { go s.refreshStartupHints(rec) }
 		st.mu.Unlock()
 	}
 	if err := st.AttachDescriptorsMode(req.Descriptors, req.Selected, direct); err != nil {
@@ -1551,6 +1593,19 @@ func (s *EngineServer) handlePauseResume(w http.ResponseWriter, r *http.Request,
 	s.notifyChange()
 }
 
+func (s *EngineServer) handleForgetPeers(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		InfoHash string `json:"infoHash"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.InfoHash == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	// Delete forgets peers even after Drop already removed the live torrent.
+	s.forgetPeerHints(req.InfoHash)
+	writeJSON(w, http.StatusOK, OkResponse{Ok: true})
+}
+
 func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 	var req IdRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1583,7 +1638,10 @@ func (s *EngineServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.closePreviewFor(rec)
 	s.closePlaybackReaders(rec.Torrent)
-	s.forgetPeerHints(rec.InfoHash)
+	if destroy {
+		// A Drop keeps the library entry; its peers reconnect on the next Play.
+		s.forgetPeerHints(rec.InfoHash)
+	}
 	s.deleteResumeWindow(rec.InfoHash)
 	rec.Torrent.Drop()
 	_ = s.storage.DeleteCheckpoint(rec.InfoHash)
@@ -1630,7 +1688,7 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 	if rec.DirectPlay {
 		streamStorage = s.storage.GetStorage(rec.InfoHash)
 	}
-	bucketList, err := pieceBuckets(t, rec.Selected, maxBuckets, streamStorage)
+	bucketList, err := pieceBuckets(t, rec.Selected, maxBuckets, streamStorage, len(s.playbackWindows(t)) > 0)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1648,17 +1706,8 @@ func (s *EngineServer) handlePieces(w http.ResponseWriter, r *http.Request, id s
 		Buckets:         bucketList,
 		GhostProMode:    s.isGhostProEnabled(),
 	}
-	if resp.GhostProMode && !rec.Paused && !rec.removed && !rec.Checking && rec.Error == nil && s.payloadTransfersAllowed.Load() {
-		for _, window := range s.playbackWindows(t) {
-			for _, tier := range []struct {
-				span  pieceSpan
-				label string
-			}{{window.urgent, "U"}, {window.readahead, "R"}, {window.lookahead, "L"}} {
-				if !tier.span.empty() {
-					resp.Playback = append(resp.Playback, PlaybackPieceRange{tier.span.begin, tier.span.end - 1, tier.label})
-				}
-			}
-		}
+	if !rec.Paused && !rec.removed && !rec.Checking && rec.Error == nil && s.payloadTransfersAllowed.Load() {
+		s.addPlaybackTelemetry(&resp, t, streamStorage)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -1736,6 +1785,9 @@ func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request)
 		GhostMode: ghost, GhostProMode: ghostPro, DialRatePerSec: dial, EffectiveDialRatePerSec: effectiveDial,
 		PeerExploration: s.peerExploration.Load(),
 		ClaudeSeekMode:  s.isClaudeSeekEnabled(),
+		HedgeRequests:   s.hedgeRequests.Load(),
+		SlowPeerYield:   s.slowPeerYield.Load(),
+		DropChokers:     s.dropChokers.Load(),
 		IdleDropMinutes: int(s.idleDropMinutes.Load()),
 		SeekStats:       s.seekStats.snapshot(),
 		RamCacheBytes:   s.storage.CacheLimit(),
@@ -1777,13 +1829,40 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	if req.RamCacheBytes != nil && (*req.RamCacheBytes < DefaultMaxCacheBytes || *req.RamCacheBytes > MaxRamCacheBytes) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "RAM cache must be between 64 and 1024 MiB"})
+	if req.RamCacheBytes != nil && (*req.RamCacheBytes < MinRamCacheBytes || *req.RamCacheBytes > MaxRamCacheBytes) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "RAM cache must be between 16 and 1024 MiB"})
 		return
 	}
 	if req.MaxPeers != 0 && (req.MaxPeers < 8 || req.MaxPeers > 500) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "maxPeers must be between 8 and 500"})
 		return
+	}
+	if req.SeekLogPath != nil {
+		s.seekLog.setPath(*req.SeekLogPath, req.SeekLogTag)
+	}
+	if req.SeekExperiment != nil {
+		s.seekExperiment.Store(*req.SeekExperiment)
+		if !*req.SeekExperiment {
+			torrent.SetSeekTuning(s.baseSeekTuning())
+		}
+	}
+	if req.HedgeRequests != nil {
+		if s.hedgeRequests.Swap(*req.HedgeRequests) != *req.HedgeRequests {
+			// Seek times on screen then compare the two settings.
+			s.seekStats.reset()
+		}
+		torrent.SetSeekTuning(s.baseSeekTuning())
+	}
+	if req.SlowPeerYield != nil {
+		if s.slowPeerYield.Swap(*req.SlowPeerYield) != *req.SlowPeerYield {
+			s.seekStats.reset()
+		}
+		torrent.SetSeekTuning(s.baseSeekTuning())
+	}
+	if req.DropChokers != nil {
+		if s.dropChokers.Swap(*req.DropChokers) != *req.DropChokers {
+			s.seekStats.reset()
+		}
 	}
 	s.mu.Lock()
 	if req.RamCacheBytes != nil {
@@ -1921,6 +2000,7 @@ func (s *EngineServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 
 // Media Streaming handler
 func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	requested := time.Now()
 	// Parse /torrent/{id}/file/{index}
 	path := strings.Trim(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
@@ -1946,6 +2026,7 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.mu.RLock()
 	configured := rec.Configured
+	directPlay := rec.DirectPlay
 	selectedFiles := append([]int(nil), rec.Selected...)
 	rec.mu.RUnlock()
 
@@ -1984,11 +2065,21 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload transfers are disabled in settings", http.StatusConflict)
 		return
 	}
-	playback, err := s.OpenPlayback(id, fileIdx)
+	start := rangeStart(r.Header.Get("Range"))
+	inRAM := false
+	if pieceLen := t.Info().PieceLength; pieceLen > 0 && max(start, 0) < file.Length() {
+		inRAM = t.Piece(int((file.Offset() + max(start, 0)) / pieceLen)).State().Complete
+	}
+	variant, unverified := s.pickSeekVariant(start)
+	rescuesBefore := t.WebtorRescues()
+	playback, err := s.openPlaybackAt(id, fileIdx, start)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	playback.mu.Lock()
+	playback.unverifiedReads = unverified
+	playback.mu.Unlock()
 	defer playback.Close()
 	stopCancel := context.AfterFunc(r.Context(), playback.Close)
 	defer stopCancel()
@@ -2006,7 +2097,23 @@ func (s *EngineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "*")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 
-	http.ServeContent(w, r, filepath.Base(file.DisplayPath()), time.Time{}, reader)
+	meter := &streamMeter{r: reader, start: requested}
+	http.ServeContent(w, r, filepath.Base(file.DisplayPath()), time.Time{}, meter)
+	kind := "range"
+	if start < 0 {
+		kind = "open"
+	}
+	peers, unchoked := t.WebtorPeerCounts()
+	s.mu.RLock()
+	down := s.downloadSpeed
+	s.mu.RUnlock()
+	s.seekLog.write(seekRecord{
+		at: requested, torrent: rec.InfoHash[:min(8, len(rec.InfoHash))], file: fileIdx, kind: kind,
+		offset: max(start, 0), length: file.Length(), first: meter.first, m1: meter.m1, m2: meter.m2,
+		total: time.Since(requested), bytes: meter.n, inRAM: inRAM, peers: peers, unchoked: unchoked, downBytesSec: down,
+		variant: variant, rescues: t.WebtorRescues() - rescuesBefore,
+		directPlay: directPlay, pieceBytes: t.Info().PieceLength,
+	})
 }
 
 func fileIsVerified(t *torrent.Torrent, file *torrent.File) bool {
@@ -2033,4 +2140,22 @@ func urlUnescape(s string) string {
 		return s
 	}
 	return u
+}
+
+// rangeStart is the first byte of a single "bytes=N-" or "bytes=N-M" range,
+// or -1 when the header asks for something else.
+func rangeStart(header string) int64 {
+	spec, ok := strings.CutPrefix(strings.TrimSpace(header), "bytes=")
+	if !ok || strings.Contains(spec, ",") {
+		return -1
+	}
+	first, _, ok := strings.Cut(spec, "-")
+	if !ok || first == "" {
+		return -1
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(first), 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
 }

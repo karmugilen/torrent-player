@@ -19,7 +19,10 @@ type rawPieceBucket struct {
 // class only: verified (1) wins over receiving (2). Adjacent equal classes are
 // merged so priority-only splits from PieceStateRuns do not survive. The output
 // cap stays small so it is not sized to the fat anacrolix run list.
-func compressPieceRuns(states []torrent.PieceStateRun, total int) ([]pieceRun, error) {
+// While a video plays, a partial piece counts as receiving only if playback
+// wants it now (Next or above); a part-filled piece left at an earlier seek
+// spot is not being fetched.
+func compressPieceRuns(states []torrent.PieceStateRun, total int, playing bool) ([]pieceRun, error) {
 	if total < 0 {
 		return nil, fmt.Errorf("invalid piece run")
 	}
@@ -41,7 +44,7 @@ func compressPieceRuns(states []torrent.PieceStateRun, total int) ([]pieceRun, e
 		flags := uint32(0)
 		if state.Complete {
 			flags = 1
-		} else if state.Partial || state.Checking || state.Hashing {
+		} else if state.Checking || state.Hashing || (state.Partial && (!playing || state.Priority >= torrent.PiecePriorityNext)) {
 			flags = 2
 		}
 		n := uint32(length)
@@ -97,7 +100,9 @@ func (st *DocumentTorrentStorage) streamPieceRuns(total int) ([]pieceRun, error)
 		if !st.streamLost[index] {
 			if st.completed[index] {
 				flags = 1
-			} else if len(st.streamRanges[index]) > 0 {
+			} else if len(st.streamRanges[index]) > 0 && st.streamDemand[index] {
+				// Receiving means fetched now. A part-filled piece left at
+				// an earlier seek spot is not.
 				flags = 2
 			}
 		}
@@ -109,13 +114,13 @@ func (st *DocumentTorrentStorage) streamPieceRuns(total int) ([]pieceRun, error)
 	return runs, nil
 }
 
-func pieceBuckets(t *torrent.Torrent, selected []int, maxBuckets int, streamStorage *DocumentTorrentStorage) ([]PieceBucket, error) {
+func pieceBuckets(t *torrent.Torrent, selected []int, maxBuckets int, streamStorage *DocumentTorrentStorage, playing bool) ([]PieceBucket, error) {
 	var runs []pieceRun
 	var err error
 	if streamStorage != nil {
 		runs, err = streamStorage.streamPieceRuns(t.NumPieces())
 	} else {
-		runs, err = compressPieceRuns(t.PieceStateRuns(), t.NumPieces())
+		runs, err = compressPieceRuns(t.PieceStateRuns(), t.NumPieces(), playing)
 	}
 	if err != nil {
 		return nil, err

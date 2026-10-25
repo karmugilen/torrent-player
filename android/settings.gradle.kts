@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "webtor"
-include(":core", ":app")
+include(":core", ":app", ":seekprobe")

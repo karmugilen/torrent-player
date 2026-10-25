@@ -41,6 +41,17 @@ private class FakeEngineTransport : EngineTransport {
 }
 
 class EngineClientTest {
+    @Test
+    fun forgetPeerHintsPostsTheInfoHash() {
+        val client = EngineClient { method, path, body ->
+            assertEquals("POST", method)
+            assertEquals("/forget-peers", path)
+            assertEquals("abcd", JSONObject(body!!).getString("infoHash"))
+            EngineResponse(200, """{"ok":true}""")
+        }
+        client.forgetPeerHints("abcd")
+    }
+
     @Test fun previewStateUsesNativePlaybackAndCacheSnapshot() {
         val client = EngineClient { method, path, _ ->
             assertEquals("GET", method)
@@ -113,6 +124,16 @@ class EngineClientTest {
         transport.enqueue(TestResponse().setBody("""{"idleDropMinutes":30}"""))
         assertEquals(30, client.setIdleDropMinutes(30))
         assertEquals("{\"idleDropMinutes\":30}", transport.takeRequest().body.readUtf8())
+    }
+
+    @Test
+    fun seekLogSettingSendsPathAndBuild() {
+        transport.enqueue(TestResponse().setBody("""{}"""))
+        client.setSeekLog("/sdcard/Android/data/webtor.app/files/seek-log.csv", "2.1.45", experiment = true)
+        val body = JSONObject(transport.takeRequest().body.readUtf8())
+        assertEquals("/sdcard/Android/data/webtor.app/files/seek-log.csv", body.getString("seekLogPath"))
+        assertEquals("2.1.45", body.getString("seekLogTag"))
+        assertTrue(body.getBoolean("seekExperiment"))
     }
 
     private lateinit var transport: FakeEngineTransport
@@ -485,6 +506,30 @@ class EngineClientTest {
         val request = transport.takeRequest()
         assertEquals("/settings", request.path)
         assertFalse(JSONObject(request.body.readUtf8()).getBoolean("payloadTransfersAllowed"))
+    }
+
+    @Test
+    fun piecesParsesEveryPlaybackTierPlayheadsAndDetail() {
+        transport.enqueue(
+            TestResponse().setBody(
+                """{"id":"abc","totalPieces":40,"pieceLength":1048576,"buckets":[],
+                    "playback":[{"start":8,"end":9,"priority":"B"},{"start":10,"end":11,"priority":"U"},
+                      {"start":12,"end":15,"priority":"N"},{"start":16,"end":30,"priority":"R"},
+                      {"start":31,"end":35,"priority":"L"},{"start":36,"end":36,"priority":"X"}],
+                    "playheads":[10],
+                    "playbackDetail":{"start":8,"states":"vvvrmmsv","playhead":10}}"""
+            )
+        )
+        val t = client.pieces("abc")
+        assertEquals(listOf("B", "U", "N", "R", "L"), t.playback.map { it.priority })
+        assertEquals(listOf(10), t.playheads)
+        assertEquals(PlaybackDetail(8, "vvvrmmsv", 10), t.playbackDetail)
+    }
+
+    @Test
+    fun piecesIgnoresAMalformedPlaybackDetail() {
+        transport.enqueue(TestResponse().setBody("""{"id":"abc","buckets":[],"playbackDetail":{"start":2,"states":"vqz"}}"""))
+        assertNull(client.pieces("abc").playbackDetail)
     }
 
     @Test

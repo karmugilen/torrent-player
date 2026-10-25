@@ -288,6 +288,10 @@ data class PieceColors(
     val urgent: Color,
     val readahead: Color,
     val lookahead: Color,
+    /** Ghost Pro's fast tier, just below urgent. */
+    val fast: Color = Color(0xFFF48FB1),
+    /** Rewind cushion behind the playhead. */
+    val rewind: Color = Color(0xFF90A4AE),
 )
 
 val DefaultPieceColors = PieceColors(
@@ -308,6 +312,8 @@ fun pieceColors(theme: AppTheme, dark: Boolean, dynamicColors: Boolean): PieceCo
         urgent = Color(0xFFF37F94), // Eosine Pink
         readahead = Color(0xFF78CDD0), // Calamine Blue
         lookahead = Color(0xFFB984AF), // Lilac
+        fast = Color(0xFFF7B3A1), // Light Salmon
+        rewind = Color(0xFFA9B8B2), // Sage Gray
     )
     else -> PieceColors(
         done = Color(0xFF112F2C), // Deep Slate Green
@@ -316,6 +322,8 @@ fun pieceColors(theme: AppTheme, dark: Boolean, dynamicColors: Boolean): PieceCo
         urgent = Color(0xFFDA525D), // Eugenia Red
         readahead = Color(0xFF00939B), // Peacock Blue
         lookahead = Color(0xFFA36AA5), // Aconite Violet
+        fast = Color(0xFFC0566F), // Rose
+        rewind = Color(0xFF5E7470), // Slate Gray
     )
 }
 

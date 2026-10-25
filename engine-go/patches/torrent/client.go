@@ -1801,6 +1801,8 @@ func (cl *Client) newConnection(nc net.Conn, opts newConnectionOpts) (c *PeerCon
 		PeerMaxRequests: 250,
 		connString:      opts.connString,
 		conn:            nc,
+		// Connections start choked.
+		webtorChokedSince: time.Now(),
 	}
 	c.initRequestState()
 	// TODO: Need to be much more explicit about this, including allowing non-IP bannable addresses.

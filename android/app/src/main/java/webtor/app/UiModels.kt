@@ -55,7 +55,7 @@ data class UiState(
     val dynamicColors: Boolean = true,
     val reducedEffects: Boolean = false,
     val directPlayDefault: Boolean = false,
-    val playbackMethod: PlaybackMethod = PlaybackMethod.CONTENT_URI,
+    val playbackMethod: PlaybackMethod = PlaybackMethod.HTTP,
     val diagnosticsPreview: String? = null,
     val networkPolicy: TransferNetworkPolicy = TransferNetworkPolicy.ANY,
     val networkAllowed: Boolean = true,
@@ -66,22 +66,31 @@ data class UiState(
     val storageFolderName: String = "Downloads/Webtor",
     val hasCustomFolder: Boolean = false,
     val storageAccessWarning: String? = null,
-    val playBoost: Boolean = false,
-    val adaptiveBuffer: Boolean = false,
+    val playBoost: Boolean = true,
+    // Built-in playback mode (no longer switches), chosen by the engine's
+    // simulated-swarm comparisons: Ghost Pro and optimized seek help; the
+    // burst-aware buffer made no measurable difference over adaptive.
+    val adaptiveBuffer: Boolean = true,
     val burstAwareBuffer: Boolean = false,
     val peerExploration: Boolean = false,
     val ghostMode: Boolean = false,
-    val ghostProMode: Boolean = false,
-    val claudeSeekMode: Boolean = false,
+    val ghostProMode: Boolean = true,
+    val claudeSeekMode: Boolean = true,
+    /** Experimental hedged requests for blocks stuck at the playhead. */
+    val hedgeRequests: Boolean = false,
+    /** Experimental: slow peers leave playback pieces to faster peers. */
+    val slowPeerYield: Boolean = false,
+    /** Experimental: drop peers that keep us choked. */
+    val dropChokers: Boolean = false,
     /** Minutes before an idle Direct Play session is dropped; 0 is off. */
     val idleDropMinutes: Int = 15,
     val seekStats: webtor.core.SeekStats? = null,
     val fileOnlyPlayback: Boolean = true,
     val downloadRateKiB: Int = 0,
     val fastPeerSearch: Boolean = false,
-    val pauseOnLowBattery: Boolean = false,
+    val pauseOnLowBattery: Boolean = true,
     val batteryPaused: Boolean = false,
-    val playNext: Boolean = false,
+    val playNext: Boolean = true,
     val preloadStart: Boolean = false,
     val listenPort: Int = 0,
 )

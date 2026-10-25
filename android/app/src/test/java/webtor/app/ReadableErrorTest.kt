@@ -27,4 +27,10 @@ class ReadableErrorTest {
         assertEquals(engineDown, readableError("Engine down"))
         assertEquals(engineDown, readableError("Native engine initialization failed"))
     }
+
+    @Test
+    fun pausedTorrentDataExplainsTheCause() {
+        val shown = readableError("HTTP 409: {\"error\":\"payload transfers are disabled in settings\"}")
+        assertTrue(shown, shown.startsWith("Torrent data is paused by low battery or the network setting."))
+    }
 }

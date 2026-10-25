@@ -169,7 +169,7 @@ func (rec *TorrentRecord) computeWantedPieces() map[int]bool {
 
 // Intersect each reader's published forward path with missing selected pieces.
 // Keep disjoint readers separate: a union bounding range would include gaps
-// between unrelated seeks. Metadata probes and lookbehind are not forward paths.
+// between unrelated seeks. Metadata probes are not forward paths.
 func contiguousWantedPieces(windows []playbackWindowState, wanted map[int]bool) map[int]bool {
 	pieces := make(map[int]bool)
 	for _, window := range windows {

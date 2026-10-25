@@ -6,6 +6,15 @@ import android.content.Context
 import android.content.Intent
 import android.widget.Toast
 
+/** Info hash of a library row, including one whose engine session was already dropped. */
+internal fun torrentInfoHash(entry: DownloadEntry): String? {
+    val statusHash = entry.status?.infoHash?.trim().orEmpty()
+    if (statusHash.isNotEmpty()) return statusHash
+    val key = entry.key.trim()
+    if (isLikelyInfoHash(key)) return key
+    return null
+}
+
 internal fun isLikelyInfoHash(value: String?): Boolean {
     if (value.isNullOrBlank()) return false
     val trimmed = value.trim()

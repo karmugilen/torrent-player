@@ -47,6 +47,13 @@ func (c *playbackPriorityCoordinator) prepareResume(file *torrent.File, offset *
 func (c *playbackPriorityCoordinator) holdReaderResume(p *playbackReader) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A player that seeks closes the old reader after opening the new one.
+	// Holding the old position then would keep fetching where it no longer is.
+	for r := range c.readers {
+		if r != p && r.file == p.file {
+			return
+		}
+	}
 	if c.resumeReader == p {
 		c.holdResumeLocked(p.file, torrent.PiecePriorityHigh)
 	}
@@ -160,4 +167,109 @@ func (s *EngineServer) persistVerifiedResumeWindow(rec *TorrentRecord, fileIndex
 		c.mu.Unlock()
 	}
 	s.saveResumeWindowDetailed(rec, fileIndex, file.DisplayPath(), file.Length(), pieceLen, aligned, length, buf, generation, clearGen)
+}
+
+// A player closes its stream on every seek. Saving the resume window each time
+// hashed and fsynced up to 4 MiB while holding cacheMu, which the next open
+// waits for, and wrote flash on every seek. The save now runs once seeking has
+// settled for resumePersistDelay; engine shutdown runs it at once.
+const resumePersistDelay = 2 * time.Second
+
+type pendingResumeSave struct {
+	timer     *time.Timer
+	rec       *TorrentRecord
+	fileIndex int
+	offset    int64
+}
+
+func (s *EngineServer) scheduleResumePersist(rec *TorrentRecord, fileIndex int, offset int64) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.resumeSaves == nil {
+		s.resumeSaves = make(map[string]*pendingResumeSave)
+	}
+	if old := s.resumeSaves[rec.InfoHash]; old != nil {
+		old.timer.Stop()
+	}
+	save := &pendingResumeSave{rec: rec, fileIndex: fileIndex, offset: offset}
+	save.timer = time.AfterFunc(resumePersistDelay, func() {
+		s.cacheMu.Lock()
+		current := s.resumeSaves[rec.InfoHash] == save
+		if current {
+			delete(s.resumeSaves, rec.InfoHash)
+		}
+		s.cacheMu.Unlock()
+		if current && !s.shuttingDown.Load() {
+			s.persistVerifiedResumeWindow(rec, fileIndex, offset)
+		}
+	})
+	s.resumeSaves[rec.InfoHash] = save
+}
+
+// flushResumeSaves runs every pending save now.
+func (s *EngineServer) flushResumeSaves() {
+	s.cacheMu.Lock()
+	pending := make([]*pendingResumeSave, 0, len(s.resumeSaves))
+	for hash, save := range s.resumeSaves {
+		if save.timer.Stop() {
+			pending = append(pending, save)
+		}
+		delete(s.resumeSaves, hash)
+	}
+	s.cacheMu.Unlock()
+	for _, save := range pending {
+		s.persistVerifiedResumeWindow(save.rec, save.fileIndex, save.offset)
+	}
+}
+
+// forgetResumeLocked drops the known window and any pending save of infoHash,
+// or of every torrent when infoHash is empty.
+func (s *EngineServer) forgetResumeLocked(infoHash string) {
+	for hash, save := range s.resumeSaves {
+		if infoHash == "" || hash == infoHash {
+			save.timer.Stop()
+			delete(s.resumeSaves, hash)
+		}
+	}
+	for hash := range s.resumeKnown {
+		if infoHash == "" || hash == infoHash {
+			delete(s.resumeKnown, hash)
+		}
+	}
+}
+
+func (s *EngineServer) rememberResumeLocked(meta resumeWindowMeta) {
+	if s.resumeKnown == nil {
+		s.resumeKnown = make(map[string]resumeWindowMeta)
+	}
+	s.resumeKnown[meta.InfoHash] = meta
+}
+
+// resumeWindowInRAM reports the known resume window of fileIndex when every
+// piece of it is already verified in storage.
+func (s *EngineServer) resumeWindowInRAM(rec *TorrentRecord, fileIndex int) (int64, bool) {
+	s.cacheMu.Lock()
+	meta, ok := s.resumeKnown[rec.InfoHash]
+	s.cacheMu.Unlock()
+	files := rec.Torrent.Files()
+	if !ok || meta.FileIndex != fileIndex || fileIndex < 0 || fileIndex >= len(files) || !meta.Expires.After(time.Now()) {
+		return 0, false
+	}
+	file := files[fileIndex]
+	if meta.Offset < 0 || meta.Length <= 0 || meta.Offset+meta.Length > file.Length() {
+		return 0, false
+	}
+	st := s.storage.GetStorage(rec.InfoHash)
+	if st == nil {
+		return 0, false
+	}
+	begin, end := filePieceRange(file, meta.Offset, meta.Offset+meta.Length)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i := begin; i < end; i++ {
+		if !st.completed[i] {
+			return 0, false
+		}
+	}
+	return meta.Offset, true
 }

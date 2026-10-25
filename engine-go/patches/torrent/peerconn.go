@@ -55,6 +55,13 @@ type PeerConn struct {
 	// requests actually want. This could use a roaring.BSI if the memory use becomes noticeable.
 	validReceiveChunks map[RequestIndex]int
 	PeerMaxRequests    maxRequests // Maximum pending requests the peer allows.
+	// Webtor: round trip estimate for sizing the request pipeline, and the
+	// limit it gave at the last refill.
+	webtorRTT           rttEstimator
+	webtorPipelineLimit maxRequests
+	// When the peer last choked us (connections start choked); zero while
+	// unchoked. See WebtorDropChokers.
+	webtorChokedSince time.Time
 
 	// Move to PeerConn?
 	protocolLogger log.Logger
@@ -925,6 +932,7 @@ func (c *PeerConn) mainReadLoop() (err error) {
 				// only a single peer, our chunk balancing should smooth over this abuse.
 			}
 			c.peerChoking = true
+			c.webtorChokedSince = time.Now()
 			c.updateExpectingChunks()
 		case pp.Unchoke:
 			if !c.peerChoking {
@@ -934,6 +942,7 @@ func (c *PeerConn) mainReadLoop() (err error) {
 				break
 			}
 			c.peerChoking = false
+			c.webtorChokedSince = time.Time{}
 			preservedCount := 0
 			c.requestState.Requests.Iterate(func(x RequestIndex) bool {
 				if !c.peerAllowedFast.Contains(c.t.pieceIndexOfRequestIndex(x)) {
@@ -1009,7 +1018,11 @@ func (c *PeerConn) mainReadLoop() (err error) {
 			err = c.peerSentHaveNone()
 		case pp.Reject:
 			req := newRequestFromMessage(&msg)
-			if !c.remoteRejectedRequest(c.t.requestIndexFromRequest(req)) {
+			if r := c.t.requestIndexFromRequest(req); c.validReceiveChunks[r] > 0 && !c.requestState.Requests.Contains(r) &&
+				!c.requestState.Cancelled.Contains(r) && c.webtorHedgeAnswered(r) {
+				// Our duplicate request (Hedge), not one the library tracks.
+				c.decExpectedChunkReceive(r)
+			} else if !c.remoteRejectedRequest(r) {
 				err = fmt.Errorf("received invalid reject for request %v", req)
 				c.protocolLogger.Levelf(log.Debug, "%v", err)
 			}
@@ -1576,7 +1589,11 @@ func (me *PeerConn) peerPtr() *Peer {
 
 // The actual value to use as the maximum outbound requests.
 func (cn *PeerConn) nominalMaxRequests() maxRequests {
-	return max(1, min(cn.PeerMaxRequests, cn.peakRequests*2, maxLocalToRemoteRequests))
+	n := max(1, min(cn.PeerMaxRequests, cn.peakRequests*2, maxLocalToRemoteRequests))
+	if limit := cn.playbackPipelineLimit(); limit > 0 {
+		n = min(n, limit)
+	}
+	return n
 }
 
 // Set the Peer loggers. This is given Client loggers, and later Torrent loggers when the Torrent is
@@ -1769,6 +1786,10 @@ func (cn *PeerConn) request(r RequestIndex) (more bool, err error) {
 	if maxRequests(cn.requestState.Requests.GetCardinality()) >= cn.nominalMaxRequests() {
 		return true, errors.New("too many outstanding requests")
 	}
+	if cn.requestState.Requests.IsEmpty() {
+		// Nothing queued ahead of it: its block measures the round trip.
+		cn.webtorRTT.sent(r)
+	}
 	cn.requestState.Requests.Add(r)
 	if cn.validReceiveChunks == nil {
 		cn.validReceiveChunks = make(map[RequestIndex]int)
@@ -1893,10 +1914,18 @@ func (p *PeerConn) uncancelledRequests() uint64 {
 }
 
 func (p *PeerConn) isLowOnRequests() bool {
+	if f := currentSeekTuning().RefillAt; f > 0 && p.t.requestFocus.Load() != 0 {
+		return p.requestState.Requests.GetCardinality() <= uint64(float64(p.nominalMaxRequests())*f)
+	}
+	if currentSeekTuning().FullPipeline {
+		// Refill at half, so the pipeline never runs dry waiting for it.
+		return p.requestState.Requests.GetCardinality() <= uint64(p.nominalMaxRequests()/2)
+	}
 	return p.requestState.Requests.IsEmpty() && p.requestState.Cancelled.IsEmpty()
 }
 
 func (c *PeerConn) checkReceivedChunk(req RequestIndex, msg *pp.Message, ppReq Request) (intended bool, err error) {
+	c.webtorRTT.received(req)
 	if c.validReceiveChunks[req] <= 0 {
 		ChunksReceived.Add("unexpected", 1)
 		err = errors.New("received unexpected chunk")
@@ -1922,6 +1951,8 @@ func (c *PeerConn) checkReceivedChunk(req RequestIndex, msg *pp.Message, ppReq R
 			if c.isLowOnRequests() {
 				c.onNeedUpdateRequests("Peer.receiveChunk deleted request")
 			}
+		} else if c.webtorHedgeAnswered(req) {
+			intended = true
 		} else {
 			ChunksReceived.Add("unintended", 1)
 		}

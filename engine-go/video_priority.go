@@ -54,6 +54,15 @@ func (s *EngineServer) applyVideoStartupHints(rec *TorrentRecord) {
 			raiseSpan(demand, spanFromFile(f, length-tail, length), torrent.PiecePriorityNow)
 		}
 	}
+	if st := s.directStreamStorage(rec); st != nil {
+		// Save every selected video's metadata in the background, below
+		// playback and startup demand.
+		for _, p := range st.startupFetchPieces(s.openPlaybackReaders(t) > 0) {
+			if demand[p] < torrent.PiecePriorityNormal {
+				demand[p] = torrent.PiecePriorityNormal
+			}
+		}
+	}
 	raiseNextPreload(rec, demand)
 	c.setHints(demand)
 }

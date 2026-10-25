@@ -404,6 +404,7 @@ func (c *Peer) receiveChunk(msg *pp.Message) error {
 		}
 		p.cancel(req)
 	}
+	t.webtorCancelHedge(req, c)
 
 	err = func() error {
 		cl.unlock()

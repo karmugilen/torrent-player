@@ -17,6 +17,21 @@ func pieceStateRun(length int, complete, partial, checking, hashing bool) torren
 	return torrent.PieceStateRun{PieceState: state, Length: length}
 }
 
+func TestCompressPieceRunsCountsOnlyWantedPartialsWhilePlaying(t *testing.T) {
+	left := pieceStateRun(2, false, true, false, false)
+	left.Priority = torrent.PiecePriorityNormal
+	wanted := pieceStateRun(3, false, true, false, false)
+	wanted.Priority = torrent.PiecePriorityNext
+	got, err := compressPieceRuns([]torrent.PieceStateRun{left, wanted}, 5, true)
+	if err != nil || !reflect.DeepEqual(got, []pieceRun{{length: 2, flags: 0}, {length: 3, flags: 2}}) {
+		t.Fatalf("playing: %+v %v", got, err)
+	}
+	got, err = compressPieceRuns([]torrent.PieceStateRun{left, wanted}, 5, false)
+	if err != nil || !reflect.DeepEqual(got, []pieceRun{{length: 5, flags: 2}}) {
+		t.Fatalf("not playing: %+v %v", got, err)
+	}
+}
+
 func TestCompressPieceRuns(t *testing.T) {
 	high := pieceStateRun(4, true, false, false, false)
 	high.Priority = torrent.PiecePriorityNow
@@ -36,7 +51,7 @@ func TestCompressPieceRuns(t *testing.T) {
 		pieceStateRun(6, false, false, false, true),
 		pieceStateRun(7, false, false, false, false),
 	}
-	got, err := compressPieceRuns(states, 4+6+2+4+1+6+7)
+	got, err := compressPieceRuns(states, 4+6+2+4+1+6+7, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,13 +67,13 @@ func TestCompressPieceRuns(t *testing.T) {
 
 	onlyChecking, err := compressPieceRuns([]torrent.PieceStateRun{
 		pieceStateRun(3, false, false, true, false),
-	}, 3)
+	}, 3, false)
 	if err != nil || !reflect.DeepEqual(onlyChecking, []pieceRun{{length: 3, flags: 2}}) {
 		t.Fatalf("checking run: %+v %v", onlyChecking, err)
 	}
 	onlyHashing, err := compressPieceRuns([]torrent.PieceStateRun{
 		pieceStateRun(3, false, false, false, true),
-	}, 3)
+	}, 3, false)
 	if err != nil || !reflect.DeepEqual(onlyHashing, []pieceRun{{length: 3, flags: 2}}) {
 		t.Fatalf("hashing run: %+v %v", onlyHashing, err)
 	}
@@ -67,7 +82,7 @@ func TestCompressPieceRuns(t *testing.T) {
 	for i := range same {
 		same[i] = pieceStateRun(1, false, true, false, false)
 	}
-	merged, err := compressPieceRuns(same, len(same))
+	merged, err := compressPieceRuns(same, len(same), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,11 +93,11 @@ func TestCompressPieceRuns(t *testing.T) {
 		t.Fatalf("cap %d sized from the anacrolix run list", cap(merged))
 	}
 
-	empty, err := compressPieceRuns(nil, 0)
+	empty, err := compressPieceRuns(nil, 0, false)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty: %+v %v", empty, err)
 	}
-	short, err := compressPieceRuns([]torrent.PieceStateRun{pieceStateRun(2, true, false, false, false)}, 5)
+	short, err := compressPieceRuns([]torrent.PieceStateRun{pieceStateRun(2, true, false, false, false)}, 5, false)
 	if err == nil || short != nil {
 		t.Fatalf("short coverage must fail closed: %+v %v", short, err)
 	}
@@ -99,7 +114,7 @@ func TestCompressPieceRunsRejectsBadLengths(t *testing.T) {
 	}
 	totals := []int{3, 3, 3, 5, -1}
 	for i, states := range cases {
-		got, err := compressPieceRuns(states, totals[i])
+		got, err := compressPieceRuns(states, totals[i], false)
 		if err == nil || got != nil {
 			t.Fatalf("case %d: got %+v err %v", i, got, err)
 		}
@@ -112,17 +127,17 @@ func TestCompressPieceRunsUint32Limit(t *testing.T) {
 	}
 	limit := uint64(math.MaxUint32)
 	overflow := int(limit + 1)
-	got, err := compressPieceRuns([]torrent.PieceStateRun{{Length: overflow}}, overflow+10)
+	got, err := compressPieceRuns([]torrent.PieceStateRun{{Length: overflow}}, overflow+10, false)
 	if err == nil || got != nil {
 		t.Fatalf("length above MaxUint32 truncated to %+v err %v", got, err)
 	}
-	got, err = compressPieceRuns([]torrent.PieceStateRun{{Length: int(limit)}, {Length: 1}}, int(limit)+10)
+	got, err = compressPieceRuns([]torrent.PieceStateRun{{Length: int(limit)}, {Length: 1}}, int(limit)+10, false)
 	if err == nil || got != nil {
 		t.Fatalf("sum above MaxUint32: %+v %v", got, err)
 	}
 	exact := pieceStateRun(0, true, false, false, false)
 	exact.Length = int(limit)
-	got, err = compressPieceRuns([]torrent.PieceStateRun{exact}, int(limit))
+	got, err = compressPieceRuns([]torrent.PieceStateRun{exact}, int(limit), false)
 	if err != nil || !reflect.DeepEqual(got, []pieceRun{{length: math.MaxUint32, flags: 1}}) {
 		t.Fatalf("exact MaxUint32: %+v %v", got, err)
 	}

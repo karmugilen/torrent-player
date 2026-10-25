@@ -3,6 +3,12 @@ package webtor.app
 /** SharedPreferences keys from the removed download-slot queue; cleared on upgrade. */
 val LEGACY_DOWNLOAD_QUEUE_PREF_KEYS = listOf("downloadQueueMode", "downloadQueueOrder")
 
+/** Former playback experiment switches; playback now has one built-in mode. */
+val RETIRED_EXPERIMENT_PREF_KEYS = listOf(
+    "playBoost", "adaptiveBuffer", "burstAwareBuffer", "peerExploration", "ghostMode",
+    "ghostProMode", "claudeSeekMode", "fastPeerSearch", "preloadStart",
+)
+
 /**
  * Whether restore/configure should apply the saved selected-file intent as
  * native payload selection. User-paused torrents are never auto-started.

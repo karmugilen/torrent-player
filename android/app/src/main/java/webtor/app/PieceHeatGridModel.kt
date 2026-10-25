@@ -2,6 +2,7 @@ package webtor.app
 
 import webtor.core.PieceBucket
 import webtor.core.PieceTelemetry
+import webtor.core.PlaybackDetail
 import webtor.core.PlaybackPieceRange
 import kotlin.math.ceil
 import kotlin.math.max
@@ -356,8 +357,9 @@ data class PlaybackBand(
     val pieces: Int,
 )
 
-/** Disjoint bands retain true piece positions inside aggregated cells. U wins
- * over R, then L, including when multiple readers share the same bucket. */
+/** Disjoint bands retain true piece positions inside aggregated cells. Where
+ * readers overlap the higher tier wins (U, N, R, L, then B), without counting
+ * a piece twice. */
 fun playbackBands(bucket: NormalizedPieceBucket, ranges: List<PlaybackPieceRange>): List<PlaybackBand> {
     if (bucket.excludedOnly || bucket.total <= 0) return emptyList()
     val start = bucket.start.toLong()
@@ -378,8 +380,98 @@ fun playbackBands(bucket: NormalizedPieceBucket, ranges: List<PlaybackPieceRange
 }
 
 fun playbackRank(priority: String): Int = when (priority) {
-    "U" -> 3
-    "R" -> 2
-    "L" -> 1
+    "U" -> 5
+    "N" -> 4
+    "R" -> 3
+    "L" -> 2
+    "B" -> 1
     else -> 0
 }
+
+/**
+ * The tier covering most of a cell's pieces; ties go to the higher tier. One
+ * urgent piece among 64 no longer paints the whole cell urgent.
+ */
+fun dominantPlaybackTier(bands: List<PlaybackBand>): String? =
+    bands.groupBy { it.priority }
+        .mapValues { (_, tier) -> tier.sumOf { it.pieces } }
+        .maxWithOrNull(compareBy<Map.Entry<String, Int>> { it.value }.thenBy { playbackRank(it.key) })
+        ?.key
+
+/** Highest tier containing piece [index], or null outside every window. */
+fun playbackTierAt(index: Int, ranges: List<PlaybackPieceRange>): String? =
+    ranges.filter { index in it.start..it.end }.maxByOrNull { playbackRank(it.priority) }?.priority
+
+/** One tile of the playback buffer: a piece, or a few when the window is long. */
+data class PlaybackTile(
+    val start: Int,
+    val end: Int,
+    val tier: String?,
+    val verified: Int,
+    val saved: Int,
+    val receiving: Int,
+    val total: Int,
+    val playhead: Boolean,
+) {
+    val ready: Int get() = verified + saved
+    val done: Boolean get() = total > 0 && ready >= total
+    val readyFraction: Float get() = if (total <= 0) 0f else ready.toFloat() / total
+    /** Saved on storage only: the start and end of a Direct Play video. */
+    val savedOnly: Boolean get() = done && saved > 0 && verified == 0
+}
+
+data class PlaybackTierCount(val tier: String, val ready: Int, val total: Int)
+
+data class PlaybackBufferModel(
+    val tiles: List<PlaybackTile>,
+    val piecesPerTile: Int,
+    /** Pieces ready without a gap from the playhead forward, and behind it. */
+    val readyAhead: Int,
+    val readyBehind: Int,
+    val tiers: List<PlaybackTierCount>,
+)
+
+/**
+ * The playing window at true size: one tile per piece, grouped evenly only
+ * when the window is longer than [maxTiles]. Each tile takes the tier covering
+ * most of its pieces.
+ */
+fun playbackBufferModel(
+    detail: PlaybackDetail,
+    ranges: List<PlaybackPieceRange>,
+    maxTiles: Int = MAX_PLAYBACK_TILES,
+): PlaybackBufferModel {
+    val states = detail.states
+    val tiers = Array(states.length) { playbackTierAt(detail.start + it, ranges) }
+    val ready = { i: Int -> states[i] == 'v' || states[i] == 's' }
+    val head = detail.playhead - detail.start
+    var ahead = 0
+    if (head in states.indices) while (head + ahead < states.length && ready(head + ahead)) ahead++
+    var behind = 0
+    while (head - behind - 1 in states.indices && ready(head - behind - 1)) behind++
+
+    val per = maxOf(1, ceil(states.length / maxTiles.coerceAtLeast(1).toDouble()).toInt())
+    val tiles = (states.indices step per).map { first ->
+        val last = minOf(states.length, first + per) - 1
+        val group = first..last
+        val tier = group.mapNotNull { tiers[it] }.groupingBy { it }.eachCount()
+            .maxWithOrNull(compareBy<Map.Entry<String, Int>> { it.value }.thenBy { playbackRank(it.key) })?.key
+        PlaybackTile(
+            start = detail.start + first,
+            end = detail.start + last,
+            tier = tier,
+            verified = group.count { states[it] == 'v' },
+            saved = group.count { states[it] == 's' },
+            receiving = group.count { states[it] == 'r' },
+            total = group.count(),
+            playhead = head in group,
+        )
+    }
+    val counts = listOf("U", "N", "R", "L", "B").mapNotNull { tier ->
+        val pieces = states.indices.filter { tiers[it] == tier }
+        if (pieces.isEmpty()) null else PlaybackTierCount(tier, pieces.count(ready), pieces.size)
+    }
+    return PlaybackBufferModel(tiles, per, ahead, behind, counts)
+}
+
+const val MAX_PLAYBACK_TILES = 512

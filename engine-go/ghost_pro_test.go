@@ -93,11 +93,15 @@ func TestGhostProPlaybackStartupSeekAndScaledWindows(t *testing.T) {
 				p.lookahead != spanFromFile(p.file, offset+tc.forward, offset+tc.forward+tc.lookahead) {
 				t.Fatalf("scaled windows: %+v", p.appliedWindow)
 			}
+			// Only the pieces holding the playhead's 2 MiB are Now; every
+			// block after them is Next, fetched in order.
+			nowEnd := min(p.urgent.end, p.urgent.begin+int((playbackUrgentBytes+tc.pieceLen-1)/tc.pieceLen)+urgentNowExtraPieces)
 			for _, tier := range []struct {
 				span     pieceSpan
 				priority torrent.PiecePriority
 			}{
-				{p.urgent, torrent.PiecePriorityNow}, {p.readahead, torrent.PiecePriorityReadahead}, {p.lookahead, torrent.PiecePriorityHigh},
+				{pieceSpan{p.urgent.begin, nowEnd}, torrent.PiecePriorityNow}, {pieceSpan{nowEnd, p.urgent.end}, torrent.PiecePriorityNext},
+				{p.readahead, torrent.PiecePriorityNext}, {p.lookahead, torrent.PiecePriorityNext},
 			} {
 				for i := tier.span.begin; i < tier.span.end; i++ {
 					if got := rawPiecePriority(rec.Torrent.Piece(i)); got != tier.priority {
@@ -120,6 +124,10 @@ func TestGhostProPlaybackStartupSeekAndScaledWindows(t *testing.T) {
 
 func TestGhostProInstantPlayKeepsAllTiersWithinRAMAllowance(t *testing.T) {
 	s, rec := ghostProPlaybackFixture(t, 1<<20, 256, true)
+	const cachePieces = 64 // 64 MiB cache of 1 MiB pieces
+	span := func(p *playbackReader) int {
+		return p.lookahead.end - p.urgent.begin
+	}
 	readers := make([]*playbackReader, 0, 4)
 	for i := 0; i < 4; i++ {
 		p, err := s.OpenPlayback(rec.ID, 0)
@@ -127,21 +135,139 @@ func TestGhostProInstantPlayKeepsAllTiersWithinRAMAllowance(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer p.Close()
-		p.testApplyOffset(int64(32+i*40) << 20)
-		p.mu.Lock()
-		p.finishFocusLocked()
-		p.mu.Unlock()
-		if p.urgent.empty() || p.readahead.empty() || p.lookahead.empty() {
-			t.Fatalf("cache should hold all tiers: %+v", p.appliedWindow)
-		}
-		// Original cap: ((64MiB - 4MiB) / 4 readers) - 1 piece = 14MiB.
-		if p.lookahead.end-p.urgent.begin > 14 {
-			t.Fatalf("window exceeds per-reader RAM allowance: %+v", p.appliedWindow)
-		}
 		readers = append(readers, p)
+		// Every open reader recomputes its window on its next read.
+		for j, r := range readers {
+			r.testApplyOffset(int64(32+j*60) << 20)
+			r.mu.Lock()
+			r.finishFocusLocked()
+			r.mu.Unlock()
+		}
+		total := 0
+		for _, r := range readers {
+			if r.urgent.empty() || r.readahead.empty() || r.lookahead.empty() {
+				t.Fatalf("cache should hold all tiers: %+v", r.appliedWindow)
+			}
+			total += span(r)
+		}
+		if total > cachePieces {
+			t.Fatalf("%d readers need %d pieces of a %d-piece cache", len(readers), total, cachePieces)
+		}
+		// A lone reader fills the cache ahead of its playhead.
+		if len(readers) == 1 && total < cachePieces*90/100 {
+			t.Fatalf("single reader uses only %d of %d pieces: %+v", total, cachePieces, p.appliedWindow)
+		}
 	}
 	if len(s.playbackWindows(rec.Torrent)) != len(readers) {
 		t.Fatal("missing reader windows")
+	}
+}
+
+func windowPieces(p *playbackReader) int {
+	spans := []pieceSpan{p.urgent, p.readahead, p.lookahead}
+	begin, end := 0, 0
+	for _, span := range spans {
+		if span.empty() {
+			continue
+		}
+		if begin == end || span.begin < begin {
+			begin = span.begin
+		}
+		if span.end > end {
+			end = span.end
+		}
+	}
+	return end - begin
+}
+
+// Short jumps stay inside the RAM window. A jump to another part of the file
+// moves that window, and a second viewer shares the cache with the one already playing.
+func TestDirectPlaySeekIsSmoothForwardBackwardAndMiddle(t *testing.T) {
+	s, rec := ghostProPlaybackFixture(t, 1<<20, 256, true)
+	st := s.storage.GetStorage(rec.InfoHash)
+	p, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	const piece = int64(1 << 20)
+	middle := 128 * piece
+	p.testApplyOffset(middle)
+	p.mu.Lock()
+	p.finishFocusLocked()
+	p.mu.Unlock()
+	st.mu.Lock()
+	behind := st.streamDemand[int((middle-1)/piece)]
+	st.mu.Unlock()
+	if behind || p.urgent.begin != int(middle/piece) {
+		t.Fatalf("window must start at the playhead with nothing behind it: %+v", p.appliedWindow)
+	}
+	p.testApplyOffset(middle - piece)
+	p.mu.Lock()
+	p.finishFocusLocked()
+	p.mu.Unlock()
+	if !p.urgent.contains(int((middle - piece) / piece)) {
+		t.Fatalf("one-piece rewind did not move the playhead: %+v", p.urgent)
+	}
+	far := middle + 80*piece
+	p.testApplyOffset(far)
+	p.mu.Lock()
+	p.finishFocusLocked()
+	p.mu.Unlock()
+	if p.urgent.contains(int(middle/piece)) || !p.urgent.contains(int(far/piece)) {
+		t.Fatalf("jump did not move the playhead: %+v", p.urgent)
+	}
+
+	alone := windowPieces(p)
+	other, err := s.OpenPlayback(rec.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	other.testApplyOffset(40 * piece)
+	other.mu.Lock()
+	other.finishFocusLocked()
+	other.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		total := windowPieces(p) + windowPieces(other)
+		if total <= 64 && windowPieces(p) < alone && windowPieces(p) > 0 && windowPieces(other) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("two viewers pinned %d pieces (playing %d, second %d) of 64", total, windowPieces(p), windowPieces(other))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDirectPlayLargePiecesStayInsideTheCache(t *testing.T) {
+	s, rec := ghostProPlaybackFixture(t, 16<<20, 16, true)
+	open := func(offset int64) *playbackReader {
+		t.Helper()
+		p, err := s.OpenPlayback(rec.ID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { p.Close() })
+		p.testApplyOffset(offset)
+		p.mu.Lock()
+		p.finishFocusLocked()
+		p.mu.Unlock()
+		return p
+	}
+	first := open(16<<20 + 1)
+	second := open(16<<20 + 1)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		total := windowPieces(first) + windowPieces(second)
+		if total <= 4 && total > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("16 MiB pieces pinned %d of 4 cache pieces", total)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -188,10 +314,11 @@ func TestGhostProPlaybackTelemetryMovesClearsAndToggles(t *testing.T) {
 		return response
 	}
 	response := read()
-	if !response.GhostProMode || len(response.Playback) != 3 {
+	if !response.GhostProMode || len(response.Playback) != 2 {
 		t.Fatalf("missing tier telemetry: %+v", response.Playback)
 	}
-	for i, want := range []PlaybackPieceRange{{32, 47, "U"}, {48, 95, "R"}, {96, 127, "L"}} {
+	// Only the playhead's 2 MiB is this block (U); every block after it is N.
+	for i, want := range []PlaybackPieceRange{{32, 33, "U"}, {34, 127, "N"}} {
 		if response.Playback[i] != want {
 			t.Fatalf("range %d: %+v want %+v", i, response.Playback[i], want)
 		}
@@ -199,8 +326,13 @@ func TestGhostProPlaybackTelemetryMovesClearsAndToggles(t *testing.T) {
 	if code, body := s.DispatchControl("POST", "/settings", `{"ghostProMode":false}`); code != 200 {
 		t.Fatalf("disable: %d %s", code, body)
 	}
-	if response := read(); response.GhostProMode || len(response.Playback) != 0 || !p.lookahead.empty() || p.urgent != (pieceSpan{32, 34}) {
+	// Without Ghost Pro the normal, shorter window is still shown.
+	response = read()
+	if response.GhostProMode || !p.lookahead.empty() || p.urgent != (pieceSpan{32, 34}) {
 		t.Fatal("disable did not restore normal window")
+	}
+	if len(response.Playback) != 2 || response.Playback[0] != (PlaybackPieceRange{32, 33, "U"}) || response.Playback[1].End >= 127 {
+		t.Fatalf("normal window telemetry: %+v", response.Playback)
 	}
 	if code, body := s.DispatchControl("POST", "/settings", `{"ghostProMode":true}`); code != 200 {
 		t.Fatalf("enable: %d %s", code, body)
@@ -218,7 +350,7 @@ func TestGhostProPlaybackTelemetryMovesClearsAndToggles(t *testing.T) {
 
 func TestContiguousWantedPiecesExcludesReaderGapsAndCompletedPieces(t *testing.T) {
 	windows := []playbackWindowState{
-		{urgent: pieceSpan{10, 12}, readahead: pieceSpan{12, 14}, lookahead: pieceSpan{14, 16}, lookbehind: pieceSpan{8, 10}},
+		{urgent: pieceSpan{10, 12}, readahead: pieceSpan{12, 14}, lookahead: pieceSpan{14, 16}},
 		{urgent: pieceSpan{100, 102}},
 	}
 	wanted := map[int]bool{8: true, 10: true, 11: true, 13: true, 15: true, 50: true, 100: true, 101: true}

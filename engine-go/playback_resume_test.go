@@ -50,7 +50,7 @@ func TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes(t *testing.T) {
 				t.Fatalf("header probe replaced resume: %d != %d", got, position)
 			}
 			reopened := open()
-			urgent, _, _, _, _, _, _ := reopened.testWindow()
+			urgent, _, _, _, _, _ := reopened.testWindow()
 			if urgent.begin != 10 {
 				t.Fatalf("reopen starts at piece %d", urgent.begin)
 			}
@@ -81,7 +81,7 @@ func TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes(t *testing.T) {
 				t.Fatalf("resume hint: %d %s", hintCode, hintResponse)
 			}
 			hinted := open()
-			urgent, _, _, _, _, _, _ = hinted.testWindow()
+			urgent, _, _, _, _, _ = hinted.testWindow()
 			if urgent.begin != 14 {
 				t.Fatal("saved-position prefetch hint was ignored")
 			}
@@ -101,7 +101,7 @@ func TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes(t *testing.T) {
 				t.Fatalf("restart: %d %s", code, response)
 			}
 			restart := open()
-			urgent, _, _, _, _, _, _ = restart.testWindow()
+			urgent, _, _, _, _, _ = restart.testWindow()
 			if urgent.begin != 0 {
 				t.Fatal("Play from start reused the old body position")
 			}
@@ -145,7 +145,8 @@ func TestOpenPlaybackReusesValidatedResumeWindow(t *testing.T) {
 
 	// Drop in-memory completion so only resume inject can warm playback.
 	st.mu.Lock()
-	st.cache, st.cacheDirty, st.cacheOrder, st.cacheBytes = make(map[int][]byte), make(map[int]bool), nil, 0
+	st.cache, st.cacheDirty, st.cacheBytes = make(map[int][]byte), make(map[int]bool), 0
+	st.cacheOrder.reset()
 	st.completed = make(map[int]bool)
 	st.streamWhole, st.streamRanges = make(map[int]bool), make(map[int][]streamByteRange)
 	st.mu.Unlock()

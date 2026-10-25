@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -133,6 +134,27 @@ func TestResumeWindowPersistsVerifiedBytesOnly(t *testing.T) {
 	}
 }
 
+func TestForgetPeersForADroppedTorrent(t *testing.T) {
+	s, rec, _, _ := configuredLargeVideo(t, 4)
+	s.rememberPeerHint(rec.InfoHash, torrent.PeerInfo{
+		Addr: &net.TCPAddr{IP: net.ParseIP("9.9.9.9"), Port: 6881}, Source: torrent.PeerSourceTracker,
+	}, false)
+	body := fmt.Sprintf(`{"id":%q,"destroyStore":false}`, rec.ID)
+	if code, response := s.DispatchControl("POST", "/remove", body); code != 200 {
+		t.Fatalf("drop: %d %s", code, response)
+	}
+	forget := fmt.Sprintf(`{"infoHash":%q}`, rec.InfoHash)
+	if code, response := s.DispatchControl("POST", "/forget-peers", forget); code != 200 {
+		t.Fatalf("forget: %d %s", code, response)
+	}
+	s.peerHintMu.Lock()
+	kept := len(s.peerHints[rec.InfoHash])
+	s.peerHintMu.Unlock()
+	if kept != 0 {
+		t.Fatalf("delete after drop kept %d peer hints", kept)
+	}
+}
+
 func TestForgetPeerHintsOnRemovePath(t *testing.T) {
 	dir := t.TempDir()
 	s := testEngineAt(t, dir)
@@ -230,5 +252,27 @@ func TestCacheClearRejectsUnknownCategory(t *testing.T) {
 	s := testEngineAt(t, dir)
 	if err := s.clearCacheCategories([]string{"nope"}); err == nil {
 		t.Fatal("expected invalid category error")
+	}
+}
+
+func TestDropKeepsPeerHintsAndDeleteForgetsThem(t *testing.T) {
+	for _, destroy := range []bool{false, true} {
+		s, rec, _, _ := configuredLargeVideo(t, 4)
+		s.rememberPeerHint(rec.InfoHash, torrent.PeerInfo{
+			Addr: &net.TCPAddr{IP: net.ParseIP("8.8.4.4"), Port: 6881},
+		}, false)
+		body := fmt.Sprintf(`{"id":%q,"destroyStore":%t}`, rec.ID, destroy)
+		if code, response := s.DispatchControl("POST", "/remove", body); code != 200 {
+			t.Fatalf("remove: %d %s", code, response)
+		}
+		s.peerHintMu.Lock()
+		kept := len(s.peerHints[rec.InfoHash])
+		s.peerHintMu.Unlock()
+		if destroy && kept != 0 {
+			t.Fatalf("delete kept %d peer hints", kept)
+		}
+		if !destroy && kept != 1 {
+			t.Fatalf("drop lost the peer hints the next Play reconnects to: %d", kept)
+		}
 	}
 }

@@ -134,6 +134,7 @@ func initializeAndroidEngine(downloadDir string, maxPeers int) int {
 	if maxPeers <= 0 {
 		maxPeers = 55
 	}
+	memoryLimitManaged.Store(true)
 	server, err := NewEngineServer(0, downloadDir, maxPeers)
 	if err != nil {
 		androidLogE(fmt.Sprintf("Failed to create engine: %v", err))

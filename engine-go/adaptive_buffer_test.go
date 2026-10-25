@@ -72,6 +72,6 @@ func measuredPlaybackLookahead(t *testing.T, pattern []int64, experiment bufferE
 			t.Fatalf("read: %d %v", n, err)
 		}
 	}
-	urgent, ahead, _, _, _, _, _ := reader.testWindow()
+	urgent, ahead, _, _, _, _ := reader.testWindow()
 	return int64(max(urgent.end, ahead.end)-urgent.begin) * pieceLen
 }

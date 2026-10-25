@@ -107,23 +107,7 @@ func (p *desiredPeerRequests) lessByValue(leftRequest, rightRequest RequestIndex
 	rightPiece := p.pieceStates[rightPieceIndex].UnwrapPtr()
 	// Putting this first means we can steal requests from lesser-performing peers for our first few
 	// new requests.
-	priority := func() PiecePriority {
-		// Technically we would be happy with the cached priority here, except we don't actually
-		// cache it anymore, and Torrent.PiecePriority just does another lookup of *Piece to resolve
-		// the priority through Piece.purePriority, which is probably slower.
-		leftPriority := leftPiece.Priority
-		rightPriority := rightPiece.Priority
-		ml = ml.Int(
-			-int(leftPriority),
-			-int(rightPriority),
-		)
-		if !ml.Ok() {
-			if leftPriority != rightPriority {
-				panic("expected equal")
-			}
-		}
-		return leftPriority
-	}()
+	ml = ml.Int(-int(leftPiece.Priority), -int(rightPiece.Priority))
 	if ml.Ok() {
 		return ml.MustLess()
 	}
@@ -155,6 +139,22 @@ func (p *desiredPeerRequests) lessByValue(leftRequest, rightRequest RequestIndex
 		// it will be served and therefore is the best candidate to cancel.
 		ml = ml.CmpInt64(rightLast.Sub(leftLast).Nanoseconds())
 	}
+	if focus, ok := t.requestFocusIndex(); ok {
+		focusPiece := t.pieceIndexOfRequestIndex(focus)
+		if leftPieceIndex == rightPieceIndex {
+			// Within the piece a player is waiting on, fetch from its read
+			// position first. After a seek into the middle of a large piece,
+			// blocks before the playhead would otherwise arrive first.
+			if leftPieceIndex == focusPiece {
+				ml = ml.Bool(leftRequest < focus, rightRequest < focus)
+			}
+		} else {
+			// Every tier goes nearest the playhead first. Upstream orders
+			// pieces rarest first, which can leave the piece being watched
+			// behind the others.
+			ml = ml.Int(focusDistance(leftPieceIndex, focusPiece), focusDistance(rightPieceIndex, focusPiece))
+		}
+	}
 	// Just trigger on any webseed requests present on the Torrent. That suggests that the Torrent
 	// or files are prioritized enough to compete with PeerConn requests. Later we could filter on
 	// webseeds actually requesting or supporting requests for the pieces we're comparing.
@@ -164,17 +164,8 @@ func (p *desiredPeerRequests) lessByValue(leftRequest, rightRequest RequestIndex
 		// the middle.
 		ml = ml.Cmp(-cmp.Compare(leftRequest, rightRequest))
 	} else {
-		ml = ml.Int(
-			leftPiece.Availability,
-			rightPiece.Availability)
-		if priority == PiecePriorityReadahead {
-			// TODO: For readahead in particular, it would be even better to consider distance from the
-			// reader position so that reads earlier in a torrent don't starve reads later in the
-			// torrent. This would probably require reconsideration of how readahead priority works.
-			ml = ml.Int(leftPieceIndex, rightPieceIndex)
-		} else {
-			ml = ml.Int(t.pieceRequestOrder[leftPieceIndex], t.pieceRequestOrder[rightPieceIndex])
-		}
+		// Webtor streams: file order, not rarest first.
+		ml = ml.Int(leftPieceIndex, rightPieceIndex)
 		ml = multiless.EagerOrdered(ml, leftRequest, rightRequest)
 	}
 	// Prefer request indexes in order for storage write performance. Since the heap request heap
@@ -221,12 +212,25 @@ func (p *PeerConn) getDesiredRequestState() (desired desiredRequestState) {
 	t.logPieceRequestOrder()
 	// Caller-provided allocation for roaring bitmap iteration.
 	var it typedRoaring.Iterator[RequestIndex]
+	enough := candidateBudget(p)
+	usable := 0
+	yieldsLeft := 0
+	if currentSeekTuning().SlowPeerYield && t.requestFocus.Load() != 0 {
+		yieldsLeft = slowPeerYieldsPerRefill
+	}
 	t.getRequestablePieces(
 		func(ih metainfo.Hash, pieceIndex int, pieceExtra requestStrategy.PieceRequestOrderState) bool {
+			if enough > 0 && usable >= enough && pieceExtra.Priority < PiecePriorityNow {
+				return false
+			}
 			if ih != *t.canonicalShortInfohash() {
 				return true
 			}
 			if !p.peerHasPiece(pieceIndex) {
+				return true
+			}
+			if yieldsLeft > 0 && pieceExtra.Priority >= PiecePriorityNext && p.webtorYieldToFasterPeers(pieceIndex) {
+				yieldsLeft--
 				return true
 			}
 			requestHeap.pieceStates[pieceIndex].Set(pieceExtra)
@@ -252,6 +256,11 @@ func (p *PeerConn) getDesiredRequestState() (desired desiredRequestState) {
 					return
 				}
 				requestHeap.requestIndexes = append(requestHeap.requestIndexes, r)
+				if enough > 0 {
+					if holder := t.requestingPeer(r); holder == nil || holder == p {
+						usable++
+					}
+				}
 			})
 			return true
 		},
@@ -301,6 +310,10 @@ func (p *PeerConn) updateRequestsWithReason(reason updateRequestReason) {
 }
 
 func (p *PeerConn) updateRequests() {
+	// The pipeline limit follows the peer's rate, which moves with the
+	// clock; fix it for this refill so a check and the request that follows
+	// it see the same limit.
+	p.webtorPipelineLimit = p.computePlaybackPipelineLimit()
 	next := p.getDesiredRequestState()
 	p.applyRequestState(next)
 	p.t.cacheNextRequestIndexesForReuse(next.Requests.requestIndexes)
@@ -341,6 +354,9 @@ func (p *PeerConn) applyRequestState(next desiredRequestState) {
 			next.Interested = true
 		}
 	}
+	if !next.Interested && p.webtorHasPlayingPieceWeLack() {
+		next.Interested = true
+	}
 	if !p.setInterested(next.Interested) {
 		return
 	}
@@ -358,8 +374,7 @@ func (p *PeerConn) applyRequestState(next desiredRequestState) {
 		if requestHeap.Len() == 0 {
 			break
 		}
-		numPending := maxRequests(current.Requests.GetCardinality() + current.Cancelled.GetCardinality())
-		if numPending >= p.nominalMaxRequests() {
+		if p.pendingRequests() >= p.nominalMaxRequests() && !p.urgentPastCancels(next.Requests.requestIndexes[0]) {
 			break
 		}
 		req := heap.Pop(requestHeap)
@@ -376,6 +391,13 @@ func (p *PeerConn) applyRequestState(next desiredRequestState) {
 		}
 
 		existing := t.requestingPeer(req)
+		if existing == nil {
+			if faster := p.fasterFocusPeer(req); faster != nil {
+				// Leave the playhead block to a peer that sends it sooner.
+				faster.onNeedUpdateRequests(peerUpdateRequestsUrgentNudge)
+				continue
+			}
+		}
 		if existing != nil && existing != p {
 			// don't steal on cancel - because this is triggered by t.cancelRequest below
 			// which means that the cancelled can immediately try to steal back a request
@@ -384,6 +406,17 @@ func (p *PeerConn) applyRequestState(next desiredRequestState) {
 				continue
 			}
 
+			if currentSeekTuning().NoBalanceSteal && t.requestFocus.Load() != 0 {
+				if !p.shouldStealUrgent(req, existing) {
+					continue
+				}
+				t.cancelRequest(req)
+				more = p.mustRequest(req)
+				if !more {
+					break
+				}
+				continue
+			}
 			// Don't steal from the poor.
 			diff := int64(current.Requests.GetCardinality()) + 1 - (int64(existing.uncancelledRequests()) - 1)
 			// Steal a request that leaves us with one more request than the existing peer
@@ -408,6 +441,18 @@ func (p *PeerConn) applyRequestState(next desiredRequestState) {
 			current.Requests.GetCardinality()-originalRequestCount))
 	}
 	newPeakRequests := maxRequests(current.Requests.GetCardinality() - originalRequestCount)
+	switch currentSeekTuning().PeakMode {
+	case PeakWholeQueue:
+		newPeakRequests = maxRequests(current.Requests.GetCardinality())
+	case PeakKeepOnTopUp:
+		// Upstream refills only an empty peer, so the blocks added are the
+		// whole queue. A top-up of a busy peer (an urgent nudge, every
+		// 100 ms while the player reads) adds few or none, and took that as
+		// the peer's capacity.
+		if originalRequestCount != 0 {
+			newPeakRequests = max(newPeakRequests, p.peakRequests)
+		}
+	}
 	// log.Printf(
 	// 	"requests %v->%v (peak %v->%v) reason %q (peer %v)",
 	// 	originalRequestCount, current.Requests.GetCardinality(), p.peakRequests, newPeakRequests, p.needRequestUpdate, p)
