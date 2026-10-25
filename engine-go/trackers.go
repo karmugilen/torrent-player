@@ -161,7 +161,7 @@ func (p *trackerPool) refresh(ctx context.Context, now time.Time) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	req.Header.Set("User-Agent", "TorrentPlayer/1.4.4")
+	req.Header.Set("User-Agent", "TorrentPlayer/"+appVersion)
 	if c.ETag != "" {
 		req.Header.Set("If-None-Match", c.ETag)
 	}

@@ -131,7 +131,21 @@ data class PlaybackPieceRange(val start: Int, val end: Int, val priority: String
 data class PlaybackDetail(val start: Int, val states: String, val playhead: Int)
 
 /** Seek-to-first-byte times recorded by the engine since Claude optimized seek last changed. */
-data class SeekStats(val count: Int, val lastMs: Long, val medianMs: Long, val stalls: Int)
+data class SeekStats(
+    val count: Int,
+    val lastMs: Long,
+    val medianMs: Long,
+    val stalls: Int,
+    /** How well the engine predicts block arrival; null from older engines. */
+    val arrival: ArrivalStats? = null,
+)
+
+/** Block arrival prediction learned on the device: the network's mean error. */
+data class ArrivalStats(
+    val samples: Long,
+    val networkErrMs: Long,
+    val using: Boolean,
+)
 
 data class PieceTelemetry(
     val id: String,
@@ -377,7 +391,11 @@ class EngineClient(
         post("/settings", JSONObject().put("dropChokers", enabled)).optBoolean("dropChokers", enabled)
 
     /** Null when the engine predates seek statistics. */
-    fun seekStats(): SeekStats? = get("/settings").optJSONObject("seekStats")?.let(::parseSeekStats)
+    fun seekStats(): SeekStats? {
+        val settings = get("/settings")
+        return settings.optJSONObject("seekStats")?.let(::parseSeekStats)
+            ?.copy(arrival = settings.optJSONObject("arrival")?.let(::parseArrivalStats))
+    }
 
     /**
      * Gates torrent payload bytes globally while preserving tracker, DHT and
@@ -456,6 +474,12 @@ class EngineClient(
             lastMs = json.optLong("lastMs").coerceAtLeast(0L),
             medianMs = json.optLong("medianMs").coerceAtLeast(0L),
             stalls = json.optInt("stalls").coerceAtLeast(0),
+        )
+
+        fun parseArrivalStats(json: JSONObject): ArrivalStats = ArrivalStats(
+            samples = json.optLong("samples").coerceAtLeast(0L),
+            networkErrMs = json.optDouble("networkErrMs", 0.0).toLong().coerceAtLeast(0L),
+            using = json.optBoolean("using"),
         )
 
         fun parsePieces(json: JSONObject): PieceTelemetry {

@@ -210,14 +210,17 @@ type SettingsResponse struct {
 	HedgeRequests           bool  `json:"hedgeRequests"`
 	SlowPeerYield           bool  `json:"slowPeerYield"`
 	DropChokers             bool  `json:"dropChokers"`
-	IdleDropMinutes         int   `json:"idleDropMinutes"`
-	RamCacheBytes           int64 `json:"ramCacheBytes"`
-	SeedingEnabled          bool  `json:"seedingEnabled"`
-	SeedRatioMilli          int64 `json:"seedRatioMilli"`
-	SeedTimeMinutes         int64 `json:"seedTimeMinutes"`
-	MaxPeers                int   `json:"maxPeers"`
-	DownloadRateBytesSec    int64 `json:"downloadRateBytesSec"`
-	UploadRateBytesSec      int64 `json:"uploadRateBytesSec"`
+	LearnedArrival          bool  `json:"learnedArrival"`
+	// Arrival is how well block arrival times are predicted.
+	Arrival              ArrivalStats `json:"arrival"`
+	IdleDropMinutes      int          `json:"idleDropMinutes"`
+	RamCacheBytes        int64        `json:"ramCacheBytes"`
+	SeedingEnabled       bool         `json:"seedingEnabled"`
+	SeedRatioMilli       int64        `json:"seedRatioMilli"`
+	SeedTimeMinutes      int64        `json:"seedTimeMinutes"`
+	MaxPeers             int          `json:"maxPeers"`
+	DownloadRateBytesSec int64        `json:"downloadRateBytesSec"`
+	UploadRateBytesSec   int64        `json:"uploadRateBytesSec"`
 	// PayloadTransfersAllowed controls torrent file bytes only. Tracker, DHT,
 	// PEX, and metadata discovery keep running while it is false.
 	PayloadTransfersAllowed bool `json:"payloadTransfersAllowed"`
@@ -233,6 +236,7 @@ type SettingsRequest struct {
 	HedgeRequests        *bool  `json:"hedgeRequests,omitempty"`
 	SlowPeerYield        *bool  `json:"slowPeerYield,omitempty"`
 	DropChokers          *bool  `json:"dropChokers,omitempty"`
+	LearnedArrival       *bool  `json:"learnedArrival,omitempty"`
 	IdleDropMinutes      *int   `json:"idleDropMinutes,omitempty"`
 	RamCacheBytes        *int64 `json:"ramCacheBytes,omitempty"`
 	SeedingEnabled       *bool  `json:"seedingEnabled,omitempty"`
@@ -258,4 +262,13 @@ type SettingsRequest struct {
 type OkResponse struct {
 	Ok bool   `json:"ok"`
 	ID string `json:"id,omitempty"`
+}
+
+// ArrivalStats reports the block arrival network learned on the device and
+// its running mean error.
+type ArrivalStats struct {
+	Samples      int64   `json:"samples"`
+	NetworkErrMs float64 `json:"networkErrMs"`
+	// Using is whether the network's estimate is in use.
+	Using bool `json:"using"`
 }

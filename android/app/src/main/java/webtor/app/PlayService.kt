@@ -25,6 +25,8 @@ class PlayService : Service() {
     private var paused: Boolean = false
     private var isMultiple: Boolean = false
     private var playbackOnly: Boolean = false
+    // Live playback stats (seek time, arrival estimates), shown expanded.
+    private var stats: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -71,6 +73,7 @@ class PlayService : Service() {
         if (intent?.hasExtra(EXTRA_PAUSED) == true) {
             paused = intent.getBooleanExtra(EXTRA_PAUSED, false)
         }
+        if (intent?.hasExtra(EXTRA_STATS) == true) stats = intent.getStringExtra(EXTRA_STATS).orEmpty()
         if (intent?.hasExtra(EXTRA_PLAYBACK_ONLY) == true) playbackOnly = intent.getBooleanExtra(EXTRA_PLAYBACK_ONLY, false)
         if (intent?.hasExtra(EXTRA_MULTIPLE) == true) {
             isMultiple = intent.getBooleanExtra(EXTRA_MULTIPLE, false)
@@ -116,6 +119,9 @@ class PlayService : Service() {
             .setShowWhen(false)
             .setProgress(if (playbackOnly) 0 else 100, if (playbackOnly) 0 else progress, false)
             .apply {
+                if (stats.isNotEmpty()) setStyle(NotificationCompat.BigTextStyle().bigText("$text\n$stats"))
+            }
+            .apply {
                 if (!commandInProgress && !playbackOnly) {
                     addAction(android.R.drawable.ic_menu_close_clear_cancel, stopLabel, stop)
                 }
@@ -131,6 +137,7 @@ class PlayService : Service() {
             .putExtra(EXTRA_PROGRESS, progress)
             .putExtra(EXTRA_PAUSED, paused)
             .putExtra(EXTRA_MULTIPLE, isMultiple)
+            .putExtra(EXTRA_STATS, stats)
         return PendingIntent.getForegroundService(this, requestCode, intent, flags)
     }
 
@@ -165,6 +172,7 @@ class PlayService : Service() {
         const val EXTRA_PAUSED = "paused"
         const val EXTRA_MULTIPLE = "multiple"
         private const val EXTRA_PLAYBACK_ONLY = "playbackOnly"
+        private const val EXTRA_STATS = "stats"
         private const val CHANNEL = "webtor-downloads"
         private const val NOTIF_ID = 42
         private const val REQUEST_OPEN = 0
@@ -179,6 +187,7 @@ class PlayService : Service() {
             text: String = "Downloading",
             multiple: Boolean = false,
             playbackOnly: Boolean = false,
+            stats: String = "",
         ) {
             val intent = Intent(ctx, PlayService::class.java)
                 .putExtra(EXTRA_TITLE, title)
@@ -187,6 +196,7 @@ class PlayService : Service() {
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_MULTIPLE, multiple)
                 .putExtra(EXTRA_PLAYBACK_ONLY, playbackOnly)
+                .putExtra(EXTRA_STATS, stats)
             runCatching { ContextCompat.startForegroundService(ctx, intent) }
         }
 

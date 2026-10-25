@@ -1,4 +1,4 @@
-//go:build !rust && !android
+//go:build !rust
 
 package main
 
@@ -7,8 +7,8 @@ import (
 	"sort"
 )
 
-// Host fallback used when the Rust piece aggregator is not linked.
-// Android builds always set the rust tag and do not compile this file.
+// Pure Go piece aggregator, used unless the optional Rust core is linked.
+// Android release builds use it so F-Droid needs only Go and the NDK.
 // Selection ranges and the bucket slice are the only scratch; runs stay compressed.
 func aggregatePieceBuckets(runs []pieceRun, ranges []pieceRange, total, maxBuckets int) ([]PieceBucket, error) {
 	if total < 0 || uint64(total) > uint64(^uint32(0)) || maxBuckets < 1 || maxBuckets > 1024 {

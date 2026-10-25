@@ -61,6 +61,7 @@ class LibrarySession(
     private var storageStatsJob: Job? = null
     private var eventJob: Job? = null
     private var lastServiceUpdate = 0L
+    private var lastStatsRefresh = 0L
     private var draftGeneration = 0L
     private var commitInProgress = false
     private val retryStates = mutableMapOf<String, RetryState>()
@@ -156,7 +157,7 @@ class LibrarySession(
                         maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 500),
                         ramCacheMiB = settings.getInt("ramCacheMiB", 64).coerceIn(RAM_CACHE_STEPS_MIB.first(), RAM_CACHE_STEPS_MIB.last()),
                         ramCacheAuto = settings.getBoolean("ramCacheAuto", !settings.contains("ramCacheMiB")),
-                        seedingEnabled = settings.getBoolean("seedingEnabled", false),
+                        seedingEnabled = settings.getBoolean("seedingEnabled", true),
                         seedRatioMilli = settings.getInt("seedRatioMilli", 1000).coerceIn(100, 10000),
                         seedTimeMinutes = settings.getInt("seedTimeMinutes", 60).coerceIn(1, 1440),
                         seedUploadKiB = settings.getInt("seedUploadKiB", 256).coerceIn(16, 4096),
@@ -399,6 +400,7 @@ class LibrarySession(
             refreshSeekStats()
         }
     }
+
 
     fun setDropChokers(enabled: Boolean) {
         settings.edit().putBoolean("dropChokers", enabled).apply()
@@ -2783,6 +2785,11 @@ class LibrarySession(
             return
         }
         val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastStatsRefresh >= 2000) {
+            // The notification shows them while a video plays elsewhere.
+            lastStatsRefresh = now
+            refreshSeekStats()
+        }
         if (force || now - lastServiceUpdate >= 1000) {
             PlayService.start(
                 app,
@@ -2792,6 +2799,7 @@ class LibrarySession(
                 text = notification.text,
                 multiple = notification.multiple,
                 playbackOnly = notification.playbackOnly,
+                stats = playbackStatsLine(_ui.value),
             )
             lastServiceUpdate = now
         }

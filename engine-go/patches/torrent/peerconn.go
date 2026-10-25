@@ -62,6 +62,12 @@ type PeerConn struct {
 	// When the peer last choked us (connections start choked); zero while
 	// unchoked. See WebtorDropChokers.
 	webtorChokedSince time.Time
+	// When the peer last unchoked us; an input of the arrival model.
+	webtorUnchokedAt time.Time
+	// Learned arrival: this peer's correction, and what each outstanding
+	// request was sent with (webtor_arrival.go).
+	webtorArrival        arrivalPeer
+	webtorArrivalSamples map[RequestIndex]arrivalSample
 
 	// Move to PeerConn?
 	protocolLogger log.Logger
@@ -943,6 +949,7 @@ func (c *PeerConn) mainReadLoop() (err error) {
 			}
 			c.peerChoking = false
 			c.webtorChokedSince = time.Time{}
+			c.webtorUnchokedAt = time.Now()
 			preservedCount := 0
 			c.requestState.Requests.Iterate(func(x RequestIndex) bool {
 				if !c.peerAllowedFast.Contains(c.t.pieceIndexOfRequestIndex(x)) {
@@ -1790,6 +1797,7 @@ func (cn *PeerConn) request(r RequestIndex) (more bool, err error) {
 		// Nothing queued ahead of it: its block measures the round trip.
 		cn.webtorRTT.sent(r)
 	}
+	cn.webtorNoteRequestSent(r, cn.requestState.Requests.GetCardinality())
 	cn.requestState.Requests.Add(r)
 	if cn.validReceiveChunks == nil {
 		cn.validReceiveChunks = make(map[RequestIndex]int)
@@ -1864,6 +1872,8 @@ func (c *PeerConn) deleteRequest(r RequestIndex) bool {
 		f(PeerRequestEvent{c.peerPtr(), c.t.requestIndexToRequest(r)})
 	}
 	c.updateExpectingChunks()
+	// A cancelled or rejected block teaches nothing.
+	delete(c.webtorArrivalSamples, r)
 	// TODO: Can't this happen if a request is stolen?
 	if c.t.requestingPeer(r) != c {
 		panic("only one peer should have a given request at a time")
@@ -1926,6 +1936,7 @@ func (p *PeerConn) isLowOnRequests() bool {
 
 func (c *PeerConn) checkReceivedChunk(req RequestIndex, msg *pp.Message, ppReq Request) (intended bool, err error) {
 	c.webtorRTT.received(req)
+	c.webtorLearnArrival(req)
 	if c.validReceiveChunks[req] <= 0 {
 		ChunksReceived.Add("unexpected", 1)
 		err = errors.New("received unexpected chunk")

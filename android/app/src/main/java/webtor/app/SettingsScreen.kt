@@ -471,10 +471,38 @@ fun SettingsScreen(
             item {
                 SettingsSection("Experimental", outlined = true) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text("Playback method", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Optional controls for playback and transfers. Some can use more data and battery.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        SectionDivider()
+                        Text("Playback", style = MaterialTheme.typography.titleMedium, color = colors.onSurface)
+                        Text(
+                            "One built-in mode, like YouTube: a seek stops every download for the old place and fetches the new spot first, then the next blocks in order, filling your RAM setting ahead. Nothing behind the playhead is fetched.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                onRefreshSeekStats()
+                                delay(2_000)
+                            }
+                        }
+                        Text(
+                            seekStatsLine(state.seekStats),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Playback method", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                         Text(
                             "Completed downloads still open from the saved file. This choice is for incomplete video and Direct Play.",
                             style = MaterialTheme.typography.bodySmall,
@@ -514,7 +542,43 @@ fun SettingsScreen(
                             }
                         }
                     }
+                    SwitchRow(
+                        title = "Hedged requests (experimental)",
+                        supporting = "When a block at the playhead is late, also ask a faster peer for it and use whichever copy comes first. Seek times above restart when you switch, so you can compare.",
+                        checked = state.hedgeRequests,
+                        onCheckedChange = onHedgeRequests,
+                    )
+                    SwitchRow(
+                        title = "Slow peers step aside (experimental)",
+                        supporting = "A peer slower than 48 KB/s skips a piece near the playhead that faster peers would finish first, and fetches further ahead instead.",
+                        checked = state.slowPeerYield,
+                        onCheckedChange = onSlowPeerYield,
+                    )
+                    SwitchRow(
+                        title = "Drop peers that won't share (experimental)",
+                        supporting = "A peer that keeps refusing to send for 5 s is disconnected when other peers are waiting, so a new one can take its place.",
+                        checked = state.dropChokers,
+                        onCheckedChange = onDropChokers,
+                    )
+                    SwitchRow(
+                        title = "Play this file only",
+                        supporting = "While playing a saved torrent, pauses downloads of its other selected files. They resume when you return from the player. Direct Play already streams only the playing file.",
+                        checked = state.fileOnlyPlayback,
+                        onCheckedChange = onFileOnlyPlayback,
+                    )
+                    SwitchRow(
+                        title = "Play next video",
+                        supporting = "When a video ends, starts the next selected video in the same torrent. Near the end, quietly loads the start of the next one so it opens instantly.",
+                        checked = state.playNext,
+                        onCheckedChange = onPlayNext,
+                    )
                     SectionDivider()
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Network and battery", style = MaterialTheme.typography.titleMedium, color = colors.onSurface)
+                    }
                     Column(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -581,12 +645,6 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text(
-                            "Optional controls for playback and transfers. Some can use more data and battery.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        SectionDivider()
                         Text("More peers", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                         Text(
                             "Raises the same connection limit as Connections. More peers can start a transfer faster and use more battery.",
@@ -605,49 +663,6 @@ fun SettingsScreen(
                                 )
                             }
                         }
-                        SectionDivider()
-                        Text("Playback", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            "One built-in mode, like YouTube: a seek stops every download for the old place and fetches the new spot first, then the next blocks in order, filling your RAM setting ahead. Nothing behind the playhead is fetched.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        LaunchedEffect(Unit) {
-                            while (true) {
-                                onRefreshSeekStats()
-                                delay(2_000)
-                            }
-                        }
-                        Text(
-                            seekStatsLine(state.seekStats),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        SwitchRow(
-                            title = "Hedged requests (experimental)",
-                            supporting = "When a block at the playhead is late, also ask a faster peer for it and use whichever copy comes first. Seek times above restart when you switch, so you can compare.",
-                            checked = state.hedgeRequests,
-                            onCheckedChange = onHedgeRequests,
-                        )
-                        SwitchRow(
-                            title = "Slow peers step aside (experimental)",
-                            supporting = "A peer slower than 48 KB/s skips a piece near the playhead that faster peers would finish first, and fetches further ahead instead.",
-                            checked = state.slowPeerYield,
-                            onCheckedChange = onSlowPeerYield,
-                        )
-                        SwitchRow(
-                            title = "Drop peers that won't share (experimental)",
-                            supporting = "A peer that keeps refusing to send for 5 s is disconnected when other peers are waiting, so a new one can take its place.",
-                            checked = state.dropChokers,
-                            onCheckedChange = onDropChokers,
-                        )
-                        SectionDivider()
-                        SwitchRow(
-                            title = "Play this file only",
-                            supporting = "While playing a saved torrent, pauses downloads of its other selected files. They resume when you return from the player. Direct Play already streams only the playing file.",
-                            checked = state.fileOnlyPlayback,
-                            onCheckedChange = onFileOnlyPlayback,
-                        )
                         SectionDivider()
                         Text("Transfer network", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                         Text(
@@ -688,22 +703,6 @@ fun SettingsScreen(
                                     label = { Text(label) },
                                 )
                             }
-                        }
-                        SectionDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Play next video", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    "When a video ends, starts the next selected video in the same torrent. Near the end, quietly loads the start of the next one so it opens instantly.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.playNext, onCheckedChange = onPlayNext)
                         }
                         SectionDivider()
                         Row(

@@ -18,10 +18,6 @@ val buildGoEngine by tasks.registering(Exec::class) {
     workingDir(repoRoot)
     commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
     inputs.files(engineSources)
-    inputs.file(repoRoot.resolve("engine-rust/Cargo.toml"))
-    inputs.file(repoRoot.resolve("engine-rust/Cargo.lock"))
-    inputs.file(repoRoot.resolve("engine-rust/pieces.h"))
-    inputs.dir(repoRoot.resolve("engine-rust/src"))
     outputs.file(file("src/main/jniLibs/arm64-v8a/libengine.so"))
 }
 
@@ -35,7 +31,6 @@ val buildGoEngineEmulator by tasks.registering(Exec::class) {
     environment("ENGINE_ABI", "x86_64")
     commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
     inputs.files(engineSources)
-    inputs.dir(repoRoot.resolve("engine-rust/src"))
     outputs.file(file("src/main/jniLibs/x86_64/libengine.so"))
 }
 
@@ -53,8 +48,8 @@ android {
         applicationId = "webtor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 82
-        versionName = "2.1.52"
+        versionCode = 98
+        versionName = "2.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")
@@ -123,6 +118,8 @@ android {
 }
 
 buildGoEngine.configure {
+    // build.sh stamps the engine with versionName.
+    inputs.property("versionName", android.defaultConfig.versionName)
     environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
     environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
 }

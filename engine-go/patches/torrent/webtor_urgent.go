@@ -99,6 +99,10 @@ type SeekTuning struct {
 	// 40 KiB/s peer held a block 1-3 MiB ahead, and playback froze when it
 	// got there.
 	SlowPeerYield bool
+	// LearnedArrival takes block arrival estimates from the network learned
+	// on the device (webtor_arrival.go), and calls a block overdue by its own
+	// estimate.
+	LearnedArrival bool
 	// PeakMode is how a request update sets the peer's request limit
 	// (twice its peak). See the PeakMode constants.
 	PeakMode PeakMode
@@ -476,6 +480,11 @@ func (p *Peer) WebtorRequestInfo() (pending int, bytesPerSecond float64) {
 // rate. A peer with no measured rate never wins; one with no round trip yet
 // is assumed 200 ms away.
 func (c *PeerConn) expectedArrival() float64 {
+	if c.t.cl.useLearnedArrival() {
+		if x, ok := c.arrivalInputs(c.requestState.Requests.GetCardinality()); ok {
+			return c.learnedArrival(x)
+		}
+	}
 	rate := c.downloadRate()
 	if rate <= 0 {
 		return math.MaxFloat64
@@ -714,7 +723,13 @@ func (t *Torrent) webtorHedgeHeadOfLine() int {
 		if h := t.webtorHedges[r]; h != nil && !h.closed.IsSet() {
 			continue
 		}
-		if time.Since(t.requestState[r].when) < max(after, 2*holder.webtorRTT.estimate) {
+		// With the learned model, late is late for this request from this
+		// peer; otherwise a fixed age.
+		if overdue, ok := holder.webtorBlockOverdue(r, 100*time.Millisecond); ok {
+			if !overdue {
+				continue
+			}
+		} else if time.Since(t.requestState[r].when) < max(after, 2*holder.webtorRTT.estimate) {
 			continue
 		}
 		piece := t.pieceIndexOfRequestIndex(r)

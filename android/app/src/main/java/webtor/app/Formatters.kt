@@ -308,3 +308,30 @@ fun ramCacheStepIndex(mib: Int): Int =
     RAM_CACHE_STEPS_MIB.indices.minBy { kotlin.math.abs(RAM_CACHE_STEPS_MIB[it] - mib) }
 
 fun formatRamCacheMiB(mib: Int): String = if (mib >= 1024 && mib % 1024 == 0) "${mib / 1024} GiB" else "$mib MiB"
+
+/**
+ * Extra lines for the expanded notification while a video streams: the
+ * playing file's progress and upload, and how quickly seeks start playing.
+ * Empty until there is something to show.
+ */
+internal fun playbackStatsLine(ui: UiState): String {
+    val parts = mutableListOf<String>()
+    val streaming = ui.library.filter { it.directPlay && it.hasActiveTransfer() && !it.checking }
+    streaming.singleOrNull()?.let { entry ->
+        val file = entry.files.find { it.index == (entry.status?.focusedFile ?: entry.focusedFile) }
+        if (file != null && file.length > 0) {
+            val got = (file.length * file.progress.coerceIn(0.0, 1.0)).toLong()
+            parts += "File ${(100 * file.progress.coerceIn(0.0, 1.0)).toInt()}% · ${formatBytes(got)} of ${formatBytes(file.length)}" +
+                (entry.liveStatus()?.uploadSpeed?.takeIf { it > 0 }?.let { " · ↑ ${formatSpeed(it)}" } ?: "")
+        }
+    }
+    val seek = ui.seekStats
+    if (seek != null && seek.count > 0) {
+        val stalls = if (seek.stalls == 1) "1 stall" else "${seek.stalls} stalls"
+        parts += "Seeks ${seek.count} · usually ${formatMs(seek.medianMs)} · last ${formatMs(seek.lastMs)} · $stalls"
+    }
+    return parts.joinToString("\n")
+}
+
+/** 640 ms, 1.3 s. */
+internal fun formatMs(ms: Long): String = if (ms < 1000) "$ms ms" else String.format(Locale.US, "%.1f s", ms / 1000.0)

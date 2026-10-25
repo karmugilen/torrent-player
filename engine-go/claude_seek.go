@@ -104,6 +104,7 @@ func (s *EngineServer) baseSeekTuning() torrent.SeekTuning {
 	tuning := torrent.DefaultSeekTuning
 	tuning.Hedge = s.hedgeRequests.Load()
 	tuning.SlowPeerYield = s.slowPeerYield.Load()
+	tuning.LearnedArrival = s.learnedArrival.Load()
 	return tuning
 }
 

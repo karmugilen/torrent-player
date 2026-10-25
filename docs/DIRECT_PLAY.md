@@ -171,3 +171,64 @@ seek times so on and off can be compared.
   than twice the free slots. `TestPeerThatKeepsUsChokedIsDropped`.
 
 None was measured on a swarm before release.
+
+## 2.1.53: block arrival learned on the device
+
+`patches/torrent/webtor_arrival.go`. Every request records its inputs; every
+arrived block scores the formula (round trip + queue and block at the peer's
+rate) and a learned estimate, and teaches the latter: a global linear model
+over (1, round trip, queue/rate, block/rate, jitter), starting at the formula
+and moved by normalized LMS (step 0.02, error clipped to ±2 s, weights
+bounded), times a per-peer factor (actual over global, 0.5–4×). Learning runs
+always; the switch "Learned arrival times" (`SeekTuning.LearnedArrival`) makes
+peer choice and hedge timing use it after 500 blocks while its running error
+is below the formula's. Hedging then calls a block late past its own estimate
+plus twice the peer's usual error (at least 100 ms). Settings shows both
+errors. Synthetic test (queues 1.6× slower, one peer 3× slower): formula off
+by 3066 ms, learned by 431 ms (`TestArrivalModelLearnsFromArrivedBlocks`).
+Weights are not saved across launches; they relearn within a minute of play.
+
+## 2.1.55: richer inputs, a neural network, saved models
+
+Inputs added to the arrival models: the peer's recent rate (EWMA of block
+inter-arrival; the lifetime rate lags), seconds since its last block (capped
+10) and since it unchoked us (capped 30). A one-hidden-layer network (8 log
+inputs, 8 tanh units, predicting log seconds, SGD step 0.005, error clipped
+to ±2 in log) now learns alongside the linear model. The formula, linear
+model and network are scored on every block; with "Learned arrival times" on,
+the warmed-up model (linear 500 blocks, network 3000) with the lowest
+running error is used if it beats the formula. Models are saved to
+`.cache/arrival-model.json` once a minute while learning and on close, and
+loaded at start. Synthetic test with a nonlinear pattern (twice as fast in the
+2 s after an unchoke): formula off by 2378 ms, linear 906 ms, network 775 ms.
+
+## 2.1.56: attention over each peer's last blocks
+
+`patches/torrent/webtor_attention.go`: one attention head (d = 8) from the
+request's log inputs (query) over the peer's last 16 blocks (keys and values
+from log time, log time over the formula, log age, log queue), plus a tanh
+branch of the inputs. It predicts the log of actual over the linear estimate,
+starting at zero (as the linear model) and stepping 0.001; it warms up for
+5000 blocks and joins the same competition. The gradient is written by hand
+and checked against finite differences
+(`TestAttentionGradientMatchesFiniteDifferences`). Synthetic results: a peer
+switching between slow and fast modes, attention 333 ms vs network 454 ms but
+linear 291 ms (the per-peer factor, a fast average, follows the mode already);
+with the unchoke pattern, attention became the best model.
+
+## 2.2.0: the network only
+
+Phone comparisons over whole playback sessions kept the 2.1.55 network and
+dropped everything else: the formula, the linear model, attention, gradient
+boosted trees, a mutation-trained network, a Puffer-style range predictor
+(bnet) and a first-principles network (fnet). The network now drives peer
+choice, hedge timing and slow-peer yielding from the first block, with no
+warm-up, no formula fallback and no setting. It still learns on every arrived
+block and is saved to `.cache/arrival-model.json`. The playback notification
+shows the file's progress, download and upload, and seek times (count,
+median, last, stalls). `TestArrivalModelLearnsFromArrivedBlocks` checks that
+it learns a slow peer from a normal one within 6000 blocks.
+
+The Android engine no longer links `engine-rust`: the pure Go piece
+aggregator, extent hashing and range merge are used, so the F-Droid recipe
+needs only Go and the NDK.

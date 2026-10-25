@@ -62,7 +62,11 @@ fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String>
     val got = downloading.sumOf { it.downloaded }
     val progress = if (total <= 0) 0 else (100.0 * got / total).toInt().coerceIn(0, 100)
     val text = when {
-        streaming.isNotEmpty() && downloading.isEmpty() -> "Direct Play · " + formatSpeed(streaming.sumOf { it.liveDownloadSpeed() ?: 0L })
+        streaming.isNotEmpty() && downloading.isEmpty() -> buildString {
+            append("Direct Play · ↓ " + formatSpeed(streaming.sumOf { it.liveDownloadSpeed() ?: 0L }))
+            val statuses = streaming.mapNotNull { it.liveStatus() }
+            if (statuses.size == streaming.size) append(" · ${formatPeers(statuses.sumOf { it.numPeers.coerceAtLeast(0) })}")
+        }
         downloading.isNotEmpty() -> buildString {
             append("${formatBytes(got)} / ${formatBytes(total)} · ")
             val speeds = downloading.mapNotNull { it.liveDownloadSpeed() }

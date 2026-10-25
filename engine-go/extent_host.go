@@ -1,4 +1,4 @@
-//go:build !rust && !android
+//go:build !rust
 
 package main
 

@@ -133,8 +133,10 @@ type EngineServer struct {
 	hedgeRequests atomic.Bool
 	// slowPeerYield turns on SeekTuning.SlowPeerYield; dropChokers drops
 	// peers that keep us choked (Settings, experimental).
-	slowPeerYield   atomic.Bool
-	dropChokers     atomic.Bool
+	slowPeerYield atomic.Bool
+	dropChokers   atomic.Bool
+	// learnedArrival turns on SeekTuning.LearnedArrival.
+	learnedArrival  atomic.Bool
 	seedingEnabled  atomic.Bool
 	seedingAllowed  atomic.Bool
 	seedRatioMilli  atomic.Int64
@@ -236,8 +238,8 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	cfg.HTTPDialContext = trackerSockets.DialContext
 	cfg.TrackerDialContext = cfg.HTTPDialContext
 
-	cfg.HTTPUserAgent = "TorrentPlayer/1.4.5"
-	cfg.ExtendedHandshakeClientVersion = "Torrent Player 1.4.5 (Go)"
+	cfg.HTTPUserAgent = "TorrentPlayer/" + appVersion
+	cfg.ExtendedHandshakeClientVersion = "Torrent Player " + appVersion + " (Go)"
 
 	// Robust STUN servers for WebRTC ICE traversal & hole punching
 	cfg.ICEServerList = []webrtc.ICEServer{
@@ -279,6 +281,8 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	s.seedRatioMilli.Store(1000)
 	s.seedTimeMinutes.Store(60)
 	s.seedingAllowed.Store(true)
+	// The learned arrival network beat the formula 2-3x on the phone.
+	s.learnedArrival.Store(true)
 	s.loadSeedAccounts()
 	cfg.Callbacks.CompletedHandshake = func(pc *torrent.PeerConn, hash torrent.InfoHash) {
 		s.mu.RLock()
@@ -319,6 +323,8 @@ func NewEngineServer(ctlPort int, downloadDir string, maxPeers int) (*EngineServ
 	s.warmDHTContacts()
 	go s.rateTrackerLoop()
 	go s.dropChokersLoop()
+	s.loadArrivalModel()
+	go s.arrivalSaveLoop()
 
 	return s, nil
 }
@@ -569,6 +575,7 @@ func (s *EngineServer) Close() {
 		s.flushResumeSaves()
 		// Capture DHT contacts before the client tears down its servers.
 		s.snapshotDHTContacts()
+		s.saveArrivalModel()
 		s.seedTick()
 		s.saveSeedAccounts()
 		s.client.Close()
@@ -1788,6 +1795,8 @@ func (s *EngineServer) handleGetSettings(w http.ResponseWriter, r *http.Request)
 		HedgeRequests:   s.hedgeRequests.Load(),
 		SlowPeerYield:   s.slowPeerYield.Load(),
 		DropChokers:     s.dropChokers.Load(),
+		LearnedArrival:  s.learnedArrival.Load(),
+		Arrival:         s.arrivalStats(),
 		IdleDropMinutes: int(s.idleDropMinutes.Load()),
 		SeekStats:       s.seekStats.snapshot(),
 		RamCacheBytes:   s.storage.CacheLimit(),
@@ -1855,6 +1864,12 @@ func (s *EngineServer) handlePostSettings(w http.ResponseWriter, r *http.Request
 	}
 	if req.SlowPeerYield != nil {
 		if s.slowPeerYield.Swap(*req.SlowPeerYield) != *req.SlowPeerYield {
+			s.seekStats.reset()
+		}
+		torrent.SetSeekTuning(s.baseSeekTuning())
+	}
+	if req.LearnedArrival != nil {
+		if s.learnedArrival.Swap(*req.LearnedArrival) != *req.LearnedArrival {
 			s.seekStats.reset()
 		}
 		torrent.SetSeekTuning(s.baseSeekTuning())

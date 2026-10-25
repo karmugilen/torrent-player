@@ -128,6 +128,8 @@ type Client struct {
 	outgoingTCPHook atomic.Value
 	// Nanoseconds before a stalled urgent block may move to a faster peer; 0 disables.
 	urgentStealAfter atomic.Int64
+	// Webtor: the learned block arrival model (webtor_arrival.go).
+	webtorArrival arrivalModel
 }
 
 type clientWebseedState struct {

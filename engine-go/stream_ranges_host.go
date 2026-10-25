@@ -1,10 +1,10 @@
-//go:build !rust && !android
+//go:build !rust
 
 package main
 
 import "sort"
 
-// Keep the host implementation equivalent to the Android Rust core. Only the
+// Keep this equivalent to the optional Rust core. Only the
 // new interval is inserted; the prefix is already sorted and normalized.
 func mergeReceivedRangeOutOfOrder(ranges []streamByteRange, incoming streamByteRange) []streamByteRange {
 	existing := len(ranges)

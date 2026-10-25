@@ -44,7 +44,7 @@ data class UiState(
     val maxPeers: Int = 55,
     val ramCacheMiB: Int = 64,
     val ramCacheAuto: Boolean = true,
-    val seedingEnabled: Boolean = false,
+    val seedingEnabled: Boolean = true,
     val seedRatioMilli: Int = 1000,
     val seedTimeMinutes: Int = 60,
     val seedUploadKiB: Int = 256,
