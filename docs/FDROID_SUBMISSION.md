@@ -1,81 +1,56 @@
-# F-Droid submission: Torrent Player (`webtor.app`)
+# F-Droid releases: Torrent Player (`webtor.app`)
 
-The active submission is [fdroiddata merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893). Update that branch instead of opening a duplicate merge request.
+Torrent Player is published on F-Droid: <https://f-droid.org/packages/webtor.app/>.
+The inclusion merge request [fdroiddata !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893)
+was merged on 2026-10-17 with 2.0.0 (23). The live recipe is
+[`metadata/webtor.app.yml`](https://gitlab.com/fdroid/fdroiddata/-/blob/master/metadata/webtor.app.yml);
+[`webtor.app.yml`](../webtor.app.yml) here is a reference copy.
 
-## Current status (2026-10-04)
+## How updates reach F-Droid
 
-- The submission targets **2.0.0 (23)** only.
-- Reviewed release source: `5cfbdc1e8a1d9672c969ffbf4a215217d99477a0`.
-- Metadata-only follow-up source: `92b1a9914c17d0fb03cd6577ce889faf66cc2cd9`.
-- The follow-up describes automatic tracker-list refresh, supplemental public trackers and WebRTC/STUN providers, and adds the missing versionCode 23 changelog. Android/Go source and build inputs are identical to the released source; the existing release APK and tag are retained.
-- See [the reviewer comment and follow-up](FDROID_REVIEW_2026-10-04.md). Optional controls and protocol client version cleanup are deferred to a later release.
-- The existing MR description has been updated. [Pipeline 2910503829](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2910503829) passed all nine jobs, including source build, reproducible comparison against the existing signed reference APK, source scan and APK scan. On-device testing and maintainer acceptance remain pending.
-- The recipe intentionally pins a metadata-only source revision after the existing release tag. The submission script requires an exact tagged release commit and should be used again for the next tested, tagged application release.
+The recipe uses `UpdateCheckMode: Tags` and `AutoUpdateMode: Version`. F-Droid's
+checkupdates bot finds a new `v*` tag, reads `versionName` and `versionCode`
+from `android/app/build.gradle.kts` at that tag and adds a build that copies the
+previous one. Nothing needs to be submitted by hand as long as the build steps
+stay the same: Debian `golang-go` (1.24), NDK r26b, `go mod download` and
+`go mod verify`, then Gradle in `android/app`. The engine must therefore stay
+pure Go (no Rust or other toolchains) and `go.mod` must stay at `go 1.24`.
 
-## Historical status (2026-09-16)
+The builds are reproducible. `Binaries:` points at
+`https://github.com/karmugilen/torrent-player/releases/download/v%v/torrent-player-%v.apk`
+and `AllowedAPKSigningKeys` is the release key
+(`b26e9a22c1a40c5f8bd2bb5ba9e8639f7835c1ca986e9607e240beeddbd9f71f`). F-Droid
+rebuilds the tag, copies the GitHub APK's signature onto its build and
+publishes the GitHub APK only if they match. The GitHub APK must be built in
+F-Droid's buildserver image, not with a local Gradle: local builds differ in
+`classes.dex`, `baseline.prof` and `libengine.so`.
 
-- The 1.4.4 submission passed all nine jobs in
-  [pipeline 2851213344](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2851213344).
-- The recipe now targets 1.4.5 (22), source
-  `b772ad8183ef9f6e229f1309a7b1bcccb00462df`, to fix large-download resume.
-- Local F-Droid 2.4.2 in `buildserver-trixie` passed metadata rewrite/lint,
-  module verification, clean source scan, release build, APK identity checks and
-  binary scan for that exact source. No scanner exemptions were used.
-- Submitted recipe commit: `8593e91a5083091071f71b9a9c0d29e12d144b34`.
-  [Pipeline 2853130363](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2853130363)
-  passed all nine jobs. MR !48893 is fully updated with all required checklist
-  items complete, awaiting maintainer review and publication.
+## Releasing a version
 
-## Maintainer review update (2026-09-17)
+1. Raise `versionCode` and `versionName` in `android/app/build.gradle.kts` and
+   add `fastlane/metadata/android/en-US/changelogs/<versionCode>.txt`
+   (500 characters or fewer).
+2. Commit and push the branch to GitHub. Do not tag yet.
+3. Run `scripts/fdroid-release.sh` (defaults to `HEAD`). It clones fdroiddata,
+   adds the build as checkupdates would, runs the fdroiddata CI build job in
+   `registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie`
+   (`scripts/fdroid-ci-build.sh`, including F-Droid's source and APK scans),
+   signs the APK with the release key (see [SIGNING.md](SIGNING.md)) and checks
+   that the signer is the allowed key. The APK lands in
+   `artifacts/torrent-player-<versionName>.apk`.
+4. Create the GitHub release with that APK in one step, so the tag never exists
+   without the APK:
+   `gh release create v<versionName> artifacts/torrent-player-<versionName>.apk --target <commit> ...`
+5. Never replace an APK that has been published. Fix problems in a new version.
 
-@linsui requested reproducible-build metadata on MR !48893:
+## History
 
-- `Binaries:` GitHub release APK URL pattern
-- `AllowedAPKSigningKeys:` SHA-256 of the published 1.4.5 APK signer
-- Removed unnecessary `timeout: 3600`
-
-The listing AutoName remains **Torrent Player**. The metadata filename /
-application id `webtor.app` is the Android `applicationId` and cannot change
-without publishing a different app id.
-
-## Build recipe
-
-The canonical recipe is [`webtor.app.yml`](../webtor.app.yml). The app now builds a native Go engine from `engine-go/` with Android NDK r26b. It does not use Node.js, npm, V8, CMake, JavaScript bundles, or native Node addons.
-
-Gradle runs `engine-go/build.sh` before packaging. The build requires Go 1.24 or newer, Java 17 or 21, Android SDK 34, and NDK 26.1.10909125. The Android release APK contains `libengine.so` for `arm64-v8a`.
-
-Before submitting a release, update the recipe's full commit SHA and version fields, then validate from a clean checkout in F-Droid's current buildserver image:
-
-```sh
-fdroid rewritemeta webtor.app
-fdroid lint webtor.app
-fdroid checkupdates --auto webtor.app
-fdroid build --latest webtor.app
-```
-
-The recipe installs Debian Go 1.24.4, downloads the exact go.mod/go.sum dependencies during prebuild, and runs `go mod verify`. `GOTOOLCHAIN=local` prevents automatic toolchain downloads. The local anet source patch replaces its unused precompiled mobile binaries. Packaged Go dependency notices can be refreshed with `python3 scripts/update-go-notices.py` after building libengine.so. Do not claim an official successful build until the fdroiddata pipeline has built and scanned the new Go-engine release.
-
-## Submit updates
-
-After testing and pushing the referenced upstream release commit, run:
-
-```sh
-./scripts/submit-to-fdroid.sh
-```
-
-The script updates only the existing submission branch. F-Droid maintainers control review, builds, signing, and publication.
-
-## Release 1.4.4 validation (2026-09-15)
-
-- Release source: `cb711809578404b46761ecb679591c34b34d9cdb`, version 1.4.4 (21).
-- F-Droid 2.4.2 in `buildserver-trixie`, Debian Go 1.24.4 and NDK r26b:
-  metadata lint/rewritemeta, module verification, clean source scan, release
-  build, APK identity checks and APK binary scan all passed.
-- Command: `fdroid build -v --latest --test --scan-binary webtor.app`.
-- The first empty local workspace exposed F-Droid 2.4.2's SOURCE_DATE_EPOCH
-  lookup-before-clone error. Pre-cloning the repository resolved that tooling
-  issue; subsequent builds used F-Droid's normal checkout/clean/scanning flow.
-- The new recipe removes the previous Node/npm/srclib preparation and retains
-  full commit pinning. No binary/source scanner exemptions were added.
-- F-Droid review and publication remain controlled by maintainers. Check the
-  existing MR for the current upstream pipeline and review status.
+- 2.2.0 (98), 2026-10-25: first update after inclusion. The Android engine stopped
+  linking the Rust helpers, so the recipe stayed Go-only, and trackers and peers
+  see the real app version. Built and signed with `scripts/fdroid-release.sh`.
+- 2.0.0 (23): reviewed in !48893 (reviewer @mezinster, 2026-10-03; VirusTotal 0/67).
+  Follow-ups disclosed the tracker-list refresh, extra public trackers and
+  STUN providers in the description and added changelog 23. Pipeline
+  [2910503829](https://gitlab.com/karmugilrc/fdroiddata/-/pipelines/2910503829)
+  passed all nine jobs including the reproducible comparison.
+- 1.4.4 (21) and 1.4.5 (22): earlier recipe versions during review.

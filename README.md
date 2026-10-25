@@ -12,24 +12,11 @@
     <a href="https://github.com/anacrolix/torrent"><img src="https://img.shields.io/badge/Engine-Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Native Go torrent engine"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
     <a href="https://github.com/karmugilen/torrent-player/releases"><img src="https://img.shields.io/github/v/release/karmugilen/torrent-player?style=flat-square&color=orange" alt="Release"></a>
+    <a href="https://f-droid.org/packages/webtor.app/"><img src="https://img.shields.io/f-droid/v/webtor.app?style=flat-square&logo=f-droid" alt="F-Droid"></a>
   </p>
 </p>
 
 ---
-
-## Local redesign
-
-See [the 2.1.3 UI, playback and improvement notes](README_REDESIGN.md) for dynamic Material UI, live cached thumbnails, playback continuity, the branching peer view, caches, storage repair and the optimized local release.
-
-## Desktop discovery webpage
-
-Run `./scripts/discovery.sh start` and open [Torrent Atlas](http://127.0.0.1:18181)
-for a live world map and public torrent discovery on this PC. Search observed
-names, filter by country, and view the top ten within the local sample.
-The bulk lookup tool matches up to 100,000 hashes against saved names and the
-local index, with CSV export. Fresh feeds, tracker hints and publisher metadata
-run alongside DHT; provisional labels and verified results remain distinguishable.
-See [the desktop page notes](engine-go/cmd/discovery/README.md).
 
 ## Screenshots
 
@@ -47,24 +34,27 @@ See [the desktop page notes](engine-go/cmd/discovery/README.md).
 ## Key Features
 
 - **Two storage choices**: Download selected files to `Downloads/Webtor` for offline use, or choose **Direct Play** to keep video in bounded RAM and save only a small verified startup cache. Choose the default in Settings; both actions remain available when adding a torrent.
-  - Settings offers Auto RAM or a manual cache limit of 64, 128, 256, 512 or 1,024 MiB per transfer, and a peer connection limit from 8 to 500 (default 55). Auto chooses 64–512 MiB from available memory and active transfers when starting, returning to the app, or configuring a transfer. Both settings survive restarts and apply to active and future transfers. Cache reductions take effect as pieces are replaced; preview tasks retain their separate memory budget. Peer selection uses the original usefulness and recency rules.
+  - Settings offers Auto RAM or a manual cache limit from 16 MiB to 1 GiB per transfer, and a peer connection limit from 8 to 500 (default 55). Auto chooses 64–512 MiB from available memory and active transfers when starting, returning to the app, or configuring a transfer. Both settings survive restarts and apply to active and future transfers. Cache reductions take effect as pieces are replaced; preview tasks retain their separate memory budget. Peer selection uses the original usefulness and recency rules.
+- **Fast seeking**: A seek stops every download for the old place and fetches the new spot first, then the following blocks in order. A small network learned on the phone predicts when each peer will deliver a block, so the play position is requested from the peers likely to send it first. It runs and is stored only on the device.
+- **Continue watching & Play next**: Saved positions for every episode, and the next selected video starts when one ends, with its start fetched in advance.
+- **Seeding on by default**: Completed downloads share their verified pieces until a share ratio of 1.0 or 60 minutes, at up to 256 KiB/s, only on Wi-Fi, and paused during playback. All limits, or seeding itself, can be changed in Settings.
 - **In-Progress Streaming & Per-File Playback**: Launch directly into your favorite Android video player (VLC, Nova Player, Just Player, MPV, etc.) while downloading progresses, or play finished videos anytime.
 - **External-player extras**: Naturally ordered episode playlists, matching selected subtitle files, and saved resume positions for players that support the corresponding Android intent/result contracts.
 - **Selective File Downloads**: Choose exactly which files, episodes, or bonus materials to download from multi-file torrents.
 - **Battery-Friendly & Low-RAM Stability**:
   - Native Go engine with bounded preparation and piece-boundary storage. Direct Play prioritizes opening/container pieces, adapts forward buffering to reader consumption, parks idle probes, and retries stalled reads through the existing peer scheduler.
-  - CPU-sized background workers validate startup caches and hash independent pieces, capped at four workers per torrent. Direct Play entries stay paused on app startup. See [playback and cache behavior](docs/DIRECT_PLAY.md).
+  - CPU-sized background workers validate startup caches and hash independent pieces across the available CPU cores. Direct Play entries stay paused on app startup. See [playback and cache behavior](docs/DIRECT_PLAY.md).
   - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's existing one-second sampling clock.
-- **Dynamic Material You UI**: Wallpaper-based colours on Android 12+, solid Material surfaces, light/dark appearance and optional solid colour palettes. Search/filter/batch controls and persistent previews from verified cached video data.
-- **Cached Public Trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled. See [tracker discovery details](docs/RELEASE_1.4.4.md).
+- **Dynamic Material You UI**: Wallpaper-based colours on Android 12+, light/dark appearance and four themes (Aero, Antiquity, Retro and Wada). Search/filter/batch controls and persistent previews from verified cached video data.
+- **Cached Public Trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled.
 - **Full Swarm Connectivity**: Connects to seeds and peers via DHT, UDP trackers (OpenTrackr and more), and WebTorrent WebSocket trackers, transferring data over TCP, native uTP, and WebRTC data channels.
-- **Live Connection Maps**: Download details offers a world map of approximate peer countries and an expandable branching device/protocol/peer diagram. The view follows the selected Aero, Antiquity or Retro theme, shows TCP/uTP/WebRTC counts and animates links only when peer payload counters change. Country lookup uses a bundled offline DB-IP database; unknown and local addresses remain unlocated. Maps refresh once per second while details is visible, and pause clears peer connections.
+- **Live Connection Maps**: Download details offers a world map of approximate peer countries and an expandable branching device/protocol/peer diagram. The view follows the selected theme, shows TCP/uTP/WebRTC counts and animates links only when peer payload counters change. Country lookup uses a bundled offline DB-IP database; unknown and local addresses remain unlocated. Maps refresh once per second while details is visible, and pause clears peer connections.
 
 ---
 
 ## Installation
 
-Download the latest APK release from [GitHub Releases](https://github.com/karmugilen/torrent-player/releases).
+Install from [F-Droid](https://f-droid.org/packages/webtor.app/), or download the APK from [GitHub Releases](https://github.com/karmugilen/torrent-player/releases). Both are signed with the same key, so either one updates the other.
 
 Install via ADB or your device's package installer:
 ```bash
@@ -111,8 +101,8 @@ adb install -r torrent-player.apk
   - Native Go shared library based on `anacrolix/torrent`.
   - Supports TCP, uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, and HTTP/WebSocket trackers.
   - Android commands run through JNI; there is no Android control listener on port 18080 and no OkHttp dependency.
-  - Settings saves the preferred playback method: Standard sends a read-only Android content URI, while HTTP stream (experimental) sends a loopback media URL for incomplete video and Direct Play. Standard's incomplete files use a seekable proxy descriptor backed by verified Go torrent reads; completed files use their saved descriptor with either setting.
-  - The outlined Experimental section groups playback and transfer controls. Play this file only is enabled by default: playing a saved torrent suspends requests for its other selected files, including their startup hints, until you return from the external player. Turning the switch off restores normal downloading. Direct Play already focuses on the playing video.
+  - Settings saves the preferred playback method: HTTP stream (default) sends a loopback media URL for incomplete video and Direct Play, while Content URI sends a read-only Android content URI backed by a seekable proxy descriptor over verified Go torrent reads. Completed files use their saved descriptor with either setting.
+  - The outlined Experimental section has a Playback group (seek time stats, playback method, hedged requests, slow peers step aside, drop peers that won't share, play this file only, play next video) and a Network and battery group. Play this file only is enabled by default: playing a saved torrent suspends requests for its other selected files, including their startup hints, until you return from the external player. Turning the switch off restores normal downloading. Direct Play already focuses on the playing video.
   - A loopback HTTP media endpoint remains available for streaming compatibility. The standalone host engine also provides an HTTP control adapter for development.
 
 ---
@@ -134,13 +124,18 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`assembleRelease` produces an optimized, unsigned APK for F-Droid to sign.
-Upstream releases use the `WEBTOR_KEYSTORE`, `WEBTOR_STORE_PASSWORD`,
-`WEBTOR_KEY_ALIAS` and `WEBTOR_KEY_PASSWORD` environment variables for signing.
-The build contains no Node.js runtime, npm packages, V8 engine, or JavaScript bundle.
+`assembleRelease` produces an optimized, unsigned APK. The engine is pure Go;
+the build needs no Rust, Node.js, npm, V8 or JavaScript bundle.
 
-F-Droid inclusion is tracked in [merge request !48893](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/48893).
-See [the submission notes](docs/FDROID_SUBMISSION.md) for the build recipe and validation status.
+Releases are reproducible: each GitHub APK is built in F-Droid's buildserver
+image and signed with the release key, and F-Droid publishes it after
+rebuilding the tag and matching it. See [the F-Droid release notes](docs/FDROID_SUBMISSION.md)
+and [signing](docs/SIGNING.md).
+
+### Desktop discovery page
+
+`engine-go/cmd/discovery` is a separate desktop tool and is not part of the app.
+See [its notes](engine-go/cmd/discovery/README.md).
 
 ---
 

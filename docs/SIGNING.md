@@ -19,6 +19,11 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew :app:assembleRelease --no-daemo
 Do **not** pass `-Pwebtor.localSigning=true` when the `WEBTOR_*` variables are
 set. That flag is only for debug-key local installs.
 
+That signs a local build, which F-Droid cannot reproduce. Published releases
+are built in F-Droid's buildserver image and signed by
+`scripts/fdroid-release.sh` with the same key; see
+[FDROID_SUBMISSION.md](FDROID_SUBMISSION.md).
+
 Required environment variables (also documented in `README.md`):
 
 - `WEBTOR_KEYSTORE`
