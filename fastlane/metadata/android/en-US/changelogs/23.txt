@@ -1,0 +1,1 @@
+Faster video opening and seeking with improved download write-back. Restore pending magnets after restart. Show per-torrent speeds, live progress and a pieces heat map. Share or copy magnet links from torrent details. Keep background saved-data verification and responsive pause/resume/remove from 1.4.5.
