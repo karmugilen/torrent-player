@@ -49,12 +49,14 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlin.math.roundToInt
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
@@ -739,6 +741,30 @@ fun SettingsScreen(
                 }
             }
             item {
+                SettingsSection("About") {
+                    val uri = LocalUriHandler.current
+                    ListItem(
+                        headlineContent = { Text("Privacy policy") },
+                        supportingContent = { Text("Nothing is collected. Lists every network connection the app makes.") },
+                        modifier = Modifier.clickable { runCatching { uri.openUri(PRIVACY_POLICY_URL) } },
+                        colors = settingsListColors(),
+                    )
+                    SectionDivider()
+                    ListItem(
+                        headlineContent = { Text("Source code") },
+                        supportingContent = { Text("Free and open source under the MIT license") },
+                        modifier = Modifier.clickable { runCatching { uri.openUri(SOURCE_CODE_URL) } },
+                        colors = settingsListColors(),
+                    )
+                    SectionDivider()
+                    ListItem(
+                        headlineContent = { Text("Version") },
+                        supportingContent = { Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})") },
+                        colors = settingsListColors(),
+                    )
+                }
+            }
+            item {
                 SettingsSection("Maintenance") {
                     ListItem(
                         headlineContent = {
@@ -948,6 +974,9 @@ private fun DangerOutlineButton(text: String, onClick: () -> Unit) {
         Text(text)
     }
 }
+
+private const val PRIVACY_POLICY_URL = "https://github.com/karmugilen/torrent-player/blob/go-engine/PRIVACY.md"
+private const val SOURCE_CODE_URL = "https://github.com/karmugilen/torrent-player"
 
 /** One-line seek comparison for the current mode's measurement window. */
 internal fun seekStatsLine(stats: webtor.core.SeekStats?): String {

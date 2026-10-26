@@ -18,7 +18,7 @@ which `scripts/play-bundle.sh` sets; the content provider authority follows it.
   time and posts a notice; opening the app resets the 6-hour budget.
 - App Bundle: `scripts/play-bundle.sh` builds `artifacts/torrent-player-<version>.aab`
   signed with the release key.
-- Privacy policy: [PRIVACY.md](../PRIVACY.md), URL
+- Privacy policy: [PRIVACY.md](../PRIVACY.md), linked in Settings, About (Play requires an in-app link), URL
   `https://github.com/karmugilen/torrent-player/blob/go-engine/PRIVACY.md`.
 - Listing text and graphics: `fastlane/metadata/android/en-US/` (title, short
   description, icon 512 px, feature graphic 1024×500, phone screenshots). Play
