@@ -22,6 +22,7 @@ OUT="$ROOT/android/app/src/main/jniLibs/$ABI"
 mkdir -p "$OUT"
 
 # Pure Go, so F-Droid needs only Go and the NDK (engine-rust is not linked).
+# 16 KB page alignment is required by Google Play for Android 15+ devices.
 VERSION="$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' "$ROOT/android/app/build.gradle.kts")"
 echo "Building Go engine for Android $ABI..."
 cd "$ROOT/engine-go"
@@ -32,7 +33,7 @@ GOOS=android \
 GOARCH="$GOARCH_ABI" \
 CC="$CC" \
 CXX="$CXX" \
-CGO_LDFLAGS="-static-libstdc++" \
+CGO_LDFLAGS="-static-libstdc++ -Wl,-z,max-page-size=16384" \
 go build -tags=nosqlite,noboltdb -trimpath -buildvcs=false -buildmode=c-shared -ldflags="-s -w -buildid= -X main.appVersion=$VERSION" -o "$OUT/libengine.so" .
 
 if [ -f "$TOOLCHAIN/bin/llvm-strip" ]; then

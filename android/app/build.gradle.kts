@@ -41,15 +41,15 @@ tasks.named("preBuild") {
 
 android {
     namespace = "webtor.app"
-    compileSdk = 34
+    compileSdk = 36
     ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "webtor.app"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 98
-        versionName = "2.2.0"
+        targetSdk = 36
+        versionCode = 99
+        versionName = "2.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")

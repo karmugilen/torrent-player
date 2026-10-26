@@ -53,6 +53,13 @@ class PlayService : Service() {
         }
     }
 
+    // Android 15+ allows dataSync services 6 hours in the background per day.
+    // Stop in time or the system kills the app; opening the app resets it.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        notifyTimedOut(this)
+        stopSelf()
+    }
+
     override fun onDestroy() {
         if (Build.VERSION.SDK_INT >= 24) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -164,6 +171,15 @@ class PlayService : Service() {
                 manager.notify(entry.key.hashCode(), NotificationCompat.Builder(ctx, "webtor-complete").setSilent(true).setOnlyAlertOnce(true).setSmallIcon(android.R.drawable.stat_sys_download_done).setContentTitle("Download complete").setContentText("A download is ready").setContentIntent(open).setAutoCancel(true).build())
             }
         }
+        private fun notifyTimedOut(ctx: Context) {
+            runCatching {
+                val manager = ctx.getSystemService(NotificationManager::class.java)
+                if (Build.VERSION.SDK_INT >= 33 && manager.areNotificationsEnabled().not()) return
+                manager.createNotificationChannel(NotificationChannel("webtor-complete", "Completed downloads", NotificationManager.IMPORTANCE_DEFAULT))
+                val open = PendingIntent.getActivity(ctx, REQUEST_OPEN, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                manager.notify(NOTIF_TIMEOUT_ID, NotificationCompat.Builder(ctx, "webtor-complete").setSilent(true).setSmallIcon(android.R.drawable.stat_sys_warning).setContentTitle("Transfers stopped in the background").setContentText("Android allows 6 hours a day. Open Torrent Player to continue.").setContentIntent(open).setAutoCancel(true).build())
+            }
+        }
         const val ACTION_STOP = "webtor.app.STOP"
         private const val ACTION_REFRESH = "webtor.app.REFRESH_NOTIFICATION"
         const val EXTRA_TITLE = "title"
@@ -175,6 +191,7 @@ class PlayService : Service() {
         private const val EXTRA_STATS = "stats"
         private const val CHANNEL = "webtor-downloads"
         private const val NOTIF_ID = 42
+        private const val NOTIF_TIMEOUT_ID = 43
         private const val REQUEST_OPEN = 0
         private const val REQUEST_STOP = 3
         private const val REQUEST_REFRESH = 4

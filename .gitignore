@@ -26,3 +26,4 @@ android/app/icon/full1024.png
 engine-go/engine-go
 engine-go/engine-go.test
 android/seekprobe/build/
+*.aab

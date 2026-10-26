@@ -1,0 +1,1 @@
+Targets Android 16 (API 36). The engine supports 16 KB memory pages for newer phones. On Android 15 and newer, background transfers stop cleanly after Android's 6-hour daily limit, with a notice; opening the app continues them. Privacy policy added.
