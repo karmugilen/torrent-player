@@ -21,12 +21,15 @@
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/library.png" width="31%" alt="Library & Video Previews" />&nbsp;
-  <img src="docs/images/add_sheet.png" width="31%" alt="Add Magnet & Select Files" />&nbsp;
-  <img src="docs/images/details.png" width="31%" alt="Details, Telemetry & Pieces" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" width="19%" alt="Library with video previews" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2.png" width="19%" alt="Add a magnet and choose files" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3.png" width="19%" alt="Live swarm world map and pieces" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4.png" width="19%" alt="Connected peers by protocol" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="19%" alt="Experimental playback settings" />
 </p>
 <p align="center">
-  <sub><b>Left:</b> Library & Video Previews &nbsp;|&nbsp; <b>Center:</b> Add Magnet & File Selection &nbsp;|&nbsp; <b>Right:</b> Details, Swarm Telemetry & Pieces</sub>
+  <sub>Library and previews · Add a torrent · Swarm map and pieces · Peers · Playback settings<br>
+  Shown with <i>Big Buck Bunny</i> and <i>Sintel</i> (&copy; Blender Foundation, CC BY 3.0). Peer IP addresses are hidden.</sub>
 </p>
 
 ---
