@@ -2,9 +2,10 @@
 
 Last updated: 2026-10-26
 
-Torrent Player (`webtor.app`) is a free, open-source BitTorrent client for
-Android. This policy explains what the app does with information. The source
-code is at <https://github.com/karmugilen/torrent-player>.
+Torrent Player (`torrentplayer.app` on Google Play, `webtor.app` on F-Droid
+and GitHub) is a free, open-source BitTorrent client for Android. This policy
+explains what the app does with information. The source code is at
+<https://github.com/karmugilen/torrent-player>.
 
 ## What the developer collects
 

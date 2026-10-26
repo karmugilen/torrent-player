@@ -105,7 +105,7 @@ class PlaybackProvider : ContentProvider() {
 
     companion object {
         fun uriFor(entry: DownloadEntry, file: SavedFile): Uri = Uri.Builder()
-            .scheme("content").authority("webtor.app.playback")
+            .scheme("content").authority("${BuildConfig.APPLICATION_ID}.playback")
             .appendPath(entry.key).appendPath(file.index.toString()).appendPath(file.name).build()
     }
 }

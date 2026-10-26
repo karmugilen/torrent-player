@@ -45,7 +45,9 @@ android {
     ndkVersion = "26.1.10909125"
 
     defaultConfig {
-        applicationId = "webtor.app"
+        // F-Droid and GitHub ship webtor.app; the Google Play listing is
+        // torrentplayer.app (scripts/play-bundle.sh sets webtor.applicationId).
+        applicationId = providers.gradleProperty("webtor.applicationId").getOrElse("webtor.app")
         minSdk = 26
         targetSdk = 36
         versionCode = 99
@@ -105,6 +107,8 @@ android {
 
     buildFeatures {
         compose = true
+        // PlaybackProvider builds its content authority from APPLICATION_ID.
+        buildConfig = true
     }
 
     androidResources {

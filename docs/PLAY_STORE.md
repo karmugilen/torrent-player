@@ -1,8 +1,13 @@
-# Google Play release: Torrent Player (`webtor.app`)
+# Google Play release: Torrent Player (`torrentplayer.app`)
 
-The same app goes to Google Play, F-Droid and GitHub, signed with the same
-release key (SHA-256 `b26e9a22c1a40c5f8bd2bb5ba9e8639f7835c1ca986e9607e240beeddbd9f71f`),
-so installs from any store update each other.
+The same code goes to Google Play as `torrentplayer.app` and to F-Droid and
+GitHub as `webtor.app` ("webtor" is also the name of an unrelated website).
+Both are signed with the release key
+(SHA-256 `b26e9a22c1a40c5f8bd2bb5ba9e8639f7835c1ca986e9607e240beeddbd9f71f`).
+They are separate apps on the phone: a Play install and an F-Droid install can
+sit side by side, and moving between them means reinstalling. The package name
+comes from the Gradle property `webtor.applicationId` (default `webtor.app`),
+which `scripts/play-bundle.sh` sets; the content provider authority follows it.
 
 ## What the code already meets (2.3.0, versionCode 99)
 
@@ -27,14 +32,14 @@ so installs from any store update each other.
    row** before it can publish to production. Organization accounts (D-U-N-S
    number) skip this.
 2. **Create the app.** Name "Torrent Player", default language English (US), App,
-   Free. Package name comes from the first upload: `webtor.app`.
+   Free, package name `torrentplayer.app` (created 2026-10-26).
 3. **App signing: use the existing key.** On the first upload choose
    *Use a different key* → *Export and upload a key from Java keystore*. Play shows
    a PEPK command and an encryption key file. Run it with:
    `--keystore=$HOME/.config/webtor/webtor-release.jks --alias=webtor`
-   and upload the zip. Do **not** let Google generate a new key: Play installs would
-   then be unable to update F-Droid or GitHub installs, and the reverse. The same
-   key is also used as the upload key.
+   and upload the zip. Using the existing key keeps one key for every store and
+   lets the same key prove ownership for Android developer verification. The
+   same key is also used as the upload key.
 4. **Closed testing track.** Upload the `.aab`, add the testers' Google accounts
    (or a Google Group), roll out, and keep 12+ testers opted in for 14 days.
 5. **Apply for production** in the Console, then promote the release.
