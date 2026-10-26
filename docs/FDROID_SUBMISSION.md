@@ -43,11 +43,20 @@ F-Droid's buildserver image, not with a local Gradle: local builds differ in
    `gh release create v<versionName> artifacts/torrent-player-<versionName>.apk --target <commit> ...`
 5. Never replace an APK that has been published. Fix problems in a new version.
 
+Sign with `apksigner sign --alignment-preserved` (the script does). Without it,
+build-tools 35 and newer re-align the zip while signing, and F-Droid's
+verification fails because the signature no longer fits its build. The script
+runs F-Droid's own `verify_apks` check before it reports success.
+
 ## History
 
 - 2.2.0 (98), 2026-10-25: first update after inclusion. The Android engine stopped
   linking the Rust helpers, so the recipe stayed Go-only, and trackers and peers
-  see the real app version. Built and signed with `scripts/fdroid-release.sh`.
+  see the real app version. Built and signed with `scripts/fdroid-release.sh`;
+  two builds from different commits were byte-identical, F-Droid's
+  `verify_apks` accepted the GitHub APK and `fdroid checkupdates` picked up
+  `v2.2.0` (98). The first upload, signed without `--alignment-preserved`, was
+  replaced minutes after release, before F-Droid fetched it.
 - 2.0.0 (23): reviewed in !48893 (reviewer @mezinster, 2026-10-03; VirusTotal 0/67).
   Follow-ups disclosed the tracker-list refresh, extra public trackers and
   STUN providers in the description and added changelog 23. Pipeline

@@ -64,7 +64,9 @@ set -a
 # shellcheck disable=SC1090
 . "$HOME/.config/webtor/credentials.env"
 set +a
-"$APKSIGNER" sign --ks "$WEBTOR_KEYSTORE" --ks-key-alias "$WEBTOR_KEY_ALIAS" \
+# --alignment-preserved keeps every zip byte of F-Droid's build, so F-Droid
+# can copy this signature onto its own build of the tag.
+"$APKSIGNER" sign --alignment-preserved --ks "$WEBTOR_KEYSTORE" --ks-key-alias "$WEBTOR_KEY_ALIAS" \
     --ks-pass env:WEBTOR_STORE_PASSWORD --key-pass env:WEBTOR_KEY_PASSWORD \
     --out "$OUT" "$UNSIGNED"
 rm -f "$OUT.idsig"
@@ -74,5 +76,19 @@ GOT="$("$APKSIGNER" verify --print-certs "$OUT" | sed -n 's/^Signer #1 certifica
 [ "$GOT" = "$WANT" ] || { echo "Signer $GOT is not F-Droid's allowed key $WANT" >&2; exit 1; }
 
 cp "$UNSIGNED" "$WORK/webtor.app_$CODE.unsigned.apk"
+
+# The check F-Droid runs before publishing: copy our signature onto its build.
+git clone -q --depth 1 https://gitlab.com/fdroid/fdroidserver.git "$WORK/fdroidserver"
+cp "$OUT" "$WORK/signed.apk"
+$DOCKER run --rm -v "$WORK:/w" "$IMAGE" bash -c '
+    mkdir /tmp/v && cd /tmp/v && PYTHONPATH=/w/fdroidserver python3 -c "
+import sys
+from fdroidserver import common
+common.config = {\"sdk_path\": \"/opt/android-sdk\"}
+common.fill_config_defaults(common.config)
+sys.exit(common.verify_apks(\"/w/signed.apk\", sys.argv[1], \"/tmp/v\"))
+" "/w/webtor.app_'"$CODE"'.unsigned.apk"' ||
+    { echo "F-Droid would reject $OUT: its signature does not fit F-Droid's build" >&2; exit 1; }
+echo "F-Droid verification: OK"
 echo "Signed $OUT"
 echo "sha256 $(sha256sum "$OUT" | cut -d' ' -f1)"
