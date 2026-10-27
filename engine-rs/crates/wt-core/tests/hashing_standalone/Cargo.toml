@@ -1,0 +1,26 @@
+[package]
+name = "wt-core-hashing-standalone"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep out of the engine-rs workspace (coordinator owns workspace.members).
+[workspace]
+
+[dependencies]
+wt-types = { path = "/home/kar/orca/workspaces/torrent-player/rust-engine/engine-rs/crates/wt-types" }
+wt-meta = { path = "/home/kar/orca/workspaces/torrent-player/rust-engine/engine-rs/crates/wt-meta" }
+wt-discovery = { path = "/home/kar/orca/workspaces/torrent-player/rust-engine/engine-rs/crates/wt-discovery" }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+thiserror = "2"
+parking_lot = "0.12"
+sha1 = { version = "0.10", features = ["asm"] }
+sha2 = "0.10"
+rand = "0.8"
+ring = "0.17"
+hex = "0.4"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
