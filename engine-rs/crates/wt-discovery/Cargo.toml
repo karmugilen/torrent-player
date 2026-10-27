@@ -1,0 +1,15 @@
+[package]
+name = "wt-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wt-types.workspace = true
+wt-meta.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+tracing.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "wt-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wt-types.workspace = true
+wt-meta.workspace = true
+wt-core.workspace = true
+wt-storage.workspace = true
+wt-policy.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[lib]
+name = "engine"
+crate-type = ["cdylib", "rlib"]
