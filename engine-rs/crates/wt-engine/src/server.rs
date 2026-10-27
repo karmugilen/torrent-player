@@ -134,6 +134,7 @@ pub struct EngineServer {
     pub dial_rate_per_sec: AtomicUsize,
     pub peer_exploration: AtomicBool,
     pub claude_seek_mode: AtomicBool,
+    pub seek_stats: Mutex<SeekStats>,
     pub hedge_requests: AtomicBool,
     pub slow_peer_yield: AtomicBool,
     pub drop_chokers: AtomicBool,
@@ -260,6 +261,11 @@ impl EngineServer {
                             "network changed",
                         ));
                     }
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        dialer.track_fd(stream.as_raw_fd());
+                    }
                     Ok(stream)
                 })
             },
@@ -267,6 +273,7 @@ impl EngineServer {
         let config = wt_core::ClientConfig {
             callbacks,
             tracker_dialer,
+            header_obfuscation_policy: Default::default(),
             default_storage: storage.clone(),
             listen_port: 0,
             no_dht: false,
@@ -344,7 +351,8 @@ impl EngineServer {
             ghost_pro_mode: AtomicBool::new(false),
             dial_rate_per_sec: AtomicUsize::new(30),
             peer_exploration: AtomicBool::new(false),
-            claude_seek_mode: AtomicBool::new(true),
+            claude_seek_mode: AtomicBool::new(false),
+            seek_stats: Mutex::new(SeekStats::default()),
             hedge_requests: AtomicBool::new(true),
             slow_peer_yield: AtomicBool::new(true),
             drop_chokers: AtomicBool::new(true),
@@ -404,6 +412,43 @@ impl EngineServer {
         } else {
             rec.torrent.disallow_data_upload();
         }
+    }
+
+    fn apply_transfer_state(&self, rec: &mut TorrentRecord) {
+        let active = self.payload_transfers_allowed.load(Ordering::SeqCst)
+            && rec.configured
+            && !rec.paused
+            && rec.error.is_none();
+        if !active {
+            rec.torrent.disallow_data_download();
+            rec.torrent.disallow_data_upload();
+        }
+        if rec.torrent.info().is_some() {
+            let files = rec.torrent.files();
+            let only = rec.file_only && rec.focused_file.is_some() && !rec.direct_play;
+            for file in files {
+                let priority = if active && rec.selected.contains(&file.index()) && !rec.direct_play
+                {
+                    if only {
+                        if Some(file.index()) == rec.focused_file {
+                            wt_core::PiecePriority::Normal
+                        } else {
+                            wt_core::PiecePriority::None
+                        }
+                    } else {
+                        wt_core::PiecePriority::Normal
+                    }
+                } else {
+                    wt_core::PiecePriority::None
+                };
+                file.set_priority(priority);
+            }
+            if active {
+                rec.torrent.allow_data_download();
+                rec.torrent.allow_data_upload();
+            }
+        }
+        self.apply_seed_policy(rec);
     }
 
     pub fn notify_change(&self) {
@@ -859,6 +904,15 @@ impl EngineServer {
         }
 
         let file = &rec.files[file_index];
+        if !self.payload_transfers_allowed.load(Ordering::SeqCst)
+            && file.verified_bytes < file.length
+        {
+            return (
+                409,
+                serde_json::to_vec(&json!({"error": "payload transfers are disabled in settings"}))
+                    .unwrap(),
+            );
+        }
         let stream_url = format!(
             "http://127.0.0.1:{}/torrent/{}/file/{}",
             self.stream_port.load(Ordering::SeqCst),
@@ -902,7 +956,9 @@ impl EngineServer {
                 .get("fileOnly")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            r.write().file_only = enabled;
+            let mut rec = r.write();
+            rec.file_only = enabled;
+            self.apply_transfer_state(&mut rec);
             (
                 200,
                 serde_json::to_vec(&json!({"fileOnly": enabled})).unwrap(),
@@ -927,7 +983,9 @@ impl EngineServer {
         };
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
-            r.write().focused_file = req.file_index;
+            let mut rec = r.write();
+            rec.focused_file = req.file_index;
+            self.apply_transfer_state(&mut rec);
             self.notify_change();
             (
                 200,
@@ -976,17 +1034,11 @@ impl EngineServer {
                 rec.torrent.update_piece_completion(piece);
             }
             rec.configured = true;
-            for file in rec.torrent.files() {
-                if req.selected.contains(&file.index()) {
-                    file.download();
-                } else {
-                    file.set_priority(wt_core::PiecePriority::None);
-                }
-            }
             rec.selected = req.selected;
             if req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM) {
                 rec.direct_play = true;
             }
+            self.apply_transfer_state(&mut rec);
             self.notify_change();
             (
                 200,
@@ -1013,14 +1065,8 @@ impl EngineServer {
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
-            for file in rec.torrent.files() {
-                if req.selected.contains(&file.index()) {
-                    file.download();
-                } else {
-                    file.set_priority(wt_core::PiecePriority::None);
-                }
-            }
             rec.selected = req.selected.clone();
+            self.apply_transfer_state(&mut rec);
             self.notify_change();
             (
                 200,
@@ -1052,15 +1098,7 @@ impl EngineServer {
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
             rec.paused = pause;
-            if pause {
-                rec.torrent.disallow_data_download();
-                rec.torrent.disallow_data_upload();
-            } else {
-                rec.torrent.allow_data_download();
-                if self.seeding_enabled.load(Ordering::SeqCst) {
-                    rec.torrent.allow_data_upload();
-                }
-            }
+            self.apply_transfer_state(&mut rec);
             self.notify_change();
             (
                 200,
@@ -1160,26 +1198,58 @@ impl EngineServer {
         let mut buckets = Vec::new();
         let pieces_per_bucket = (total_pieces + buckets_count - 1) / buckets_count.max(1);
 
+        let piece_len = if rec.piece_length > 0 {
+            rec.piece_length
+        } else {
+            1
+        };
+        let mut selected_pieces = vec![false; total_pieces];
+        let files = rec.torrent.files();
+        for &idx in &rec.selected {
+            if let Some(f) = files.get(idx) {
+                if f.length() == 0 {
+                    continue;
+                }
+                let start_piece = (f.offset() / piece_len) as usize;
+                let end_piece = ((f.offset() + f.length() + piece_len - 1) / piece_len) as usize;
+                for item in selected_pieces
+                    .iter_mut()
+                    .take(end_piece.min(total_pieces))
+                    .skip(start_piece)
+                {
+                    *item = true;
+                }
+            }
+        }
+
         for i in 0..buckets_count {
             let start = i * pieces_per_bucket;
             let end = ((i + 1) * pieces_per_bucket).min(total_pieces);
             let total = end.saturating_sub(start);
-            let verified = if !rec.piece_verified.is_empty() {
-                rec.piece_verified[start..end]
-                    .iter()
-                    .filter(|&&v| v)
-                    .count()
-            } else {
-                0
-            };
+            let mut selected = 0;
+            let mut verified = 0;
+            let mut selected_verified = 0;
+            for p in start..end {
+                let is_sel = selected_pieces.get(p).copied().unwrap_or(false);
+                let is_ver = rec.piece_verified.get(p).copied().unwrap_or(false);
+                if is_sel {
+                    selected += 1;
+                }
+                if is_ver {
+                    verified += 1;
+                    if is_sel {
+                        selected_verified += 1;
+                    }
+                }
+            }
             buckets.push(PieceBucket {
                 start,
                 end,
                 total,
-                selected: total,
+                selected,
                 verified,
                 receiving: 0,
-                selected_verified: verified,
+                selected_verified,
                 selected_receiving: 0,
             });
         }
@@ -1256,6 +1326,41 @@ impl EngineServer {
         };
 
         let mut peers = Vec::new();
+        if !rec.paused {
+            for peer in rec.torrent.peer_conns() {
+                let addr = if peer.remote_addr.ip().is_unspecified() {
+                    std::net::SocketAddr::new(
+                        match peer.remote_addr.ip() {
+                            std::net::IpAddr::V4(_) => {
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                            }
+                            std::net::IpAddr::V6(_) => {
+                                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                            }
+                        },
+                        peer.remote_addr.port(),
+                    )
+                } else {
+                    peer.remote_addr
+                };
+                let address = addr.to_string();
+                let country = self.geoip.lookup_country(&address);
+                let transport = match peer.transport {
+                    wt_types::Transport::Tcp => "TCP".to_string(),
+                    wt_types::Transport::Utp => "uTP".to_string(),
+                    wt_types::Transport::WebRtc => "WebRTC".to_string(),
+                    wt_types::Transport::WebSeed => "WebSeed".to_string(),
+                };
+                peers.push(PeerConnectionView {
+                    address,
+                    transport,
+                    client: peer.client_name,
+                    downloaded: peer.conn_stats.bytes_read_data,
+                    uploaded: peer.conn_stats.bytes_written_data,
+                    country,
+                });
+            }
+        }
         sort_peer_connections(&mut peers);
 
         let resp = ConnectionsResponse {
@@ -1331,7 +1436,7 @@ impl EngineServer {
             download_rate_bytes_sec: self.download_rate_limit.load(Ordering::SeqCst),
             upload_rate_bytes_sec: self.upload_rate_limit.load(Ordering::SeqCst),
             payload_transfers_allowed: self.payload_transfers_allowed.load(Ordering::SeqCst),
-            seek_stats: SeekStats::default(),
+            seek_stats: self.seek_stats.lock().clone(),
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }
@@ -1388,7 +1493,16 @@ impl EngineServer {
             self.peer_exploration.store(exp, Ordering::SeqCst);
         }
         if let Some(seek) = req.claude_seek_mode {
-            self.claude_seek_mode.store(seek, Ordering::SeqCst);
+            let prev = self.claude_seek_mode.swap(seek, Ordering::SeqCst);
+            if prev != seek {
+                let after = if seek {
+                    std::time::Duration::from_millis(500)
+                } else {
+                    std::time::Duration::ZERO
+                };
+                self.client.set_urgent_request_stealing(after);
+                *self.seek_stats.lock() = SeekStats::default();
+            }
         }
         if let Some(h) = req.hedge_requests {
             self.hedge_requests.store(h, Ordering::SeqCst);
@@ -1440,12 +1554,7 @@ impl EngineServer {
 
         for r in self.records.read().values() {
             let mut rec = r.write();
-            if self.payload_transfers_allowed.load(Ordering::SeqCst) && !rec.paused {
-                rec.torrent.allow_data_download();
-            } else {
-                rec.torrent.disallow_data_download();
-            }
-            self.apply_seed_policy(&mut rec);
+            self.apply_transfer_state(&mut rec);
         }
         self.notify_change();
         self.handle_get_settings()

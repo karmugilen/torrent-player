@@ -827,7 +827,17 @@ impl PlaybackSession {
         }
         let want = buf.len().min((self.length - offset) as usize);
         self.update_window(offset);
-        let n = self.backend.read_at(&mut buf[..want], offset)?;
+        let mut n = 0;
+        while n < want {
+            let got = self.backend.read_at(&mut buf[n..want], offset + n as i64)?;
+            if got == 0 {
+                break;
+            }
+            n += got;
+            if _partial {
+                break;
+            }
+        }
         if !self.open_phase {
             self.coordinator.set_playing(self.session_id);
         }

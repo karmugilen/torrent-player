@@ -240,6 +240,9 @@ pub fn public_tracker_url(raw: &str) -> Option<String> {
     }
 
     let port = u.port();
+    if port == Some(0) {
+        return None;
+    }
     if scheme == "udp" && port.is_none() {
         return None;
     }
@@ -254,7 +257,17 @@ pub fn public_tracker_url(raw: &str) -> Option<String> {
     let _ = u.set_host(Some(&host));
     let _ = u.set_port(normalized_port);
 
-    Some(u.to_string())
+    let mut res = u.to_string();
+    if !raw
+        .split("://")
+        .nth(1)
+        .is_some_and(|rest| rest.contains('/'))
+        && res.ends_with('/')
+    {
+        res.pop();
+    }
+
+    Some(res)
 }
 
 pub fn parse_tracker_list(body: &str) -> Vec<String> {

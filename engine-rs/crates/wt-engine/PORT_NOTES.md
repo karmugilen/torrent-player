@@ -147,3 +147,27 @@ Owned by agy-4 (playback.rs ownership moved to the helper worker above).
 - Remaining `engine_playback*`, `engine_direct_playback`, `engine_instant_seek`, `engine_idle_buffer`, `engine_playback_resume`, `engine_next_preload`, `engine_seek_http` stay ignored until server implements `PlaybackHost`.
 - `cargo clippy -p wt-engine --lib --no-deps -- -D warnings` clean on owned modules.
 - `cargo fmt` applied on owned files.
+
+## Two-Host Engine Transfer & Parity (agy-engine)
+
+- **`tests/engine_two_host.rs`**: Full end-to-end multi-process engine transfer on localhost:
+  - Spawns two independent `engine-host` instances (seeder and leecher) on ephemeral ports.
+  - Seeds a pre-verified download via `.boundary` and checkpoint files.
+  - Adds torrent to leecher via magnet link with `x.pe=<seeder_ip>:<seeder_port>`.
+  - Leecher downloads metadata, configures storage, downloads all pieces, reaches 100% verified bytes.
+  - Verified disk bytes on leecher match fixture data byte-for-byte.
+- **`cargo run -p wt-parity -- api-diff`**:
+  - **30 MATCH, 0 DIFF, 0 CRITICAL**.
+  - All routes (`/stats`, `/settings`, `/network`, `/add`, `/configure`, `/select`, `/pause`, `/resume`, `/remove`, `/torrent/{id}`, `/metadata/{id}`, `/connections/{id}`, `/pieces/{id}`, etc.) byte/JSON-parity matched against `engine-go`.
+- **Android `libengine.so`**:
+  - `bash engine-rs/build-android.sh` produces `libengine.so` (arm64-v8a).
+  - 16 KiB ELF segment aligned (`0x4000`).
+  - Contains all 9 JNI exports (`Java_webtor_app_EngineHost_*`).
+- **Core / Server Integration Fixes**:
+  - `apply_transfer_state`: updates file and piece priorities according to `payload_transfers_allowed`, `file_only`, and `selected` files.
+  - `/settings`: `maxPeers: 0` treated as unchanged; `claudeSeekMode` defaults to false and resets `seek_stats` on toggle with `set_urgent_request_stealing`.
+  - `/network`: rejects requests without `connected`.
+  - `/connections`: queries active connections from `rec.torrent.peer_conns()`, normalizes localhost address, resolves GeoIP country, and sorts.
+  - Payload gate: returns 409 `"payload transfers are disabled in settings"` on incomplete playback when transfers disallowed.
+  - Tracker dialer: tracks raw file descriptors in `NetworkDialer` and issues `libc::shutdown(fd, SHUT_RDWR)` on reset.
+

@@ -42,6 +42,8 @@ struct NetworkDialerInner {
     split: bool,
     connections: HashSet<usize>,
     next_id: usize,
+    #[cfg(unix)]
+    fds: HashSet<std::os::fd::RawFd>,
 }
 
 impl Default for NetworkDialer {
@@ -58,6 +60,8 @@ impl NetworkDialer {
                 split: false,
                 connections: HashSet::new(),
                 next_id: 1,
+                #[cfg(unix)]
+                fds: HashSet::new(),
             }),
         }
     }
@@ -83,7 +87,18 @@ impl NetworkDialer {
     pub fn reset(&self) {
         let mut g = self.inner.lock();
         g.epoch = g.epoch.wrapping_add(1);
+        #[cfg(unix)]
+        for fd in g.fds.drain() {
+            unsafe {
+                libc::shutdown(fd, libc::SHUT_RDWR);
+            }
+        }
         g.connections.clear();
+    }
+
+    #[cfg(unix)]
+    pub fn track_fd(&self, fd: std::os::fd::RawFd) {
+        self.inner.lock().fds.insert(fd);
     }
 
     /// Register a live connection id (tests / custom dials).
