@@ -151,7 +151,17 @@ impl EngineServer {
         };
 
         let storage = Arc::new(wt_storage::DocumentStorageClient::new(&dir));
+        let status_target = tracker_status.clone();
+        let callbacks = wt_core::Callbacks { status_updated: vec![Arc::new(move |event| {
+            let (hash, url, status, message) = match event {
+                wt_core::StatusEvent::TrackerConnected { info_hash, url } | wt_core::StatusEvent::TrackerAnnounceSuccessful { info_hash, url } => (info_hash, url, "working", ""),
+                wt_core::StatusEvent::TrackerDisconnected { info_hash, url, error } => (info_hash, url, "error", error.as_deref().unwrap_or("")),
+                wt_core::StatusEvent::TrackerAnnounceError { info_hash, url, error } => (info_hash, url, "error", error.as_str()),
+            };
+            status_target.set_status(&hash.to_hex(), url, status, message);
+        })], ..Default::default() };
         let config = wt_core::ClientConfig {
+            callbacks,
             default_storage: storage.clone(), seed: true, always_want_conns: true,
             periodically_announce_torrents_to_dht: true,
             piece_hashers_per_torrent: wt_storage::background_workers(), dial_rate: 30.0,
@@ -402,6 +412,7 @@ impl EngineServer {
             Ok(t) => t,
             Err(e) => return (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap()),
         };
+        if !self.seeding_enabled.load(Ordering::SeqCst) { torrent.disallow_data_upload(); }
         torrent.add_peers(peers.into_iter().map(|addr| wt_core::PeerInfo { id: None, addr, source: wt_core::PeerSource::Direct, supports_encryption: false, pex: Default::default(), trusted: false }).collect());
         let info_hash = torrent.info_hash().to_hex();
         let id = info_hash.clone();
@@ -657,6 +668,14 @@ impl EngineServer {
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
+            let Some(storage) = self.storage.get_storage(&rec.info_hash) else {
+                return (400, serde_json::to_vec(&json!({"error":"metadata not ready"})).unwrap());
+            };
+            let stream = req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM);
+            if let Err(e) = storage.attach_descriptors_mode(&req.descriptors, &req.selected, stream) {
+                return (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap());
+            }
+            for piece in 0..rec.torrent.num_pieces() { rec.torrent.update_piece_completion(piece); }
             rec.configured = true;
             for file in rec.torrent.files() { if req.selected.contains(&file.index()) { file.download(); } else { file.set_priority(wt_core::PiecePriority::None); } }
             rec.selected = req.selected;
@@ -984,6 +1003,7 @@ impl EngineServer {
                 );
             }
             self.max_peers.store(peers, Ordering::SeqCst);
+            for t in self.client.torrents() { t.set_max_established_conns(peers); }
         }
 
         if let Some(cache_bytes) = req.ram_cache_bytes {
@@ -994,6 +1014,7 @@ impl EngineServer {
                 );
             }
             self.ram_cache_bytes.store(cache_bytes, Ordering::SeqCst);
+            self.storage.set_memory_limit(cache_bytes);
         }
 
         if let Some(dial) = req.dial_rate_per_sec {
@@ -1051,6 +1072,11 @@ impl EngineServer {
                 .store(allowed, Ordering::SeqCst);
         }
 
+        for t in self.client.torrents() {
+            if self.seeding_enabled.load(Ordering::SeqCst) && self.seeding_allowed.load(Ordering::SeqCst) { t.allow_data_upload(); }
+            else { t.disallow_data_upload(); }
+            if self.payload_transfers_allowed.load(Ordering::SeqCst) { t.allow_data_download(); } else { t.disallow_data_download(); }
+        }
         self.notify_change();
         self.handle_get_settings()
     }

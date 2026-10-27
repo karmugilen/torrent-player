@@ -229,6 +229,9 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn requesting_peer(&self, req: RequestIndex) -> Option<PeerKey> {
+        if let Some((peer, _)) = self.assignments.read().get(&req) {
+            return Some(*peer);
+        }
         self.request_state
             .read()
             .get(&req)
@@ -236,10 +239,14 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn request_when(&self, req: RequestIndex) -> Option<Instant> {
+        if let Some((_, when)) = self.assignments.read().get(&req) {
+            return Some(*when);
+        }
         self.request_state.read().get(&req).map(|a| a.when)
     }
 
     fn assign_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) {
+        self.assignments.write().insert(req, (peer, when));
         if let Some(addr) = addr_for_key(self, peer) {
             self.request_state.write().insert(
                 req,
@@ -253,6 +260,7 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn clear_assignment(&self, req: RequestIndex) {
+        self.assignments.write().remove(&req);
         self.request_state.write().remove(&req);
     }
 
@@ -345,6 +353,9 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn hedge_peer(&self, req: RequestIndex) -> Option<PeerKey> {
+        if let Some(peer) = self.hedge_peers.read().get(&req) {
+            return Some(*peer);
+        }
         self.hedges
             .read()
             .get(&req)
@@ -352,12 +363,14 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn set_hedge_peer(&self, req: RequestIndex, peer: PeerKey) {
+        self.hedge_peers.write().insert(req, peer);
         if let Some(addr) = addr_for_key(self, peer) {
             self.hedges.write().insert(req, addr);
         }
     }
 
     fn clear_hedge(&self, req: RequestIndex) {
+        self.hedge_peers.write().remove(&req);
         self.hedges.write().remove(&req);
     }
 

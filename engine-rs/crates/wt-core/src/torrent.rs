@@ -81,6 +81,8 @@ pub struct TorrentInner {
     pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
     pub dirty_chunks: RwLock<HashSet<RequestIndex>>,
     pub request_state: RwLock<HashMap<RequestIndex, ActiveRequest>>,
+    pub assignments: RwLock<HashMap<RequestIndex, (u64, Instant)>>,
+    pub hedge_peers: RwLock<HashMap<RequestIndex, u64>>,
     pub hedges: RwLock<HashMap<RequestIndex, SocketAddr>>,
 
     pub conns: RwLock<HashMap<SocketAddr, PeerConn>>,
@@ -135,6 +137,8 @@ impl TorrentInner {
             peer_pieces: RwLock::new(HashMap::new()),
             dirty_chunks: RwLock::new(HashSet::new()),
             request_state: RwLock::new(HashMap::new()),
+            assignments: RwLock::new(HashMap::new()),
+            hedge_peers: RwLock::new(HashMap::new()),
             hedges: RwLock::new(HashMap::new()),
             conns: RwLock::new(HashMap::new()),
             known_peers: RwLock::new(HashSet::new()),
