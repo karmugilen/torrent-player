@@ -1,0 +1,203 @@
+//! Live connection handle and event handler interface.
+
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use parking_lot::RwLock;
+use tokio::sync::{mpsc, Notify};
+use wt_types::{InfoHash, PeerId, PeerSource, Transport};
+use wt_wire::message::Message;
+
+use crate::stats::{AtomicConnStats, PeerConnInfo};
+use crate::{CoreError, Result};
+
+/// Callback interface implemented by the peer state machine (e.g. `agy-2`).
+pub trait ConnHandler: Send + 'static {
+    /// Invoked whenever a new BitTorrent message arrives from the peer.
+    fn on_message(&mut self, handle: &ConnHandle, msg: Message) -> Result<()>;
+
+    /// Invoked when the connection closes, with an optional error description.
+    fn on_closed(&mut self, handle: &ConnHandle, reason: &str);
+}
+
+/// A cheaply cloneable handle to an active peer connection.
+#[derive(Clone)]
+pub struct ConnHandle {
+    inner: Arc<ConnHandleInner>,
+}
+
+pub struct ConnHandleInner {
+    pub remote_addr: SocketAddr,
+    pub outgoing: bool,
+    pub transport: Transport,
+    pub encrypted: bool,
+    pub info_hash: InfoHash,
+    pub peer_id: Option<PeerId>,
+    pub source: PeerSource,
+    pub connected_at: Instant,
+    pub closed: Arc<AtomicBool>,
+    pub close_reason: RwLock<Option<String>>,
+    pub stats: Arc<AtomicConnStats>,
+    pub write_tx: mpsc::Sender<Message>,
+    pub write_waker: Arc<Notify>,
+}
+
+impl ConnHandle {
+    /// Create a new handle instance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        remote_addr: SocketAddr,
+        outgoing: bool,
+        transport: Transport,
+        encrypted: bool,
+        info_hash: InfoHash,
+        peer_id: Option<PeerId>,
+        source: PeerSource,
+        write_tx: mpsc::Sender<Message>,
+        write_waker: Arc<Notify>,
+        closed: Arc<AtomicBool>,
+        stats: Arc<AtomicConnStats>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ConnHandleInner {
+                remote_addr,
+                outgoing,
+                transport,
+                encrypted,
+                info_hash,
+                peer_id,
+                source,
+                connected_at: Instant::now(),
+                closed,
+                close_reason: RwLock::new(None),
+                stats,
+                write_tx,
+                write_waker,
+            }),
+        }
+    }
+
+    /// Queue a message to be written to the peer (non-blocking).
+    /// Returns `true` if queued, `false` if the buffer/queue is full or closed.
+    pub fn send_message(&self, msg: Message) -> bool {
+        if self.is_closed() {
+            return false;
+        }
+        match self.inner.write_tx.try_send(msg) {
+            Ok(_) => {
+                self.inner.write_waker.notify_waiters();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Queue a message with async backpressure when the outbound queue is full.
+    pub async fn send_message_async(&self, msg: Message) -> Result<()> {
+        if self.is_closed() {
+            return Err(CoreError::Closed);
+        }
+        self.inner
+            .write_tx
+            .send(msg)
+            .await
+            .map_err(|_| CoreError::Closed)?;
+        self.inner.write_waker.notify_waiters();
+        Ok(())
+    }
+
+    /// Explicitly wake the connection writer to flush queued messages.
+    pub fn flush(&self) {
+        self.inner.write_waker.notify_waiters();
+    }
+
+    /// Close the connection with a reason.
+    pub fn close(&self, reason: impl Into<String>) {
+        let r = reason.into();
+        let was_closed = self.inner.closed.swap(true, Ordering::SeqCst);
+        if !was_closed {
+            *self.inner.close_reason.write() = Some(r);
+            self.inner.write_waker.notify_waiters();
+        }
+    }
+
+    /// Check if the connection has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Relaxed)
+    }
+
+    /// The reason the connection was closed, if set.
+    pub fn close_reason(&self) -> Option<String> {
+        self.inner.close_reason.read().clone()
+    }
+
+    /// Remote peer address.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.inner.remote_addr
+    }
+
+    /// Transport type (TCP or uTP).
+    pub fn transport(&self) -> Transport {
+        self.inner.transport
+    }
+
+    /// Whether this is an outbound connection.
+    pub fn is_outgoing(&self) -> bool {
+        self.inner.outgoing
+    }
+
+    /// Whether Message Stream Encryption (MSE) is active.
+    pub fn is_encrypted(&self) -> bool {
+        self.inner.encrypted
+    }
+
+    /// InfoHash associated with this peer session.
+    pub fn info_hash(&self) -> InfoHash {
+        self.inner.info_hash
+    }
+
+    /// Remote Peer ID, if negotiated during handshake.
+    pub fn peer_id(&self) -> Option<PeerId> {
+        self.inner.peer_id
+    }
+
+    /// Live byte and chunk statistics counters.
+    pub fn stats(&self) -> Arc<AtomicConnStats> {
+        self.inner.stats.clone()
+    }
+
+    /// Connection metadata snapshot.
+    pub fn info(&self) -> PeerConnInfo {
+        let stats = self.inner.stats.snapshot();
+        PeerConnInfo {
+            remote_addr: self.inner.remote_addr,
+            dial_addr: if self.inner.outgoing {
+                Some(self.inner.remote_addr)
+            } else {
+                None
+            },
+            peer_id: self.inner.peer_id,
+            client_name: String::new(),
+            transport: self.inner.transport,
+            source: self.inner.source,
+            encrypted: self.inner.encrypted,
+            outgoing: self.inner.outgoing,
+            peer_choking: true,
+            am_choking: true,
+            peer_interested: false,
+            am_interested: false,
+            conn_stats: stats,
+            download_rate: 0.0,
+            upload_rate: 0.0,
+            peer_completion: 0.0,
+            pending_requests: 0,
+            rtt: std::time::Duration::from_millis(200),
+            queued: 0,
+            cancelled: 0,
+            connected_for: self.inner.connected_at.elapsed(),
+            last_useful_data: None,
+        }
+    }
+}
