@@ -21,10 +21,10 @@ Started 10:59 · elapsed 1.9 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 58 min at 8.9%/h):
+ETA (rough, from the last 59 min at 8.9%/h):
 
-- crates complete: ~14:53 (in 2.0 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~18:53 (in 6.0 h; the 4 h after the crates is a planning guess)
+- crates complete: ~14:54 (in 2.0 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~18:54 (in 6.0 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
@@ -34,12 +34,12 @@ ETA (rough, from the last 58 min at 8.9%/h):
 | wt-core | codex-1+4 | running | 13626 | 11303 | 121 | 207 | 1 | codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig) |
 | wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5019 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
-| wt-parity | grok-1, codex-3 | done | 0 | 3354 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
+| wt-parity | grok-1, codex-3 | done | 0 | 3374 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
 | wt-engine | codex-2+5 | running | 5609 | 5098 | 71 | 178 | 0 | codex-2 (server on wt_core, api-diff 29 match / 1 critical) + codex-5 (types.rs, 11 real engine tests, 132 placeholders) |
-## Milestones (the real finish line): 5/13
+## Milestones (the real finish line): 6/13
 
 ```text
-MILESTONES [############..................] 5/13
+MILESTONES [##############................] 6/13
 ```
 
 - [x] All 8 crates compile; wt-meta, wt-wire, wt-discovery, wt-policy, wt-storage done with tests passing
@@ -47,7 +47,7 @@ MILESTONES [############..................] 5/13
 - [x] First real data transfer between two Rust clients (TCP, explicit dial, legacy loop)
 - [x] Android arm64 libengine.so builds with all 9 JNI symbols, 16 KiB aligned
 - [x] Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
-- [ ] Transfer driven only by add_peers (automatic dialing) over TCP and uTP
+- [x] Transfer driven only by add_peers (automatic dialing) on the new connection path: TCP passes (uTP pending)
 - [ ] Magnet (ut_metadata) transfer and reader seek on the new connection path
 - [ ] Two engine-host processes transfer a torrent through the control API
 - [ ] Control API JSON: 0 CRITICAL
@@ -177,10 +177,13 @@ The crate bars above count code written; these milestones count things that work
 - api-diff 29/1/1: only /metadata torrentData left (codex-2)
 - codex-3 perf bug: Direct Play startup-piece save does hash+write+fsync under the global storage lock (Go queues it to a background drain); approved fix in storage.rs
 - ClientConfig + Callbacks moved to codex-4 (tracker dial hook, completed_handshake callback); coordinator stops editing codex-1 files on request
+- New connection path: TCP transfer with automatic add_peers dialing passes (256 KiB verified, hash completion)
 
 ## Commits
 
 ```text
+b5bed0d engine-rs: codex checkpoint (new connection path TCP transfer with automatic dialing passes)
+d370599 engine-rs: milestone checklist in the progress report
 4ff7b0e engine-rs: progress report update
 f666237 engine-rs: codex checkpoint
 da98e2f wt-core: disambiguate PeerTorrent piece_length/num_pieces in torrent_impls (coordinator fix)

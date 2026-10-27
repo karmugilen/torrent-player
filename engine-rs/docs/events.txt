@@ -75,3 +75,4 @@
 -|api-diff 29/1/1: only /metadata torrentData left (codex-2)
 -|codex-3 perf bug: Direct Play startup-piece save does hash+write+fsync under the global storage lock (Go queues it to a background drain); approved fix in storage.rs
 -|ClientConfig + Callbacks moved to codex-4 (tracker dial hook, completed_handshake callback); coordinator stops editing codex-1 files on request
+-|New connection path: TCP transfer with automatic add_peers dialing passes (256 KiB verified, hash completion)

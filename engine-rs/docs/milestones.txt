@@ -3,7 +3,7 @@ x|wt-core module tests pass (71 across 13 binaries; 64 lib tests)
 x|First real data transfer between two Rust clients (TCP, explicit dial, legacy loop)
 x|Android arm64 libengine.so builds with all 9 JNI symbols, 16 KiB aligned
 x|Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
- |Transfer driven only by add_peers (automatic dialing) over TCP and uTP
+x|Transfer driven only by add_peers (automatic dialing) on the new connection path: TCP passes (uTP pending)
  |Magnet (ut_metadata) transfer and reader seek on the new connection path
  |Two engine-host processes transfer a torrent through the control API
  |Control API JSON: 0 CRITICAL
