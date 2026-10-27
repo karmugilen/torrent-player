@@ -424,17 +424,31 @@ impl PeerTorrent for TorrentInner {
             .collect()
     }
 
-    fn on_metadata_data(&self, _piece: u32, _total_size: u32, _data: Bytes) -> Result<bool> {
-        // TODO: MetadataExchange field
+    fn on_metadata_data(&self, piece: u32, total_size: u32, data: Bytes) -> Result<bool> {
+        let verified = {
+            let mut metadata = self.metadata.write();
+            metadata.set_size(total_size).map_err(|e| CoreError::Other(e.to_string()))?;
+            metadata.on_data(piece, &data).map_err(|e| CoreError::Other(e.to_string()))?
+        };
+        if let Some(verified) = verified {
+            self.set_info(Arc::new(verified.info))?;
+            *self.metainfo_raw.write() = Some(wt_types::MetaInfo { info_bytes: verified.info_bytes, ..Default::default() });
+            return Ok(true);
+        }
         Ok(false)
     }
 
-    fn metadata_piece(&self, _piece: u32) -> Option<(u32, Bytes)> {
-        None
+    fn metadata_piece(&self, piece: u32) -> Option<(u32, Bytes)> {
+        let raw = self.metainfo_raw.read();
+        let bytes = &raw.as_ref()?.info_bytes;
+        let start = (piece as usize).checked_mul(crate::metadata::METADATA_PIECE_SIZE)?;
+        if start >= bytes.len() { return None; }
+        let end = (start + crate::metadata::METADATA_PIECE_SIZE).min(bytes.len());
+        Some((bytes.len() as u32, Bytes::copy_from_slice(&bytes[start..end])))
     }
 
     fn metadata_size(&self) -> Option<u32> {
-        None
+        self.metainfo_raw.read().as_ref().map(|m| m.info_bytes.len() as u32).or_else(|| self.metadata.read().size())
     }
 
     fn has_metadata(&self) -> bool {

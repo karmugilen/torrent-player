@@ -1,0 +1,11 @@
+{"downloadSpeed":0,"uploadSpeed":0,"progress":0,"ratio":0,"torrents":0,"ctlPort":0,"streamPort":0,"path":"","payloadTransfersAllowed":false,"listenPort":0}
+{"torrentId":"","prepare":false}
+{"id":"","infoHash":null}
+{"id":"","fileIndex":0}
+{"id":"","descriptors":null,"selected":null}
+{"id":"","selected":null}
+{"maxPeers":0}
+{"samples":0,"networkErrMs":0,"using":false}
+{"count":0,"lastMs":0,"medianMs":0,"stalls":0}
+{"url":"","tier":0,"status":"","original":false}
+{"ok":false}

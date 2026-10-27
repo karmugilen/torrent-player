@@ -77,6 +77,7 @@ pub struct TorrentInner {
 
     pub pieces: RwLock<Vec<PieceEntry>>,
     pub book: RwLock<Option<crate::piece_state::PieceBook>>,
+    pub metadata: RwLock<crate::metadata::MetadataExchange>,
     pub dht_nodes: RwLock<Vec<SocketAddr>>,
     pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
     pub dirty_chunks: RwLock<HashSet<RequestIndex>>,
@@ -133,6 +134,7 @@ impl TorrentInner {
             default_storage,
             pieces: RwLock::new(Vec::new()),
             book: RwLock::new(None),
+            metadata: RwLock::new(crate::metadata::MetadataExchange::new(Some(info_hash), info_hash_v2)),
             dht_nodes: RwLock::new(Vec::new()),
             peer_pieces: RwLock::new(HashMap::new()),
             dirty_chunks: RwLock::new(HashSet::new()),

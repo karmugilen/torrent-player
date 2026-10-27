@@ -5,33 +5,26 @@
 //! dial limiters, Sources (DHT/trackers/WebTorrent), and legacy PeerConn attach
 //! after `conn::dial_peer` / accept (until `PeerTorrent` is wired by agy-2).
 
-use bytes::{Bytes, BytesMut};
 use parking_lot::{Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Notify};
-use wt_types::{InfoHash, PeerId, PeerInfo, PeerSource, PieceIndex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use wt_types::{InfoHash, PeerId, PeerInfo, PeerSource};
 
 use crate::arrival::ArrivalModel;
 use crate::conn::{
     dial_peer as conn_dial_peer, AcceptedConn, DialParams, HalfOpenTracker, PeerListener,
     SharedDatagramAdapter,
 };
-use crate::peer_conn::PeerConn;
 use crate::ratelimit::{Limiter, DEFAULT_DOWNLOAD_BURST};
 use crate::sources::{
     RegisterTorrent, Sources, SourcesConfig, TorrentAnnounceInfo, TorrentKeys, PeerSink,
 };
-use crate::torrent::TorrentInner;
-use crate::wire::{
-    decode_message, ExtendedHandshake, Message, MetadataMsg, MetadataMsgType,
-    DEFAULT_MAX_MESSAGE_LENGTH, DEFAULT_UT_METADATA_ID, DEFAULT_UT_PEX_ID, EXTENSION_NAME_METADATA,
-    EXTENSION_NAME_PEX, EXT_HANDSHAKE_ID,
-};
-use crate::{ClientConfig, CoreError, PeerStream, Result, TcpConnHook, TorrentSpec};
+use crate::torrent::{AttachInfo, TorrentInner};
+use crate::{ClientConfig, CoreError, Result, TcpConnHook, TorrentSpec};
 
 /// Thin Sources sink / announce adapter over [`TorrentInner`] (agy-2 owns the
 /// eventual first-class impls; Client registers torrents immediately).
@@ -158,6 +151,7 @@ pub struct ClientInner {
     listener: RwLock<Option<Arc<PeerListener>>>,
     sources: RwLock<Option<Arc<Sources>>>,
     accept_tx_closed: AtomicBool,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl ClientInner {
@@ -234,6 +228,7 @@ impl ClientInner {
             listener: RwLock::new(None),
             sources: RwLock::new(None),
             accept_tx_closed: AtomicBool::new(false),
+            tasks: Mutex::new(Vec::new()),
             config: cfg,
         });
 
@@ -272,18 +267,13 @@ impl ClientInner {
             }
 
             let (accepted_tx, mut accepted_rx) = mpsc::channel::<AcceptedConn>(64);
-            let weak_lookup_client = Arc::clone(self);
+            let weak_lookup_client = Arc::downgrade(self);
             let lookup: crate::conn::InfoHashLookup = Arc::new(move |ih: &InfoHash| {
-                weak_lookup_client.torrents_by_short.read().contains_key(ih)
+                weak_lookup_client.upgrade().is_some_and(|c| c.torrents_by_short.read().contains_key(ih))
             });
-            let skey_client = Arc::clone(self);
+            let skey_client = Arc::downgrade(self);
             let skey_provider: crate::conn::SkeyProvider = Arc::new(move || {
-                skey_client
-                    .torrents_by_short
-                    .read()
-                    .keys()
-                    .map(|ih| ih.0)
-                    .collect()
+                skey_client.upgrade().map(|c| c.torrents_by_short.read().keys().map(|ih| ih.0).collect()).unwrap_or_default()
             });
 
             listener.spawn_accept_loop(
@@ -296,7 +286,7 @@ impl ClientInner {
             );
 
             let accept_client = Arc::clone(self);
-            self.tokio_handle.spawn(async move {
+            let task = self.tokio_handle.spawn(async move {
                 while let Some(accepted) = accepted_rx.recv().await {
                     if accept_client.closed.load(Ordering::Relaxed) {
                         break;
@@ -310,6 +300,7 @@ impl ClientInner {
                     .accept_tx_closed
                     .store(true, Ordering::Relaxed);
             });
+            self.tasks.lock().push(task);
 
             *self.listener.write() = Some(Arc::new(listener));
         }
@@ -468,16 +459,8 @@ impl ClientInner {
             spec.web_seeds.clone(),
         );
 
-        // Dial known peers when dialing enabled (Go maybeNewConns).
         if self.config.dial_for_peer_conns {
-            let peers: Vec<_> = torrent_inner.known_peers.read().iter().cloned().collect();
-            for p in peers {
-                let t = torrent_inner.clone();
-                let cl = Arc::clone(self);
-                self.tokio_handle.spawn(async move {
-                    let _ = cl.dial_peer(t, p.addr, p.source).await;
-                });
-            }
+            self.start_dialer(&torrent_inner);
         }
 
         Ok((torrent_inner, true))
@@ -593,6 +576,10 @@ impl ClientInner {
             listener.close();
         }
 
+        for task in self.tasks.lock().drain(..) {
+            task.abort();
+        }
+
         if let Some(sources) = self.sources.write().take() {
             self.block_on(async move { sources.close().await });
         }
@@ -614,445 +601,86 @@ impl ClientInner {
         }
     }
 
+    fn start_dialer(self: &Arc<Self>, torrent: &Arc<TorrentInner>) {
+        let client = Arc::downgrade(self);
+        let torrent = Arc::downgrade(torrent);
+        let task = self.tokio_handle.spawn(async move {
+            loop {
+                let (Some(client), Some(torrent)) = (client.upgrade(), torrent.upgrade()) else { break };
+                if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) { break; }
+                let count = torrent.wants_conns().min(client.config.half_open_conns_per_torrent);
+                for peer in torrent.take_dial_candidates(count) {
+                    let cl = Arc::clone(&client);
+                    let tor = Arc::clone(&torrent);
+                    let task = client.tokio_handle.spawn(async move {
+                        let ok = cl.dial_peer(Arc::clone(&tor), peer.addr, peer.source).await.is_ok();
+                        tor.dial_finished(peer.addr, ok);
+                    });
+                    client.tasks.lock().push(task);
+                }
+                tokio::select! {
+                    _ = torrent.peers_changed().notified() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
+            }
+        });
+        self.tasks.lock().push(task);
+    }
+
     async fn attach_accepted(self: &Arc<Self>, accepted: AcceptedConn) -> Result<()> {
-        let torrent = self
-            .torrents_by_short
-            .read()
-            .get(&accepted.info_hash)
-            .cloned()
+        let torrent = self.torrents_by_short.read().get(&accepted.info_hash).cloned()
             .ok_or_else(|| CoreError::Other("unknown infohash after accept".into()))?;
-
-        // Handshake already completed by PeerListener; attach legacy PeerConn I/O.
-        self.attach_handshaken_peer(
-            torrent,
-            accepted.stream,
-            accepted.handle.remote_addr(),
-            false,
-            PeerSource::Incoming,
-            accepted.handle.peer_id(),
-        )
-        .await
+        let info = AttachInfo {
+            remote: accepted.handle.remote_addr(), outgoing: false,
+            transport: accepted.handle.transport(), encrypted: accepted.handle.is_encrypted(),
+            peer_id: accepted.peer_id, reserved: accepted.peer_extension_bits.0,
+            source: PeerSource::Incoming,
+        };
+        self.attach_driver(torrent, info, accepted.stream, accepted.handle, accepted.write_rx, accepted.write_waker)
     }
 
-    /// Dial a peer for `torrent` (used by e2e / transfer tests and maybeNewConns).
-    pub async fn dial_peer(
-        self: &Arc<Self>,
-        torrent: Arc<TorrentInner>,
-        addr: SocketAddr,
-        source: PeerSource,
-    ) -> Result<()> {
-        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
-            return Ok(());
+    pub async fn dial_peer(self: &Arc<Self>, torrent: Arc<TorrentInner>, addr: SocketAddr, source: PeerSource) -> Result<()> {
+        let transport = if !self.config.disable_tcp { wt_types::Transport::Tcp } else { wt_types::Transport::Utp };
+        let result = self.dial_peer_transport(Arc::clone(&torrent), addr, source, transport, false).await;
+        if result.is_err() && transport == wt_types::Transport::Tcp && !self.config.disable_utp {
+            return self.dial_peer_transport(torrent, addr, source, wt_types::Transport::Utp, false).await;
         }
-        if !self.config.dial_for_peer_conns {
-            return Err(CoreError::Other("dial_for_peer_conns disabled".into()));
-        }
+        result
+    }
 
-        self.active_half_open
-            .store(self.half_open.current_total(), Ordering::Relaxed);
-
-        let metadata_size = torrent
-            .metainfo_raw
-            .read()
-            .as_ref()
-            .map(|i| i.info_bytes.len() as u32);
+    pub async fn dial_peer_transport(self: &Arc<Self>, torrent: Arc<TorrentInner>, addr: SocketAddr, source: PeerSource, transport: wt_types::Transport, require_plain: bool) -> Result<()> {
+        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) { return Err(CoreError::Closed); }
+        let metadata_size = torrent.metainfo_raw.read().as_ref().map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
-        let utp = self
-            .listener
-            .read()
-            .as_ref()
-            .and_then(|l| l.utp_socket().cloned());
-
-        // Prefer plain when peer is a trusted Direct e2e peer and TCP is enabled —
-        // still go through conn::dial_peer for half-open + rate limiting. MSE is
-        // required to talk to our own PeerListener.
-        let params = DialParams {
-            remote_addr: addr,
-            info_hash: torrent.info_hash,
-            our_peer_id: self.peer_id,
-            transport: if !self.config.disable_tcp {
-                Some(wt_types::Transport::Tcp)
-            } else {
-                Some(wt_types::Transport::Utp)
-            },
-            source,
-            metadata_size,
-            cfg: &self.config,
-            tracker: &self.half_open,
-            dial_limiter: Some(&self.dial_limiter),
-            tcp_conn_hook: hook.as_ref(),
-            utp_socket: utp.as_ref(),
-            require_plain: false,
+        let utp = self.listener.read().as_ref().and_then(|l| l.utp_socket().cloned());
+        let outcome = conn_dial_peer(DialParams {
+            remote_addr: addr, info_hash: torrent.info_hash, our_peer_id: self.peer_id,
+            transport: Some(transport), source, metadata_size, cfg: &self.config,
+            tracker: &self.half_open, dial_limiter: Some(&self.dial_limiter),
+            tcp_conn_hook: hook.as_ref(), utp_socket: utp.as_ref(), require_plain,
+        }).await?;
+        let info = AttachInfo {
+            remote: addr, outgoing: true, transport: outcome.handle.transport(),
+            encrypted: outcome.handle.is_encrypted(), peer_id: outcome.peer_id,
+            reserved: outcome.peer_extension_bits.0, source,
         };
-
-        let outcome = conn_dial_peer(params).await?;
-        self.active_half_open
-            .store(self.half_open.current_total(), Ordering::Relaxed);
-
-        self.attach_handshaken_peer(
-            torrent,
-            outcome.stream,
-            addr,
-            true,
-            source,
-            Some(outcome.peer_id),
-        )
-        .await
+        self.attach_driver(torrent, info, outcome.stream, outcome.handle, outcome.write_rx, outcome.write_waker)
     }
 
-    /// Dial over an explicit transport (for TCP vs uTP handshake tests).
-    pub async fn dial_peer_transport(
-        self: &Arc<Self>,
-        torrent: Arc<TorrentInner>,
-        addr: SocketAddr,
-        source: PeerSource,
-        transport: wt_types::Transport,
-        require_plain: bool,
-    ) -> Result<()> {
-        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        let metadata_size = torrent
-            .metainfo_raw
-            .read()
-            .as_ref()
-            .map(|i| i.info_bytes.len() as u32);
-        let hook = self.outgoing_tcp_conn_hook.read().clone();
-        let utp = self
-            .listener
-            .read()
-            .as_ref()
-            .and_then(|l| l.utp_socket().cloned());
-        let params = DialParams {
-            remote_addr: addr,
-            info_hash: torrent.info_hash,
-            our_peer_id: self.peer_id,
-            transport: Some(transport),
-            source,
-            metadata_size,
-            cfg: &self.config,
-            tracker: &self.half_open,
-            dial_limiter: Some(&self.dial_limiter),
-            tcp_conn_hook: hook.as_ref(),
-            utp_socket: utp.as_ref(),
-            require_plain,
-        };
-        let outcome = conn_dial_peer(params).await?;
-        self.attach_handshaken_peer(
-            torrent,
-            outcome.stream,
-            addr,
-            true,
-            source,
-            Some(outcome.peer_id),
-        )
-        .await
-    }
-
-    async fn attach_handshaken_peer(
-        self: &Arc<Self>,
-        torrent: Arc<TorrentInner>,
-        stream: Box<dyn PeerStream>,
-        remote_addr: SocketAddr,
-        outgoing: bool,
-        source: PeerSource,
-        peer_id: Option<PeerId>,
-    ) -> Result<()> {
-        // Reuse legacy PeerConn reader/writer until PeerTorrent + ConnHandler are wired.
-        self.spawn_peer_conn_handshaken(torrent, stream, remote_addr, outgoing, source, peer_id)
-            .await
-    }
-
-    /// Legacy PeerConn attach for a stream that already completed BT (+ optional MSE) handshake.
-    pub async fn spawn_peer_conn_handshaken(
-        self: &Arc<Self>,
-        torrent: Arc<TorrentInner>,
-        stream: Box<dyn PeerStream>,
-        remote_addr: SocketAddr,
-        outgoing: bool,
-        source: PeerSource,
-        peer_id: Option<PeerId>,
-    ) -> Result<()> {
-        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Message>();
-        let write_waker = Arc::new(Notify::new());
-
-        let peer_conn = PeerConn::new(
-            remote_addr,
-            outgoing,
-            source,
-            write_tx.clone(),
-            write_waker.clone(),
-        );
-        if let Some(pid) = peer_id {
-            peer_conn.inner.write().peer_id = Some(pid);
-        }
-
-        // Send Extended Handshake (BEP 10) — may duplicate dialer's; peers tolerate it.
-        let mut m_map = BTreeMap::new();
-        m_map.insert(EXTENSION_NAME_METADATA.to_string(), DEFAULT_UT_METADATA_ID);
-        if !self.config.disable_pex {
-            m_map.insert(EXTENSION_NAME_PEX.to_string(), DEFAULT_UT_PEX_ID);
-        }
-
-        let ext_hs = ExtendedHandshake {
-            m: m_map,
-            v: Some(self.config.extended_handshake_client_version.clone()),
-            p: Some(*self.listen_port.read()),
-            yourip: None,
-            ipv4: None,
-            ipv6: None,
-            reqq: Some(250),
-            metadata_size: torrent
-                .metainfo_raw
-                .read()
-                .as_ref()
-                .map(|i| i.info_bytes.len() as u32),
-            upload_only: None,
-            encryption: None,
-        };
-        peer_conn.send_message(Message::Extended {
-            id: EXT_HANDSHAKE_ID,
-            payload: ext_hs.encode(),
-        });
-
-        let pieces_guard = torrent.pieces.read();
-        if !pieces_guard.is_empty() {
-            let num_pieces = pieces_guard.len();
-            let num_bytes = num_pieces.div_ceil(8);
-            let mut bf = vec![0u8; num_bytes];
-            let mut any_complete = false;
-            for (idx, p) in pieces_guard.iter().enumerate() {
-                if p.complete {
-                    bf[idx / 8] |= 1 << (7 - (idx % 8));
-                    any_complete = true;
-                }
-            }
-            if any_complete {
-                peer_conn.send_message(Message::Bitfield(Bytes::from(bf)));
-            }
-        }
-        drop(pieces_guard);
-
-        if !torrent.data_upload_disallowed.load(Ordering::Relaxed) {
-            peer_conn.send_message(Message::Unchoke);
-            peer_conn.inner.write().am_choking = false;
-        }
-
-        if !torrent.data_download_disallowed.load(Ordering::Relaxed) {
-            peer_conn.send_message(Message::Interested);
-            peer_conn.inner.write().am_interested = true;
-        }
-
-        torrent.conns.write().insert(remote_addr, peer_conn.clone());
-        torrent.bump_change();
-
-        for cb in &self.config.callbacks.completed_handshake {
-            cb(&peer_conn.peer_conn_info(), torrent.info_hash);
-        }
-
-        let (mut read_half, mut write_half) = tokio::io::split(stream);
-
-        let waker_clone = write_waker.clone();
-        let p_conn_w = peer_conn.clone();
-        let _writer_handle = self.tokio_handle.spawn(async move {
-            let mut write_buf = BytesMut::with_capacity(64 * 1024);
-            while !p_conn_w.is_closed() {
-                let notified = waker_clone.notified();
-                tokio::pin!(notified);
-
-                while let Ok(msg) = write_rx.try_recv() {
-                    msg.encode(&mut write_buf);
-                }
-
-                if write_buf.is_empty() {
-                    tokio::select! {
-                        _ = notified => {},
-                        msg = write_rx.recv() => {
-                            if let Some(m) = msg {
-                                m.encode(&mut write_buf);
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if !write_buf.is_empty() {
-                    use tokio::io::AsyncWriteExt;
-                    if write_half.write_all(&write_buf).await.is_err() {
-                        break;
-                    }
-                    write_buf.clear();
-                }
-            }
-            p_conn_w.close();
-        });
-
-        let p_conn_r = peer_conn.clone();
-        let tor_r = torrent.clone();
-        let _reader_handle = self.tokio_handle.spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut read_buf = BytesMut::with_capacity(64 * 1024);
-            while !p_conn_r.is_closed() {
-                let msg_res = decode_message(&mut read_buf, DEFAULT_MAX_MESSAGE_LENGTH);
-                match msg_res {
-                    Ok(Some(msg)) => {
-                        match msg {
-                            Message::Choke => {
-                                p_conn_r.inner.write().peer_choking = true;
-                                p_conn_r.inner.write().webtor_choked_since = Some(Instant::now());
-                                tor_r.bump_change();
-                            }
-                            Message::Unchoke => {
-                                p_conn_r.inner.write().peer_choking = false;
-                                p_conn_r.inner.write().webtor_unchoked_at = Some(Instant::now());
-                                tor_r.refill_peer_requests(&p_conn_r);
-                                tor_r.bump_change();
-                            }
-                            Message::Interested => {
-                                p_conn_r.inner.write().peer_interested = true;
-                                tor_r.bump_change();
-                            }
-                            Message::NotInterested => {
-                                p_conn_r.inner.write().peer_interested = false;
-                                tor_r.bump_change();
-                            }
-                            Message::Have { index } => {
-                                p_conn_r.inner.write().peer_pieces.insert(index);
-                                tor_r.refill_peer_requests(&p_conn_r);
-                                tor_r.bump_change();
-                            }
-                            Message::Bitfield(bf) => {
-                                let mut inner = p_conn_r.inner.write();
-                                for (byte_idx, &byte) in bf.iter().enumerate() {
-                                    for bit_idx in 0..8 {
-                                        if (byte & (1 << (7 - bit_idx))) != 0 {
-                                            let p = (byte_idx * 8 + bit_idx) as PieceIndex;
-                                            inner.peer_pieces.insert(p);
-                                        }
-                                    }
-                                }
-                                drop(inner);
-                                tor_r.refill_peer_requests(&p_conn_r);
-                                tor_r.bump_change();
-                            }
-                            Message::HaveAll => {
-                                p_conn_r.inner.write().peer_sent_have_all = true;
-                                tor_r.refill_peer_requests(&p_conn_r);
-                                tor_r.bump_change();
-                            }
-                            Message::Piece {
-                                index,
-                                begin,
-                                piece,
-                            } => {
-                                tor_r.on_block_received(remote_addr, index, begin, piece);
-                                tor_r.refill_peer_requests(&p_conn_r);
-                            }
-                            Message::Request {
-                                index,
-                                begin,
-                                length,
-                            } => {
-                                if !tor_r.data_upload_disallowed.load(Ordering::Relaxed) {
-                                    if let Some(info) = tor_r.info.read().as_ref() {
-                                        if let Some(storage) = tor_r.storage.read().as_ref() {
-                                            let piece_obj = info.piece(index);
-                                            let piece_storage =
-                                                storage.piece(piece_obj, info.piece_hash_v1(index));
-                                            let mut buf = vec![0u8; length as usize];
-                                            if let Ok(n) =
-                                                piece_storage.read_at(&mut buf, begin as i64)
-                                            {
-                                                if n == length as usize {
-                                                    p_conn_r.send_message(Message::Piece {
-                                                        index,
-                                                        begin,
-                                                        piece: Bytes::from(buf),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Message::Cancel { .. } => {}
-                            Message::Extended { id, payload } => {
-                                if id == EXT_HANDSHAKE_ID {
-                                    if let Ok(ext) = ExtendedHandshake::decode(&payload) {
-                                        let mut inner = p_conn_r.inner.write();
-                                        inner.peer_ext_ut_metadata =
-                                            ext.m.get(EXTENSION_NAME_METADATA).copied();
-                                        inner.peer_ext_ut_pex =
-                                            ext.m.get(EXTENSION_NAME_PEX).copied();
-                                        inner.peer_metadata_size = ext.metadata_size;
-                                        drop(inner);
-
-                                        if tor_r.info.read().is_none() {
-                                            if let Some(m_id) =
-                                                ext.m.get(EXTENSION_NAME_METADATA).copied()
-                                            {
-                                                let req = MetadataMsg::request(0);
-                                                p_conn_r.send_message(req.to_message(m_id));
-                                            }
-                                        }
-                                    }
-                                } else if id == DEFAULT_UT_METADATA_ID {
-                                    if let Ok(meta_msg) = MetadataMsg::decode(payload) {
-                                        match meta_msg.msg_type {
-                                            MetadataMsgType::Request => {
-                                                if let Some(mi) = tor_r.metainfo_raw.read().as_ref()
-                                                {
-                                                    let resp = MetadataMsg::data(
-                                                        meta_msg.piece,
-                                                        mi.info_bytes.len() as u32,
-                                                        Bytes::copy_from_slice(&mi.info_bytes),
-                                                    );
-                                                    if let Some(peer_m_id) =
-                                                        p_conn_r.inner.read().peer_ext_ut_metadata
-                                                    {
-                                                        p_conn_r.send_message(
-                                                            resp.to_message(peer_m_id),
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            MetadataMsgType::Data => {
-                                                if tor_r.info.read().is_none() {
-                                                    if let Some(data) = meta_msg.data {
-                                                        if let Ok(info) = wt_meta::parse_info(&data)
-                                                        {
-                                                            let _ = tor_r.set_info(Arc::new(info));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            MetadataMsgType::Reject => {}
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        break;
-                    }
-                }
-
-                match read_half.read_buf(&mut read_buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-            p_conn_r.close();
-            tor_r.conns.write().remove(&remote_addr);
-            tor_r.bump_change();
-        });
-
+    fn attach_driver(self: &Arc<Self>, torrent: Arc<TorrentInner>, info: AttachInfo,
+        stream: Box<dyn crate::PeerStream>, handle: crate::conn::ConnHandle,
+        write_rx: mpsc::Receiver<crate::wire::Message>, write_waker: Arc<tokio::sync::Notify>) -> Result<()> {
+        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) { return Err(CoreError::Closed); }
+        let handler = torrent.attach_connection(info, handle.clone())?;
+        for cb in &self.config.callbacks.completed_handshake { cb(&handle.info(), torrent.info_hash); }
+        let (reader, writer) = crate::conn::spawn_connection_driver(
+            stream, handler, handle, write_rx, write_waker,
+            Some(self.download_limiter.clone()), Some(self.upload_limiter.clone()),
+            crate::conn::DEFAULT_KEEPALIVE_TIMEOUT, crate::conn::DEFAULT_READ_DEADLINE);
+        let mut tasks = self.tasks.lock();
+        tasks.retain(|t| !t.is_finished());
+        tasks.push(reader);
+        tasks.push(writer);
         Ok(())
     }
 }

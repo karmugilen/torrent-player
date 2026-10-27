@@ -20,14 +20,23 @@ fn zero_option(value: &Option<i64>) -> bool {
     value.is_none_or(|v| v == 0)
 }
 
-fn serialize_max_peers<S: serde::Serializer>(value: &Option<usize>, serializer: S) -> Result<S::Ok, S::Error> {
+fn serialize_max_peers<S: serde::Serializer>(
+    value: &Option<usize>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     serializer.serialize_u64(value.unwrap_or(0) as u64)
 }
 
 fn serialize_go_float<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
-    if value.is_finite() && value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && *value >= i64::MIN as f64
+        && *value < i64::MAX as f64
+    {
         serializer.serialize_i64(*value as i64)
-    } else { serializer.serialize_f64(*value) }
+    } else {
+        serializer.serialize_f64(*value)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
