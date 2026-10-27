@@ -5,6 +5,7 @@
 //!   successful dial (Go `dialPool.getFirst`).
 //! - Try preferred header-obfuscation, then fall back on the *same* winning
 //!   transport when `RequirePreferred` is false.
+//!
 //! LTEP / HaveNone / Unchoke are sent by `PeerConnHandler::start`.
 
 use std::net::SocketAddr;
@@ -25,9 +26,9 @@ use crate::ratelimit::Limiter;
 use crate::stats::AtomicConnStats;
 use crate::{ClientConfig, CoreError, PeerStream, Result, TcpConnHook};
 
-/// Legacy bounded-queue size (kept for API/compat). Writer is unbounded so Piece
-/// replies are never try_send-dropped under PeerMaxRequests / LTEP `reqq` pipelines.
-pub const OUTBOUND_MSG_QUEUE: usize = 8192;
+/// Capacity for the outbound message queue. Sized for Go `localClientReqq` (1024).
+/// Legacy size constant (writer is unbounded).
+pub const OUTBOUND_MSG_QUEUE: usize = 1024;
 
 /// Outcome of a successful outgoing dial and handshake.
 pub struct DialOutcome {
@@ -102,19 +103,34 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
                 error = %first_err,
                 "preferred header obfuscation failed; redialing same transport with fallback"
             );
-            let (raw2, transport2) =
-                dial_raw_one(&params, winning_transport, dial_timeout).await.map_err(|e| {
-                    CoreError::Other(format!(
-                        "handshake failed (preferred obfuscation={prefer_obfuscated}: {first_err}; fallback redial: {e})"
-                    ))
-                })?;
-            complete_bt_handshake(&params, raw2, transport2, !prefer_obfuscated)
-                .await
-                .map_err(|fallback_err| {
-                    CoreError::Other(format!(
-                        "handshake failed (preferred obfuscation={prefer_obfuscated}: {first_err}; fallback: {fallback_err})"
-                    ))
-                })
+            // 1) Same transport, opposite obfuscation (Go).
+            if let Ok((raw2, transport2)) =
+                dial_raw_one(&params, winning_transport, dial_timeout).await
+            {
+                if let Ok(outcome) =
+                    complete_bt_handshake(&params, raw2, transport2, !prefer_obfuscated).await
+                {
+                    return Ok(outcome);
+                }
+            }
+            // 2) Other transports × both obfuscation modes. uTP often wins the
+            // dial race then MSE EOF; TCP+plaintext may still succeed.
+            for transport in candidate_transports(&params) {
+                if transport == winning_transport {
+                    continue;
+                }
+                for obfuscated in [prefer_obfuscated, !prefer_obfuscated] {
+                    let Ok((raw, t)) = dial_raw_one(&params, transport, dial_timeout).await else {
+                        continue;
+                    };
+                    if let Ok(outcome) = complete_bt_handshake(&params, raw, t, obfuscated).await {
+                        return Ok(outcome);
+                    }
+                }
+            }
+            Err(CoreError::Other(format!(
+                "handshake failed (preferred obfuscation={prefer_obfuscated}: {first_err}; same+other transport fallbacks exhausted)"
+            )))
         }
         Err(e) => Err(e),
     }

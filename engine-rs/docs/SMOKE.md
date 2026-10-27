@@ -182,8 +182,9 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | go-ubuntu-r9 | 5.0 | 8→30 | 5.94 |
 | rust-ubuntu-r8 | 5.5 | 4→13 | 0.94 |
 | rust-ubuntu-r9 | 10.5 | 9→14 | 1.11 |
+| rust-ubuntu-r13 | 12.0 | **6→19** | 1.02 |
 | go-ubuntu (earlier ×3) | 6.5 / 5.5 / 9.6 | 10→42 / 7→44 / 10→45 | 6.77 / 4.09 / 7.44 |
 | rust-sintel (earlier ×3) | 2.0 / 2.5 / 3.0 | 1→13 / 1→8 / 1→8 | **22.92 / 26.89 / 14.70** |
 
-**Status:** Ubuntu peer count jumped from ~4–8 to **13–14 held** after retention fix (still short of Go ~30). Speed ~1.1 vs Go ~6 — dial success (~10% after timeouts/MSE) and per-peer throughput remain below Go; many established peers still show `downloaded=0`. Sintel speed previously beat Go; recent Sintel magnet runs flaked empty-files (xs/metadata). Not full acceptance yet.
+**Status:** Ubuntu peer count jumped from ~4–8 to **13–19 held** after retention + other-transport handshake fallback (still short of Go ~30). Speed ~1.1 vs Go ~6 — dial success (~10% after timeouts/MSE) and per-peer throughput remain below Go; many established peers still show `downloaded=0`. Sintel speed previously beat Go; recent Sintel magnet runs flaked empty-files (xs/metadata). Not full acceptance yet.
 
