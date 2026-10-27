@@ -27,7 +27,7 @@ pub mod stats;
 pub mod storage_adapter;
 pub mod strategy;
 pub mod torrent;
-mod torrent_impls;
+pub mod torrent_impls;
 pub mod tuning;
 pub mod webseed_peer;
 pub mod webtor;
