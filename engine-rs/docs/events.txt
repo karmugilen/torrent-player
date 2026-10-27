@@ -83,3 +83,5 @@
 -|Phone attached: agy-perf installed the Rust debug APK, engine starts on the device (2e72b78)
 -|Disk dropped to 29 GB: deleted the 5 unused codex build dirs (back to 36 GB)
 -|agy-core round 2: takes wt-engine preview/playback/stream files and their test requests from agy-engine's backlog
+-|agy-engine round 1 done and verified (c5a7a13): two engine-host processes download by magnet + x.pe to 100 % with SHA-1 checked bytes; api-diff 30/0/0 re-run by the coordinator; clippy clean
+-|All Go engine tests now have real ports (0 placeholders); about 95 wait on named engine features; agy-engine (server) and agy-core (preview/playback) build them
