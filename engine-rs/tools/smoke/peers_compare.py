@@ -20,6 +20,8 @@ try:
     for _ in range(100):
         try: call('GET', '/stats', timeout=1); break
         except Exception: time.sleep(0.1)
+    # Match Android LibrarySession defaults used by smoke.py --profile app.
+    call('POST', '/settings', {'maxPeers': 55, 'dialRatePerSec': 30, 'peerExploration': True})
     t0 = time.monotonic(); code, add = call('POST', '/add', {'torrentId': MAGNET, 'prepare': True}); tid = add['id']
     while True:
         code, st = call('GET', f'/torrent/{tid}')

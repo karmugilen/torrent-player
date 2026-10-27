@@ -436,8 +436,9 @@ impl TorrentInner {
             self.dial_backoff.lock().remove(&addr);
             self.dial_fail_counts.lock().remove(&addr);
         } else {
-            // Exponential backoff: 5s, 10s, 20s, … capped at 120s. Dialer may
-            // re-queue the PeerInfo so we retry without waiting on rediscovery.
+            // Exponential backoff: 2s, 4s, 8s, … capped at 60s (was 5s…120s).
+            // Faster first retry cycles dead contacts out of the half-open
+            // budget sooner on timeout-heavy Ubuntu.
             let n = {
                 let mut counts = self.dial_fail_counts.lock();
                 let e = counts.entry(addr).or_insert(0);
@@ -445,7 +446,7 @@ impl TorrentInner {
                 *e
             };
             let shift = n.saturating_sub(1).min(5);
-            let secs = (5u64 << shift).min(120);
+            let secs = (2u64 << shift).min(60);
             self.dial_backoff
                 .lock()
                 .insert(addr, Instant::now() + Duration::from_secs(secs));
