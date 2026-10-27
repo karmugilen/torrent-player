@@ -26,7 +26,7 @@ Build: `CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-core-e2e CARGO_BUILD_JOB
 | `testClientTransfer` TCP greeting | `e2e_transfer::transfer_greeting_tcp` | compile / run |
 | `testClientTransfer` larger payload | `e2e_transfer::transfer_patterned_tcp_256kib` | compile / run |
 | `testClientTransfer` uTP-only | `e2e_transfer::transfer_greeting_utp` | compile / run |
-| MSE / `HeaderObfuscationPolicy` variants | `e2e_transfer::transfer_with_mse_encryption` | **ignored-waiting** `ClientConfig HeaderObfuscationPolicy` |
+| MSE / `HeaderObfuscationPolicy` variants | `e2e_transfer::transfer_with_mse_encryption` | pass |
 | Magnet + `ut_metadata` | `e2e_transfer::transfer_magnet_ut_metadata` | compile / run |
 | Magnet + `x.pe` peer | `e2e_pex::magnet_with_explicit_peer` | compile / run |
 | `TestAddDropTorrent` / re-add | `e2e_transfer::add_drop_readd_torrent` | compile / run |
@@ -86,7 +86,8 @@ Recorded by running the ignored 64 MiB test and the closest Go transfer.
 
 | Engine | Command | MiB/s | Notes |
 |--------|---------|-------|-------|
-| Rust `wt-core` | `cargo test -p wt-core --test e2e_throughput throughput_64mib_tcp -- --ignored --nocapture` | 2.4429 | 64 MiB, 1 MiB pieces, TCP-only, MemoryClientStorage, loopback, unoptimized test profile (2026-10-27) |
+| Rust `wt-core` (release) | `cargo test -p wt-core --release --test e2e_throughput throughput_64mib_tcp -- --ignored --nocapture` | 43.8626 | 64 MiB, 1 MiB pieces, TCP-only, MemoryClientStorage, loopback, release profile (2026-10-27) |
+| Rust `wt-core` (debug) | `cargo test -p wt-core --test e2e_throughput throughput_64mib_tcp -- --ignored --nocapture` | 2.4429 | 64 MiB, 1 MiB pieces, TCP-only, MemoryClientStorage, loopback, unoptimized debug profile (2026-10-27) |
 | Go engine parity harness | `engine-rs/docs/events.txt` recorded baseline | 19.5 | Different harness; not a comparable Go library benchmark. A matched Go library measurement remains outstanding. |
 
 ### Go throughput note

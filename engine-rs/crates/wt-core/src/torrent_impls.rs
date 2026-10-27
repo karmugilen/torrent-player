@@ -65,6 +65,14 @@ pub fn peer_key_from_addr(addr: SocketAddr) -> PeerKey {
 }
 
 fn addr_for_key(t: &TorrentInner, key: PeerKey) -> Option<SocketAddr> {
+    if let Some(&addr) = t
+        .conn_handles
+        .read()
+        .keys()
+        .find(|&&a| peer_key_from_addr(a) == key)
+    {
+        return Some(addr);
+    }
     t.conns
         .read()
         .keys()
@@ -184,8 +192,11 @@ impl PeerTorrent for TorrentInner {
     fn note_availability(&self, piece: PieceIndex, delta: i32) {
         if let Some(book) = self.book.write().as_mut() {
             for _ in 0..delta.unsigned_abs() {
-                if delta > 0 { book.increment_relative_availability(piece); }
-                else { book.decrement_relative_availability(piece); }
+                if delta > 0 {
+                    book.increment_relative_availability(piece);
+                } else {
+                    book.decrement_relative_availability(piece);
+                }
             }
         }
     }
@@ -193,14 +204,20 @@ impl PeerTorrent for TorrentInner {
     fn note_peer_piece(&self, peer: PeerKey, piece: PieceIndex, has: bool) {
         let mut peers = self.peer_pieces.write();
         let pieces = peers.entry(peer).or_default();
-        if has { pieces.insert(piece); } else { pieces.remove(&piece); }
+        if has {
+            pieces.insert(piece);
+        } else {
+            pieces.remove(&piece);
+        }
     }
 
     fn peer_closed(&self, addr: SocketAddr) {
         let old = self.conn_handles.write().remove(&addr);
         self.conns.write().remove(&addr);
         if old.is_some_and(|handle| handle.is_outgoing()) {
-            self.dial_backoff.lock().insert(addr, Instant::now() + Duration::from_secs(30));
+            self.dial_backoff
+                .lock()
+                .insert(addr, Instant::now() + Duration::from_secs(30));
         }
         self.peer_pieces.write().remove(&peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);
@@ -210,15 +227,20 @@ impl PeerTorrent for TorrentInner {
 
     fn update_peer_snapshot(&self, info: crate::stats::PeerConnInfo) {
         let mut since = self.choked_since.write();
-        if info.peer_choking { since.entry(info.remote_addr).or_insert_with(Instant::now); }
-        else { since.remove(&info.remote_addr); }
+        if info.peer_choking {
+            since.entry(info.remote_addr).or_insert_with(Instant::now);
+        } else {
+            since.remove(&info.remote_addr);
+        }
         drop(since);
         self.peer_snapshots.write().insert(info.remote_addr, info);
     }
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()> {
         let info = self.info.read().clone().ok_or(CoreError::NoInfo)?;
-        if piece >= info.num_pieces() || u64::from(begin) + data.len() as u64 > info.piece(piece).length as u64 {
+        if piece >= info.num_pieces()
+            || u64::from(begin) + data.len() as u64 > info.piece(piece).length as u64
+        {
             return Err(CoreError::Other("invalid piece range".into()));
         }
         let storage = self
@@ -241,7 +263,9 @@ impl PeerTorrent for TorrentInner {
 
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes> {
         let info = self.info.read().clone().ok_or(CoreError::NoInfo)?;
-        if piece >= info.num_pieces() || u64::from(begin) + u64::from(length) > info.piece(piece).length as u64 {
+        if piece >= info.num_pieces()
+            || u64::from(begin) + u64::from(length) > info.piece(piece).length as u64
+        {
             return Err(CoreError::Other("invalid piece range".into()));
         }
         let storage = self
@@ -258,25 +282,47 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn queue_piece_hash(&self, piece: PieceIndex) {
-        let Some(info) = self.info.read().clone() else { return; };
-        let Some(storage) = self.storage.read().clone() else { return; };
-        let Some(hash) = info.piece_hash_v1(piece) else { return; };
+        let Some(info) = self.info.read().clone() else {
+            return;
+        };
+        let Some(storage) = self.storage.read().clone() else {
+            return;
+        };
+        let Some(hash) = info.piece_hash_v1(piece) else {
+            return;
+        };
         let priority = {
             let mut pieces = self.pieces.write();
-            let Some(p) = pieces.get_mut(piece as usize) else { return; };
-            if p.checking || p.complete { return; }
+            let Some(p) = pieces.get_mut(piece as usize) else {
+                return;
+            };
+            if p.checking || p.complete {
+                return;
+            }
             p.checking = true;
             p.priority
         };
         let piece_obj = info.piece(piece);
         let job = crate::hashing::HashJob {
-            piece_index: piece, priority, storage: storage.piece(piece_obj, Some(hash)),
-            expected: crate::hashing::ExpectedHash::V1(hash), piece_length: info.piece_length,
-            data_length: piece_obj.length, v1_zero_pad: 0, smartban: None,
+            piece_index: piece,
+            priority,
+            storage: storage.piece(piece_obj, Some(hash)),
+            expected: crate::hashing::ExpectedHash::V1(hash),
+            piece_length: info.piece_length,
+            data_length: piece_obj.length,
+            v1_zero_pad: 0,
+            smartban: None,
             seq: self.hash_seq.fetch_add(1, Ordering::Relaxed),
         };
-        if !self.hasher.lock().as_ref().is_some_and(|pool| pool.queue(job).is_ok()) {
-            if let Some(p) = self.pieces.write().get_mut(piece as usize) { p.checking = false; }
+        if !self
+            .hasher
+            .lock()
+            .as_ref()
+            .is_some_and(|pool| pool.queue(job).is_ok())
+        {
+            if let Some(p) = self.pieces.write().get_mut(piece as usize) {
+                p.checking = false;
+            }
         }
         TorrentInner::bump_change(self);
     }
@@ -376,7 +422,14 @@ impl PeerTorrent for TorrentInner {
             );
         }
         for (r, (peer, when)) in self.assignments.read().iter() {
-            assignments.insert(*r, PeerRequestAssignment { peer: *peer, when: *when, peer_outstanding: 0 });
+            assignments.insert(
+                *r,
+                PeerRequestAssignment {
+                    peer: *peer,
+                    when: *when,
+                    peer_outstanding: 0,
+                },
+            );
         }
 
         let snap = RequestTorrentSnapshot {
@@ -412,10 +465,7 @@ impl PeerTorrent for TorrentInner {
         if let Some(peer) = self.hedge_peers.read().get(&req) {
             return Some(*peer);
         }
-        self.hedges
-            .read()
-            .get(&req)
-            .map(|a| peer_key_from_addr(*a))
+        self.hedges.read().get(&req).map(|a| peer_key_from_addr(*a))
     }
 
     fn set_hedge_peer(&self, req: RequestIndex, peer: PeerKey) {
@@ -439,8 +489,23 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn peer_has_piece(&self, peer: PeerKey, piece: PieceIndex) -> bool {
-        if self.peer_pieces.read().get(&peer).is_some_and(|pieces| pieces.contains(&piece)) {
+        if self
+            .peer_pieces
+            .read()
+            .get(&peer)
+            .is_some_and(|pieces| pieces.contains(&piece))
+        {
             return true;
+        }
+        if let Some(snap) = self
+            .peer_snapshots
+            .read()
+            .values()
+            .find(|p| peer_key_from_addr(p.remote_addr) == peer)
+        {
+            if snap.peer_completion >= 1.0 {
+                return true;
+            }
         }
         let Some(addr) = addr_for_key(self, peer) else {
             return false;
@@ -454,8 +519,25 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn webtor_peer_snap(&self, peer: PeerKey) -> Option<WebtorPeerSnap> {
-        if let Some(info) = self.peer_snapshots.read().values().find(|p| peer_key_from_addr(p.remote_addr) == peer) {
-            return Some(WebtorPeerSnap { key: peer, download_rate_bps: info.download_rate, rtt: info.rtt, queued: info.queued as u32, cancelled: info.cancelled as u32, nominal_max: 64, peer_choking: info.peer_choking, closed: false, last_useful: info.last_useful_data.and_then(|d| Instant::now().checked_sub(d)) });
+        if let Some(info) = self
+            .peer_snapshots
+            .read()
+            .values()
+            .find(|p| peer_key_from_addr(p.remote_addr) == peer)
+        {
+            return Some(WebtorPeerSnap {
+                key: peer,
+                download_rate_bps: info.download_rate,
+                rtt: info.rtt,
+                queued: info.queued as u32,
+                cancelled: info.cancelled as u32,
+                nominal_max: 64,
+                peer_choking: info.peer_choking,
+                closed: false,
+                last_useful: info
+                    .last_useful_data
+                    .and_then(|d| Instant::now().checked_sub(d)),
+            });
         }
         let addr = addr_for_key(self, peer)?;
         let conns = self.conns.read();
@@ -477,7 +559,12 @@ impl PeerTorrent for TorrentInner {
 
     fn connected_peer_keys(&self) -> Vec<PeerKey> {
         if !self.conn_handles.read().is_empty() {
-            return self.conn_handles.read().keys().map(|&addr| peer_key_from_addr(addr)).collect();
+            return self
+                .conn_handles
+                .read()
+                .keys()
+                .map(|&addr| peer_key_from_addr(addr))
+                .collect();
         }
         self.conns
             .read()
@@ -489,12 +576,19 @@ impl PeerTorrent for TorrentInner {
     fn on_metadata_data(&self, piece: u32, total_size: u32, data: Bytes) -> Result<bool> {
         let verified = {
             let mut metadata = self.metadata.write();
-            metadata.set_size(total_size).map_err(|e| CoreError::Other(e.to_string()))?;
-            metadata.on_data(piece, &data).map_err(|e| CoreError::Other(e.to_string()))?
+            metadata
+                .set_size(total_size)
+                .map_err(|e| CoreError::Other(e.to_string()))?;
+            metadata
+                .on_data(piece, &data)
+                .map_err(|e| CoreError::Other(e.to_string()))?
         };
         if let Some(verified) = verified {
             self.set_info(Arc::new(verified.info))?;
-            *self.metainfo_raw.write() = Some(wt_types::MetaInfo { info_bytes: verified.info_bytes, ..Default::default() });
+            *self.metainfo_raw.write() = Some(wt_types::MetaInfo {
+                info_bytes: verified.info_bytes,
+                ..Default::default()
+            });
             return Ok(true);
         }
         Ok(false)
@@ -504,13 +598,22 @@ impl PeerTorrent for TorrentInner {
         let raw = self.metainfo_raw.read();
         let bytes = &raw.as_ref()?.info_bytes;
         let start = (piece as usize).checked_mul(crate::metadata::METADATA_PIECE_SIZE)?;
-        if start >= bytes.len() { return None; }
+        if start >= bytes.len() {
+            return None;
+        }
         let end = (start + crate::metadata::METADATA_PIECE_SIZE).min(bytes.len());
-        Some((bytes.len() as u32, Bytes::copy_from_slice(&bytes[start..end])))
+        Some((
+            bytes.len() as u32,
+            Bytes::copy_from_slice(&bytes[start..end]),
+        ))
     }
 
     fn metadata_size(&self) -> Option<u32> {
-        self.metainfo_raw.read().as_ref().map(|m| m.info_bytes.len() as u32).or_else(|| self.metadata.read().size())
+        self.metainfo_raw
+            .read()
+            .as_ref()
+            .map(|m| m.info_bytes.len() as u32)
+            .or_else(|| self.metadata.read().size())
     }
 
     fn has_metadata(&self) -> bool {
@@ -520,9 +623,14 @@ impl PeerTorrent for TorrentInner {
     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()> {
         let mut last = self.pex_last_recv.lock();
         let mut prior = last.get(&from).copied();
-        let peers = self.pex.lock().ingest(msg, Instant::now(), &mut prior)
+        let peers = self
+            .pex
+            .lock()
+            .ingest(msg, Instant::now(), &mut prior)
             .map_err(|e| CoreError::Other(format!("PEX: {e:?}")))?;
-        if let Some(time) = prior { last.insert(from, time); }
+        if let Some(time) = prior {
+            last.insert(from, time);
+        }
         drop(last);
         self.known_peers.write().extend(peers);
         self.bump_change();
@@ -531,7 +639,9 @@ impl PeerTorrent for TorrentInner {
 
     fn add_dht_node(&self, addr: SocketAddr) {
         let mut nodes = self.dht_nodes.write();
-        if !nodes.contains(&addr) { nodes.push(addr); }
+        if !nodes.contains(&addr) {
+            nodes.push(addr);
+        }
     }
 
     fn on_peer_listen_port(&self, peer_addr: SocketAddr, port: u16) {
@@ -580,7 +690,21 @@ impl PeerTorrent for TorrentInner {
 pub fn init_book_and_glue(t: &TorrentInner, info: &wt_types::Info) {
     let mut book = t.book.write();
     if book.is_none() {
-        *book = Some(crate::piece_state::PieceBook::new(info.num_pieces(), info.piece_length, info.total_length(), BLOCK_SIZE));
+        let mut b = crate::piece_state::PieceBook::new(
+            info.num_pieces(),
+            info.piece_length,
+            info.total_length(),
+            BLOCK_SIZE,
+        );
+        let peers = t.peer_pieces.read();
+        for pieces in peers.values() {
+            for &p in pieces {
+                if p < info.num_pieces() {
+                    b.increment_relative_availability(p);
+                }
+            }
+        }
+        *book = Some(b);
     }
 }
 
@@ -588,9 +712,15 @@ pub fn init_book_and_glue(t: &TorrentInner, info: &wt_types::Info) {
 pub fn note_peer_piece(t: &TorrentInner, peer: PeerKey, piece: PieceIndex, has: bool) {
     let mut peers = t.peer_pieces.write();
     let pieces = peers.entry(peer).or_default();
-    let changed = if has { pieces.insert(piece) } else { pieces.remove(&piece) };
+    let changed = if has {
+        pieces.insert(piece)
+    } else {
+        pieces.remove(&piece)
+    };
     drop(peers);
-    if changed { t.note_availability(piece, if has { 1 } else { -1 }); }
+    if changed {
+        t.note_availability(piece, if has { 1 } else { -1 });
+    }
 }
 
 impl TorrentInner {
@@ -625,7 +755,10 @@ impl ReaderHost for TorrentInner {
             if chunk_len <= 0 {
                 break;
             }
-            let complete = pieces.get(piece as usize).map(|p| p.complete).unwrap_or(false);
+            let complete = pieces
+                .get(piece as usize)
+                .map(|p| p.complete)
+                .unwrap_or(false);
             if !responsive && !complete {
                 break;
             }
@@ -675,7 +808,13 @@ impl ReaderHost for TorrentInner {
         let (now, readahead) = reader_piece_priorities(&ranges);
         let mut pieces = self.pieces.write();
         for piece in pieces.iter_mut() {
-            let reader_priority = if now.contains(&piece.index) { PiecePriority::Now } else if readahead.contains(&piece.index) { PiecePriority::High } else { PiecePriority::None };
+            let reader_priority = if now.contains(&piece.index) {
+                PiecePriority::Now
+            } else if readahead.contains(&piece.index) {
+                PiecePriority::High
+            } else {
+                PiecePriority::None
+            };
             piece.priority = piece.base_priority.max(reader_priority);
         }
         drop(pieces);
@@ -689,7 +828,13 @@ impl ReaderHost for TorrentInner {
         let (now, readahead) = reader_piece_priorities(&ranges);
         let mut pieces = self.pieces.write();
         for piece in pieces.iter_mut() {
-            let reader_priority = if now.contains(&piece.index) { PiecePriority::Now } else if readahead.contains(&piece.index) { PiecePriority::High } else { PiecePriority::None };
+            let reader_priority = if now.contains(&piece.index) {
+                PiecePriority::Now
+            } else if readahead.contains(&piece.index) {
+                PiecePriority::High
+            } else {
+                PiecePriority::None
+            };
             piece.priority = piece.base_priority.max(reader_priority);
         }
         drop(pieces);
@@ -743,11 +888,19 @@ impl ReaderHost for TorrentInner {
     }
 
     fn torrent_length(&self) -> i64 {
-        self.info.read().as_ref().map(|i| i.total_length()).unwrap_or(0)
+        self.info
+            .read()
+            .as_ref()
+            .map(|i| i.total_length())
+            .unwrap_or(0)
     }
 
     fn num_pieces(&self) -> u32 {
-        self.info.read().as_ref().map(|i| i.num_pieces()).unwrap_or(0)
+        self.info
+            .read()
+            .as_ref()
+            .map(|i| i.num_pieces())
+            .unwrap_or(0)
     }
 
     fn is_closed(&self) -> bool {
@@ -759,7 +912,8 @@ impl ReaderHost for TorrentInner {
     }
 
     fn on_read_waiting(&self, torrent_offset: i64) {
-        self.request_focus.store(torrent_offset + 1, Ordering::Relaxed);
+        self.request_focus
+            .store(torrent_offset + 1, Ordering::Relaxed);
         self.nudge_urgent_requests();
     }
 }
@@ -775,4 +929,3 @@ mod tests {
         assert_eq!(peer_key_from_addr(a), peer_key_from_addr(a));
     }
 }
-

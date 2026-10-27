@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use wt_types::{
-    ClientStorage, Info, InfoHash, InfoHashV2, MetaInfo, PeerId, PeerInfo, PeerSource, PieceIndex, PiecePriority,
-    RequestIndex, TorrentStorage, Transport, BLOCK_SIZE,
+    ClientStorage, Info, InfoHash, InfoHashV2, MetaInfo, PeerId, PeerInfo, PeerSource, PieceIndex,
+    PiecePriority, RequestIndex, TorrentStorage, Transport, BLOCK_SIZE,
 };
 
 use crate::arrival::ArrivalModel;
@@ -157,7 +157,10 @@ impl TorrentInner {
             default_storage,
             pieces: RwLock::new(Vec::new()),
             book: RwLock::new(None),
-            metadata: RwLock::new(crate::metadata::MetadataExchange::new(Some(info_hash), info_hash_v2)),
+            metadata: RwLock::new(crate::metadata::MetadataExchange::new(
+                Some(info_hash),
+                info_hash_v2,
+            )),
             pex: Mutex::new(crate::pex::PexState::new()),
             pex_last_recv: Mutex::new(HashMap::new()),
             peer_listen_ports: RwLock::new(HashMap::new()),
@@ -205,9 +208,15 @@ impl TorrentInner {
     pub fn bump_change(&self) {
         self.change_version.fetch_add(1, Ordering::SeqCst);
         self.peer_notify.notify_one();
-        for handle in self.conn_handles.read().values() { handle.wake(); }
+        for handle in self.conn_handles.read().values() {
+            handle.wake();
+        }
         let _guard = self.change_mutex.lock();
         self.change_cond.notify_all();
+    }
+
+    pub fn wake_all_connections(&self) {
+        self.bump_change();
     }
 
     pub fn add_peers(self: &Arc<Self>, peers: Vec<PeerInfo>) -> usize {
@@ -221,17 +230,38 @@ impl TorrentInner {
             }
         }
         let count = added.len();
-        if count > 0 { self.bump_change(); }
+        if count > 0 {
+            self.bump_change();
+        }
         count
     }
 
-    pub(crate) fn attach_connection(self: &Arc<Self>, info: AttachInfo, handle: crate::conn::ConnHandle) -> Result<crate::peer_conn::PeerConnHandler<Self>> {
-        if self.closed.load(Ordering::Relaxed) { return Err(CoreError::Closed); }
-        if info.remote != handle.remote_addr() { return Err(CoreError::Other("peer address mismatch".into())); }
-        let _ = (info.outgoing, info.transport, info.encrypted, info.peer_id, info.reserved, info.source);
+    pub(crate) fn attach_connection(
+        self: &Arc<Self>,
+        info: AttachInfo,
+        handle: crate::conn::ConnHandle,
+    ) -> Result<crate::peer_conn::PeerConnHandler<Self>> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(CoreError::Closed);
+        }
+        if info.remote != handle.remote_addr() {
+            return Err(CoreError::Other("peer address mismatch".into()));
+        }
+        let _ = (
+            info.outgoing,
+            info.transport,
+            info.encrypted,
+            info.peer_id,
+            info.reserved,
+            info.source,
+        );
         let mut handles = self.conn_handles.write();
-        if handles.contains_key(&info.remote) || handles.len() >= self.max_established_conns.load(Ordering::Relaxed) {
-            return Err(CoreError::Other("duplicate peer or connection limit reached".into()));
+        if handles.contains_key(&info.remote)
+            || handles.len() >= self.max_established_conns.load(Ordering::Relaxed)
+        {
+            return Err(CoreError::Other(
+                "duplicate peer or connection limit reached".into(),
+            ));
         }
         handles.insert(info.remote, handle.clone());
         drop(handles);
@@ -244,13 +274,21 @@ impl TorrentInner {
 
     fn start_hashing(self: &Arc<Self>) {
         let mut slot = self.hasher.lock();
-        if slot.is_some() { return; }
-        let workers = self.client.read().upgrade().map_or(2, |client| client.config.piece_hashers_per_torrent);
+        if slot.is_some() {
+            return;
+        }
+        let workers = self
+            .client
+            .read()
+            .upgrade()
+            .map_or(2, |client| client.config.piece_hashers_per_torrent);
         let (pool, rx) = crate::hashing::PieceHasherPool::with_workers(workers);
         let torrent = Arc::downgrade(self);
         std::thread::spawn(move || {
             while let Ok(result) = rx.recv() {
-                let Some(torrent) = torrent.upgrade() else { break; };
+                let Some(torrent) = torrent.upgrade() else {
+                    break;
+                };
                 torrent.apply_hash_result(result);
             }
         });
@@ -258,39 +296,63 @@ impl TorrentInner {
     }
 
     fn apply_hash_result(&self, result: crate::hashing::HashResult) {
-        let Some(info) = self.info.read().clone() else { return; };
-        let Some(storage) = self.storage.read().clone() else { return; };
+        let Some(info) = self.info.read().clone() else {
+            return;
+        };
+        let Some(storage) = self.storage.read().clone() else {
+            return;
+        };
         let piece = result.piece_index;
-        if piece >= info.num_pieces() { return; }
+        if piece >= info.num_pieces() {
+            return;
+        }
         let ps = storage.piece(info.piece(piece), info.piece_hash_v1(piece));
-        let valid = result.correct && !result.cancelled && result.error.is_none() && ps.mark_complete().is_ok();
-        if !valid { let _ = ps.mark_not_complete(); }
+        let valid = result.correct
+            && !result.cancelled
+            && result.error.is_none()
+            && ps.mark_complete().is_ok();
+        if !valid {
+            let _ = ps.mark_not_complete();
+        }
         {
             let mut pieces = self.pieces.write();
             if let Some(entry) = pieces.get_mut(piece as usize) {
                 entry.checking = false;
                 entry.complete = valid;
                 entry.ok = true;
-                if !valid { entry.partial = false; entry.chunks_received.clear(); }
+                if !valid {
+                    entry.partial = false;
+                    entry.chunks_received.clear();
+                }
             }
         }
         if let Some(book) = self.book.write().as_mut() {
             book.set_complete_cached(piece, true, valid);
             if !valid {
-                let (begin, end) = piece_req_index_range(piece, info.piece_length, info.total_length());
+                let (begin, end) =
+                    piece_req_index_range(piece, info.piece_length, info.total_length());
                 let mut dirty = self.dirty_chunks.write();
-                for req in begin..end { dirty.remove(&req); book.mark_chunk_pending(req); }
+                for req in begin..end {
+                    dirty.remove(&req);
+                    book.mark_chunk_pending(req);
+                }
             }
         }
         if valid {
-            for handle in self.conn_handles.read().values() { handle.send_message(wt_wire::message::Message::Have { index: piece }); }
+            for handle in self.conn_handles.read().values() {
+                handle.send_message(wt_wire::message::Message::Have { index: piece });
+            }
         }
         self.bump_change();
     }
 
     pub(crate) fn wants_conns(&self) -> usize {
-        if self.closed.load(Ordering::Relaxed) { return 0; }
-        self.max_established_conns.load(Ordering::Relaxed).saturating_sub(self.conn_handles.read().len() + self.dialing_peers.lock().len())
+        if self.closed.load(Ordering::Relaxed) {
+            return 0;
+        }
+        self.max_established_conns
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.conn_handles.read().len() + self.dialing_peers.lock().len())
     }
 
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
@@ -298,16 +360,38 @@ impl TorrentInner {
         let mut dialing = self.dialing_peers.lock();
         let backoff = self.dial_backoff.lock();
         let now = Instant::now();
-        self.known_peers.read().iter().filter(|p| !handles.contains_key(&p.addr) && !dialing.contains(&p.addr) && backoff.get(&p.addr).is_none_or(|until| *until <= now)).take(max).cloned().collect::<Vec<_>>().into_iter().inspect(|p| { dialing.insert(p.addr); }).collect()
+        self.known_peers
+            .read()
+            .iter()
+            .filter(|p| {
+                !handles.contains_key(&p.addr)
+                    && !dialing.contains(&p.addr)
+                    && backoff.get(&p.addr).is_none_or(|until| *until <= now)
+            })
+            .take(max)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .inspect(|p| {
+                dialing.insert(p.addr);
+            })
+            .collect()
     }
 
     pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {
         self.dialing_peers.lock().remove(&addr);
-        if ok { self.dial_backoff.lock().remove(&addr); }
-        else { self.dial_backoff.lock().insert(addr, Instant::now() + Duration::from_secs(30)); }
+        if ok {
+            self.dial_backoff.lock().remove(&addr);
+        } else {
+            self.dial_backoff
+                .lock()
+                .insert(addr, Instant::now() + Duration::from_secs(30));
+        }
         self.bump_change();
     }
-    pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify { &self.peer_notify }
+    pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify {
+        &self.peer_notify
+    }
 
     pub fn set_info(&self, info: Arc<Info>) -> Result<()> {
         let num_pieces = info.num_pieces() as usize;
@@ -316,14 +400,19 @@ impl TorrentInner {
         let total_len = info.total_length();
         for i in 0..num_pieces {
             let mut entry = PieceEntry::new(i as PieceIndex, piece_len, total_len);
-            if self.download_all_requested.load(Ordering::Relaxed) { entry.priority = PiecePriority::Normal; entry.base_priority = PiecePriority::Normal; }
+            if self.download_all_requested.load(Ordering::Relaxed) {
+                entry.priority = PiecePriority::Normal;
+                entry.base_priority = PiecePriority::Normal;
+            }
             piece_entries.push(entry);
         }
 
         // Open storage
         let storage = self.default_storage.open_torrent(&info, self.info_hash)?;
         for entry in &mut piece_entries {
-            let completion = storage.piece(info.piece(entry.index), info.piece_hash_v1(entry.index)).completion();
+            let completion = storage
+                .piece(info.piece(entry.index), info.piece_hash_v1(entry.index))
+                .completion();
             entry.ok = completion.ok;
             entry.complete = completion.ok && completion.complete;
         }
@@ -595,7 +684,9 @@ impl TorrentInner {
         {
             return 0;
         }
-        for handle in self.conn_handles.read().values() { handle.wake(); }
+        for handle in self.conn_handles.read().values() {
+            handle.wake();
+        }
         self.rescue_head_of_line();
         self.hedge_head_of_line();
 
@@ -955,4 +1046,3 @@ impl TorrentInner {
         self.bump_change();
     }
 }
-

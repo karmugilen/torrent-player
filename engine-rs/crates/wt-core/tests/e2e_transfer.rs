@@ -23,21 +23,39 @@ async fn restored_seeder_to_magnet_download() {
         let piece = info.piece(i);
         let storage = store.piece(piece, info.piece_hash_v1(i));
         let start = i as usize * info.piece_length as usize;
-        storage.write_at(&data[start..start + piece.length as usize], 0).unwrap();
+        storage
+            .write_at(&data[start..start + piece.length as usize], 0)
+            .unwrap();
         storage.mark_complete().unwrap();
     }
     let mut seed_config = testing_config(seed_storage.clone(), true);
     seed_config.disable_utp = true;
     let seed = Client::new(seed_config).unwrap();
-    let (seed_t, _) = seed.add_torrent_spec(torrent_spec(ih, Some(info_bytes), "restored", Some(seed_storage))).unwrap();
+    let (seed_t, _) = seed
+        .add_torrent_spec(torrent_spec(
+            ih,
+            Some(info_bytes),
+            "restored",
+            Some(seed_storage),
+        ))
+        .unwrap();
     assert_eq!(seed_t.bytes_completed(), data.len() as i64);
-    let addr = format!("127.0.0.1:{}", wait_local_port(&seed).await).parse().unwrap();
+    let addr = format!("127.0.0.1:{}", wait_local_port(&seed).await)
+        .parse()
+        .unwrap();
 
     let download_storage = Arc::new(MemoryClientStorage::new());
     let mut download_config = testing_config(download_storage.clone(), false);
     download_config.disable_utp = true;
     let download = Client::new(download_config).unwrap();
-    let (torrent, _) = download.add_torrent_spec(torrent_spec(ih, None, "magnet", Some(download_storage.clone()))).unwrap();
+    let (torrent, _) = download
+        .add_torrent_spec(torrent_spec(
+            ih,
+            None,
+            "magnet",
+            Some(download_storage.clone()),
+        ))
+        .unwrap();
     torrent.download_all();
     add_client_peer(&download, &torrent, addr).await;
     wait_bytes_completed(&torrent, data.len() as i64, Duration::from_secs(20)).await;
@@ -231,14 +249,68 @@ async fn transfer_greeting_utp() {
 }
 
 /// MSE / header-obfuscation transfer variants.
-/// `ClientConfig` has no HeaderObfuscationPolicy yet — ignore until wired.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "waiting for ClientConfig HeaderObfuscationPolicy / MSE knobs on public API"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transfer_with_mse_encryption() {
-    unimplemented!("MSE policy knobs");
+    let (info, ih, data, info_bytes) = greeting_torrent();
+
+    let seeder_storage = Arc::new(MemoryClientStorage::new());
+    let mut seeder_cfg = testing_config(seeder_storage.clone(), true);
+    seeder_cfg.disable_utp = true;
+    seeder_cfg.header_obfuscation_policy = wt_core::HeaderObfuscationPolicy {
+        preferred: true,
+        require_preferred: true,
+    };
+    let seeder = Client::new(seeder_cfg).unwrap();
+    let seeder_addr = format!("127.0.0.1:{}", wait_local_port(&seeder).await)
+        .parse()
+        .unwrap();
+    let (seeder_t, _) = seeder
+        .add_torrent_spec(torrent_spec(
+            ih,
+            Some(info_bytes.clone()),
+            "mse-seeder",
+            Some(seeder_storage.clone()),
+        ))
+        .unwrap();
+    seeder_t.inner.set_info(Arc::new(info.clone())).unwrap();
+    seed_memory(&seeder_storage, &seeder_t, &info, ih, &data);
+
+    let leecher_storage = Arc::new(MemoryClientStorage::new());
+    let mut leecher_cfg = testing_config(leecher_storage.clone(), false);
+    leecher_cfg.disable_utp = true;
+    leecher_cfg.header_obfuscation_policy = wt_core::HeaderObfuscationPolicy {
+        preferred: true,
+        require_preferred: true,
+    };
+    let leecher = Client::new(leecher_cfg).unwrap();
+    let (leecher_t, _) = leecher
+        .add_torrent_spec(torrent_spec(
+            ih,
+            Some(info_bytes),
+            "mse-leecher",
+            Some(leecher_storage.clone()),
+        ))
+        .unwrap();
+    leecher_t.inner.set_info(Arc::new(info.clone())).unwrap();
+    leecher_t.download_all();
+
+    add_client_peer(&leecher, &leecher_t, seeder_addr).await;
+    wait_bytes_completed(&leecher_t, info.total_length(), Duration::from_secs(20)).await;
+    let got = read_all_from_storage(&leecher_storage, &info, ih);
+    assert_eq!(got, data);
+
+    let conns = leecher_t.peer_conns();
+    assert!(!conns.is_empty(), "expected established peer connections");
+    assert!(
+        conns.iter().any(|c| c.encrypted),
+        "expected at least one encrypted connection under require_preferred"
+    );
+
+    seeder.close();
+    leecher.close();
 }
 
-/// Leecher starts from magnet (no info_bytes); fetches metadata via ut_metadata.
+/// Leecher starts from magnet (no info_bytes); fetches metadata via ut_metadata, then downloads data.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transfer_magnet_ut_metadata() {
     const SIZE: usize = 64 * 1024;
@@ -281,7 +353,7 @@ async fn transfer_magnet_ut_metadata() {
             ih,
             None,
             "magnet-leecher",
-            Some(leecher_storage),
+            Some(leecher_storage.clone()),
         ))
         .unwrap();
     assert!(leecher_t.info().is_none());
@@ -292,6 +364,11 @@ async fn transfer_magnet_ut_metadata() {
         .expect("ut_metadata should deliver info");
     assert_eq!(fetched.name, info.name);
     assert_eq!(fetched.total_length(), SIZE as i64);
+
+    leecher_t.download_all();
+    wait_bytes_completed(&leecher_t, SIZE as i64, Duration::from_secs(20)).await;
+    let got = read_all_from_storage(&leecher_storage, &info, ih);
+    assert_eq!(got, data);
 
     seeder.close();
     leecher.close();

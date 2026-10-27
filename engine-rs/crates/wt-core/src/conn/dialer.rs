@@ -126,11 +126,20 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
     };
 
     // 4. Message Stream Encryption (MSE) negotiation
-    let (mut stream, is_encrypted): (Box<dyn PeerStream>, bool) = if params.require_plain {
+    let (mut stream, is_encrypted): (Box<dyn PeerStream>, bool) = if params.require_plain
+        || (!cfg.header_obfuscation_policy.preferred
+            && !cfg.header_obfuscation_policy.require_preferred)
+    {
         (raw_stream, false)
     } else {
-        let mse_fut =
-            mse::initiate_handshake(raw_stream, &params.info_hash.0, None, CryptoMethod::ALL);
+        let provides = if cfg.header_obfuscation_policy.preferred
+            && cfg.header_obfuscation_policy.require_preferred
+        {
+            CryptoMethod::RC4
+        } else {
+            CryptoMethod::ALL
+        };
+        let mse_fut = mse::initiate_handshake(raw_stream, &params.info_hash.0, None, provides);
         let (encrypted_stream, crypto_method) =
             tokio::time::timeout(cfg.handshakes_timeout, mse_fut)
                 .await

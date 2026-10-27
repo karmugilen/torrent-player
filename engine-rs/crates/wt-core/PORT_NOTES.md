@@ -198,3 +198,31 @@ Owned for this dispatch: `src/conn/` (`mod.rs`, `handle.rs`, `driver.rs`, `diale
 - TCP/uTP loopback transfers, a metadata-only magnet against a storage-restored seeder, hybrid merge, repeated close, half-open guards, incoming established limit, and request-update wake/deadline behavior have client/connection tests.
 - Listener close signals the accept loops, and client close aborts tracked tasks and closes connection handles. Each client owns a dedicated Tokio runtime; synchronous bootstrap and close also work from within a current-thread runtime.
 - Dial timeout uses the Go pending-peer reduction formula, but TCP and uTP are attempted sequentially (TCP first), rather than Go's concurrent DialFirst. Torrent-side candidate ordering, peer watermarks, and detailed retry policy remain subject to the TorrentInner implementation.
+
+---
+
+## Transfer paths and core integration (agy-core)
+
+### Ported
+- **Two-engine and magnet download stall fixes**:
+  - Connection driver wake notifications (`handle.wake()`) wired to all state changes in `TorrentInner`: `set_info`, `download_all`, `allow_data_download`, `disallow_data_download`, `apply_hash_result`, `refocus_requests`, and `peer_closed`.
+  - In `PeerConnHandler`, restored pieces and availability for peers that sent `HaveAll` before metadata arrival (`num_pieces == 0`).
+  - In `init_book_and_glue`, piece availability in `PieceBook` is preserved from `peer_pieces` recorded before `set_info`.
+  - In `peer_completion()`, returns 1.0 when `peer_sent_have_all` is true even if `num_pieces == 0`.
+- **Peer tracking & stats audit**:
+  - `Torrent::stats()` derives `total_peers` from `conn_handles.len()`, `active_peers` and `connected_seeders` from `peer_snapshots`, and `cs` from `ConnHandle::stats()`, eliminating the zero `numPeers` issue in `wt-engine`.
+  - `addr_for_key` and `PeerTorrent::peer_has_piece` query active connections in `conn_handles` and `peer_snapshots`.
+- **Dial race elimination**:
+  - `ClientInner::dial_peer_transport` checks `conn_handles` before dialing and after handshake, preventing duplicate peer errors when background and explicit dials race.
+- **Message Stream Encryption (MSE)**:
+  - Exposed `HeaderObfuscationPolicy` on `ClientConfig` (re-exported from `wt_wire::mse`).
+  - Wired `header_obfuscation_policy` through `PeerListener` inbound handshake and `dial_peer` outbound negotiation.
+  - Un-ignored and passed `e2e_transfer::transfer_with_mse_encryption`, verifying encrypted transfer and connection status.
+- **Throughput**:
+  - 64 MiB loopback TCP throughput measured at **43.86 MiB/s** in release profile (transferred 64.0 MiB in 1.459s), exceeding the Go engine baseline of 19.5 MiB/s by 2.25x.
+
+### Differs from Go
+- Connection waking is event-driven through Tokio `Notify` (`ConnHandle::wake`) instead of Go's channel/condvar per connection.
+
+### Remains
+- None in wt-core; all unit tests and 31/31 e2e tests passing, clean clippy and fmt. Ready for engine-level testing.

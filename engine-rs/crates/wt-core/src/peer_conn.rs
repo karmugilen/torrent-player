@@ -622,10 +622,18 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
     pub fn start(&mut self, handle: &ConnHandle) {
         let mut ext = ExtendedHandshake::default();
-        ext.m.insert(EXTENSION_NAME_METADATA.to_string(), self.our_ext_metadata);
-        ext.m.insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
+        ext.m
+            .insert(EXTENSION_NAME_METADATA.to_string(), self.our_ext_metadata);
+        ext.m
+            .insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
         ext.metadata_size = self.torrent.metadata_size();
-        self.send(handle, Message::Extended { id: EXT_HANDSHAKE_ID, payload: ext.encode() });
+        self.send(
+            handle,
+            Message::Extended {
+                id: EXT_HANDSHAKE_ID,
+                payload: ext.encode(),
+            },
+        );
         let count = self.torrent.num_pieces();
         if count > 0 {
             let mut bits = vec![0u8; (count as usize).div_ceil(8)];
@@ -676,12 +684,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     }
 
     fn peer_completion(&self) -> f64 {
+        if self.state.peer_sent_have_all {
+            return 1.0;
+        }
         let n = self.torrent.num_pieces();
         if n == 0 {
             return 0.0;
-        }
-        if self.state.peer_sent_have_all {
-            return 1.0;
         }
         self.state.peer_pieces.len() as f64 / f64::from(n)
     }
@@ -714,6 +722,17 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
         let (snap, order) = self.torrent.desired_request_context();
         let num_pieces = self.torrent.num_pieces();
+        if self.state.peer_sent_have_all
+            && num_pieces > 0
+            && self.state.peer_pieces.len() < num_pieces as usize
+        {
+            for i in 0..num_pieces {
+                if self.state.peer_pieces.insert(i) {
+                    self.torrent.note_availability(i, 1);
+                    self.torrent.note_peer_piece(self.key(), i, true);
+                }
+            }
+        }
         let mut has_piece = vec![false; num_pieces as usize];
         let mut allowed = vec![false; num_pieces as usize];
         if self.state.peer_sent_have_all {
@@ -1312,15 +1331,35 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         let should_choke = self.torrent.data_upload_disallowed();
         if self.state.am_choking != should_choke {
             self.state.am_choking = should_choke;
-            self.send(handle, if should_choke { Message::Choke } else { Message::Unchoke });
+            self.send(
+                handle,
+                if should_choke {
+                    Message::Choke
+                } else {
+                    Message::Unchoke
+                },
+            );
         }
         if self.torrent.data_download_disallowed() {
             let requests: Vec<_> = self.state.outstanding_requests.drain().collect();
             for req in requests {
-                let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
-                self.send(handle, Message::Cancel { index: coord.piece, begin: coord.offset, length: coord.length });
+                let coord = block_coord_from_req_index(
+                    req,
+                    self.torrent.piece_length(),
+                    self.torrent.total_length(),
+                );
+                self.send(
+                    handle,
+                    Message::Cancel {
+                        index: coord.piece,
+                        begin: coord.offset,
+                        length: coord.length,
+                    },
+                );
                 self.torrent.clear_chunk_requested(req);
-                if self.torrent.requesting_peer(req) == Some(self.key()) { self.torrent.clear_assignment(req); }
+                if self.torrent.requesting_peer(req) == Some(self.key()) {
+                    self.torrent.clear_assignment(req);
+                }
             }
         } else {
             self.update_requests(handle);
@@ -1329,7 +1368,9 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
     }
 
     fn wake_interval(&self) -> Option<Duration> {
-        if (0..self.torrent.num_pieces()).any(|i| self.torrent.piece_priority(i) >= PiecePriority::Next && !self.torrent.piece_complete(i)) {
+        if (0..self.torrent.num_pieces()).any(|i| {
+            self.torrent.piece_priority(i) >= PiecePriority::Next && !self.torrent.piece_complete(i)
+        }) {
             Some(Duration::from_millis(100))
         } else {
             None

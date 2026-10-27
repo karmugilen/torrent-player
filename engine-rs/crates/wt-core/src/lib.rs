@@ -39,6 +39,7 @@ pub use stats::{ClientStats, ConnStats, PeerConnInfo, TorrentStats};
 pub use storage_adapter::{verify_piece_hash, MemoryClientStorage};
 pub use torrent::TorrentInner;
 pub use tuning::{current_seek_tuning, set_seek_tuning, PeakMode, SeekTuning};
+pub use wt_wire::mse::HeaderObfuscationPolicy;
 
 // ---------------------------------------------------------------- config
 
@@ -76,6 +77,7 @@ pub struct ClientConfig {
     pub extended_handshake_client_version: String,
     pub ice_servers: Vec<String>,
     pub default_storage: Arc<dyn ClientStorage>,
+    pub header_obfuscation_policy: HeaderObfuscationPolicy,
     pub callbacks: Callbacks,
 }
 
@@ -110,6 +112,7 @@ impl Default for ClientConfig {
             extended_handshake_client_version: "Webtor 2.0".to_string(),
             ice_servers: Vec::new(),
             default_storage: Arc::new(MemoryClientStorage::new()),
+            header_obfuscation_policy: HeaderObfuscationPolicy::default(),
             callbacks: Callbacks::default(),
         }
     }
@@ -481,9 +484,40 @@ impl Torrent {
 
     pub fn stats(&self) -> TorrentStats {
         let mut cs = ConnStats::default();
-        let conns = self.inner.conns.read();
+        let snapshots = self.inner.peer_snapshots.read();
+        let handles = self.inner.conn_handles.read();
         let mut active = 0;
         let mut seeders = 0;
+        if !snapshots.is_empty() || !handles.is_empty() {
+            for h in handles.values() {
+                cs.add(&h.stats().snapshot());
+            }
+            for snap in snapshots.values() {
+                if !snap.peer_choking {
+                    active += 1;
+                }
+                if snap.peer_completion >= 1.0 {
+                    seeders += 1;
+                }
+            }
+            let pieces_complete = self
+                .inner
+                .pieces
+                .read()
+                .iter()
+                .filter(|p| p.complete)
+                .count();
+            return TorrentStats {
+                conn_stats: cs,
+                total_peers: handles.len(),
+                pending_peers: 0,
+                active_peers: active,
+                connected_seeders: seeders,
+                half_open_peers: 0,
+                pieces_complete,
+            };
+        }
+        let conns = self.inner.conns.read();
         for c in conns.values() {
             let inner = c.inner.read();
             cs.add(&inner.stats.snapshot());
@@ -517,7 +551,9 @@ impl Torrent {
     }
 
     pub fn download_all(&self) {
-        self.inner.download_all_requested.store(true, Ordering::Relaxed);
+        self.inner
+            .download_all_requested
+            .store(true, Ordering::Relaxed);
         let mut pieces = self.inner.pieces.write();
         for p in pieces.iter_mut() {
             if p.base_priority == PiecePriority::None {
@@ -526,21 +562,21 @@ impl Torrent {
             }
         }
         drop(pieces);
-        self.inner.bump_change();
+        self.inner.wake_all_connections();
     }
 
     pub fn allow_data_download(&self) {
         self.inner
             .data_download_disallowed
             .store(false, Ordering::Relaxed);
-        self.inner.bump_change();
+        self.inner.wake_all_connections();
     }
 
     pub fn disallow_data_download(&self) {
         self.inner
             .data_download_disallowed
             .store(true, Ordering::Relaxed);
-        self.inner.bump_change();
+        self.inner.wake_all_connections();
     }
 
     pub fn allow_data_upload(&self) {
@@ -577,7 +613,9 @@ impl Torrent {
 
     pub fn peer_conns(&self) -> Vec<PeerConnInfo> {
         let snapshots = self.inner.peer_snapshots.read();
-        if !snapshots.is_empty() { return snapshots.values().cloned().collect(); }
+        if !snapshots.is_empty() {
+            return snapshots.values().cloned().collect();
+        }
         drop(snapshots);
         let conns = self.inner.conns.read();
         conns
@@ -716,7 +754,9 @@ impl Torrent {
 
     pub fn drop_torrent(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
-        for handle in self.inner.conn_handles.read().values() { handle.close("torrent dropped"); }
+        for handle in self.inner.conn_handles.read().values() {
+            handle.close("torrent dropped");
+        }
         let conns = self.inner.conns.write();
         for c in conns.values() {
             c.close();
@@ -739,7 +779,7 @@ impl Torrent {
     }
 
     pub fn refocus_requests(&self) {
-        self.inner.bump_change();
+        self.inner.wake_all_connections();
         let conns = self.inner.conns.read();
         for c in conns.values() {
             self.inner.refill_peer_requests(c);
@@ -767,7 +807,12 @@ impl Torrent {
 
     pub fn peer_counts(&self) -> (usize, usize) {
         let snapshots = self.inner.peer_snapshots.read();
-        if !snapshots.is_empty() { return (snapshots.len(), snapshots.values().filter(|s| !s.peer_choking).count()); }
+        if !snapshots.is_empty() {
+            return (
+                snapshots.len(),
+                snapshots.values().filter(|s| !s.peer_choking).count(),
+            );
+        }
         drop(snapshots);
         let conns = self.inner.conns.read();
         let total = conns.len();
@@ -781,13 +826,30 @@ impl Torrent {
     pub fn drop_chokers(&self, after: Duration) -> usize {
         let snapshots = self.inner.peer_snapshots.read();
         let since = self.inner.choked_since.read();
-        let selected: Vec<_> = snapshots.values().filter(|p| p.peer_choking && p.am_interested && since.get(&p.remote_addr).is_some_and(|t| t.elapsed() >= after)).take(2).map(|p| p.remote_addr).collect();
+        let selected: Vec<_> = snapshots
+            .values()
+            .filter(|p| {
+                p.peer_choking
+                    && p.am_interested
+                    && since
+                        .get(&p.remote_addr)
+                        .is_some_and(|t| t.elapsed() >= after)
+            })
+            .take(2)
+            .map(|p| p.remote_addr)
+            .collect();
         drop(since);
         drop(snapshots);
         if !selected.is_empty() {
             let handles = self.inner.conn_handles.read();
-            for addr in &selected { if let Some(handle) = handles.get(addr) { handle.close("choked too long"); } }
-            self.inner.chokers_dropped.fetch_add(selected.len() as i64, Ordering::Relaxed);
+            for addr in &selected {
+                if let Some(handle) = handles.get(addr) {
+                    handle.close("choked too long");
+                }
+            }
+            self.inner
+                .chokers_dropped
+                .fetch_add(selected.len() as i64, Ordering::Relaxed);
             return selected.len();
         }
         let mut conns = self.inner.conns.write();

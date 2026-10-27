@@ -13,7 +13,7 @@ use wt_types::{InfoHash, PeerId, PeerSource, Transport};
 use wt_wire::ext::{ExtendedHandshake, EXTENSION_NAME_METADATA, EXTENSION_NAME_PEX};
 use wt_wire::handshake::{default_peer_extension_bytes, handshake_incoming, PeerExtensionBits};
 use wt_wire::message::Message;
-use wt_wire::mse::{handle_encryption, CryptoMethod, HeaderObfuscationPolicy};
+use wt_wire::mse::{handle_encryption, CryptoMethod};
 use wt_wire::utp::UtpSocket;
 
 use crate::conn::half_open::HalfOpenTracker;
@@ -277,12 +277,13 @@ async fn handle_inbound_inner(
 ) -> Result<AcceptedConn> {
     // 1. MSE Handshake
     let skeys: Vec<Vec<u8>> = (skey_provider)().into_iter().map(|k| k.to_vec()).collect();
-    let mse_policy = HeaderObfuscationPolicy {
-        preferred: true,
-        require_preferred: false,
-    };
-    let selector = |methods: CryptoMethod| {
-        if methods.supports_rc4() {
+    let mse_policy = cfg.header_obfuscation_policy;
+    let selector = move |methods: CryptoMethod| {
+        if mse_policy.preferred && methods.supports_rc4() {
+            CryptoMethod::RC4
+        } else if !mse_policy.preferred && methods.supports_plaintext() {
+            CryptoMethod::PLAINTEXT
+        } else if !mse_policy.require_preferred && methods.supports_rc4() {
             CryptoMethod::RC4
         } else {
             CryptoMethod::PLAINTEXT

@@ -760,6 +760,9 @@ impl ClientInner {
         if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
             return Err(CoreError::Closed);
         }
+        if torrent.conn_handles.read().contains_key(&addr) {
+            return Ok(());
+        }
         let metadata_size = torrent
             .metainfo_raw
             .read()
@@ -802,14 +805,23 @@ impl ClientInner {
             reserved: outcome.peer_extension_bits.0,
             source,
         };
-        self.attach_driver(
-            torrent,
+        match self.attach_driver(
+            torrent.clone(),
             info,
             outcome.stream,
             outcome.handle,
             outcome.write_rx,
             outcome.write_waker,
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if torrent.conn_handles.read().contains_key(&addr) {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     fn attach_driver(
