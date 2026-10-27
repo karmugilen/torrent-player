@@ -165,7 +165,12 @@ impl Limiter {
         loop {
             match self.reserve_delay(n) {
                 Some(d) if d.is_zero() => return,
-                Some(d) => sleep(d).await,
+                // reserve_delay already took the tokens; waiting out the
+                // delay completes the reservation (x/time/rate WaitN).
+                Some(d) => {
+                    sleep(d).await;
+                    return;
+                }
                 None => {
                     // Can never satisfy: wait briefly and retry in case burst grows.
                     sleep(Duration::from_millis(50)).await;
@@ -249,5 +254,17 @@ mod tests {
         let l = Limiter::new(1000.0, 1);
         assert!(l.allow());
         l.wait_n(1).await;
+    }
+
+    #[tokio::test]
+    async fn wait_n_returns_after_one_delay_when_burst_is_spent() {
+        // 100 tokens at 1000/s: the second wait_n(100) needs ~100 ms, once.
+        let l = Limiter::new(1000.0, 100);
+        let start = std::time::Instant::now();
+        l.wait_n(100).await;
+        l.wait_n(100).await;
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(80), "took {took:?}");
+        assert!(took < Duration::from_millis(400), "took {took:?}");
     }
 }
