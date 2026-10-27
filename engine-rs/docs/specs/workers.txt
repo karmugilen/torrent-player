@@ -1,11 +1,4 @@
 run run_861102160a1b
-grok-2 wt-core-lint task_28fca93f92d7 ctx_a8266f5bfdbc term_488ca834-68a1-4199-8bdd-bc9fb20f246f
-agy-2  wt-core      task_22719c3f3433 ctx_7e27ed8df81d term_4a1a3214-be32-4a64-8862-95a7413c6a2f
-agy-3  storage-bench task_51991b568536 ctx_3a3a09fb2647 term_4f7fe3ec-b9a2-42cf-bc48-b95a27f81215
-agy-4  wt-engine-integrate task_0911238be18d ctx_f6050d6ae8ee term_1a965108-6a73-4bcd-addb-f7833fb47e6a
-grok-4 types-json   task_10293d5ab1e4 ctx_71810fd5ec87 term_74f5a709-7fa8-42a4-b151-798f6feddab8
-grok-5 wt-core-e2e  task_a2384f1c0d4b ctx_26e610b2d0b4 term_10792bcf-cc94-4af8-adab-e3b02636e6db
-grok-9 wt-core-impls task_3d7f24f1eedd ctx_415e10a96dc0 term_ff6fa61a-1062-4269-affd-1677b6c3f891
 codex-1 wt-core-all task_6a0d8c2edad2 ctx_357f6e8f7888 term_379b26f4-ace6-4144-b15a-b81640c2aa3c
 codex-2 wt-engine-all task_dc6d01a094df ctx_4c4567df42bd term_d7e4eb3f-cc46-4036-9575-5a194d9bd224
 codex-3 perf task_ab9c9b28fa4f ctx_e827eb631be6 term_0b06f557-b63c-43ef-b684-ce3a61b09df8

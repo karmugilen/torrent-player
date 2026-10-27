@@ -59,3 +59,4 @@
 -|At pause: grok-4, grok-5, grok-6 confirmed paused; others finishing their current step; grok-2 at 9% of weekly limit
 -|wt-storage fully done: grok-7 added accessors, 109 pass / 0 ignored / 0 fail; grok-9 paused waiting on agy-2 TorrentInner fields
 -|agy-2, agy-3, agy-4 hit quota (reset in ~3h20m). User: switch to Codex. codex-1 owns all wt-core, codex-2 all wt-engine, codex-3 performance vs Go
+-|User asked to close all agy and grok workers: agy-2/3/4 stopped, grok-2/4/5/9 abandoned, all 8 grok terminals closed, their tasks marked cancelled. Only codex-1/2/3 remain
