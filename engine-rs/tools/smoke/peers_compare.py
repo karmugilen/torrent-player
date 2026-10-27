@@ -24,7 +24,7 @@ try:
     call('POST', '/settings', {
         'maxPeers': 55, 'dialRatePerSec': 30, 'peerExploration': True,
         'claudeSeekMode': True, 'hedgeRequests': True, 'slowPeerYield': True,
-        'dropChokers': True,
+        'dropChokers': True, 'seedingEnabled': True,
     })
     t0 = time.monotonic(); code, add = call('POST', '/add', {'torrentId': MAGNET, 'prepare': True}); tid = add['id']
     while True:
