@@ -188,8 +188,8 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | rust-ubuntu-r41 | 4.0 | 8→18 | **1.58** | TCP 15 + uTP 3; 7/18 active; 22 MiB; SlowPeerYield fix |
 | rust-ubuntu-r38 | 5.5 | **10→33** | 0.75 | TCP 26 + **uTP 7**; 13/33 active; 15 MiB — peer count peak |
 | rust-ubuntu-forceutp-r2 | 5.0 | 6→16 | 0.08 | **uTP 16**; was 0 dial_ok before BEP29 |
-| rust-sintel-r6 | 2.5 | 13→24 | **10.53** | TCP 20 + uTP 3; 17/23 active; 164 MiB |
-| rust-sintel-r5 | 2.5 | **14→32** | 12.44 | prior TCP-only |
+| rust-sintel-r7 | 1.5 | **21→39** | **34.8** | TCP 32 + **uTP 5**; **30/37** active; **855 MiB** |
+| rust-sintel-r6 | 2.5 | 13→24 | 10.53 | TCP 20 + uTP 3; 17/23 active; 164 MiB |
 
 **Status:** uTP unblocked (BEP29). Ubuntu peer counts reach **18–33** with live uTP. Same-day Go **35–41** peers / **5–7** MiB/s / ~95% downloading / ~300 MiB. Rust speed **~1–1.6 MiB/s**, ~40% peers active, tens of MiB — SlowPeerYield no longer starves new Now requests; still chasing per-peer TCP throughput. Sintel healthy with uTP. Not full Ubuntu speed acceptance yet.
 
