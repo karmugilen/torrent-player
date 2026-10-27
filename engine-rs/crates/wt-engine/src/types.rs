@@ -28,8 +28,10 @@ fn serialize_max_peers<S: serde::Serializer>(
 }
 
 fn serialize_go_float<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
-    if value.is_finite()
-        && value.fract() == 0.0
+    if !value.is_finite() {
+        return Err(serde::ser::Error::custom("unsupported non-finite float"));
+    }
+    if value.fract() == 0.0
         && *value >= i64::MIN as f64
         && *value < i64::MAX as f64
     {
@@ -381,6 +383,28 @@ pub struct OkResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "empty_string")]
     pub id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOnlyResponse {
+    pub file_only: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetPeersRequest {
+    pub info_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClearCacheRequest {
+    pub categories: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

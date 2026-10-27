@@ -21,7 +21,7 @@ use crate::conn::{
 };
 use crate::ratelimit::{Limiter, DEFAULT_DOWNLOAD_BURST};
 use crate::sources::{
-    RegisterTorrent, Sources, SourcesConfig, TorrentAnnounceInfo, TorrentKeys, PeerSink,
+    PeerSink, RegisterTorrent, Sources, SourcesConfig, TorrentAnnounceInfo, TorrentKeys,
 };
 use crate::torrent::{AttachInfo, TorrentInner};
 use crate::{ClientConfig, CoreError, Result, TcpConnHook, TorrentSpec};
@@ -99,7 +99,10 @@ impl TorrentAnnounceInfo for TorrentSourcesAdapter {
     }
 
     fn need_data(&self) -> bool {
-        !self.torrent.data_download_disallowed.load(Ordering::Relaxed)
+        !self
+            .torrent
+            .data_download_disallowed
+            .load(Ordering::Relaxed)
             && !self.torrent.seeding.load(Ordering::Relaxed)
     }
 
@@ -269,11 +272,16 @@ impl ClientInner {
             let (accepted_tx, mut accepted_rx) = mpsc::channel::<AcceptedConn>(64);
             let weak_lookup_client = Arc::downgrade(self);
             let lookup: crate::conn::InfoHashLookup = Arc::new(move |ih: &InfoHash| {
-                weak_lookup_client.upgrade().is_some_and(|c| c.torrents_by_short.read().contains_key(ih))
+                weak_lookup_client
+                    .upgrade()
+                    .is_some_and(|c| c.torrents_by_short.read().contains_key(ih))
             });
             let skey_client = Arc::downgrade(self);
             let skey_provider: crate::conn::SkeyProvider = Arc::new(move || {
-                skey_client.upgrade().map(|c| c.torrents_by_short.read().keys().map(|ih| ih.0).collect()).unwrap_or_default()
+                skey_client
+                    .upgrade()
+                    .map(|c| c.torrents_by_short.read().keys().map(|ih| ih.0).collect())
+                    .unwrap_or_default()
             });
 
             listener.spawn_accept_loop(
@@ -333,7 +341,12 @@ impl ClientInner {
         }
     }
 
-    fn register_sources(&self, torrent: &Arc<TorrentInner>, trackers: Vec<Vec<String>>, web_seeds: Vec<String>) {
+    fn register_sources(
+        &self,
+        torrent: &Arc<TorrentInner>,
+        trackers: Vec<Vec<String>>,
+        web_seeds: Vec<String>,
+    ) {
         let Some(sources) = self.sources.read().clone() else {
             return;
         };
@@ -356,7 +369,10 @@ impl ClientInner {
     }
 
     /// Add or merge a torrent (Go `Client.AddTorrentSpec` + `Torrent.MergeSpec`).
-    pub fn add_torrent_spec(self: &Arc<Self>, mut spec: TorrentSpec) -> Result<(Arc<TorrentInner>, bool)> {
+    pub fn add_torrent_spec(
+        self: &Arc<Self>,
+        mut spec: TorrentSpec,
+    ) -> Result<(Arc<TorrentInner>, bool)> {
         let _add_guard = self.add_torrent_lock.lock();
         if self.closed.load(Ordering::Relaxed) {
             return Err(CoreError::Closed);
@@ -606,14 +622,23 @@ impl ClientInner {
         let torrent = Arc::downgrade(torrent);
         let task = self.tokio_handle.spawn(async move {
             loop {
-                let (Some(client), Some(torrent)) = (client.upgrade(), torrent.upgrade()) else { break };
-                if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) { break; }
-                let count = torrent.wants_conns().min(client.config.half_open_conns_per_torrent);
+                let (Some(client), Some(torrent)) = (client.upgrade(), torrent.upgrade()) else {
+                    break;
+                };
+                if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
+                    break;
+                }
+                let count = torrent
+                    .wants_conns()
+                    .min(client.config.half_open_conns_per_torrent);
                 for peer in torrent.take_dial_candidates(count) {
                     let cl = Arc::clone(&client);
                     let tor = Arc::clone(&torrent);
                     let task = client.tokio_handle.spawn(async move {
-                        let ok = cl.dial_peer(Arc::clone(&tor), peer.addr, peer.source).await.is_ok();
+                        let ok = cl
+                            .dial_peer(Arc::clone(&tor), peer.addr, peer.source)
+                            .await
+                            .is_ok();
                         tor.dial_finished(peer.addr, ok);
                     });
                     client.tasks.lock().push(task);
@@ -628,55 +653,136 @@ impl ClientInner {
     }
 
     async fn attach_accepted(self: &Arc<Self>, accepted: AcceptedConn) -> Result<()> {
-        let torrent = self.torrents_by_short.read().get(&accepted.info_hash).cloned()
+        let torrent = self
+            .torrents_by_short
+            .read()
+            .get(&accepted.info_hash)
+            .cloned()
             .ok_or_else(|| CoreError::Other("unknown infohash after accept".into()))?;
         let info = AttachInfo {
-            remote: accepted.handle.remote_addr(), outgoing: false,
-            transport: accepted.handle.transport(), encrypted: accepted.handle.is_encrypted(),
-            peer_id: accepted.peer_id, reserved: accepted.peer_extension_bits.0,
+            remote: accepted.handle.remote_addr(),
+            outgoing: false,
+            transport: accepted.handle.transport(),
+            encrypted: accepted.handle.is_encrypted(),
+            peer_id: accepted.peer_id,
+            reserved: accepted.peer_extension_bits.0,
             source: PeerSource::Incoming,
         };
-        self.attach_driver(torrent, info, accepted.stream, accepted.handle, accepted.write_rx, accepted.write_waker)
+        self.attach_driver(
+            torrent,
+            info,
+            accepted.stream,
+            accepted.handle,
+            accepted.write_rx,
+            accepted.write_waker,
+        )
     }
 
-    pub async fn dial_peer(self: &Arc<Self>, torrent: Arc<TorrentInner>, addr: SocketAddr, source: PeerSource) -> Result<()> {
-        let transport = if !self.config.disable_tcp { wt_types::Transport::Tcp } else { wt_types::Transport::Utp };
-        let result = self.dial_peer_transport(Arc::clone(&torrent), addr, source, transport, false).await;
+    pub async fn dial_peer(
+        self: &Arc<Self>,
+        torrent: Arc<TorrentInner>,
+        addr: SocketAddr,
+        source: PeerSource,
+    ) -> Result<()> {
+        let transport = if !self.config.disable_tcp {
+            wt_types::Transport::Tcp
+        } else {
+            wt_types::Transport::Utp
+        };
+        let result = self
+            .dial_peer_transport(Arc::clone(&torrent), addr, source, transport, false)
+            .await;
         if result.is_err() && transport == wt_types::Transport::Tcp && !self.config.disable_utp {
-            return self.dial_peer_transport(torrent, addr, source, wt_types::Transport::Utp, false).await;
+            return self
+                .dial_peer_transport(torrent, addr, source, wt_types::Transport::Utp, false)
+                .await;
         }
         result
     }
 
-    pub async fn dial_peer_transport(self: &Arc<Self>, torrent: Arc<TorrentInner>, addr: SocketAddr, source: PeerSource, transport: wt_types::Transport, require_plain: bool) -> Result<()> {
-        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) { return Err(CoreError::Closed); }
-        let metadata_size = torrent.metainfo_raw.read().as_ref().map(|i| i.info_bytes.len() as u32);
+    pub async fn dial_peer_transport(
+        self: &Arc<Self>,
+        torrent: Arc<TorrentInner>,
+        addr: SocketAddr,
+        source: PeerSource,
+        transport: wt_types::Transport,
+        require_plain: bool,
+    ) -> Result<()> {
+        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
+            return Err(CoreError::Closed);
+        }
+        let metadata_size = torrent
+            .metainfo_raw
+            .read()
+            .as_ref()
+            .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
-        let utp = self.listener.read().as_ref().and_then(|l| l.utp_socket().cloned());
+        let utp = self
+            .listener
+            .read()
+            .as_ref()
+            .and_then(|l| l.utp_socket().cloned());
         let outcome = conn_dial_peer(DialParams {
-            remote_addr: addr, info_hash: torrent.info_hash, our_peer_id: self.peer_id,
-            transport: Some(transport), source, metadata_size, cfg: &self.config,
-            tracker: &self.half_open, dial_limiter: Some(&self.dial_limiter),
-            tcp_conn_hook: hook.as_ref(), utp_socket: utp.as_ref(), require_plain,
-        }).await?;
+            remote_addr: addr,
+            info_hash: torrent.info_hash,
+            our_peer_id: self.peer_id,
+            transport: Some(transport),
+            source,
+            metadata_size,
+            cfg: &self.config,
+            tracker: &self.half_open,
+            dial_limiter: Some(&self.dial_limiter),
+            tcp_conn_hook: hook.as_ref(),
+            utp_socket: utp.as_ref(),
+            require_plain,
+        })
+        .await?;
         let info = AttachInfo {
-            remote: addr, outgoing: true, transport: outcome.handle.transport(),
-            encrypted: outcome.handle.is_encrypted(), peer_id: outcome.peer_id,
-            reserved: outcome.peer_extension_bits.0, source,
+            remote: addr,
+            outgoing: true,
+            transport: outcome.handle.transport(),
+            encrypted: outcome.handle.is_encrypted(),
+            peer_id: outcome.peer_id,
+            reserved: outcome.peer_extension_bits.0,
+            source,
         };
-        self.attach_driver(torrent, info, outcome.stream, outcome.handle, outcome.write_rx, outcome.write_waker)
+        self.attach_driver(
+            torrent,
+            info,
+            outcome.stream,
+            outcome.handle,
+            outcome.write_rx,
+            outcome.write_waker,
+        )
     }
 
-    fn attach_driver(self: &Arc<Self>, torrent: Arc<TorrentInner>, info: AttachInfo,
-        stream: Box<dyn crate::PeerStream>, handle: crate::conn::ConnHandle,
-        write_rx: mpsc::Receiver<crate::wire::Message>, write_waker: Arc<tokio::sync::Notify>) -> Result<()> {
-        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) { return Err(CoreError::Closed); }
+    fn attach_driver(
+        self: &Arc<Self>,
+        torrent: Arc<TorrentInner>,
+        info: AttachInfo,
+        stream: Box<dyn crate::PeerStream>,
+        handle: crate::conn::ConnHandle,
+        write_rx: mpsc::Receiver<crate::wire::Message>,
+        write_waker: Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
+        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
+            return Err(CoreError::Closed);
+        }
         let handler = torrent.attach_connection(info, handle.clone())?;
-        for cb in &self.config.callbacks.completed_handshake { cb(&handle.info(), torrent.info_hash); }
+        for cb in &self.config.callbacks.completed_handshake {
+            cb(&handle.info(), torrent.info_hash);
+        }
         let (reader, writer) = crate::conn::spawn_connection_driver(
-            stream, handler, handle, write_rx, write_waker,
-            Some(self.download_limiter.clone()), Some(self.upload_limiter.clone()),
-            crate::conn::DEFAULT_KEEPALIVE_TIMEOUT, crate::conn::DEFAULT_READ_DEADLINE);
+            stream,
+            handler,
+            handle,
+            write_rx,
+            write_waker,
+            Some(self.download_limiter.clone()),
+            Some(self.upload_limiter.clone()),
+            crate::conn::DEFAULT_KEEPALIVE_TIMEOUT,
+            crate::conn::DEFAULT_READ_DEADLINE,
+        );
         let mut tasks = self.tasks.lock();
         tasks.retain(|t| !t.is_finished());
         tasks.push(reader);

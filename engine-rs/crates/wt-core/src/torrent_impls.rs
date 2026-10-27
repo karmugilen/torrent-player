@@ -185,6 +185,18 @@ impl PeerTorrent for TorrentInner {
         }
     }
 
+    fn note_peer_piece(&self, peer: PeerKey, piece: PieceIndex, has: bool) {
+        let mut peers = self.peer_pieces.write();
+        let pieces = peers.entry(peer).or_default();
+        if has { pieces.insert(piece); } else { pieces.remove(&piece); }
+    }
+
+    fn peer_closed(&self, addr: SocketAddr) {
+        self.conn_handles.write().remove(&addr);
+        self.peer_pieces.write().remove(&peer_key_from_addr(addr));
+        self.bump_change();
+    }
+
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()> {
         let info = self.info.read().clone().ok_or(CoreError::NoInfo)?;
         let storage = self
@@ -280,7 +292,7 @@ impl PeerTorrent for TorrentInner {
 
         for (i, p) in pieces.iter().enumerate() {
             let idx = i as PieceIndex;
-            let requestable = p.ok && !p.complete && !p.checking && p.priority > PiecePriority::None;
+            let requestable = !p.complete && !p.checking && p.priority > PiecePriority::None;
             piece_requestable.push(requestable);
             piece_count_unverified.push(p.checking || !p.chunks_received.is_empty());
             let begin = self.piece_request_index_begin(idx);
