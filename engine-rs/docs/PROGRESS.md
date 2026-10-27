@@ -1,6 +1,6 @@
 # Rust engine port progress
 
-## In plain words (updated 16:20)
+## In plain words (updated 16:35)
 
 **Where we are:** all the Rust code is written and it all compiles. Six of the
 8 parts are finished and tested. The last two, the torrent core (`wt-core`) and
@@ -8,18 +8,20 @@ the engine/control API (`wt-engine`), work for basic downloads but still have
 bugs in some cases.
 
 **What works today:** two Rust clients can download a file from each other
-over TCP and verify every byte. The Android `libengine.so` builds. 29 of the
-31 control-API answers match the Go engine.
+over TCP and uTP and verify every byte. Magnet links work, and a seek gets its
+first 64 KiB in 76 ms. The Android `libengine.so` builds. All 30 control-API
+answers now match the Go engine (0 differences). The slow Direct Play save now
+runs off the storage lock, like Go.
 
-**What is left (7 of 13 milestones):**
+**What is left (4 of 13 milestones):**
 
-1. Magnet links and seeking on the new connection code (a stall bug is being fixed)
-2. Two full engines downloading from each other through the control API
-3. The last API answer that differs from Go (`/metadata`)
-4. Port the 132 remaining Go engine tests for real (11 done)
-5. Move a slow Direct Play save off the storage lock (Go does this already)
-6. Speed/RAM/CPU comparison against Go: Rust must match or beat it
-7. Build the Rust APK and test it on a phone (needs a phone attached by USB)
+1. Two full engines downloading from each other through the control API. Each
+   side connects, but the download stays at 0 %. This is the main bug now.
+2. Port the 128 remaining Go engine tests for real (14 pass)
+3. Speed/RAM/CPU comparison against Go: Rust must match or beat it. The one
+   speed number so far (2.4 MiB/s) came from an unoptimized debug build, so it
+   does not count; it is being re-measured in release.
+4. Build the Rust APK and test it on a phone (needs a phone attached by USB)
 
 **Who is doing it:** 4 Antigravity agents, each on its own part, working on
 their own. The machine rebooted at 16:05, which closed the earlier Codex
@@ -54,10 +56,10 @@ wt-engine     [#############################.]  95%  running  agy-engine+tests
 
 Started 10:59 · elapsed 5.3 h · now 95%
 
-ETA (rough, from the last 317 min at 18.0%/h):
+ETA (rough, from the last 318 min at 17.9%/h):
 
-- crates complete: ~16:32 (in 0.3 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~20:32 (in 4.3 h; the 4 h after the crates is a planning guess)
+- crates complete: ~16:33 (in 0.3 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~20:33 (in 4.3 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
@@ -69,10 +71,10 @@ ETA (rough, from the last 317 min at 18.0%/h):
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
 | wt-parity | grok-1, codex-3 | done | 0 | 3371 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
 | wt-engine | agy-engine+tests | running | 5609 | 5206 | 71 | 178 | 0 | agy-engine (server, API diff 29 match / 1 critical, two-engine transfer) + agy-tests (11 real engine tests pass, 132 to port) |
-## Milestones (the real finish line): 6/13
+## Milestones (the real finish line): 9/13
 
 ```text
-MILESTONES [##############................] 6/13
+MILESTONES [#####################.........] 9/13
 ```
 
 - [x] All 8 crates compile; wt-meta, wt-wire, wt-discovery, wt-policy, wt-storage done with tests passing
@@ -81,11 +83,11 @@ MILESTONES [##############................] 6/13
 - [x] Android arm64 libengine.so builds with all 9 JNI symbols, 16 KiB aligned
 - [x] Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
 - [x] Transfer driven only by add_peers (automatic dialing) on the new connection path: TCP passes (uTP pending)
-- [ ] Magnet (ut_metadata) transfer and reader seek on the new connection path
+- [x] Magnet (ut_metadata) transfer and reader seek on the new connection path (library tests: magnet 256 KiB verified, seek first 64 KiB in 76 ms)
 - [ ] Two engine-host processes transfer a torrent through the control API
-- [ ] Control API JSON: 0 CRITICAL
-- [ ] Engine integration tests: real ports passing (now 11 real, 132 placeholders)
-- [ ] Direct Play startup saves off the storage lock (Go parity)
+- [x] Control API JSON: 0 CRITICAL (30 MATCH / 0 DIFF / 0 CRITICAL, codex-5 before the reboot; agy-engine re-verifying)
+- [ ] Engine integration tests: real ports passing (now 14 real passing, 1 waiting, 128 placeholders)
+- [x] Direct Play startup saves off the storage lock (bounded background queue, slow-save test passes, codex-3)
 - [ ] Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
 - [ ] Rust APK built with -Pwebtor.engine=rust and tested on a device
 
@@ -227,6 +229,8 @@ The crate bars above count code written; these milestones count things that work
 ## Commits
 
 ```text
+6c4f8ab engine-rs: relay pre-reboot findings to the agy wave
+b97f6d7 engine-rs: progress report with plain summary and the agy wave
 db8d228 engine-rs: agy wave task specs
 0925be0 engine-rs: codex checkpoint (pre-reboot worker output)
 092396b engine-rs: milestone - automatic-dial TCP transfer

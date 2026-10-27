@@ -4,10 +4,10 @@ x|First real data transfer between two Rust clients (TCP, explicit dial, legacy 
 x|Android arm64 libengine.so builds with all 9 JNI symbols, 16 KiB aligned
 x|Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
 x|Transfer driven only by add_peers (automatic dialing) on the new connection path: TCP passes (uTP pending)
- |Magnet (ut_metadata) transfer and reader seek on the new connection path
+x|Magnet (ut_metadata) transfer and reader seek on the new connection path (library tests: magnet 256 KiB verified, seek first 64 KiB in 76 ms)
  |Two engine-host processes transfer a torrent through the control API
- |Control API JSON: 0 CRITICAL
- |Engine integration tests: real ports passing (now 11 real, 132 placeholders)
- |Direct Play startup saves off the storage lock (Go parity)
+x|Control API JSON: 0 CRITICAL (30 MATCH / 0 DIFF / 0 CRITICAL, codex-5 before the reboot; agy-engine re-verifying)
+ |Engine integration tests: real ports passing (now 14 real passing, 1 waiting, 128 placeholders)
+x|Direct Play startup saves off the storage lock (bounded background queue, slow-save test passes, codex-3)
  |Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
  |Rust APK built with -Pwebtor.engine=rust and tested on a device

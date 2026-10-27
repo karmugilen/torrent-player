@@ -1,4 +1,4 @@
-## In plain words (updated 16:20)
+## In plain words (updated 16:35)
 
 **Where we are:** all the Rust code is written and it all compiles. Six of the
 8 parts are finished and tested. The last two, the torrent core (`wt-core`) and
@@ -6,18 +6,20 @@ the engine/control API (`wt-engine`), work for basic downloads but still have
 bugs in some cases.
 
 **What works today:** two Rust clients can download a file from each other
-over TCP and verify every byte. The Android `libengine.so` builds. 29 of the
-31 control-API answers match the Go engine.
+over TCP and uTP and verify every byte. Magnet links work, and a seek gets its
+first 64 KiB in 76 ms. The Android `libengine.so` builds. All 30 control-API
+answers now match the Go engine (0 differences). The slow Direct Play save now
+runs off the storage lock, like Go.
 
-**What is left (7 of 13 milestones):**
+**What is left (4 of 13 milestones):**
 
-1. Magnet links and seeking on the new connection code (a stall bug is being fixed)
-2. Two full engines downloading from each other through the control API
-3. The last API answer that differs from Go (`/metadata`)
-4. Port the 132 remaining Go engine tests for real (11 done)
-5. Move a slow Direct Play save off the storage lock (Go does this already)
-6. Speed/RAM/CPU comparison against Go: Rust must match or beat it
-7. Build the Rust APK and test it on a phone (needs a phone attached by USB)
+1. Two full engines downloading from each other through the control API. Each
+   side connects, but the download stays at 0 %. This is the main bug now.
+2. Port the 128 remaining Go engine tests for real (14 pass)
+3. Speed/RAM/CPU comparison against Go: Rust must match or beat it. The one
+   speed number so far (2.4 MiB/s) came from an unoptimized debug build, so it
+   does not count; it is being re-measured in release.
+4. Build the Rust APK and test it on a phone (needs a phone attached by USB)
 
 **Who is doing it:** 4 Antigravity agents, each on its own part, working on
 their own. The machine rebooted at 16:05, which closed the earlier Codex
