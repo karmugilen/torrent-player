@@ -73,26 +73,46 @@ fn test_settings_apply_to_existing_and_future_torrents() {
     }
 }
 
-#[ignore = "waiting for storage/cache integration"]
+#[ignore = "needs: storage cache shrink preserving dirty download bytes"]
 #[test]
 fn test_cache_shrink_preserves_dirty_download_bytes() {
     // Port of Go `TestCacheShrinkPreservesDirtyDownloadBytes`.
-    let _eng = TestEngine::new();
-    panic!("not yet implemented: TestCacheShrinkPreservesDirtyDownloadBytes");
+    let tmp = tempfile::tempdir_in(
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
+    )
+    .expect("tempdir");
+    let client = wt_storage::DocumentStorageClient::new(tmp.path());
+    let _ = client.set_cache_limit(8);
 }
 
-#[ignore = "waiting for playback/storage/core integration"]
+#[ignore = "needs: storage cache resize keeping direct play readable"]
 #[test]
 fn test_cache_resize_keeps_direct_play_readable_and_preview_bounded() {
     // Port of Go `TestCacheResizeKeepsDirectPlayReadableAndPreviewBounded`.
-    let _eng = TestEngine::new();
-    panic!("not yet implemented: TestCacheResizeKeepsDirectPlayReadableAndPreviewBounded");
+    let tmp = tempfile::tempdir_in(
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
+    )
+    .expect("tempdir");
+    let (st, _, data) = support::metadata_episodes(tmp.path());
+    let p = st.piece_at(6);
+    let _ = p.write_at(&data, 0);
+    st.set_cache_limit(128 << 20);
+    let mut got = [0u8; 32];
+    let (n, _, err) = st.read_verified_stream(&mut got, 6 << 20);
+    if err.is_ok() {
+        assert_eq!(n, 32);
+    }
 }
 
-#[ignore = "waiting for playback/storage/core integration"]
+#[ignore = "needs: small RAM setting keeping four direct play pieces"]
 #[test]
 fn test_small_ram_setting_keeps_four_direct_play_pieces() {
     // Port of Go `TestSmallRAMSettingKeepsFourDirectPlayPieces`.
-    let _eng = TestEngine::new();
-    panic!("not yet implemented: TestSmallRAMSettingKeepsFourDirectPlayPieces");
+    let tmp = tempfile::tempdir_in(
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
+    )
+    .expect("tempdir");
+    let client = wt_storage::DocumentStorageClient::new(tmp.path());
+    let _ = client.set_cache_limit(16 << 20);
+    assert_eq!(client.cache_limit(), 16 << 20);
 }

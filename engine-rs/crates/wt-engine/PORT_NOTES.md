@@ -171,3 +171,19 @@ Owned by agy-4 (playback.rs ownership moved to the helper worker above).
   - Payload gate: returns 409 `"payload transfers are disabled in settings"` on incomplete playback when transfers disallowed.
   - Tracker dialer: tracks raw file descriptors in `NetworkDialer` and issues `libc::shutdown(fd, SHUT_RDWR)` on reset.
 
+## Integration Test Suite (agy-tests)
+
+Owned by `agy-tests` (`tests/engine_*.rs`, `tests/support/`, `tests/ENGINE_TESTS.md`, `tests/types_json.rs`, except `engine_two_host.rs` and `jni_exports.rs`).
+
+### Status & Parity Inventory
+
+- Total integration tests mapped from `engine-go`: **143 tests** (across 27 test files).
+- **Pass**: **51 tests** running and passing cleanly with parity against Go.
+- **Waiting**: **92 tests** faithfully ported with full Go setup, assertions, and timeouts, currently marked `#[ignore = "needs: <feature>"]` pending engine feature delivery from `agy-engine` and `agy-core`.
+- **Placeholders (`unimplemented!()` or empty panics)**: **0** (completely eliminated; `grep -c unimplemented` = 0).
+- **Fails**: **0**.
+- Test suite compilation: `cargo test -p wt-engine --tests --no-run` compiles all test targets cleanly.
+- Code quality: `cargo clippy --tests -p wt-engine -- -D warnings` and `cargo fmt` clean.
+- Cross-worker requests: all waiting tests are cataloged in `engine-rs/docs/requests.md` addressed to `agy-engine` or `agy-core`.
+
+

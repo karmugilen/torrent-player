@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::types::{SettingsResponse, StatsResponse};
 use engine::EngineServer;
+use engine::types::{SettingsResponse, StatsResponse};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 
@@ -70,7 +70,23 @@ impl TestEngine {
         self.server.wait_for_change(after, timeout)
     }
 
-    pub fn close(self) {
+    pub fn open_playback(
+        &self,
+        id: &str,
+        file_index: usize,
+    ) -> std::io::Result<Arc<engine::playback::PlaybackReader>> {
+        self.server.open_playback(id, file_index)
+    }
+
+    pub fn open_preview(
+        &self,
+        id: &str,
+        file_index: usize,
+    ) -> std::io::Result<Arc<engine::preview::PreviewReader>> {
+        self.server.open_preview(id, file_index)
+    }
+
+    pub fn close(&self) {
         self.server.close();
     }
 }

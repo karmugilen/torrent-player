@@ -6,9 +6,14 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod engine;
+pub mod playback;
 pub mod torrent;
 
-pub use engine::{json_get, json_post, TestEngine};
+pub use engine::{TestEngine, json_get, json_post};
+pub use playback::{
+    add_recovery_torrent, large_playback_fixture_mode, metadata_episodes, playback_fixture_mode,
+    recovery_metadata, write_verified_piece,
+};
 pub use torrent::{
     build_multi_file_torrent, build_single_file_torrent, info_hash_hex, piece_payload,
 };

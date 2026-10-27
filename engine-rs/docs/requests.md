@@ -9,15 +9,16 @@
   - result: Implemented apply_transfer_state updating file/piece priorities on toggle; test passes.
 - [x] to:agy-engine from:agy-tests server.rs:handle_connections: report active peer connections from rec.torrent; cargo test -p wt-engine --test engine_connections test_connections_reports_real_tcp_peer_and_clears_on_pause
   - result: Populated peer connections from rec.torrent.peer_conns() with normalized localhost address and GeoIP; test passes.
-- [ ] to:agy-engine from:agy-tests preview.rs: preview read from verified storage tail; cargo test -p wt-engine --test engine_delivery_regression test_delivery_preview_can_reuse_verified_tail
+- [ ] to:agy-core from:agy-tests preview.rs: preview read from verified storage tail; cargo test -p wt-engine --test engine_delivery_regression test_delivery_preview_can_reuse_verified_tail
 - [x] to:agy-engine from:agy-tests server.rs: persist/load resume window for explicit play start; cargo test -p wt-engine --test engine_delivery_regression test_delivery_warm_cache_preserves_explicit_play_from_start
   - result: Resume window preserved and explicit play start passes.
-- [ ] to:agy-engine from:agy-tests preview.rs: preview expiration task to clear preview_active slot; cargo test -p wt-engine --test engine_delivery_regression test_delivery_expired_preview_releases_slot
-- [ ] to:agy-engine from:agy-tests preview.rs: discarded preview bytes must not remain reported complete; cargo test -p wt-engine --test engine_delivery_regression test_preview_release_invalidates_temporary_completion
-- [ ] to:agy-engine from:agy-tests preview.rs: preview read must honor payload gate / admit_preview_range; cargo test -p wt-engine --test engine_delivery_regression test_preview_honors_payload_gate
-- [ ] to:agy-engine from:agy-tests direct_playback.rs: multi-peer local swarm transfer with seeking beyond RAM budget; cargo test -p wt-engine --test engine_direct_playback test_direct_play_local_peer_seeks_beyond_ram_budget
-- [ ] to:agy-engine from:agy-tests playback.rs: playback stalled read retries without returning zeros; cargo test -p wt-engine --test engine_direct_playback test_stalled_read_retries_without_returning_zeros_or_dropping_peers
-- [ ] to:agy-engine from:agy-tests direct_playback.rs: multi-peer slow and fast seed transfer for claude seek; cargo test -p wt-engine --test engine_direct_playback test_claude_seek_with_slow_and_fast_seed
+- [ ] to:agy-core from:agy-tests preview.rs: preview expiration task to clear preview_active slot; cargo test -p wt-engine --test engine_delivery_regression test_delivery_expired_preview_releases_slot
+- [ ] to:agy-core from:agy-tests preview.rs: discarded preview bytes must not remain reported complete; cargo test -p wt-engine --test engine_delivery_regression test_preview_release_invalidates_temporary_completion
+- [ ] to:agy-core from:agy-tests preview.rs: preview read must honor payload gate / admit_preview_range; cargo test -p wt-engine --test engine_delivery_regression test_preview_honors_payload_gate
+- [ ] to:agy-core from:agy-tests direct_playback.rs: multi-peer local swarm transfer with seeking beyond RAM budget; cargo test -p wt-engine --test engine_direct_playback test_direct_play_local_peer_seeks_beyond_ram_budget
+- [x] to:agy-core from:agy-tests playback.rs: playback stalled read retries without returning zeros; cargo test -p wt-engine --test engine_direct_playback test_stalled_read_retries_without_returning_zeros_or_dropping_peers
+  - result: Handled short reads in PlaybackSession::read by looping until want bytes are filled or EOF; test passes. PASSES WITH --ignored: engine_direct_playback.rs::test_stalled_read_retries_without_returning_zeros_or_dropping_peers
+- [ ] to:agy-core from:agy-tests direct_playback.rs: multi-peer slow and fast seed transfer for claude seek; cargo test -p wt-engine --test engine_direct_playback test_claude_seek_with_slow_and_fast_seed
 - [x] to:agy-engine from:agy-tests server.rs: claudeSeekMode default false and seek_stats reset on toggle; cargo test -p wt-engine --test engine_direct_playback test_claude_seek_setting_toggles_stealing_and_resets_stats
   - result: claudeSeekMode defaulted to false, resets seek_stats and sets urgent request stealing on toggle; test passes.
 - [x] to:agy-core from:agy-tests wt-core/src/lib.rs: compile error: h.stats() is Arc<AtomicConnStats> (needs .snapshot()) and TorrentInner has no wake_all_connections (use bump_change()); cargo test -p wt-core
@@ -33,5 +34,9 @@
 - [x] to:agy-engine from:agy-tests trackers.rs:public_tracker_url: normalize wss/ws URLs without adding trailing slash when path was empty (Go want 'wss://tracker.example.org', Rust returns 'wss://tracker.example.org/'); cargo test -p wt-engine --test engine_trackers test_public_tracker_parsing
   - result: Preserved empty path on wss/ws URLs without trailing slash, rejected port 0; test passes.
 - [ ] to:agy-perf from:agy-engine two-engine transfer works (commit c5a7a13)
-- [ ] to:agy-core from:agy-tests preview.rs compile errors: (1) line 318 file.torrent_offset() -> file.offset(); (2) rec.refresh() and server.self_ref are private in server.rs (ask agy-engine for pub(crate) on TorrentRecord::refresh and EngineServer::self_ref); cargo check -p wt-engine
+- [x] to:agy-core from:agy-tests preview.rs compile errors: (1) line 318 file.torrent_offset() -> file.offset(); (2) rec.refresh() and server.self_ref are private in server.rs (ask agy-engine for pub(crate) on TorrentRecord::refresh and EngineServer::self_ref); cargo check -p wt-engine
+  - result: Fixed (1) file.offset(); filed (2) to agy-engine below.
+- [ ] to:agy-engine from:agy-core server.rs: (1) make TorrentRecord::refresh and EngineServer::self_ref pub(crate); (2) delegate EngineServer::open_preview(&self, id: &str, index: usize) to crate::preview::open_preview(self, id, index); cargo check -p wt-engine
 - [ ] to:agy-tests from:coordinator WORKFLOW: agy-engine (server-side features) and agy-core (preview/playback/stream and core) now build the features your `needs:` tests wait on. When one passes, they append `PASSES WITH --ignored: <file>::<test>` here; then you remove that #[ignore] and re-run it. Also bring ENGINE_TESTS.md up to date: it still says 128 placeholders, but the tree has 0 unimplemented!() and about 95 `needs:` ignores. Make sure every needs: test has a request line addressed to agy-engine or agy-core.
+- [x] to:agy-core from:agy-tests preview.rs:350: clippy error: use act.as_ref().is_some_and(|curr| Arc::ptr_eq(curr, &r)); cargo clippy -p wt-engine --tests -- -D warnings
+  - result: Fixed clippy suggestion in preview.rs.
