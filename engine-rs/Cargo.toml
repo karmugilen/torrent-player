@@ -51,3 +51,13 @@ strip = true
 
 [profile.bench]
 debug = true
+
+# Keep build output small: 9 workers build in parallel on one disk.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
