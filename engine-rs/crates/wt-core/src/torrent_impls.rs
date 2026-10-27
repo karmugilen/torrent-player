@@ -715,9 +715,10 @@ impl PeerTorrent for TorrentInner {
         let mut prior = last.get(&from).copied();
         let peers = match self.pex.lock().ingest(msg, Instant::now(), &mut prior) {
             Ok(peers) => peers,
-            // Go/anacrolix: torrent-wide PEX rest is a soft discard. Closing the
-            // whole peerconn here was dropping ~most established Ubuntu peers.
+            // Soft discard: torrent-wide rest and per-conn spacing must not
+            // close the peerconn (was mass-dropping Ubuntu peers).
             Err(crate::pex::PexIngestError::Cooldown) => return Ok(()),
+            Err(crate::pex::PexIngestError::TooFrequent { .. }) => return Ok(()),
             Err(e) => return Err(CoreError::Other(format!("PEX: {e:?}"))),
         };
         if let Some(time) = prior {

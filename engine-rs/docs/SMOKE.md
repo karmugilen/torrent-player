@@ -173,15 +173,17 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 - Failed dials re-queue with exponential backoff (5s…120s, max 8 attempts) so PopMax does not burn DHT/tracker contacts until rediscovery
 - Tracker peers marked trusted; announce slots nudged when `want_peers` and next_at >2 min
 - `peer_closed` re-queues outgoing peers (5 s); ut_metadata timeout retry; PEX add/drop/genmsg
+- **Retention:** ignore malformed ut_metadata (`missing msg_type`) and soft-discard PEX Cooldown/TooFrequent instead of closing the peerconn — was dropping ~40 dial_ok down to ~4 live peers
 
-### Numbers (×3 runs, 2026-10-28 grok-wire + latest swarm dial re-queue)
+### Numbers (latest same-machine runs after retention fix)
 
-| Label | meta s (runs) | peers min→max | speed peak MiB/s |
-|-------|---------------|---------------|------------------|
-| go-ubuntu | 6.5 / 5.5 / 9.6 / **9.0** | 10→42 / 7→44 / 10→45 / **10→40** | 6.77 / 4.09 / 7.44 / **4.02** |
-| rust-ubuntu | 13.5 / 5.0 / 22.0 / **7.5** (r6) | 0→4 / 2→6 / 3→6 / **2→8** | 0.71 / 1.10 / 0.73 / **1.24** |
-| go-sintel | 4.5 / 4.5 / 4.0 | 11→35 / 11→34 / 11→27 | 6.10 / 3.09 / 3.79 |
-| rust-sintel | 2.0 / 2.5 / 3.0 | 1→13 / 1→8 / 1→8 | **22.92 / 26.89 / 14.70** |
+| Label | meta s | peers min→max | speed peak MiB/s |
+|-------|--------|---------------|------------------|
+| go-ubuntu-r9 | 5.0 | 8→30 | 5.94 |
+| rust-ubuntu-r8 | 5.5 | 4→13 | 0.94 |
+| rust-ubuntu-r9 | 10.5 | 9→14 | 1.11 |
+| go-ubuntu (earlier ×3) | 6.5 / 5.5 / 9.6 | 10→42 / 7→44 / 10→45 | 6.77 / 4.09 / 7.44 |
+| rust-sintel (earlier ×3) | 2.0 / 2.5 / 3.0 | 1→13 / 1→8 / 1→8 | **22.92 / 26.89 / 14.70** |
 
-**Status:** **Sintel download speed beats Go** on prior three runs (≈4–8×). Metadata often beats Go (Ubuntu r6 meta 7.5 s < Go 9.0 s). **Ubuntu peer count and speed still short** (peak ~8 vs ~40) — dial re-queue raised peak from ~4→8; remaining gap is handshake/MSE success and established retention (grok-wire). Sintel magnet metadata flaked empty-files on two later runs (xs/ut_metadata); recheck after wire/engine stabilize. Not full acceptance on Ubuntu peers yet; Sintel speed acceptance previously met.
+**Status:** Ubuntu peer count jumped from ~4–8 to **13–14 held** after retention fix (still short of Go ~30). Speed ~1.1 vs Go ~6 — dial success (~10% after timeouts/MSE) and per-peer throughput remain below Go; many established peers still show `downloaded=0`. Sintel speed previously beat Go; recent Sintel magnet runs flaked empty-files (xs/metadata). Not full acceptance yet.
 
