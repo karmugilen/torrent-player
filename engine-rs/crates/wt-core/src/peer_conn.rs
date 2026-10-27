@@ -1015,13 +1015,16 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 .unwrap_or_else(|| block_coord_from_req_index(r, plen, total).piece);
             let prio = self.torrent.piece_priority(piece);
 
-            // SlowPeerYield
+            // SlowPeerYield: skip only non-urgent Next pieces, and only after
+            // this peer has already delivered useful data. New peers start at
+            // rate=0; yielding Now/Next before any chunk left them at
+            // downloaded=0 forever under peers_compare (slowPeerYield=true).
             if tuning.slow_peer_yield
                 && yields_left > 0
-                && prio >= PiecePriority::Next
+                && prio == PiecePriority::Next
+                && self.state.last_useful_chunk_received.is_some()
                 && self.state.download_rate.rate() < SLOW_PEER_BYTES_PER_SEC
             {
-                // Skip this piece's blocks once per refill budget.
                 yields_left = yields_left.saturating_sub(1);
                 continue;
             }
