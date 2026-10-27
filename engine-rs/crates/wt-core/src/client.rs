@@ -724,16 +724,20 @@ impl ClientInner {
                 if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
                     break;
                 }
+                // Dial volume: allow up to 48/96 half-open even when the
+                // engine config is Go's 24/48. Ubuntu dial success is ~10%
+                // (timeouts); more in-flight attempts raise held peers
+                // toward Go (~40) without raising established maxPeers.
+                let half_open_torrent = client.config.half_open_conns_per_torrent.max(48);
+                let half_open_total = client.config.total_half_open_conns.max(96);
                 let count =
                     torrent
                         .wants_conns()
-                        .min(client.config.half_open_conns_per_torrent.saturating_sub(
+                        .min(half_open_torrent.saturating_sub(
                             client.half_open.current_for_torrent(&torrent.info_hash),
                         ))
                         .min(
-                            client
-                                .config
-                                .total_half_open_conns
+                            half_open_total
                                 .saturating_sub(client.half_open.current_total()),
                         );
                 // Refresh want_peers snapshot every 5s while under low-water so
@@ -965,6 +969,9 @@ impl ClientInner {
             .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let mut cfg = self.config.clone();
+        // Match start_dialer's raised half-open so acquire limits agree.
+        cfg.half_open_conns_per_torrent = cfg.half_open_conns_per_torrent.max(48);
+        cfg.total_half_open_conns = cfg.total_half_open_conns.max(96);
         let half_open_limit = cfg.half_open_conns_per_torrent.max(1);
         // Go `reducedDialTimeout(pendingPeers)` — shorter timeouts when the dial
         // pool is large so we cycle candidates faster under half-open limits.
