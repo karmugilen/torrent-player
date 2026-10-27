@@ -396,10 +396,14 @@ impl TorrentInner {
 
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
         // Go `openNewConns` / `peers.PopMax`: remove from the dial pool when
-        // initiating. Prefer trusted then higher-value sources (tracker/PEX).
+        // initiating. Trusted first among never-tried peers; after failures,
+        // prefer fresh DHT/PEX over re-dialing firewalled tracker contacts
+        // (Ubuntu: trusted-first alone burned half-open on ~200 timeouts/min
+        // while dialable DHT peers waited).
         let handles = self.conn_handles.read();
         let mut dialing = self.dialing_peers.lock();
         let backoff = self.dial_backoff.lock();
+        let fail_counts = self.dial_fail_counts.lock();
         let now = Instant::now();
         let mut known = self.known_peers.write();
         let mut eligible: Vec<PeerInfo> = known
@@ -412,8 +416,10 @@ impl TorrentInner {
             .cloned()
             .collect();
         eligible.sort_by(|a, b| {
-            b.trusted
-                .cmp(&a.trusted)
+            let fa = fail_counts.get(&a.addr).copied().unwrap_or(0);
+            let fb = fail_counts.get(&b.addr).copied().unwrap_or(0);
+            fa.cmp(&fb)
+                .then_with(|| b.trusted.cmp(&a.trusted))
                 .then_with(|| source_dial_rank(b.source).cmp(&source_dial_rank(a.source)))
         });
         eligible.truncate(max);

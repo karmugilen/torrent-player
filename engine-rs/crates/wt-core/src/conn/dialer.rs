@@ -91,9 +91,31 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
     let dial_timeout = cfg.nominal_dial_timeout.max(cfg.min_dial_timeout);
 
     // Go dialPool: race transports, keep the first successful dialer for fallback.
+    // Prefer TCP when it lands within a short window of a uTP win — uTP often
+    // connects first then fails MSE while TCP+plaintext would work.
     let (raw_stream, winning_transport) = dial_first_raw(&params, dial_timeout).await?;
 
-    match complete_bt_handshake(&params, raw_stream, winning_transport, prefer_obfuscated).await {
+    // Fast-fail preferred MSE only when uTP won the race (common MSE EOF).
+    // TCP winners keep the full handshake timeout — a blanket 2s abort cut
+    // dial_ok 22→14 by killing slow-but-alive MSE on TCP.
+    let prefer_hs_timeout = if allow_fallback
+        && prefer_obfuscated
+        && winning_transport == Transport::Utp
+    {
+        cfg.handshakes_timeout.min(Duration::from_secs(2))
+    } else {
+        cfg.handshakes_timeout
+    };
+
+    match complete_bt_handshake(
+        &params,
+        raw_stream,
+        winning_transport,
+        prefer_obfuscated,
+        prefer_hs_timeout,
+    )
+    .await
+    {
         Ok(outcome) => Ok(outcome),
         Err(first_err) if allow_fallback => {
             tracing::debug!(
@@ -103,27 +125,37 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
                 error = %first_err,
                 "preferred header obfuscation failed; redialing same transport with fallback"
             );
+            let full_hs = cfg.handshakes_timeout;
             // 1) Same transport, opposite obfuscation (Go).
             if let Ok((raw2, transport2)) =
                 dial_raw_one(&params, winning_transport, dial_timeout).await
             {
-                if let Ok(outcome) =
-                    complete_bt_handshake(&params, raw2, transport2, !prefer_obfuscated).await
+                if let Ok(outcome) = complete_bt_handshake(
+                    &params,
+                    raw2,
+                    transport2,
+                    !prefer_obfuscated,
+                    full_hs,
+                )
+                .await
                 {
                     return Ok(outcome);
                 }
             }
-            // 2) Other transports × both obfuscation modes. uTP often wins the
-            // dial race then MSE EOF; TCP+plaintext may still succeed.
+            // 2) Other transports: plaintext first (cheap), then preferred
+            // obfuscation. Fast 2s MSE on the initial attempt already freed
+            // half-open; these redials recover uTP-won/TCP-needed peers.
             for transport in candidate_transports(&params) {
                 if transport == winning_transport {
                     continue;
                 }
-                for obfuscated in [prefer_obfuscated, !prefer_obfuscated] {
+                for obfuscated in [false, prefer_obfuscated] {
                     let Ok((raw, t)) = dial_raw_one(&params, transport, dial_timeout).await else {
                         continue;
                     };
-                    if let Ok(outcome) = complete_bt_handshake(&params, raw, t, obfuscated).await {
+                    if let Ok(outcome) =
+                        complete_bt_handshake(&params, raw, t, obfuscated, full_hs).await
+                    {
                         return Ok(outcome);
                     }
                 }
@@ -137,6 +169,8 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
 }
 
 /// Go `dialPool`: start all candidate dialers, return the first success.
+/// When uTP wins first, wait briefly for TCP — public peers often speak
+/// MSE/plaintext more reliably over TCP.
 async fn dial_first_raw(
     params: &DialParams<'_>,
     dial_timeout: Duration,
@@ -184,21 +218,63 @@ async fn dial_first_raw(
         };
         pending -= 1;
         match result {
+            Ok(stream) if transport == Transport::Tcp => {
+                drain_remaining_dials(rx, pending);
+                return Ok((stream, transport));
+            }
             Ok(stream) => {
-                // Go dialPool.startDrainer: drop late successes so sockets close.
-                if pending > 0 {
-                    tokio::spawn(async move {
-                        while let Some((_t, other)) = rx.recv().await {
+                // uTP connected first. Give TCP ~150ms to land; prefer it.
+                let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+                loop {
+                    if pending == 0 {
+                        return Ok((stream, transport));
+                    }
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        drain_remaining_dials(rx, pending);
+                        return Ok((stream, transport));
+                    }
+                    match tokio::time::timeout(left, rx.recv()).await {
+                        Ok(Some((t2, Ok(s2)))) if t2 == Transport::Tcp => {
+                            pending -= 1;
+                            drop(stream);
+                            drain_remaining_dials(rx, pending);
+                            return Ok((s2, t2));
+                        }
+                        Ok(Some((_t2, Ok(other)))) => {
+                            pending -= 1;
                             drop(other);
                         }
-                    });
+                        Ok(Some((_t2, Err(e)))) => {
+                            pending -= 1;
+                            let _ = e; // TCP/uTP race loser; keep uTP winner
+                        }
+                        Ok(None) => return Ok((stream, transport)),
+                        Err(_) => {
+                            drain_remaining_dials(rx, pending);
+                            return Ok((stream, transport));
+                        }
+                    }
                 }
-                return Ok((stream, transport));
             }
             Err(e) => last_err = Some(e),
         }
     }
     Err(last_err.unwrap_or_else(|| CoreError::Other("all initial dials failed".into())))
+}
+
+fn drain_remaining_dials(
+    mut rx: mpsc::Receiver<(Transport, Result<Box<dyn PeerStream>>)>,
+    pending: usize,
+) {
+    if pending == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        while let Some((_t, other)) = rx.recv().await {
+            drop(other);
+        }
+    });
 }
 
 fn candidate_transports(params: &DialParams<'_>) -> Vec<Transport> {
@@ -229,6 +305,7 @@ async fn complete_bt_handshake(
     raw_stream: Box<dyn PeerStream>,
     chosen_transport: Transport,
     use_header_obfuscation: bool,
+    hs_timeout: Duration,
 ) -> Result<DialOutcome> {
     let cfg = params.cfg;
 
@@ -241,11 +318,10 @@ async fn complete_bt_handshake(
             CryptoMethod::ALL
         };
         let mse_fut = mse::initiate_handshake(raw_stream, &params.info_hash.0, None, provides);
-        let (encrypted_stream, crypto_method) =
-            tokio::time::timeout(cfg.handshakes_timeout, mse_fut)
-                .await
-                .map_err(|_| CoreError::Other("MSE handshake timeout".to_string()))?
-                .map_err(|e| CoreError::Other(format!("MSE negotiation failed: {e}")))?;
+        let (encrypted_stream, crypto_method) = tokio::time::timeout(hs_timeout, mse_fut)
+            .await
+            .map_err(|_| CoreError::Other("MSE handshake timeout".to_string()))?
+            .map_err(|e| CoreError::Other(format!("MSE negotiation failed: {e}")))?;
         (
             Box::new(encrypted_stream),
             crypto_method == CryptoMethod::RC4,
@@ -261,7 +337,7 @@ async fn complete_bt_handshake(
         &params.our_peer_id,
         &reserved_bits,
     );
-    let peer_hs = tokio::time::timeout(cfg.handshakes_timeout, hs_fut)
+    let peer_hs = tokio::time::timeout(hs_timeout, hs_fut)
         .await
         .map_err(|_| CoreError::Other("BitTorrent handshake timeout".to_string()))?
         .map_err(|e| CoreError::Other(format!("BitTorrent handshake failed: {e}")))?;

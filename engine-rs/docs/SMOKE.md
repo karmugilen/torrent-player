@@ -174,17 +174,21 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 - Tracker peers marked trusted; announce slots nudged when `want_peers` and next_at >2 min
 - `peer_closed` re-queues outgoing peers (5 s); ut_metadata timeout retry; PEX add/drop/genmsg
 - **Retention:** ignore malformed ut_metadata (`missing msg_type`) and soft-discard PEX Cooldown/TooFrequent instead of closing the peerconn — was dropping ~40 dial_ok down to ~4 live peers
+- **Dial race:** prefer TCP when it lands within 150ms of a uTP win; fast-fail preferred MSE (2s) only when uTP won; other-transport plaintext-then-MSE fallback after same-transport Go fallback
+- **Dial order:** among eligible peers, never-failed before retries, then trusted, then source rank — stops burning half-open on firewalled tracker contacts while DHT waits
 
 ### Numbers (latest same-machine runs after retention fix)
 
 | Label | meta s | peers min→max | speed peak MiB/s |
 |-------|--------|---------------|------------------|
+| go-ubuntu-r10 | 4.5 | 11→44 | 2.02 |
 | go-ubuntu-r9 | 5.0 | 8→30 | 5.94 |
-| rust-ubuntu-r8 | 5.5 | 4→13 | 0.94 |
-| rust-ubuntu-r9 | 10.5 | 9→14 | 1.11 |
-| rust-ubuntu-r13 | 12.0 | **6→19** | 1.02 |
+| rust-ubuntu-r19 | 5.0 | **5→22** | 1.03 |
+| rust-ubuntu-r20 | 11.5 | **11→19** | 1.29 |
+| rust-ubuntu-r18 | 5.5 | 11→16 | 1.01 |
+| rust-ubuntu-r13 | 12.0 | 6→19 | 1.02 |
 | go-ubuntu (earlier ×3) | 6.5 / 5.5 / 9.6 | 10→42 / 7→44 / 10→45 | 6.77 / 4.09 / 7.44 |
 | rust-sintel (earlier ×3) | 2.0 / 2.5 / 3.0 | 1→13 / 1→8 / 1→8 | **22.92 / 26.89 / 14.70** |
 
-**Status:** Ubuntu peer count jumped from ~4–8 to **13–19 held** after retention + other-transport handshake fallback (still short of Go ~30). Speed ~1.1 vs Go ~6 — dial success (~10% after timeouts/MSE) and per-peer throughput remain below Go; many established peers still show `downloaded=0`. Sintel speed previously beat Go; recent Sintel magnet runs flaked empty-files (xs/metadata). Not full acceptance yet.
+**Status:** Ubuntu peers now **19–22 held** (was ~4–8) after retention + TCP-prefer dial race + fail-count dial ordering (fresh DHT/PEX before re-dialing firewalled trackers). Still short of same-day Go **44** peers / **2.0** MiB/s (historical Go peaks ~6). Speed ~1.0–1.3; many peers still `downloaded=0`. No ut_holepunch yet (Go dials holepunch after all-dial fail). Sintel previously beat Go on speed; magnet empty-files flake remains. Not full acceptance yet.
 
