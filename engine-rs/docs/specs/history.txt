@@ -25,3 +25,5 @@ agy-1 wt-core-conn DONE task_ca78c574cc4a ctx_a2a4beb9af9a commit b1f35f8
 grok-3 wt-playback DONE task_0799f8a5fd55 ctx_b81566ef61ff commit 07f3163
 grok-6 wt-core-client SETTLED-PAUSED ctx_7c0bb47c5ea6 task_a92f237e38d7 (resume: new dispatch from tests/CLIENT_HANDOFF.md)
 grok-1 wt-core-peerconn DONE-UNVERIFIED task_d1ce12daf22c ctx_ec8c54c872b1 (re-verify in-crate on resume)
+grok-7 storage-accessors DONE ctx_d2cb3cec4b34 (109/0/0)
+grok-9 wt-core-impls PAUSED ctx_415e10a96dc0 (needs agy-2 fields + remove dup ReaderHost in torrent.rs ~L799)

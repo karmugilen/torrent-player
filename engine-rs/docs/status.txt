@@ -2,7 +2,7 @@ wt-meta done verified: 39 tests, clippy+fmt clean (c191e96)
 wt-wire done verified: 31 tests, clippy all-targets clean (9721c3f)
 wt-discovery done verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6)
 wt-core running agy-2 + grok-5 (strategy+choking API published, 28 tests)
-wt-storage done verified: 93 tests pass, 0 fail, clippy all-targets clean (b29e56c); grok-7 adding 7 accessors for 16 ignored tests
+wt-storage done verified: 109 tests, 0 ignored, 0 fail, clippy clean
 wt-policy done verified: 40 tests, 45 Go tests mapped (882bc1e)
 wt-parity done verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired
 wt-engine running agy-4 + grok-4 (JNI/host/build) + grok-3 (integration tests)

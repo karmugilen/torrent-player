@@ -21,18 +21,18 @@ Started 10:59 · elapsed 1.4 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 46 min at 33.3%/h):
+ETA (rough, from the last 49 min at 31.5%/h):
 
-- crates complete: ~12:39 (in 0.3 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~16:39 (in 4.3 h; the 4 h after the crates is a planning guess)
+- crates complete: ~12:42 (in 0.3 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~16:42 (in 4.3 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | agy-2 | running | 13626 | 11719 | 121 | 200 | 1 | agy-2 + grok-5 (strategy+choking API published, 28 tests) |
-| wt-storage | agy-3 | done | 4572 | 5022 | 65 | 109 | 0 | verified: 93 tests pass, 0 fail, clippy all-targets clean (b29e56c); grok-7 adding 7 accessors for 16 ignored tests |
+| wt-core | agy-2 | running | 13626 | 11723 | 121 | 203 | 1 | agy-2 + grok-5 (strategy+choking API published, 28 tests) |
+| wt-storage | agy-3 | done | 4572 | 5016 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
 | wt-parity | grok-1 | done | 0 | 3334 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
 | wt-engine | agy-4 | running | 5609 | 4571 | 71 | 176 | 0 | agy-4 + grok-4 (JNI/host/build) + grok-3 (integration tests) |
@@ -48,7 +48,7 @@ ETA (rough, from the last 46 min at 33.3%/h):
 
 ## Pending
 
-- [ ] wt-core (agy-2): 90%, 11719 of ~10900 Rust lines, 200/121 tests
+- [ ] wt-core (agy-2): 90%, 11723 of ~10900 Rust lines, 203/121 tests
 - [ ] wt-engine (agy-4): 95%, 4571 of ~4487 Rust lines, 176/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
@@ -133,10 +133,16 @@ ETA (rough, from the last 46 min at 33.3%/h):
 - TorrentInner field list from grok-9 sent to agy-2 (urgent)
 - 12:20 PAUSE for usage limits: all workers told to checkpoint, write HANDOFF notes and stop; WIP snapshot committed (2df03bb); resume guide in docs/RESUME.md
 - At pause: grok-4, grok-5, grok-6 confirmed paused; others finishing their current step; grok-2 at 9% of weekly limit
+- wt-storage fully done: grok-7 added accessors, 109 pass / 0 ignored / 0 fail; grok-9 paused waiting on agy-2 TorrentInner fields
 
 ## Commits
 
 ```text
+915734e wt-storage: Go-parity accessors, all 109 tests on (grok-7); torrent_impls WIP and handoffs (grok-9)
+4045d86 wt-core: grok-1 peer_conn handoff note
+70967ae wt-core: peer_conn ConnHandler and PeerTorrent trait (grok-1, verify in-crate on resume)
+65b02c2 engine-rs: resume notes for workers settled during the pause
+58debaf engine-rs: progress report and resume steps at pause
 2df03bb engine-rs: WIP snapshot at pause (12:2x) - in-progress wt-core wiring, handoff notes, resume guide
 07f3163 wt-engine: playback sessions on wt_core::Reader and wt_policy (grok-3)
 b1f35f8 wt-core: peer connection driver, listeners, shared UDP socket (agy-1)
