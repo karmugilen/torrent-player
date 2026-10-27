@@ -610,6 +610,9 @@ impl ClientInner {
 
         for t in torrents {
             t.closed.store(true, Ordering::Relaxed);
+            for c in t.conn_handles.write().drain().map(|(_, c)| c) {
+                c.close("client closed");
+            }
             let conns = t.conns.write();
             for c in conns.values() {
                 c.close();

@@ -197,13 +197,20 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn peer_closed(&self, addr: SocketAddr) {
-        self.conn_handles.write().remove(&addr);
+        let old = self.conn_handles.write().remove(&addr);
+        self.conns.write().remove(&addr);
+        if old.is_some_and(|handle| handle.is_outgoing()) {
+            self.dial_backoff.lock().insert(addr, Instant::now() + Duration::from_secs(30));
+        }
         self.peer_pieces.write().remove(&peer_key_from_addr(addr));
         self.bump_change();
     }
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()> {
         let info = self.info.read().clone().ok_or(CoreError::NoInfo)?;
+        if piece >= info.num_pieces() || u64::from(begin) + data.len() as u64 > info.piece(piece).length as u64 {
+            return Err(CoreError::Other("invalid piece range".into()));
+        }
         let storage = self
             .storage
             .read()
@@ -224,6 +231,9 @@ impl PeerTorrent for TorrentInner {
 
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes> {
         let info = self.info.read().clone().ok_or(CoreError::NoInfo)?;
+        if piece >= info.num_pieces() || u64::from(begin) + u64::from(length) > info.piece(piece).length as u64 {
+            return Err(CoreError::Other("invalid piece range".into()));
+        }
         let storage = self
             .storage
             .read()
@@ -299,8 +309,8 @@ impl PeerTorrent for TorrentInner {
 
     fn desired_request_context(&self) -> (RequestTorrentSnapshot, PieceRequestOrder) {
         let info_hash = self.info_hash.0;
-        let piece_length = self.piece_length();
-        let num_pieces = self.num_pieces();
+        let piece_length = crate::peer_conn::PeerTorrent::piece_length(self);
+        let num_pieces = crate::peer_conn::PeerTorrent::num_pieces(self);
         let focus_request = TorrentInner::request_focus_index(self);
         let pieces = self.pieces.read();
         let dirty = self.dirty_chunks.read();
@@ -354,6 +364,9 @@ impl PeerTorrent for TorrentInner {
                     peer_outstanding: outstanding,
                 },
             );
+        }
+        for (r, (peer, when)) in self.assignments.read().iter() {
+            assignments.insert(*r, PeerRequestAssignment { peer: *peer, when: *when, peer_outstanding: 0 });
         }
 
         let snap = RequestTorrentSnapshot {
@@ -488,8 +501,15 @@ impl PeerTorrent for TorrentInner {
         self.info.read().is_some()
     }
 
-    fn ingest_pex(&self, _from: SocketAddr, _msg: &PexMsg) -> Result<()> {
-        // TODO: PexState field
+    fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()> {
+        let mut last = self.pex_last_recv.lock();
+        let mut prior = last.get(&from).copied();
+        let peers = self.pex.lock().ingest(msg, Instant::now(), &mut prior)
+            .map_err(|e| CoreError::Other(format!("PEX: {e:?}")))?;
+        if let Some(time) = prior { last.insert(from, time); }
+        drop(last);
+        self.known_peers.write().extend(peers);
+        self.bump_change();
         Ok(())
     }
 
@@ -498,7 +518,9 @@ impl PeerTorrent for TorrentInner {
         if !nodes.contains(&addr) { nodes.push(addr); }
     }
 
-    fn on_peer_listen_port(&self, _peer_addr: SocketAddr, _port: u16) {}
+    fn on_peer_listen_port(&self, peer_addr: SocketAddr, port: u16) {
+        self.peer_listen_ports.write().insert(peer_addr, port);
+    }
 
     fn choke_config(&self) -> ChokeConfig {
         ChokeConfig {

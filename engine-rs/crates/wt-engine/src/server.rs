@@ -170,7 +170,7 @@ impl EngineServer {
         let network = Arc::new(NetworkManager::new());
 
         let effective_peers = if max_peers == 0 {
-            55
+            100
         } else {
             max_peers.min(500)
         };
@@ -202,6 +202,16 @@ impl EngineServer {
         let config = wt_core::ClientConfig {
             callbacks,
             default_storage: storage.clone(),
+            listen_port: 0,
+            no_dht: false,
+            disable_utp: false,
+            disable_tcp: false,
+            disable_webtorrent: false,
+            disable_pex: false,
+            dial_for_peer_conns: true,
+            accept_peer_connections: true,
+            download_rate: None,
+            upload_rate: None,
             seed: true,
             always_want_conns: true,
             periodically_announce_torrents_to_dht: true,
@@ -232,9 +242,17 @@ impl EngineServer {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-            ..Default::default()
         };
         let client = wt_core::Client::new(config).map_err(std::io::Error::other)?;
+        let mut contacts = wt_storage::DhtContactStore::new();
+        contacts.load(&dir);
+        client.add_dht_nodes(
+            &contacts
+                .contacts()
+                .iter()
+                .map(|c| c.addr.clone())
+                .collect::<Vec<_>>(),
+        );
         let server = Arc::new(Self {
             self_ref: OnceLock::new(),
             client,
@@ -330,6 +348,11 @@ impl EngineServer {
 
     pub fn close(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        let mut contacts = wt_storage::DhtContactStore::new();
+        contacts.load(&self.download_dir);
+        for addr in self.client.dht_contacts() {
+            contacts.remember_dht_contact(&self.download_dir, &addr.to_string(), None);
+        }
         self.client.close();
         if let Some(server) = self.stream_server.lock().take() {
             server.close();
