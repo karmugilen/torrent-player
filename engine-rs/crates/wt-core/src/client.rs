@@ -966,6 +966,8 @@ impl ClientInner {
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let mut cfg = self.config.clone();
         let half_open_limit = cfg.half_open_conns_per_torrent.max(1);
+        // Go `reducedDialTimeout(pendingPeers)` — shorter timeouts when the dial
+        // pool is large so we cycle candidates faster under half-open limits.
         let pending = torrent.known_peers.read().len();
         let divisor = pending.saturating_add(half_open_limit) / half_open_limit;
         cfg.nominal_dial_timeout = (cfg.nominal_dial_timeout

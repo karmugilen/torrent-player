@@ -717,9 +717,10 @@ impl PeerTorrent for TorrentInner {
             Ok(peers) => peers,
             // Soft discard: torrent-wide rest and per-conn spacing must not
             // close the peerconn (was mass-dropping Ubuntu peers).
-            Err(crate::pex::PexIngestError::Cooldown) => return Ok(()),
-            Err(crate::pex::PexIngestError::TooFrequent { .. }) => return Ok(()),
-            Err(e) => return Err(CoreError::Other(format!("PEX: {e:?}"))),
+            Err(
+                crate::pex::PexIngestError::Cooldown
+                | crate::pex::PexIngestError::TooFrequent { .. },
+            ) => return Ok(()),
         };
         if let Some(time) = prior {
             last.insert(from, time);
