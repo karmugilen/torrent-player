@@ -1,6 +1,8 @@
 # wt-engine integration test map
 
-Engine integration tests declared: 148 | Enabled: 100 | Waiting: 48 | Known core-blocked failures: 2
+Engine integration tests declared: 149 | Enabled: 105 | Waiting: 44 | Known core-blocked failures: 2
+
+Round 3 group 3: six more JSON/telemetry/tracker tests pass unchanged; all integration needs ignores are down to 44. Descriptor selection now updates destinations, preserves null versus empty responses, and original trackers survive metainfo/magnet exports.
 
 Round 3 group 2: eight more playback/Ghost Pro tests pass (50 needs tests remain overall); all 11 Ghost Pro tests pass. The two empty-playback JSON assertions were corrected with coordinator approval to match Go omitted nil slices.
 
@@ -124,8 +126,8 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestPayloadGateRejectsIncompletePlaybackClearly` | `engine_server::test_payload_gate_rejects_incomplete_playback_clearly` | pass |
 | `TestPieceTelemetryReportsSelectedPieces` | `engine_server::test_piece_telemetry_reports_selected_pieces` | pass |
 | `TestAccumulateBucketPieceSelectedMixedCounts` | `engine_server::test_accumulate_bucket_piece_selected_mixed_counts` | pass |
-| `TestPieceTelemetrySelectedVerifiedIgnoresExcluded` | `engine_server::test_piece_telemetry_selected_verified_ignores_excluded` | waiting: piece telemetry selected verified ignores excluded |
-| `TestPieceTelemetrySharedBoundaryCountsAsSelected` | `engine_server::test_piece_telemetry_shared_boundary_counts_as_selected` | waiting: piece telemetry shared boundary counts as selected |
+| `TestPieceTelemetrySelectedVerifiedIgnoresExcluded` | `engine_server::test_piece_telemetry_selected_verified_ignores_excluded` | pass |
+| `TestPieceTelemetrySharedBoundaryCountsAsSelected` | `engine_server::test_piece_telemetry_shared_boundary_counts_as_selected` | pass |
 | `TestPieceTelemetryInclusiveRangesAndMaxBuckets` | `engine_server::test_piece_telemetry_inclusive_ranges_and_max_buckets` | pass |
 | `TestSettingsApplyToExistingAndFutureTorrents` | `engine_settings::test_settings_apply_to_existing_and_future_torrents` | pass |
 | `TestCacheShrinkPreservesDirtyDownloadBytes` | `engine_settings::test_cache_shrink_preserves_dirty_download_bytes` | pass |
@@ -149,9 +151,9 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestTrackerCacheConditionalRefreshAndFailure` | `engine_trackers::test_tracker_cache_conditional_refresh_and_failure` | pass |
 | `TestTrackerCacheCorruptionAndFallback` | `engine_trackers::test_tracker_cache_corruption_and_fallback` | pass |
 | `TestTrackerFetchIsAsyncAndCancelledOnClose` | `engine_trackers::test_tracker_fetch_is_async_and_cancelled_on_close` | pass |
-| `TestTrackerSupplementPublicPrivateAndMagnet` | `engine_trackers::test_tracker_supplement_public_private_and_magnet` | waiting: magnet trackers grouped into original tier |
+| `TestTrackerSupplementPublicPrivateAndMagnet` | `engine_trackers::test_tracker_supplement_public_private_and_magnet` | pass |
 | `TestTrackerRefreshIsBoundedForExistingTorrents` | `engine_trackers::test_tracker_refresh_is_bounded_for_existing_torrents` | pass |
-| `TestTrackerDiscoveredPeerSurvivesRefresh` | `engine_trackers::test_tracker_discovered_peer_survives_refresh` | waiting: supplemental tracker discovery retains live connections |
+| `TestTrackerDiscoveredPeerSurvivesRefresh` | `engine_trackers::test_tracker_discovered_peer_survives_refresh` | pass |
 | `TestManagedTrackersDoNotAccumulateAcrossRestore` | `engine_trackers::test_managed_trackers_do_not_accumulate_across_restore` | pass |
 | `TestAddMagnetIgnoresDHTLabelAndKeepsTrackerURLs` | `engine_trackers::test_add_magnet_ignores_dht_label_and_keeps_tracker_ur_ls` | pass |
 | `TestSuppliedTrackerValidationPreservesPrivatePasskeysAndTiers` | `engine_trackers::test_supplied_tracker_validation_preserves_private_passkeys_and_tiers` | pass |

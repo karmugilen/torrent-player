@@ -195,8 +195,8 @@ pub const STORAGE_MODE_STREAM: &str = "stream";
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureRequest {
     pub id: String,
-    pub descriptors: Vec<Option<i32>>,
-    pub selected: Vec<usize>,
+    pub descriptors: Option<Vec<Option<i32>>>,
+    pub selected: Option<Vec<usize>>,
     #[serde(skip_serializing_if = "empty_string")]
     pub storage_mode: Option<String>,
     #[serde(skip_serializing_if = "zero_option")]
@@ -207,7 +207,7 @@ pub struct ConfigureRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SelectRequest {
     pub id: String,
-    pub selected: Vec<usize>,
+    pub selected: Option<Vec<usize>>,
     #[serde(skip_serializing_if = "empty_vec")]
     pub descriptors: Option<Vec<Option<i32>>>,
 }
@@ -216,7 +216,7 @@ pub struct SelectRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SelectResponse {
     pub ok: bool,
-    pub selected: Vec<usize>,
+    pub selected: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

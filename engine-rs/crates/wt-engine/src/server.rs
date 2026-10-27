@@ -797,6 +797,10 @@ impl EngineServer {
                 i.piece((total_pieces - 1) as u32).length
             }
         });
+        let mut magnet = url::Url::parse(&format!("magnet:?xt=urn:btih:{info_hash}")).unwrap();
+        for tracker in original_trackers.iter().flatten() {
+            magnet.query_pairs_mut().append_pair("tr", tracker);
+        }
         let rec = Arc::new(RwLock::new(TorrentRecord {
             torrent: torrent.clone(),
             playback_coordinator: Arc::new(crate::playback::PlaybackPriorityCoordinator::new()),
@@ -804,7 +808,7 @@ impl EngineServer {
             id: id.clone(),
             info_hash: info_hash.clone(),
             name: info.as_ref().map(|i| i.name.clone()),
-            magnet_uri: Some(format!("magnet:?xt=urn:btih:{info_hash}")),
+            magnet_uri: Some(magnet.to_string()),
             prepared: req.prepare,
             configured: false,
             direct_play: false,
@@ -1147,13 +1151,15 @@ impl EngineServer {
             }
         };
 
+        let selected = req.selected.unwrap_or_default();
+        let descriptors = req.descriptors.unwrap_or_default();
         self.close_preview_for(&req.id);
 
         if let Err(error) = self.wait_for_info(&torrent) {
             return (409, serde_json::to_vec(&json!({"error": error})).unwrap());
         }
 
-        if let Err(msg) = Self::validate_selection(&torrent, &req.selected, true) {
+        if let Err(msg) = Self::validate_selection(&torrent, &selected, true) {
             return (400, serde_json::to_vec(&json!({"error": msg})).unwrap());
         }
 
@@ -1165,7 +1171,7 @@ impl EngineServer {
         };
 
         let stream = req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM);
-        if let Err(e) = storage.attach_descriptors_mode(&req.descriptors, &req.selected, stream) {
+        if let Err(e) = storage.attach_descriptors_mode(&descriptors, &selected, stream) {
             return (
                 400,
                 serde_json::to_vec(&json!({"error": e.to_string()})).unwrap(),
@@ -1181,7 +1187,7 @@ impl EngineServer {
             rec.torrent.update_piece_completion(piece);
         }
         rec.configured = true;
-        rec.selected = req.selected;
+        rec.selected = selected;
         if stream {
             rec.direct_play = true;
         }
@@ -1217,11 +1223,13 @@ impl EngineServer {
             }
         };
 
+        let selected_response = req.selected.clone();
+        let selected = req.selected.unwrap_or_default();
         if let Err(error) = self.wait_for_info(&torrent) {
             return (409, serde_json::to_vec(&json!({"error": error})).unwrap());
         }
 
-        if let Err(msg) = Self::validate_selection(&torrent, &req.selected, true) {
+        if let Err(msg) = Self::validate_selection(&torrent, &selected, true) {
             return (400, serde_json::to_vec(&json!({"error": msg})).unwrap());
         }
 
@@ -1237,7 +1245,7 @@ impl EngineServer {
             );
         }
 
-        let Some(_storage) = self.storage_for_torrent(&torrent) else {
+        let Some(storage) = self.storage_for_torrent(&torrent) else {
             return (
                 409,
                 serde_json::to_vec(&json!({"error": "download storage is not configured"}))
@@ -1245,14 +1253,23 @@ impl EngineServer {
             );
         };
 
-        rec.selected = req.selected.clone();
+        if !rec.direct_play {
+            if let Some(descriptors) = &req.descriptors {
+                if let Err(error) = storage.update_selection(descriptors, &selected) {
+                    return (400, serde_json::to_vec(&json!({"error": error.to_string()})).unwrap());
+                }
+            } else if !storage.selection_can_use_existing_files(&selected) {
+                return (400, serde_json::to_vec(&json!({"error": "descriptors are required when selecting a file for the first time"})).unwrap());
+            }
+        }
+        rec.selected = selected;
         self.apply_transfer_state(&mut rec);
         self.notify_change();
         (
             200,
             serde_json::to_vec(&SelectResponse {
                 ok: true,
-                selected: req.selected,
+                selected: selected_response,
             })
             .unwrap(),
         )

@@ -98,7 +98,6 @@ fn bypass_distinguishes_nil_and_empty_coverage() {
     );
 }
 
-#[ignore = "needs: Go nil slices in ConfigureRequest JSON"]
 #[test]
 fn configure_nil_slices_match_go_json() {
     let golden: serde_json::Value = serde_json::from_str(include_str!("go_json_golden.jsonl").lines().nth(4).unwrap()).unwrap();
@@ -106,7 +105,6 @@ fn configure_nil_slices_match_go_json() {
     assert_eq!(serde_json::to_value(request).unwrap(), golden);
 }
 
-#[ignore = "needs: Go nil slices in SelectRequest JSON"]
 #[test]
 fn select_nil_slices_match_go_json() {
     let golden: serde_json::Value = serde_json::from_str(include_str!("go_json_golden.jsonl").lines().nth(5).unwrap()).unwrap();

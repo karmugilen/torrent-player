@@ -230,7 +230,6 @@ fn test_accumulate_bucket_piece_selected_mixed_counts() {
 
 }
 
-#[ignore = "needs: piece telemetry selected verified ignores excluded"]
 #[test]
 fn test_piece_telemetry_selected_verified_ignores_excluded() {
     // Port of Go TestPieceTelemetrySelectedVerifiedIgnoresExcluded
@@ -278,7 +277,6 @@ fn test_piece_telemetry_selected_verified_ignores_excluded() {
     assert_eq!(buckets[1]["selectedVerified"], 0);
 }
 
-#[ignore = "needs: piece telemetry shared boundary counts as selected"]
 #[test]
 fn test_piece_telemetry_shared_boundary_counts_as_selected() {
     // Port of Go TestPieceTelemetrySharedBoundaryCountsAsSelected
@@ -362,4 +360,47 @@ fn test_piece_telemetry_inclusive_ranges_and_max_buckets() {
     assert_eq!(covered, telemetry.total_pieces);
     assert_eq!(telemetry.buckets[0].start, 0);
     assert_eq!(telemetry.buckets.last().unwrap().end, telemetry.total_pieces - 1);
+}
+
+#[test]
+fn test_select_requires_destination_descriptors_and_preserves_nil_response() {
+    let eng = TestEngine::new();
+    let (torrent, _, _) = support::build_multi_file_torrent("selection", 4, &[("first", 4), ("second", 4)]);
+    let (_, raw) = eng.dispatch("POST", "/add", &serde_json::json!({
+        "prepare": true, "torrentData": base64::engine::general_purpose::STANDARD.encode(torrent),
+    }).to_string());
+    let added: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let id = added["id"].as_str().unwrap();
+    let tmp = support::engine::temp_dir();
+    let first = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(tmp.path().join("first")).unwrap();
+    let second = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(tmp.path().join("second")).unwrap();
+    #[cfg(unix)]
+    let (fd1, fd2) = {
+        use std::os::fd::AsRawFd;
+        (first.as_raw_fd(), second.as_raw_fd())
+    };
+    #[cfg(not(unix))]
+    let (fd1, fd2) = (0, 0);
+    let select = |selected: serde_json::Value, descriptors: Option<serde_json::Value>| {
+        let mut request = serde_json::json!({"id": id, "selected": selected});
+        if let Some(descriptors) = descriptors { request["descriptors"] = descriptors; }
+        eng.dispatch("POST", "/select", &request.to_string())
+    };
+    let (code, raw) = eng.dispatch("POST", "/configure", &serde_json::json!({
+        "id": id, "descriptors": [fd1, null], "selected": [0],
+    }).to_string());
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+    let (code, raw) = select(serde_json::json!([1]), None);
+    assert_eq!(code, 400, "{}", String::from_utf8_lossy(&raw));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["error"], "descriptors are required when selecting a file for the first time");
+    assert_eq!(eng.server.records.read()[id].read().selected, vec![0]);
+    let (code, raw) = select(serde_json::json!([1]), Some(serde_json::json!([null, fd2])));
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+    assert_eq!(select(serde_json::json!([1]), None).0, 200);
+    for selected in [serde_json::Value::Null, serde_json::json!([])] {
+        let (code, raw) = select(selected.clone(), None);
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["selected"], selected);
+        assert!(eng.server.records.read()[id].read().selected.is_empty());
+    }
 }

@@ -190,7 +190,6 @@ fn test_tracker_fetch_is_async_and_cancelled_on_close() {
     assert_eq!(notified.load(Ordering::SeqCst), 0, "cancelled fetch notified");
 }
 
-#[ignore = "needs: magnet trackers grouped into original tier"]
 #[test]
 fn test_tracker_supplement_public_private_and_magnet() {
     for private in [false, true] {
@@ -238,7 +237,6 @@ fn test_tracker_refresh_is_bounded_for_existing_torrents() {
     assert!(!rec.paused, "refresh paused torrent");
 }
 
-#[ignore = "needs: supplemental tracker discovery retains live connections"]
 #[test]
 fn test_tracker_discovered_peer_survives_refresh() {
     let seed = TestEngine::new();
