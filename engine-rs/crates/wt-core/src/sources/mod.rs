@@ -682,9 +682,13 @@ async fn announce_to_dht(
         let Ok(mut handle) = dht.announce(ih, port, false).await else {
             continue;
         };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        // Let the traversal run to completion (Go timeboxes it, it does not
+        // stop at the first quiet gap): values arrive in bursts as the lookup
+        // moves closer to the infohash, so a short idle timeout dropped most
+        // of the peers.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_secs(2), handle.next()).await {
+            match tokio::time::timeout_at(deadline, handle.next()).await {
                 Ok(Some(vals)) => {
                     let peers: Vec<PeerInfo> = vals
                         .peers

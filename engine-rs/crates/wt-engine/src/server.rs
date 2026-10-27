@@ -467,6 +467,35 @@ impl EngineServer {
         self.apply_seed_policy(rec);
     }
 
+    /// Go `watchMetadata`: a magnet has no info at add time, so the public
+    /// tracker supplement runs once its metadata arrives.
+    fn watch_metadata(&self, torrent: &wt_core::Torrent, rec: &Arc<RwLock<TorrentRecord>>) {
+        if torrent.info().is_some() {
+            return;
+        }
+        let Some(server) = self.self_ref.get().cloned() else {
+            return;
+        };
+        let torrent = torrent.clone();
+        let rec = rec.clone();
+        self.client.inner.tokio_handle.spawn_blocking(move || loop {
+            match torrent.wait_info(Some(Duration::from_secs(5))) {
+                Ok(_) => {
+                    if let Some(server) = server.upgrade() {
+                        server.supplement_trackers(&rec);
+                        server.notify_change();
+                    }
+                    return;
+                }
+                Err(wt_core::CoreError::Closed) => return,
+                Err(_) => match server.upgrade() {
+                    Some(s) if !s.shutting_down.load(Ordering::SeqCst) => {}
+                    _ => return,
+                },
+            }
+        });
+    }
+
     pub fn notify_change(&self) {
         let (lock, cvar) = &*self.event_cond;
         let mut ver = lock.lock();
@@ -810,6 +839,7 @@ impl EngineServer {
         self.records.write().insert(id.clone(), rec.clone());
         self.records_by_hash.write().insert(info_hash.clone(), rec.clone());
         self.supplement_trackers(&rec);
+        self.watch_metadata(&torrent, &rec);
         self.start_metadata_sources(&torrent, metadata_sources);
         self.notify_change();
 
