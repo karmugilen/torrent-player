@@ -189,24 +189,31 @@ impl Sources {
         let dht = if cfg.no_dht {
             None
         } else {
+            // The mainline DHT always binds its own UDP socket. When uTP already
+            // holds the listen port (cfg.datagram is set), binding that port
+            // again fails with EADDRINUSE, so the DHT takes an ephemeral port
+            // and announces the listen port explicitly (see announce_to_dht).
+            let port = if cfg.datagram.is_some() {
+                0
+            } else {
+                cfg.listen_port
+            };
             let dht_cfg = DhtConfig {
-                port: cfg.listen_port,
+                port,
                 bootstrap: DEFAULT_BOOTSTRAP_NODES
                     .iter()
                     .map(|s| (*s).to_string())
                     .collect(),
                 ..Default::default()
             };
-            let node = if let Some(io) = cfg.datagram.clone() {
-                DhtNode::with_datagram_io(io, dht_cfg)
-                    .await
-                    .map_err(|e| CoreError::Other(e.to_string()))?
-            } else {
-                DhtNode::new(dht_cfg)
-                    .await
-                    .map_err(|e| CoreError::Other(e.to_string()))?
-            };
-            Some(Arc::new(node))
+            // Like Go, a DHT failure is not fatal: trackers keep working.
+            match DhtNode::new(dht_cfg).await {
+                Ok(node) => Some(Arc::new(node)),
+                Err(e) => {
+                    tracing::warn!("dht disabled: {e}");
+                    None
+                }
+            }
         };
 
         let me = Arc::new(Self {
@@ -671,7 +678,8 @@ async fn announce_to_dht(
     source: PeerSource,
 ) {
     for ih in keys.all_short() {
-        let Ok(mut handle) = dht.announce(ih, port, true).await else {
+        // Explicit port: the DHT socket's port is not the peer listen port.
+        let Ok(mut handle) = dht.announce(ih, port, false).await else {
             continue;
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
