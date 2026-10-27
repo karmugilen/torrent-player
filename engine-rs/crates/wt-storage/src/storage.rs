@@ -649,6 +649,36 @@ impl DocumentTorrentStorage {
         self.inner.lock().pending_sync_fds.insert(fd);
     }
 
+    /// Direct Play grid generation without cloning the compressed piece runs.
+    pub fn stream_revision(&self) -> u64 {
+        self.inner.lock().stream_revision
+    }
+
+    /// Snapshot the half-open piece window using Go `pieceStateLocked` states.
+    pub fn piece_grid_states(&self, begin: usize, end: usize) -> Vec<u8> {
+        let inner = self.inner.lock();
+        (begin..end)
+            .map(|index| {
+                let in_ram = inner.cache.get(&index).is_some_and(|data| !data.is_empty())
+                    && !inner.stream_lost.get(&index).copied().unwrap_or(false);
+                if in_ram && inner.completed.get(&index).copied().unwrap_or(false) {
+                    b'v'
+                } else if inner.startup_saved.get(&index).copied().unwrap_or(false) {
+                    b's'
+                } else if in_ram
+                    && inner
+                        .stream_ranges
+                        .get(&index)
+                        .is_some_and(|ranges| !ranges.is_empty())
+                {
+                    b'r'
+                } else {
+                    b'm'
+                }
+            })
+            .collect()
+    }
+
     /// Snapshot Direct Play RAM occupancy as compressed piece runs (Go `streamPieceRuns`).
     pub fn stream_piece_runs(&self, total: usize) -> StorageResult<Vec<PieceRun>> {
         if total > u32::MAX as usize {
@@ -2952,6 +2982,34 @@ mod startup_save_tests {
     use super::*;
     use std::sync::mpsc;
     use wt_types::FileInfo;
+
+    #[test]
+    fn piece_grid_states_match_go_storage_precedence() {
+        let storage = DocumentTorrentStorage::new(None, InfoHash([9; 20]), Path::new("."));
+        {
+            let mut inner = storage.inner.lock();
+            for index in [0, 1, 2, 3, 4, 5] {
+                inner.cache.insert(index, vec![1]);
+                inner
+                    .stream_ranges
+                    .insert(index, vec![ByteRange { start: 0, end: 1 }]);
+            }
+            for index in [0, 1, 4, 7] {
+                inner.completed.insert(index, true);
+            }
+            for index in [1, 2, 4, 6] {
+                inner.startup_saved.insert(index, true);
+            }
+            for index in [4, 5] {
+                inner.stream_lost.insert(index, true);
+            }
+            inner.stream_revision = 42;
+        }
+        assert_eq!(storage.piece_grid_states(0, 8), b"vvsrsmsm");
+        assert_eq!(storage.piece_grid_states(2, 5), b"srs");
+        assert!(storage.piece_grid_states(5, 2).is_empty());
+        assert_eq!(storage.stream_revision(), 42);
+    }
 
     #[test]
     fn slow_startup_save_does_not_block_piece_traffic() {
