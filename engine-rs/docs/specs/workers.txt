@@ -1,5 +1,4 @@
 run run_861102160a1b
-grok-1 wt-core-peerconn task_d1ce12daf22c ctx_ec8c54c872b1 term_850fca96-63b0-4fff-adfe-8c4c16dbf4fd
 grok-2 wt-core-lint task_28fca93f92d7 ctx_a8266f5bfdbc term_488ca834-68a1-4199-8bdd-bc9fb20f246f
 agy-2  wt-core      task_22719c3f3433 ctx_7e27ed8df81d term_4a1a3214-be32-4a64-8862-95a7413c6a2f
 agy-3  storage-bench task_51991b568536 ctx_3a3a09fb2647 term_4f7fe3ec-b9a2-42cf-bc48-b95a27f81215
