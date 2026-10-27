@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -28,6 +28,7 @@ use crate::types::*;
 
 pub struct TorrentRecord {
     pub torrent: wt_core::Torrent,
+    playback_coordinator: Arc<crate::playback::PlaybackPriorityCoordinator>,
     pub id: String,
     pub info_hash: String,
     pub name: Option<String>,
@@ -63,7 +64,27 @@ pub struct TorrentRecord {
     pub idle_drop_ready: bool,
 }
 
+impl TorrentRecord {
+    fn refresh(&mut self) {
+        let Some(info) = self.torrent.info() else { return; };
+        self.name = Some(info.name.clone());
+        self.piece_length = info.piece_length;
+        self.total_pieces = self.torrent.num_pieces() as usize;
+        self.last_piece_length = if self.total_pieces == 0 { 0 } else { info.piece((self.total_pieces - 1) as u32).length };
+        self.piece_verified = (0..self.total_pieces).map(|i| self.torrent.piece_complete(i as u32)).collect();
+        self.verified_bytes = self.torrent.bytes_completed();
+        self.seeding = self.torrent.seeding();
+        self.files = self.torrent.files().into_iter().map(|file| {
+            let path = file.path(); let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            let verified_bytes = file.bytes_completed(); let length = file.length();
+            FileView { index: file.index(), file_type: crate::stream_http::content_type_for_name(&name).to_string(),
+                name, path, length, progress: if length > 0 { verified_bytes as f64 / length as f64 } else { 0.0 }, verified_bytes }
+        }).collect();
+    }
+}
+
 pub struct EngineServer {
+    self_ref: OnceLock<Weak<EngineServer>>,
     pub client: wt_core::Client,
     pub storage: Arc<wt_storage::DocumentStorageClient>,
     pub download_dir: PathBuf,
@@ -145,8 +166,8 @@ impl EngineServer {
             ..Default::default()
         };
         let client = wt_core::Client::new(config).map_err(std::io::Error::other)?;
-        Ok(Arc::new(Self {
-            client, storage,
+        let server = Arc::new(Self {
+            self_ref: OnceLock::new(), client, storage,
             download_dir: dir,
             max_peers: AtomicUsize::new(effective_peers),
             ctl_port,
@@ -187,7 +208,9 @@ impl EngineServer {
             playback_readers: Mutex::new(HashMap::new()),
             next_reader_id: AtomicI64::new(1),
             bypass_enabled: AtomicBool::new(false),
-        }))
+        });
+        let _ = server.self_ref.set(Arc::downgrade(&server));
+        Ok(server)
     }
 
     pub fn notify_change(&self) {
@@ -223,29 +246,7 @@ impl EngineServer {
 
     pub async fn start_streaming(self: &Arc<Self>) -> std::io::Result<()> {
         let this = self.clone();
-        let resolver = Arc::new(move |id: &str, file_index: usize| {
-            let records = this.records.read();
-            let rec = records.get(id)?.read();
-            if file_index >= rec.files.len() {
-                return None;
-            }
-            let file = &rec.files[file_index];
-            let length = file.length;
-            let read_fn = Arc::new(move |buf: &mut [u8], _offset: i64| {
-                buf.fill(0);
-                Ok(buf.len())
-            });
-            Some(Arc::new(PlaybackReader::new(
-                id.to_string(),
-                file_index,
-                length,
-                read_fn,
-                false,
-                false,
-                false,
-                None,
-            )))
-        });
+        let resolver = Arc::new(move |id: &str, file_index: usize| this.open_playback(id, file_index).ok());
 
         let server = start_stream_server(0, resolver).await?;
         self.stream_port
@@ -416,6 +417,7 @@ impl EngineServer {
         let last_piece_length = info.as_ref().map_or(0, |i| if total_pieces == 0 { 0 } else { i.piece((total_pieces - 1) as u32).length });
         let rec = Arc::new(RwLock::new(TorrentRecord {
             torrent: torrent.clone(),
+            playback_coordinator: Arc::new(crate::playback::PlaybackPriorityCoordinator::new()),
             id: id.clone(),
             info_hash: info_hash.clone(),
             name: info.as_ref().map(|i| i.name.clone()),
@@ -468,7 +470,7 @@ impl EngineServer {
     fn handle_get_torrent(&self, id: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
         let rec = match records.get(id) {
-            Some(r) => r.read(),
+            Some(r) => { let mut rec = r.write(); rec.refresh(); rec },
             None => {
                 return (
                     404,
@@ -487,7 +489,7 @@ impl EngineServer {
             info_hash: Some(rec.info_hash.clone()),
             name: rec.name.clone(),
             magnet_uri: rec.magnet_uri.clone(),
-            ready: true,
+            ready: rec.torrent.info().is_some(),
             done: rec.verified_bytes >= rec.files.iter().map(|f| f.length).sum::<i64>(),
             paused: rec.paused,
             progress: {
@@ -500,7 +502,7 @@ impl EngineServer {
             },
             download_speed: 0,
             upload_speed: 0,
-            num_peers: 0,
+            num_peers: rec.torrent.stats().total_peers,
             length: rec.files.iter().map(|f| f.length).sum(),
             downloaded: rec.downloaded,
             verified_bytes: rec.verified_bytes,
@@ -538,7 +540,7 @@ impl EngineServer {
 
         let records = self.records.read();
         let rec = match records.get(&req.id) {
-            Some(r) => r.read(),
+            Some(r) => { let mut rec = r.write(); rec.refresh(); rec },
             None => {
                 return (
                     404,
@@ -557,7 +559,7 @@ impl EngineServer {
 
         let file = &rec.files[file_index];
         let stream_url = format!(
-            "http://127.0.0.1:{}/torrent/{}/{}",
+            "http://127.0.0.1:{}/torrent/{}/file/{}",
             self.stream_port.load(Ordering::SeqCst),
             req.id,
             file_index
@@ -799,7 +801,7 @@ impl EngineServer {
     fn handle_pieces(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
         let rec = match records.get(id) {
-            Some(r) => r.read(),
+            Some(r) => { let mut rec = r.write(); rec.refresh(); rec },
             None => {
                 return (
                     404,
@@ -1078,11 +1080,11 @@ impl EngineServer {
             enabled,
             active: enabled,
             mode: if enabled {
-                "active".to_string()
+                "tcp-write-split".to_string()
             } else {
                 "off".to_string()
             },
-            coverage: vec!["all".to_string()],
+            coverage: if enabled { Some(vec!["outgoing-tcp-peers".into(), "http-trackers".into(), "websocket-trackers".into()]) } else { None },
             error: None,
         };
         (200, serde_json::to_vec(&status).unwrap())
@@ -1114,19 +1116,22 @@ impl EngineServer {
                     bytes: 0,
                     reclaimable_bytes: 0,
                 },
-                CacheCategoryView {
-                    id: "resume".to_string(),
-                    bytes: 0,
-                    reclaimable_bytes: 0,
-                },
+                CacheCategoryView { id: "resume".into(), bytes: 0, reclaimable_bytes: 0 },
+                CacheCategoryView { id: "peers".into(), bytes: 0, reclaimable_bytes: 0 },
+                CacheCategoryView { id: "dht".into(), bytes: 0, reclaimable_bytes: 0 },
             ],
             memory_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }
 
-    fn handle_clear_cache(&self, _body: &str) -> (u16, Vec<u8>) {
-        self.handle_get_cache()
+    fn handle_clear_cache(&self, body: &str) -> (u16, Vec<u8>) {
+        let value: serde_json::Value = match serde_json::from_str(body) { Ok(v) => v, Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()) };
+        let categories: Vec<String> = value.get("categories").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+        match wt_storage::clear_cache_categories(&self.download_dir, &categories) {
+            Ok(()) => self.handle_get_cache(),
+            Err(e) => (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap()),
+        }
     }
 
     /// Public control entry point for integration tests and JNI layer.
@@ -1138,38 +1143,11 @@ impl EngineServer {
     }
 
     pub fn open_playback(&self, id: &str, index: usize) -> std::io::Result<Arc<PlaybackReader>> {
-        let records = self.records.read();
-        let rec = records
-            .get(id)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found"))?
-            .read();
-
-        if index >= rec.files.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid file index",
-            ));
-        }
-
-        let file = &rec.files[index];
-        let length = file.length;
-        let read_fn = Arc::new(|buf: &mut [u8], _offset: i64| {
-            buf.fill(0);
-            Ok(buf.len())
-        });
-
-        let reader = Arc::new(PlaybackReader::new(
-            id.to_string(),
-            index,
-            length,
-            read_fn,
-            false,
-            false,
-            false,
-            None,
-        ));
-
+        let coordinator = self.records.read().get(id).map(|r| r.read().playback_coordinator.clone())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found"))?;
+        let host = self.self_ref.get().and_then(Weak::upgrade).ok_or_else(|| std::io::Error::other("engine closed"))?;
         let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
+        let (_, reader) = PlaybackReader::open_for_host(host, coordinator, id, index, 0, handle)?;
         self.playback_readers.lock().insert(handle, reader.clone());
         Ok(reader)
     }
@@ -1184,10 +1162,11 @@ impl EngineServer {
         }
 
         let records = self.records.read();
-        let rec = records
+        let mut rec = records
             .get(id)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found"))?
-            .read();
+            .write();
+        rec.refresh();
 
         if index >= rec.files.len() {
             return Err(std::io::Error::new(
@@ -1196,22 +1175,52 @@ impl EngineServer {
             ));
         }
 
-        let file = &rec.files[index];
-        let length = file.length;
-        let reader = Arc::new(PreviewReader::new(
-            index,
-            length,
-            Box::new(|buf: &mut [u8], _offset: i64| {
-                buf.fill(0);
-                Ok(buf.len())
-            }),
-        ));
+        let file = rec.torrent.files().get(index).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"))?;
+        let length = file.length();
+        let backend = Mutex::new(crate::playback_core::CoreReaderBackend::from_file(&file));
+        let reader = Arc::new(PreviewReader::new(index, length, Box::new(move |buf, offset| {
+            crate::playback::ReaderBackend::read_at(&mut *backend.lock(), buf, offset)
+        })));
 
         *active = Some(reader.clone());
         let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
         self.preview_readers.lock().insert(handle, reader.clone());
         Ok(reader)
     }
+}
+
+impl crate::playback::PlaybackHost for EngineServer {
+    fn torrent_for_playback(&self, id: &str) -> Option<crate::playback::PlaybackTorrentSnapshot> {
+        let records = self.records.read(); let rec = records.get(id)?.read(); let info = rec.torrent.info()?; let len = info.piece_length;
+        if len <= 0 { return None; }
+        let files = rec.torrent.files().into_iter().map(|f| crate::playback::PlaybackFileInfo {
+            index: f.index(), name: f.path(), length: f.length(), torrent_offset: f.offset(),
+            begin_piece: (f.offset() / len) as u32, end_piece: ((f.offset() + f.length() + len - 1) / len) as u32,
+            verified: f.bytes_completed() == f.length(), }).collect();
+        Some(crate::playback::PlaybackTorrentSnapshot { configured: rec.configured, direct_play: rec.direct_play,
+            file_only: rec.file_only, selected: rec.selected.clone(), focused_file: rec.focused_file,
+            files, piece_length: len, open_reader_count: rec.playback_readers })
+    }
+    fn is_shutting_down(&self) -> bool { self.shutting_down.load(Ordering::SeqCst) }
+    fn payload_allowed(&self) -> bool { self.payload_transfers_allowed.load(Ordering::SeqCst) }
+    fn ghost_pro(&self) -> bool { self.ghost_pro_mode.load(Ordering::SeqCst) }
+    fn open_file_reader(&self, id: &str, index: usize) -> std::io::Result<Box<dyn crate::playback::ReaderBackend>> {
+        let records = self.records.read(); let file = records.get(id).and_then(|r| r.read().torrent.files().get(index).cloned())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent or file not found"))?;
+        Ok(Box::new(crate::playback_core::CoreReaderBackend::from_file(&file)))
+    }
+    fn apply_piece_priorities(&self, id: &str, demand: &HashMap<u32, wt_core::PiecePriority>) {
+        if let Some(r) = self.records.read().get(id) { let rec = r.read(); for (&piece, &priority) in demand { rec.torrent.set_piece_priority(piece, priority); } }
+    }
+    fn clear_piece_priorities(&self, id: &str, pieces: &[u32]) {
+        if let Some(r) = self.records.read().get(id) { let rec = r.read(); for &piece in pieces { rec.torrent.set_piece_priority(piece, wt_core::PiecePriority::None); } }
+    }
+    fn set_request_focus(&self, id: &str, offset: i64) { if let Some(r) = self.records.read().get(id) { r.read().torrent.set_request_focus(offset); } }
+    fn set_playback_interest(&self, id: &str, begin: u32, end: u32) { if let Some(r) = self.records.read().get(id) { r.read().torrent.set_playback_interest(begin, end); } }
+    fn refocus_requests(&self, id: &str) { if let Some(r) = self.records.read().get(id) { r.read().torrent.refocus_requests(); } }
+    fn nudge_urgent(&self, id: &str) -> usize { self.records.read().get(id).map_or(0, |r| r.read().torrent.nudge_urgent_requests()) }
+    fn on_focus_changed(&self, id: &str, index: usize) { if let Some(r) = self.records.read().get(id) { r.write().focused_file = Some(index); } }
+    fn piece_complete(&self, id: &str, piece: u32) -> bool { self.records.read().get(id).is_some_and(|r| r.read().torrent.piece_complete(piece)) }
 }
 
 #[cfg(test)]

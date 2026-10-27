@@ -133,26 +133,18 @@ pub fn run(opts: RunOpts) -> Result<RunReport, String> {
                 );
             }
             "resources" => {
-                let (rss_a, cpu_a, rss_b, cpu_b) = scenario_resources(&opts, &swarm, &video)?;
-                metrics.insert(
-                    "download_peak_rss_mib".into(),
-                    MetricSeries::from_samples("MiB", vec![rss_a; opts.repeats as usize], false),
-                );
-                metrics.insert(
-                    "download_cpu_seconds".into(),
-                    MetricSeries::from_samples("s", vec![cpu_a; opts.repeats as usize], false),
-                );
-                metrics.insert(
-                    "direct_play_peak_rss_mib".into(),
-                    MetricSeries::from_samples("MiB", vec![rss_b; opts.repeats as usize], false),
-                );
-                metrics.insert(
-                    "direct_play_cpu_seconds".into(),
-                    MetricSeries::from_samples("s", vec![cpu_b; opts.repeats as usize], false),
-                );
-                notes.push(
-                    "resources: single sample per mode (repeated in series for schema)".into(),
-                );
+                let mut rss_a = Vec::new();
+                let mut cpu_a = Vec::new();
+                let mut rss_b = Vec::new();
+                let mut cpu_b = Vec::new();
+                for i in 0..opts.repeats {
+                    let (a, b, c, d) = scenario_resources(&opts, &swarm, &video, i)?;
+                    rss_a.push(a); cpu_a.push(b); rss_b.push(c); cpu_b.push(d);
+                }
+                metrics.insert("download_peak_rss_mib".into(), MetricSeries::from_samples("MiB", rss_a, false));
+                metrics.insert("download_cpu_seconds".into(), MetricSeries::from_samples("s", cpu_a, false));
+                metrics.insert("direct_play_peak_rss_mib".into(), MetricSeries::from_samples("MiB", rss_b, false));
+                metrics.insert("direct_play_cpu_seconds".into(), MetricSeries::from_samples("s", cpu_b, false));
             }
             "control_latency" => {
                 let (stats_ms, torrent_ms) = scenario_control_latency(&opts, &swarm, &video)?;
@@ -492,14 +484,15 @@ fn scenario_resources(
     opts: &RunOpts,
     swarm: &Swarm,
     fixture: &Fixture,
+    i: u32,
 ) -> Result<(f64, f64, f64, f64), String> {
     // (a) download resources
-    let leech = spawn_leech(opts, "res-dl", 0)?;
+    let leech = spawn_leech(opts, "res-dl", i)?;
     let mon = ProcMonitor::start(leech.pid());
     let (stop, join) = spawn_rss_poller(leech.pid(), Duration::from_millis(200));
     let peers = swarm.peer_addrs();
     let id = add_and_configure_download(&leech, fixture, &peers)?;
-    let _ = wait_done(&leech.client(), &id, Duration::from_secs(600));
+    wait_done(&leech.client(), &id, Duration::from_secs(600))?;
     drop(stop);
     let peak = join.join().unwrap_or(0);
     let sample = mon.finish();
@@ -508,7 +501,7 @@ fn scenario_resources(
     leech.shutdown();
 
     // (b) direct play resources: ttfb + short sequential read
-    let leech = spawn_leech(opts, "res-dp", 0)?;
+    let leech = spawn_leech(opts, "res-dp", i)?;
     let mon = ProcMonitor::start(leech.pid());
     let (stop, join) = spawn_rss_poller(leech.pid(), Duration::from_millis(200));
     scenario_direct_play_on(&leech, swarm, fixture)?;

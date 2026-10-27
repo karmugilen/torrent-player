@@ -4,12 +4,40 @@
 
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+fn empty_string(value: &Option<String>) -> bool {
+    value.as_ref().is_none_or(String::is_empty)
+}
+
+fn empty_vec<T>(value: &Option<Vec<T>>) -> bool {
+    value.as_ref().is_none_or(Vec::is_empty)
+}
+
+fn zero_option(value: &Option<i64>) -> bool {
+    value.is_none_or(|v| v == 0)
+}
+
+fn serialize_max_peers<S: serde::Serializer>(value: &Option<usize>, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(value.unwrap_or(0) as u64)
+}
+
+fn serialize_go_float<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 {
+        serializer.serialize_i64(*value as i64)
+    } else { serializer.serialize_f64(*value) }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsResponse {
     pub download_speed: i64,
     pub upload_speed: i64,
+    #[serde(serialize_with = "serialize_go_float")]
     pub progress: f64,
+    #[serde(serialize_with = "serialize_go_float")]
     pub ratio: f64,
     pub torrents: usize,
     pub ctl_port: u16,
@@ -26,7 +54,7 @@ pub struct AddRequest {
     pub torrent_id: String,
     #[serde(default)]
     pub prepare: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "empty_string")]
     pub torrent_data: Option<String>,
 }
 
@@ -44,6 +72,7 @@ pub struct FileView {
     pub name: String,
     pub path: String,
     pub length: i64,
+    #[serde(serialize_with = "serialize_go_float")]
     pub progress: f64,
     pub verified_bytes: i64,
     #[serde(rename = "type")]
@@ -56,7 +85,7 @@ pub struct TrackerView {
     pub url: String,
     pub tier: usize,
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_string")]
     pub message: Option<String>,
     pub original: bool,
 }
@@ -73,6 +102,7 @@ pub struct NextPreloadView {
 #[serde(rename_all = "camelCase")]
 pub struct TorrentView {
     pub seeding: bool,
+    #[serde(serialize_with = "serialize_go_float")]
     pub seed_ratio: f64,
     pub id: String,
     pub info_hash: Option<String>,
@@ -82,6 +112,7 @@ pub struct TorrentView {
     pub ready: bool,
     pub done: bool,
     pub paused: bool,
+    #[serde(serialize_with = "serialize_go_float")]
     pub progress: f64,
     pub download_speed: i64,
     pub upload_speed: i64,
@@ -118,13 +149,13 @@ pub struct PlayRequest {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_index: Option<usize>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub boost: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub file_only: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub adaptive_buffer: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub burst_aware_buffer: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_file_index: Option<usize>,
@@ -156,9 +187,9 @@ pub struct ConfigureRequest {
     pub id: String,
     pub descriptors: Vec<Option<i32>>,
     pub selected: Vec<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_string")]
     pub storage_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "zero_option")]
     pub stream_cache_bytes: Option<i64>,
 }
 
@@ -167,7 +198,7 @@ pub struct ConfigureRequest {
 pub struct SelectRequest {
     pub id: String,
     pub selected: Vec<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_vec")]
     pub descriptors: Option<Vec<Option<i32>>>,
 }
 
@@ -228,9 +259,9 @@ pub struct PieceTelemetryResponse {
     pub max_buckets: usize,
     pub buckets: Vec<PieceBucket>,
     pub ghost_pro_mode: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_vec")]
     pub playback: Option<Vec<PlaybackPieceRange>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_vec")]
     pub playheads: Option<Vec<usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playback_detail: Option<PlaybackDetail>,
@@ -246,6 +277,7 @@ pub struct MetadataResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ArrivalStats {
     pub samples: i64,
+    #[serde(serialize_with = "serialize_go_float")]
     pub network_err_ms: f64,
     pub using: bool,
 }
@@ -257,8 +289,6 @@ pub struct SeekStats {
     pub last_ms: i64,
     pub median_ms: i64,
     pub stalls: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arrival: Option<ArrivalStats>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -318,7 +348,7 @@ pub struct SettingsRequest {
     pub seed_ratio_milli: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed_time_minutes: Option<i64>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_max_peers")]
     pub max_peers: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_rate_bytes_sec: Option<i64>,
@@ -330,7 +360,7 @@ pub struct SettingsRequest {
     pub dial_rate_per_sec: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seek_log_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "empty_string")]
     pub seek_log_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seek_experiment: Option<bool>,
@@ -340,7 +370,7 @@ pub struct SettingsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct OkResponse {
     pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_string")]
     pub id: Option<String>,
 }
 
@@ -352,7 +382,7 @@ pub struct PeerConnectionView {
     pub client: String,
     pub downloaded: i64,
     pub uploaded: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "empty_string")]
     pub country: Option<String>,
 }
 
@@ -385,8 +415,7 @@ pub struct BypassStatus {
     pub enabled: bool,
     pub active: bool,
     pub mode: String,
-    pub coverage: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Vec<String>>,
     pub error: Option<String>,
 }
 

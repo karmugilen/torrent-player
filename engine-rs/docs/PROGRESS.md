@@ -21,21 +21,21 @@ Started 10:59 · elapsed 1.8 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 52 min at 11.1%/h):
+ETA (rough, from the last 52 min at 10.9%/h):
 
-- crates complete: ~14:30 (in 1.7 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~18:30 (in 5.7 h; the 4 h after the crates is a planning guess)
+- crates complete: ~14:33 (in 1.8 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~18:33 (in 5.8 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | agy-2 | running | 13626 | 11441 | 121 | 204 | 1 | agy-2 + grok-5 (strategy+choking API published, 28 tests) |
+| wt-core | agy-2 | running | 13626 | 11451 | 121 | 204 | 1 | codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections) |
 | wt-storage | agy-3 | done | 4572 | 5011 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
-| wt-parity | grok-1 | done | 0 | 3334 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
-| wt-engine | agy-4 | running | 5609 | 4651 | 71 | 176 | 0 | agy-4 + grok-4 (JNI/host/build) + grok-3 (integration tests) |
+| wt-parity | grok-1 | done | 0 | 3328 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
+| wt-engine | agy-4 | running | 5609 | 4664 | 71 | 176 | 0 | codex-2 (server on wt_core, engine-host builds) + codex-5 (types.rs, engine tests) |
 
 ## Complete
 
@@ -48,8 +48,8 @@ ETA (rough, from the last 52 min at 11.1%/h):
 
 ## Pending
 
-- [ ] wt-core (agy-2): 90%, 11441 of ~10900 Rust lines, 204/121 tests
-- [ ] wt-engine (agy-4): 95%, 4651 of ~4487 Rust lines, 176/71 tests
+- [ ] wt-core (agy-2): 90%, 11451 of ~10900 Rust lines, 204/121 tests
+- [ ] wt-engine (agy-4): 95%, 4664 of ~4487 Rust lines, 176/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
 - [ ] Android: libengine.so (arm64) + APK build
@@ -142,10 +142,13 @@ ETA (rough, from the last 52 min at 11.1%/h):
 - agy-2, agy-3, agy-4 hit quota (reset in ~3h20m). User: switch to Codex. codex-1 owns all wt-core, codex-2 all wt-engine, codex-3 performance vs Go
 - User asked to close all agy and grok workers: agy-2/3/4 stopped, grok-2/4/5/9 abandoned, all 8 grok terminals closed, their tasks marked cancelled. Only codex-1/2/3 remain
 - User: add two Codex agents. codex-4 takes wt-core Client + connection manager from codex-1; codex-5 takes types.rs + engine tests from codex-2
+- codex-1: wt-core lib tests 64 pass / 0 fail, clippy clean; implementing automatic dialing and completion restore
+- Coordinator defined the Client <-> Torrent connection interface (attach_connection, wants_conns, take_dial_candidates, peers_changed) for codex-1 and codex-4
 
 ## Commits
 
 ```text
+930cee0 engine-rs: codex-4 and codex-5 join
 fbd723b engine-rs: codex checkpoint (wt-core clippy clean, engine-host builds)
 f1ebb59 engine-rs: only Codex workers remain
 cba7eed engine-rs: Codex workers take over wt-core, wt-engine and performance

@@ -5,7 +5,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use wt_types::{
     ClientStorage, Info, InfoHash, InfoHashV2, MetaInfo, PeerInfo, PieceIndex, PiecePriority,
@@ -85,6 +85,8 @@ pub struct TorrentInner {
 
     pub conns: RwLock<HashMap<SocketAddr, PeerConn>>,
     pub known_peers: RwLock<HashSet<PeerInfo>>,
+    pub client: RwLock<Weak<crate::client::ClientInner>>,
+    pub dialing_peers: Mutex<HashSet<SocketAddr>>,
     pub trackers: RwLock<Vec<Vec<String>>>,
     pub web_seeds: RwLock<Vec<String>>,
 
@@ -136,6 +138,8 @@ impl TorrentInner {
             hedges: RwLock::new(HashMap::new()),
             conns: RwLock::new(HashMap::new()),
             known_peers: RwLock::new(HashSet::new()),
+            client: RwLock::new(Weak::new()),
+            dialing_peers: Mutex::new(HashSet::new()),
             trackers: RwLock::new(Vec::new()),
             web_seeds: RwLock::new(Vec::new()),
             request_focus: AtomicI64::new(0),
@@ -164,6 +168,41 @@ impl TorrentInner {
         self.change_cond.notify_all();
     }
 
+    pub fn add_peers(self: &Arc<Self>, peers: Vec<PeerInfo>) -> usize {
+        let mut added = Vec::new();
+        {
+            let mut known = self.known_peers.write();
+            for peer in peers {
+                if known.insert(peer.clone()) {
+                    added.push(peer);
+                }
+            }
+        }
+        let count = added.len();
+        if let Some(client) = self.client.read().upgrade() {
+            if client.config.dial_for_peer_conns {
+                for peer in added {
+                    let mut dialing = self.dialing_peers.lock();
+                    if self.conns.read().len() + dialing.len() >= self.max_established_conns.load(Ordering::Relaxed)
+                        || self.conns.read().contains_key(&peer.addr)
+                        || !dialing.insert(peer.addr)
+                    {
+                        continue;
+                    }
+                    drop(dialing);
+                    let torrent = Arc::clone(self);
+                    let cl = Arc::clone(&client);
+                    client.tokio_handle.spawn(async move {
+                        let _ = cl.dial_peer(Arc::clone(&torrent), peer.addr, peer.source).await;
+                        torrent.dialing_peers.lock().remove(&peer.addr);
+                    });
+                }
+            }
+        }
+        if count > 0 { self.bump_change(); }
+        count
+    }
+
     pub fn set_info(&self, info: Arc<Info>) -> Result<()> {
         let num_pieces = info.num_pieces() as usize;
         let mut piece_entries = Vec::with_capacity(num_pieces);
@@ -175,6 +214,11 @@ impl TorrentInner {
 
         // Open storage
         let storage = self.default_storage.open_torrent(&info, self.info_hash)?;
+        for entry in &mut piece_entries {
+            let completion = storage.piece(info.piece(entry.index), info.piece_hash_v1(entry.index)).completion();
+            entry.ok = completion.ok;
+            entry.complete = completion.ok && completion.complete;
+        }
         *self.storage.write() = Some(storage);
         *self.pieces.write() = piece_entries;
         crate::torrent_impls::init_book_and_glue(self, &info);

@@ -6,7 +6,7 @@
 //! after `conn::dial_peer` / accept (until `PeerTorrent` is wired by agy-2).
 
 use bytes::{Bytes, BytesMut};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,11 +44,7 @@ struct TorrentSourcesAdapter {
 
 impl PeerSink for TorrentSourcesAdapter {
     fn add_peers(&self, _info_hash: InfoHash, peers: Vec<PeerInfo>) {
-        let mut known = self.torrent.known_peers.write();
-        for p in peers {
-            known.insert(p);
-        }
-        self.torrent.bump_change();
+        self.torrent.add_peers(peers);
     }
 
     fn add_web_seeds(&self, _info_hash: InfoHash, urls: Vec<String>) {
@@ -145,6 +141,8 @@ pub struct ClientInner {
     pub torrents: RwLock<HashMap<InfoHash, Arc<TorrentInner>>>,
     /// Hybrid magnet fix: both v1 and v2 short hashes (WEBTOR_PATCH).
     pub torrents_by_short: RwLock<HashMap<InfoHash, Arc<TorrentInner>>>,
+    /// Serialize lookup, creation, and alias registration for add/merge.
+    add_torrent_lock: Mutex<()>,
     pub outgoing_tcp_conn_hook: RwLock<Option<TcpConnHook>>,
     pub urgent_steal_after: RwLock<Duration>,
     pub arrival_model: Arc<RwLock<ArrivalModel>>,
@@ -221,6 +219,7 @@ impl ClientInner {
             listen_addrs: RwLock::new(Vec::new()),
             torrents: RwLock::new(HashMap::new()),
             torrents_by_short: RwLock::new(HashMap::new()),
+            add_torrent_lock: Mutex::new(()),
             outgoing_tcp_conn_hook: RwLock::new(None),
             urgent_steal_after: RwLock::new(Duration::ZERO),
             arrival_model: Arc::new(RwLock::new(ArrivalModel::new())),
@@ -367,6 +366,7 @@ impl ClientInner {
 
     /// Add or merge a torrent (Go `Client.AddTorrentSpec` + `Torrent.MergeSpec`).
     pub fn add_torrent_spec(self: &Arc<Self>, mut spec: TorrentSpec) -> Result<(Arc<TorrentInner>, bool)> {
+        let _add_guard = self.add_torrent_lock.lock();
         if self.closed.load(Ordering::Relaxed) {
             return Err(CoreError::Closed);
         }
@@ -406,6 +406,13 @@ impl ClientInner {
                 drop(short_map);
                 drop(torrents_map);
                 self.merge_spec(&existing, &spec, info_obj)?;
+                let mut aliases = self.torrents_by_short.write();
+                if let Some(v1) = spec.info_hash {
+                    aliases.insert(v1, Arc::clone(&existing));
+                }
+                if let Some(v2) = spec.info_hash_v2 {
+                    aliases.insert(v2.to_short(), Arc::clone(&existing));
+                }
                 return Ok((existing, false));
             }
         }
@@ -421,12 +428,25 @@ impl ClientInner {
             storage,
             self.arrival_model.clone(),
         ));
+        *torrent_inner.client.write() = Arc::downgrade(self);
         torrent_inner
             .max_established_conns
             .store(self.config.established_conns_per_torrent, Ordering::Relaxed);
         if self.config.seed {
             torrent_inner.seeding.store(true, Ordering::Relaxed);
         }
+
+        if let Some(info) = info_obj {
+            torrent_inner.set_info(Arc::new(info))?;
+        }
+        if let Some(info_bytes) = spec.info_bytes.clone() {
+            *torrent_inner.metainfo_raw.write() = Some(wt_types::MetaInfo {
+                info_bytes,
+                ..Default::default()
+            });
+        }
+        *torrent_inner.trackers.write() = spec.trackers.clone();
+        *torrent_inner.web_seeds.write() = spec.web_seeds.clone();
 
         {
             let mut torrents_map = self.torrents.write();
@@ -437,12 +457,6 @@ impl ClientInner {
                 short_map.insert(v2.to_short(), torrent_inner.clone());
             }
         }
-
-        if let Some(info) = info_obj {
-            let _ = torrent_inner.set_info(Arc::new(info));
-        }
-        *torrent_inner.trackers.write() = spec.trackers.clone();
-        *torrent_inner.web_seeds.write() = spec.web_seeds.clone();
 
         if !spec.dht_nodes.is_empty() {
             self.add_dht_nodes(&spec.dht_nodes);
@@ -478,8 +492,14 @@ impl ClientInner {
         // display_name is not interior-mutable on TorrentInner; set only at create.
         if let Some(info) = info_obj {
             if torrent.info.read().is_none() {
-                let _ = torrent.set_info(Arc::new(info));
+                torrent.set_info(Arc::new(info))?;
             }
+        }
+        if let Some(info_bytes) = &spec.info_bytes {
+            *torrent.metainfo_raw.write() = Some(wt_types::MetaInfo {
+                info_bytes: info_bytes.clone(),
+                ..Default::default()
+            });
         }
         if !spec.dht_nodes.is_empty() {
             self.add_dht_nodes(&spec.dht_nodes);
@@ -564,6 +584,7 @@ impl ClientInner {
     }
 
     pub fn close(self: &Arc<Self>) {
+        let _add_guard = self.add_torrent_lock.lock();
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -631,10 +652,10 @@ impl ClientInner {
             .store(self.half_open.current_total(), Ordering::Relaxed);
 
         let metadata_size = torrent
-            .info
+            .metainfo_raw
             .read()
             .as_ref()
-            .map(|i| i.total_length() as u32);
+            .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let utp = self
             .listener
@@ -692,10 +713,10 @@ impl ClientInner {
             return Ok(());
         }
         let metadata_size = torrent
-            .info
+            .metainfo_raw
             .read()
             .as_ref()
-            .map(|i| i.total_length() as u32);
+            .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let utp = self
             .listener
@@ -782,10 +803,10 @@ impl ClientInner {
             ipv6: None,
             reqq: Some(250),
             metadata_size: torrent
-                .info
+                .metainfo_raw
                 .read()
                 .as_ref()
-                .map(|i| i.total_length() as u32),
+                .map(|i| i.info_bytes.len() as u32),
             upload_only: None,
             encryption: None,
         };

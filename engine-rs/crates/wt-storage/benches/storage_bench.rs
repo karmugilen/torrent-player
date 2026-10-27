@@ -396,8 +396,7 @@ fn run_rust_piece_aggregation(iters: usize) -> Duration {
     start.elapsed()
 }
 
-#[test]
-fn storage_benchmark() {
+fn main() {
     let fixture_dir = PathBuf::from("/home/kar/.cache/wt-tmp/perf/storage-rust");
     let _ = fs::remove_dir_all(&fixture_dir);
     fs::create_dir_all(&fixture_dir).expect("create fixture dir");

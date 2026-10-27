@@ -556,14 +556,7 @@ impl Torrent {
     }
 
     pub fn add_peers(&self, peers: Vec<PeerInfo>) -> usize {
-        let mut count = 0;
-        let mut known = self.inner.known_peers.write();
-        for p in peers {
-            if known.insert(p) {
-                count += 1;
-            }
-        }
-        count
+        self.inner.add_peers(peers)
     }
 
     pub fn add_trackers(&self, tiers: Vec<Vec<String>>) {

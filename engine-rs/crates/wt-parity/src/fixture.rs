@@ -324,8 +324,8 @@ pub fn prepare_seeder_store(dir: &Path, fixture: &Fixture) -> Result<(), String>
     let mut identities = Vec::new();
     for (i, ff) in fixture.files.iter().enumerate() {
         let part = boundary.join(format!("{i}.part"));
-        fs::copy(&ff.data_path, &part)
-            .map_err(|e| format!("copy {}: {e}", ff.data_path.display()))?;
+        fs::hard_link(&ff.data_path, &part)
+            .map_err(|e| format!("hard link {}: {e}", ff.data_path.display()))?;
         // Ensure exact length.
         let meta = fs::metadata(&part).map_err(|e| e.to_string())?;
         if meta.len() != ff.length as u64 {
