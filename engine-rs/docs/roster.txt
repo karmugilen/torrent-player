@@ -4,10 +4,13 @@ grok-3|wt-engine (playback, stream_http, previews, network)|integration tests (c
 grok-4|wt-engine (types.rs JSON)|API diff tool done (6969bd9: 11 match, 19 diff, 14 critical); now fixing JSON shapes in types.rs|paused
 grok-5|wt-core (end-to-end tests)|strategy/choking (ef844c8), metadata/pex/ratelimit (76e488f), Direct Play storage (5f688b0) done; now library e2e transfer tests|paused
 agy-1|wt-core (conn driver)|wt-wire done (9721c3f, 31 tests, uTP 569 MB/s loopback); now peer connection I/O driver + shared UDP socket|running
-agy-2|wt-core|client, torrent, peer conns, reader, Webtor seek patches, arrival net|paused
-agy-3|wt-storage (benchmarks vs Go)|wt-storage done (b29e56c, 93 tests); now Go-vs-Rust storage benchmarks|paused
-agy-4|wt-engine (integration)|control API routes (e25edb6, WIP); now wiring EngineServer onto wt_core/wt_storage/wt_policy|paused
+agy-2|wt-core|client, torrent, peer conns, reader, Webtor seek patches, arrival net|quota-stopped (resets ~15:45)
+agy-3|wt-storage (benchmarks vs Go)|wt-storage done (b29e56c, 93 tests); now Go-vs-Rust storage benchmarks|quota-stopped (resets ~15:45)
+agy-4|wt-engine (integration)|control API routes (e25edb6, WIP); now wiring EngineServer onto wt_core/wt_storage/wt_policy|quota-stopped (resets ~15:45)
 grok-6|wt-core (client.rs)|hashing pool + web seed peer done (0dc46ba; SHA-1 2245 MiB/s release); now the Client|paused
 grok-7|wt-storage (accessors)|test suite done (9eb5a54); now the 7 missing accessors + switching on 16 ignored tests|paused
 grok-8|wt-core (reader)|Reader done (e6be3ec, 19 tests); released|done
 grok-9|wt-core (torrent_impls.rs)|piece state + storage glue done (7a327e6, 13+22 tests); now PeerTorrent + ReaderHost impls for TorrentInner|paused
+codex-1|wt-core (all)|finish central wiring (torrent.rs, client.rs, torrent_impls.rs, lib.rs) + real e2e transfers|running
+codex-2|wt-engine (all)|server.rs on wt_core, PlaybackHost, JSON parity (14 critical), engine tests, two-engine transfer|running
+codex-3|wt-storage benches + wt-parity|storage benchmarks vs Go, then full Go-vs-Rust parity run|running

@@ -1,0 +1,14 @@
+# Task (codex-2): finish wt-engine on the real core (control API, playback, JSON parity)
+You now OWN ALL of engine-rs/crates/wt-engine/ (src/, tests/, src/bin, src/jni) and may run (not edit) engine-rs/crates/wt-parity's api-diff. The previous workers (agy-4, grok-3, grok-4) are paused or out of quota. Do not edit other crates; wt-core is being finished in parallel by codex-1: build against its public API in crates/wt-core/src/lib.rs and ask the coordinator if something is missing or broken (it is routed to codex-1).
+Read first: engine-rs/docs/PORT_MAP.md, engine-rs/docs/RESUME.md, crates/wt-engine/PORT_NOTES.md, src/types.HANDOFF-grok-1.md (JSON fixes, server.rs call-site changes), tests/ENGINE_TESTS.md, crates/wt-parity/API_DIFF_CRITICAL.md, docs/specs/integrate.md (the integration task agy-4 did not finish), the PlaybackHost trait in src/playback.rs, and src/jni/host_api.rs. Reference: engine-go/server.go, types.go, playback.go and the rest of engine-go.
+Change:
+1. server.rs: EngineServer owns one wt_core::Client configured exactly like server.go lines 190-320, storage from wt_storage (DocumentStorageClient for downloads; wt_storage::direct_storage for Direct Play); TorrentRecord wraps wt_core::Torrent; every route in server.go handleControl backed by the real core; settings persistence and DHT contact persistence like Go; tracker status from ClientConfig callbacks; seeding policy; wt_policy where server.go uses the Go policies.
+2. Implement PlaybackHost for EngineServer and route open/read/close playback and preview through playback.rs PlaybackSession, keeping the frozen signatures used by src/jni and src/ctl_http.rs; stream_http over the same readers.
+3. types.rs: fix every JSON difference so responses match Go encoding/json (names, int vs float, null vs omitted, nested shapes); fix route-behaviour diffs (status codes).
+Acceptance (report each with output):
+- cargo build -p wt-engine (lib and --bin engine-host) and clippy -p wt-engine --all-targets -D warnings clean;
+- two engine-host processes on localhost transfer a fixture torrent: one seeds a completed download, the other adds it by magnet with x.pe and reaches 100%; show the /torrent/<id> JSON;
+- `cargo run -p wt-parity -- api-diff` (see wt-parity/README.md): 0 CRITICAL diffs, report MATCH/DIFF counts;
+- un-ignore the engine integration tests in tests/engine_*.rs as features work; report pass/ignored/fail counts by file (target: all pass);
+- bash engine-rs/build-android.sh still produces an arm64 libengine.so with the 9 JNI symbols.
+Build rules: CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/codex-2, CARGO_BUILD_JOBS=4, never under /tmp, keep 25 GB disk free, at most one release build at a time. No git write commands; the coordinator commits. Send the coordinator a status message after each acceptance item.
