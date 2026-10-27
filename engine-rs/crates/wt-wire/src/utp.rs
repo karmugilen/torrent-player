@@ -97,6 +97,16 @@ pub fn now_micros(start: Instant) -> u32 {
     (start.elapsed().as_micros() & 0xffff_ffff) as u32
 }
 
+/// Wall-clock microseconds for uTP header timestamps (libtorrent gettimeofday).
+/// Relative elapsed timestamps make peer delay samples ~unix-epoch-sized and
+/// collapse LEDBAT windows on public swarms.
+pub fn wall_micros() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_micros() & 0xffff_ffff) as u32)
+        .unwrap_or(0)
+}
+
 struct OutgoingPacket {
     seq_nr: u16,
     len: usize,
@@ -108,6 +118,7 @@ struct StreamState {
     send_id: u16,
     _recv_id: u16,
     remote_addr: SocketAddr,
+    #[allow(dead_code)]
     start_time: Instant,
 
     // Send state
@@ -190,6 +201,45 @@ impl AsyncRead for UtpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let mut st = self.inner.state.lock();
+        // Retransmit while blocked on read — otherwise a lost first DATA
+        // after SYN-ACK never retries (poll_write is not called again).
+        let retransmit = st.unacked.front().and_then(|front| {
+            if front.sent_at.elapsed() > Duration::from_millis(500) {
+                Some((
+                    front.seq_nr,
+                    front.len,
+                    front.payload.clone(),
+                    st.send_id,
+                    wall_micros(),
+                    st.last_measured_delay,
+                    DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32),
+                    st.ack_nr,
+                    st.remote_addr,
+                ))
+            } else {
+                None
+            }
+        });
+        if let Some((seq, len, payload, send_id, ts, delay, wnd, ack, target)) = retransmit {
+            if let Some(front) = st.unacked.front_mut() {
+                front.sent_at = Instant::now();
+            }
+            let hdr = PacketHeader {
+                type_ver: (ST_DATA << 4) | UTP_VERSION,
+                extension: EXT_NONE,
+                connection_id: send_id,
+                timestamp_micros: ts,
+                timestamp_diff_micros: delay,
+                wnd_size: wnd,
+                seq_nr: seq,
+                ack_nr: ack,
+            };
+            let mut pkt = BytesMut::with_capacity(HEADER_SIZE + len);
+            hdr.encode(&mut pkt);
+            pkt.extend_from_slice(&payload);
+            let _ = self.inner.socket_tx.send((pkt.freeze(), target));
+        }
+
         if !st.recv_buf.is_empty() {
             let to_read = std::cmp::min(buf.remaining(), st.recv_buf.len());
             let slice = st.recv_buf.split_to(to_read);
@@ -202,7 +252,7 @@ impl AsyncRead for UtpStream {
                     type_ver: (ST_STATE << 4) | UTP_VERSION,
                     extension: EXT_NONE,
                     connection_id: st.send_id,
-                    timestamp_micros: now_micros(st.start_time),
+                    timestamp_micros: wall_micros(),
                     timestamp_diff_micros: st.last_measured_delay,
                     wnd_size: DEFAULT_RECV_WND,
                     seq_nr: st.seq_nr,
@@ -222,6 +272,12 @@ impl AsyncRead for UtpStream {
         }
 
         st.read_waker = Some(cx.waker().clone());
+        // Wake periodically so retransmit check above can run while reading.
+        let waker = cx.waker().clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            waker.wake();
+        });
         Poll::Pending
     }
 }
@@ -270,7 +326,7 @@ impl AsyncWrite for UtpStream {
                 type_ver: (ST_DATA << 4) | UTP_VERSION,
                 extension: EXT_NONE,
                 connection_id: st.send_id,
-                timestamp_micros: now_micros(st.start_time),
+                timestamp_micros: wall_micros(),
                 timestamp_diff_micros: st.last_measured_delay,
                 wnd_size: DEFAULT_RECV_WND,
                 seq_nr: seq,
@@ -298,7 +354,7 @@ impl AsyncWrite for UtpStream {
             // Retransmission check if waiting for window
             let my_wnd = DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32);
             let send_id = st.send_id;
-            let ts = now_micros(st.start_time);
+            let ts = wall_micros();
             let delay = st.last_measured_delay;
             let ack = st.ack_nr;
             let target = st.remote_addr;
@@ -349,7 +405,7 @@ impl AsyncWrite for UtpStream {
                 type_ver: (ST_FIN << 4) | UTP_VERSION,
                 extension: EXT_NONE,
                 connection_id: st.send_id,
-                timestamp_micros: now_micros(st.start_time),
+                timestamp_micros: wall_micros(),
                 timestamp_diff_micros: st.last_measured_delay,
                 wnd_size: DEFAULT_RECV_WND,
                 seq_nr: st.seq_nr,
@@ -405,6 +461,16 @@ impl UtpSocket {
                     break;
                 }
                 for (buf, target) in batch.drain(..) {
+                    if std::env::var_os("WT_UTP_TRACE").is_some() && buf.len() >= HEADER_SIZE {
+                        let t = buf[0] >> 4;
+                        let cid = u16::from_be_bytes([buf[2], buf[3]]);
+                        let seq = u16::from_be_bytes([buf[16], buf[17]]);
+                        let ack = u16::from_be_bytes([buf[18], buf[19]]);
+                        eprintln!(
+                            "utp OUT ->{target} type={t} cid={cid} seq={seq} ack={ack} len={}",
+                            buf.len()
+                        );
+                    }
                     let _ = udp_out.send_to(&buf, target).await;
                 }
             }
@@ -452,13 +518,25 @@ impl UtpSocket {
                     }
                 };
 
-                let now_u = now_micros(start_time);
+                let now_u = wall_micros();
                 let delay = now_u.wrapping_sub(hdr.timestamp_micros);
 
+                if std::env::var_os("WT_UTP_TRACE").is_some() {
+                    eprintln!(
+                        "utp IN  <-{peer} type={pkt_type} cid={} seq={} ack={} len={len}",
+                        hdr.connection_id, hdr.seq_nr, hdr.ack_nr
+                    );
+                }
+
                 if pkt_type == ST_SYN {
-                    // Incoming connection
-                    let recv_id = hdr.connection_id;
-                    let send_id = recv_id.wrapping_add(1);
+                    // Incoming connection (BEP 29 / libutp):
+                    // SYN carries initiator recv_id (=A). Acceptor send_id=A,
+                    // recv_id=A+1. Response ST_STATE uses send_id=A.
+                    // Previous code swapped send/recv; local loopback still
+                    // worked because both ends were inverted, but public
+                    // libtorrent/qBittorrent peers rejected post-SYN data.
+                    let send_id = hdr.connection_id;
+                    let recv_id = send_id.wrapping_add(1);
 
                     let mut st = StreamState::new(send_id, recv_id, peer, start_time);
                     st.ack_nr = hdr.seq_nr;
@@ -476,8 +554,8 @@ impl UtpSocket {
                     let resp = PacketHeader {
                         type_ver: (ST_STATE << 4) | UTP_VERSION,
                         extension: EXT_NONE,
-                        connection_id: recv_id,
-                        timestamp_micros: now_micros(start_time),
+                        connection_id: send_id,
+                        timestamp_micros: wall_micros(),
                         timestamp_diff_micros: delay,
                         wnd_size: DEFAULT_RECV_WND,
                         seq_nr: 1,
@@ -501,16 +579,20 @@ impl UtpSocket {
                 let inner = match stream_opt {
                     Some(s) => s,
                     None => {
-                        // Check if it's a SYN-ACK for an ongoing connect()
+                        // SYN-ACK for an ongoing connect(): peer echoes our
+                        // SYN connection_id (= our recv_id A). Initiator
+                        // send_id = A+1, recv_id = A (BEP 29 diagram).
                         let mut syn_map = syn_senders_in.lock();
                         if let Some(sender) = syn_map.remove(&(peer, hdr.connection_id)) {
-                            let send_id = hdr.connection_id;
-                            let recv_id = send_id.wrapping_add(1);
+                            let recv_id = hdr.connection_id;
+                            let send_id = recv_id.wrapping_add(1);
                             let mut st = StreamState::new(send_id, recv_id, peer, start_time);
                             st.seq_nr = 2; // ST_SYN consumed seq 1
-                            st.ack_nr = hdr.seq_nr;
-                            // ST_STATE does NOT consume a sequence number, so server's first
-                            // data packet will have seq_nr == hdr.seq_nr
+                            // libtorrent/libutp: ST_STATE does not consume seq_nr. Init
+                            // ack_nr to seq-1; first peer DATA still uses seq (== STATE.seq).
+                            // Using ack_nr=STATE.seq makes libtorrent ignore our DATA
+                            // (ack_nr > m_seq_nr-1) — public uTP HS then stalls forever.
+                            st.ack_nr = hdr.seq_nr.wrapping_sub(1);
                             st.expected_seq_nr = hdr.seq_nr;
                             st.last_remote_ack = hdr.ack_nr;
 
@@ -529,7 +611,7 @@ impl UtpSocket {
                             type_ver: (ST_RESET << 4) | UTP_VERSION,
                             extension: EXT_NONE,
                             connection_id: hdr.connection_id,
-                            timestamp_micros: now_micros(start_time),
+                            timestamp_micros: wall_micros(),
                             timestamp_diff_micros: 0,
                             wnd_size: 0,
                             seq_nr: 1,
@@ -605,14 +687,17 @@ impl UtpSocket {
                         st.ack_nr = st.expected_seq_nr.wrapping_sub(1);
                         st.unacked_recv_count += 1;
 
-                        let should_ack = st.unacked_recv_count >= 2 || !st.out_of_order.is_empty();
+                        // ACK every DATA promptly — delayed ACK (>=2) starved
+                        // public-swarm peers that wait for ack before more data.
+                        let should_ack =
+                            st.unacked_recv_count >= 1 || !st.out_of_order.is_empty();
                         if should_ack {
                             st.unacked_recv_count = 0;
                             let resp = PacketHeader {
                                 type_ver: (ST_STATE << 4) | UTP_VERSION,
                                 extension: EXT_NONE,
                                 connection_id: st.send_id,
-                                timestamp_micros: now_micros(st.start_time),
+                                timestamp_micros: wall_micros(),
                                 timestamp_diff_micros: delay,
                                 wnd_size: DEFAULT_RECV_WND,
                                 seq_nr: st.seq_nr,
@@ -635,7 +720,7 @@ impl UtpSocket {
                             type_ver: (ST_STATE << 4) | UTP_VERSION,
                             extension: EXT_NONE,
                             connection_id: st.send_id,
-                            timestamp_micros: now_micros(st.start_time),
+                            timestamp_micros: wall_micros(),
                             timestamp_diff_micros: delay,
                             wnd_size: DEFAULT_RECV_WND,
                             seq_nr: st.seq_nr,
@@ -693,6 +778,7 @@ impl UtpSocket {
     }
 
     pub async fn connect(&self, remote: SocketAddr) -> io::Result<UtpStream> {
+        // BEP 29: SYN carries conn_id_recv; subsequent packets use recv+1.
         let conn_id: u16 = rand::random();
         let (tx, rx) = oneshot::channel();
         self.syn_senders.lock().insert((remote, conn_id), tx);
@@ -701,7 +787,9 @@ impl UtpSocket {
             type_ver: (ST_SYN << 4) | UTP_VERSION,
             extension: EXT_NONE,
             connection_id: conn_id,
-            timestamp_micros: 0,
+            // Wall-clock micros like libtorrent gettimeofday; relative
+            // timestamps make peer delay samples nonsensical.
+            timestamp_micros: wall_micros(),
             timestamp_diff_micros: 0,
             wnd_size: DEFAULT_RECV_WND,
             seq_nr: 1,

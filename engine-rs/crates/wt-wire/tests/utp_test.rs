@@ -1,9 +1,75 @@
+use bytes::BytesMut;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use wt_wire::utp::UtpSocket;
+use wt_wire::utp::{PacketHeader, UtpSocket, EXT_NONE, HEADER_SIZE, ST_DATA, ST_STATE, ST_SYN};
+
+/// BEP 29: a raw UDP peer that speaks correct connection IDs must complete
+/// handshake with our initiator (send=A+1, recv=A after SYN with A).
+#[tokio::test]
+async fn test_utp_bep29_ids_against_raw_acceptor() {
+    let raw = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    let raw_addr = raw.local_addr().unwrap();
+
+    let client = UtpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    let acceptor = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        let (n, peer) = raw.recv_from(&mut buf).await.unwrap();
+        assert!(n >= HEADER_SIZE);
+        let mut slice = bytes::Bytes::copy_from_slice(&buf[..n]);
+        let syn = PacketHeader::decode(&mut slice).unwrap();
+        assert_eq!(syn.type_ver >> 4, ST_SYN);
+        let a = syn.connection_id;
+        // Acceptor: send=A, recv=A+1 (libutp / BEP diagram)
+        let send_id = a;
+        let _recv_id = a.wrapping_add(1);
+        let resp = PacketHeader {
+            type_ver: (ST_STATE << 4) | 1,
+            extension: EXT_NONE,
+            connection_id: send_id,
+            timestamp_micros: 0,
+            timestamp_diff_micros: 0,
+            wnd_size: 1_048_576,
+            seq_nr: 42,
+            ack_nr: syn.seq_nr,
+        };
+        let mut out = BytesMut::with_capacity(HEADER_SIZE);
+        resp.encode(&mut out);
+        raw.send_to(&out, peer).await.unwrap();
+
+        // First DATA from initiator must use connection_id = A+1
+        let (n, _) = raw.recv_from(&mut buf).await.unwrap();
+        let mut slice = bytes::Bytes::copy_from_slice(&buf[..n]);
+        let data = PacketHeader::decode(&mut slice).unwrap();
+        assert_eq!(
+            data.type_ver >> 4,
+            ST_DATA,
+            "expected ST_DATA after connect"
+        );
+        assert_eq!(
+            data.connection_id,
+            a.wrapping_add(1),
+            "initiator must send with conn_id_recv+1 (BEP 29)"
+        );
+        a
+    });
+
+    let client_task = tokio::spawn(async move {
+        let mut stream = client.connect(raw_addr).await.unwrap();
+        stream.write_all(b"ping").await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let (a, _) = tokio::join!(acceptor, client_task);
+    a.unwrap();
+}
 
 #[tokio::test]
 async fn test_utp_demux_non_utp() {
@@ -139,4 +205,45 @@ async fn test_utp_loopback_64mib() {
     let (r1, r2) = tokio::join!(server_task, client_task);
     r1.unwrap();
     r2.unwrap();
+}
+
+/// Manual public-swarm probe (ignored). Run with:
+/// PUBLIC_UTP_PEER=107.175.93.162:6881 cargo test -p wt-wire --test utp_test test_utp_public_peer_hs -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn test_utp_public_peer_hs() {
+    let addr: SocketAddr = std::env::var("PUBLIC_UTP_PEER")
+        .unwrap_or_else(|_| "107.175.93.162:6881".into())
+        .parse()
+        .unwrap();
+    let sock = UtpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    println!("local {:?}", sock.local_addr().unwrap());
+    let t0 = Instant::now();
+    let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(8), sock.connect(addr)).await {
+        Ok(Ok(s)) => {
+            println!("utp connect ok in {:?}", t0.elapsed());
+            s
+        }
+        Ok(Err(e)) => panic!("connect err {e} in {:?}", t0.elapsed()),
+        Err(_) => panic!("connect timeout in {:?}", t0.elapsed()),
+    };
+    let mut hs = vec![19u8];
+    hs.extend_from_slice(b"BitTorrent protocol");
+    hs.extend_from_slice(&[0u8; 8]);
+    hs.extend_from_slice(&hex::decode("d160b8d8ea35a5b4e52837468fc8f03d55cef1f7").unwrap());
+    hs.extend_from_slice(b"-WW0001-012345678901");
+    tokio::time::timeout(std::time::Duration::from_secs(10), stream.write_all(&hs))
+        .await
+        .expect("write timeout")
+        .expect("write err");
+    let _ = stream.flush().await;
+    println!("wrote hs in {:?}", t0.elapsed());
+    let mut buf = [0u8; 68];
+    match tokio::time::timeout(std::time::Duration::from_secs(10), stream.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => println!("read hs ok in {:?} reserved={:?} peer_id={:?}", t0.elapsed(), &buf[20..28], String::from_utf8_lossy(&buf[48..])),
+        Ok(Err(e)) => panic!("read err {e} after {:?}", t0.elapsed()),
+        Err(_) => panic!("read timeout after {:?}", t0.elapsed()),
+    }
 }
