@@ -188,3 +188,13 @@ Owned for this dispatch: `src/conn/` (`mod.rs`, `handle.rs`, `driver.rs`, `diale
 - `cargo clippy -p wt-core --test conn_test -- -D warnings`: 0 warnings.
 - `cargo clippy -p wt-wire --all-targets -- -D warnings`: 0 warnings.
 - `cargo fmt --check`: Clean.
+
+---
+
+## Client and connection manager (codex-4)
+
+- One Sources instance per client shares the uTP datagram socket with DHT and UDP trackers; tracker status callbacks and the optional `ClientConfig::tracker_dialer` are wired through Sources.
+- Torrent registration serializes concurrent adds, merges tracker/web-seed data, and indexes both hybrid short hashes. Accepted and dialled peers use `PeerConnHandler` and the bounded connection driver with shared client upload/download limiters; candidate scheduling and backoff are provided by TorrentInner.
+- TCP/uTP loopback transfers, a metadata-only magnet against a storage-restored seeder, hybrid merge, repeated close, half-open guards, incoming established limit, and request-update wake/deadline behavior have client/connection tests.
+- Listener close signals the accept loops, and client close aborts tracked tasks and closes connection handles. Each client owns a dedicated Tokio runtime; synchronous bootstrap and close also work from within a current-thread runtime.
+- Dial timeout uses the Go pending-peer reduction formula, but TCP and uTP are attempted sequentially (TCP first), rather than Go's concurrent DialFirst. Torrent-side candidate ordering, peer watermarks, and detailed retry policy remain subject to the TorrentInner implementation.

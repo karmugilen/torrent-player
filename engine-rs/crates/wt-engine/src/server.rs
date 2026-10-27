@@ -8,7 +8,7 @@
 //!
 //! Port of `engine-go/server.go`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -29,6 +29,7 @@ use crate::types::*;
 pub struct TorrentRecord {
     pub torrent: wt_core::Torrent,
     playback_coordinator: Arc<crate::playback::PlaybackPriorityCoordinator>,
+    playback_demand: HashSet<u32>,
     pub id: String,
     pub info_hash: String,
     pub name: Option<String>,
@@ -177,6 +178,12 @@ impl EngineServer {
 
         let storage = Arc::new(wt_storage::DocumentStorageClient::new(&dir));
         let status_target = tracker_status.clone();
+        let client_ref: Arc<OnceLock<Weak<wt_core::ClientInner>>> = Arc::new(OnceLock::new());
+        let callback_client = client_ref.clone();
+        let hint_dir = dir.clone();
+        let hint_store = Arc::new(Mutex::new(wt_storage::PeerHintStore::new()));
+        hint_store.lock().load(&dir);
+        let callback_hints = hint_store.clone();
         let callbacks = wt_core::Callbacks {
             status_updated: vec![Arc::new(move |event| {
                 let (hash, url, status, message) = match event {
@@ -197,10 +204,69 @@ impl EngineServer {
                 };
                 status_target.set_status(&hash.to_hex(), url, status, message);
             })],
-            ..Default::default()
+            completed_handshake: vec![Arc::new(move |connection, hash| {
+                let Some(inner) = callback_client.get().and_then(Weak::upgrade) else {
+                    return;
+                };
+                let Some(info) = (wt_core::Client { inner })
+                    .torrent(hash)
+                    .and_then(|t| t.info())
+                else {
+                    return;
+                };
+                if info.private == Some(true) {
+                    return;
+                }
+                let peer = wt_core::PeerInfo {
+                    id: connection.peer_id,
+                    addr: connection.dial_addr.unwrap_or(connection.remote_addr),
+                    source: connection.source,
+                    supports_encryption: connection.encrypted,
+                    pex: Default::default(),
+                    trusted: false,
+                };
+                let hints = callback_hints.clone();
+                let dir = hint_dir.clone();
+                std::thread::spawn(move || {
+                    hints
+                        .lock()
+                        .remember_peer_hint(&dir, &hash.to_hex(), &peer, false)
+                });
+            })],
         };
+        let dialer = network.dialer();
+        let tracker_dialer = Some(Arc::new(
+            move |_network: String,
+                  address: String|
+                  -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = std::io::Result<tokio::net::TcpStream>> + Send,
+                >,
+            > {
+                let dialer = dialer.clone();
+                Box::pin(async move {
+                    let epoch = dialer.epoch();
+                    let stream = tokio::time::timeout(
+                        Duration::from_secs(6),
+                        tokio::net::TcpStream::connect(address),
+                    )
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "tracker dial timed out")
+                    })??;
+                    if dialer.epoch() != epoch {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            "network changed",
+                        ));
+                    }
+                    Ok(stream)
+                })
+            },
+        ) as _);
         let config = wt_core::ClientConfig {
             callbacks,
+            tracker_dialer,
             default_storage: storage.clone(),
             listen_port: 0,
             no_dht: false,
@@ -244,6 +310,7 @@ impl EngineServer {
             .collect(),
         };
         let client = wt_core::Client::new(config).map_err(std::io::Error::other)?;
+        let _ = client_ref.set(Arc::downgrade(&client.inner));
         let mut contacts = wt_storage::DhtContactStore::new();
         contacts.load(&dir);
         client.add_dht_nodes(
@@ -300,6 +367,43 @@ impl EngineServer {
         });
         let _ = server.self_ref.set(Arc::downgrade(&server));
         Ok(server)
+    }
+
+    fn apply_seed_policy(&self, rec: &mut TorrentRecord) {
+        rec.seeding = false;
+        if rec.paused || !self.payload_transfers_allowed.load(Ordering::SeqCst) {
+            rec.torrent.disallow_data_upload();
+            return;
+        }
+        if !rec.configured || rec.direct_play || rec.selected.is_empty() {
+            return;
+        }
+        let files = rec.torrent.files();
+        let selected: Vec<_> = files
+            .iter()
+            .filter(|f| rec.selected.contains(&f.index()))
+            .collect();
+        let size: i64 = selected.iter().map(|f| f.length()).sum();
+        let complete = selected.len() == rec.selected.len()
+            && size > 0
+            && selected.iter().all(|f| f.bytes_completed() >= f.length());
+        if !complete {
+            rec.torrent.allow_data_upload();
+            return;
+        }
+        let account = rec.seed_base;
+        let uploaded = account.uploaded + rec.torrent.stats().conn_stats.bytes_written_data;
+        let ratio = uploaded as f64 / size.max(account.downloaded).max(1) as f64;
+        let allowed = self.seeding_enabled.load(Ordering::SeqCst)
+            && self.seeding_allowed.load(Ordering::SeqCst)
+            && ratio < self.seed_ratio_milli.load(Ordering::SeqCst) as f64 / 1000.0
+            && account.seconds < self.seed_time_minutes.load(Ordering::SeqCst) * 60;
+        if allowed {
+            rec.torrent.allow_data_upload();
+            rec.seeding = true;
+        } else {
+            rec.torrent.disallow_data_upload();
+        }
     }
 
     pub fn notify_change(&self) {
@@ -548,6 +652,7 @@ impl EngineServer {
                 })
                 .collect(),
         );
+        torrent.set_max_established_conns(self.max_peers.load(Ordering::SeqCst));
         let info_hash = torrent.info_hash().to_hex();
         let id = info_hash.clone();
         let info = torrent.info();
@@ -580,6 +685,7 @@ impl EngineServer {
         let rec = Arc::new(RwLock::new(TorrentRecord {
             torrent: torrent.clone(),
             playback_coordinator: Arc::new(crate::playback::PlaybackPriorityCoordinator::new()),
+            playback_demand: HashSet::new(),
             id: id.clone(),
             info_hash: info_hash.clone(),
             name: info.as_ref().map(|i| i.name.clone()),
@@ -635,6 +741,7 @@ impl EngineServer {
             Some(r) => {
                 let mut rec = r.write();
                 rec.refresh();
+                self.apply_seed_policy(&mut rec);
                 rec
             }
             None => {
@@ -661,13 +768,7 @@ impl EngineServer {
             .map(|f| f.verified_bytes)
             .sum();
         let view = TorrentView {
-            seeding: rec.configured
-                && !rec.direct_play
-                && !rec.paused
-                && selected_total > 0
-                && selected_verified >= selected_total
-                && self.seeding_enabled.load(Ordering::SeqCst)
-                && self.seeding_allowed.load(Ordering::SeqCst),
+            seeding: rec.seeding,
             seed_ratio: 0.0,
             id: rec.id.clone(),
             info_hash: Some(rec.info_hash.clone()),
@@ -1186,7 +1287,15 @@ impl EngineServer {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            if let Ok(data) = wt_meta::encode_metainfo(&mi) {
+            if let Ok(mut data) = wt_meta::encode_metainfo(&mi) {
+                // Go's generated metainfo includes empty piece-layers and URL-list containers.
+                if mi.piece_layers.is_empty()
+                    && mi.url_list.is_empty()
+                    && data.last() == Some(&b'e')
+                {
+                    data.pop();
+                    data.extend_from_slice(b"12:piece layersde8:url-listlee");
+                }
                 let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
                 return (
                     200,
@@ -1238,7 +1347,7 @@ impl EngineServer {
             }
         };
 
-        if let Some(peers) = req.max_peers {
+        if let Some(peers) = req.max_peers.filter(|&p| p != 0) {
             if !(8..=500).contains(&peers) {
                 return (
                     400,
@@ -1266,6 +1375,7 @@ impl EngineServer {
         if let Some(dial) = req.dial_rate_per_sec {
             let clamped = dial.clamp(10, 80);
             self.dial_rate_per_sec.store(clamped, Ordering::SeqCst);
+            self.client.inner.dial_limiter.set_limit(clamped as f64);
         }
 
         if let Some(ghost) = req.ghost_mode {
@@ -1309,45 +1419,44 @@ impl EngineServer {
         }
         if let Some(down) = req.download_rate_bytes_sec {
             self.download_rate_limit.store(down, Ordering::SeqCst);
+            self.client.inner.download_limiter.set_limit(if down > 0 {
+                down as f64
+            } else {
+                f64::INFINITY
+            });
         }
         if let Some(up) = req.upload_rate_bytes_sec {
             self.upload_rate_limit.store(up, Ordering::SeqCst);
+            self.client.inner.upload_limiter.set_limit(if up > 0 {
+                up as f64
+            } else {
+                f64::INFINITY
+            });
         }
         if let Some(allowed) = req.payload_transfers_allowed {
             self.payload_transfers_allowed
                 .store(allowed, Ordering::SeqCst);
         }
 
-        for t in self.client.torrents() {
-            if self.seeding_enabled.load(Ordering::SeqCst)
-                && self.seeding_allowed.load(Ordering::SeqCst)
-            {
-                t.allow_data_upload();
+        for r in self.records.read().values() {
+            let mut rec = r.write();
+            if self.payload_transfers_allowed.load(Ordering::SeqCst) && !rec.paused {
+                rec.torrent.allow_data_download();
             } else {
-                t.disallow_data_upload();
+                rec.torrent.disallow_data_download();
             }
-            if self.payload_transfers_allowed.load(Ordering::SeqCst) {
-                t.allow_data_download();
-            } else {
-                t.disallow_data_download();
-            }
+            self.apply_seed_policy(&mut rec);
         }
         self.notify_change();
         self.handle_get_settings()
     }
 
     fn handle_network_change(&self, body: &str) -> (u16, Vec<u8>) {
-        let req: NetworkChangeRequest = match serde_json::from_str(body) {
-            Ok(r) => r,
-            Err(_) => {
-                return (
-                    400,
-                    serde_json::to_vec(&json!({"error": "invalid json"})).unwrap(),
-                )
-            }
+        let (generation, connected) = match NetworkManager::parse_change_body(body) {
+            Ok(v) => v,
+            Err(e) => return (400, serde_json::to_vec(&json!({"error":e})).unwrap()),
         };
-        let connected = req.connected.unwrap_or(false);
-        let _ = self.network.on_network_change(req.generation, connected);
+        let _ = self.network.on_network_change(generation, connected);
         self.notify_change();
         (
             200,
@@ -1473,12 +1582,17 @@ impl EngineServer {
             .ok_or_else(|| std::io::Error::other("engine closed"))?;
         let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
         let (_, reader) = PlaybackReader::open_for_host(host, coordinator, id, index, 0, handle)?;
-        self.playback_readers.lock().insert(handle, reader.clone());
+        let mut readers = self.playback_readers.lock();
+        readers.retain(|_, reader| !reader.is_closed());
+        readers.insert(handle, reader.clone());
         Ok(reader)
     }
 
     pub fn open_preview(&self, id: &str, index: usize) -> std::io::Result<Arc<PreviewReader>> {
         let mut active = self.preview_active.lock();
+        if active.as_ref().is_some_and(|reader| reader.is_closed()) {
+            *active = None;
+        }
         if active.is_some() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -1582,16 +1696,41 @@ impl crate::playback::PlaybackHost for EngineServer {
     }
     fn apply_piece_priorities(&self, id: &str, demand: &HashMap<u32, wt_core::PiecePriority>) {
         if let Some(r) = self.records.read().get(id) {
-            let rec = r.read();
+            let mut rec = r.write();
+            let previous = std::mem::take(&mut rec.playback_demand);
+            let info = rec.torrent.info();
+            for piece in previous {
+                if demand.contains_key(&piece) {
+                    continue;
+                }
+                let wanted = info.as_ref().is_some_and(|info| {
+                    let p = info.piece(piece);
+                    rec.torrent.files().iter().any(|f| {
+                        rec.selected.contains(&f.index())
+                            && f.offset() < p.offset + p.length
+                            && f.offset() + f.length() > p.offset
+                    })
+                });
+                rec.torrent.set_piece_priority(
+                    piece,
+                    if wanted {
+                        wt_core::PiecePriority::Normal
+                    } else {
+                        wt_core::PiecePriority::None
+                    },
+                );
+            }
             for (&piece, &priority) in demand {
                 rec.torrent.set_piece_priority(piece, priority);
             }
+            rec.playback_demand.extend(demand.keys().copied());
         }
     }
     fn clear_piece_priorities(&self, id: &str, pieces: &[u32]) {
         if let Some(r) = self.records.read().get(id) {
-            let rec = r.read();
+            let mut rec = r.write();
             for &piece in pieces {
+                rec.playback_demand.remove(&piece);
                 rec.torrent
                     .set_piece_priority(piece, wt_core::PiecePriority::None);
             }

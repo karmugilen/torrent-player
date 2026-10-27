@@ -23,7 +23,9 @@ pub trait ConnHandler: Send + 'static {
 
     fn on_wake(&mut self, _handle: &ConnHandle) {}
 
-    fn wake_interval(&self) -> Option<std::time::Duration> { None }
+    fn wake_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// A cheaply cloneable handle to an active peer connection.

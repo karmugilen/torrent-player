@@ -258,7 +258,11 @@ pub fn torrent_spec(
 }
 
 /// Dial seeder from leecher (Go `AddClientPeer` analogue via public ClientInner).
-pub async fn add_client_peer(_leecher: &Client, leecher_torrent: &Torrent, seeder_addr: SocketAddr) {
+pub async fn add_client_peer(
+    _leecher: &Client,
+    leecher_torrent: &Torrent,
+    seeder_addr: SocketAddr,
+) {
     leecher_torrent.add_peers(vec![peer_info(seeder_addr)]);
 }
 

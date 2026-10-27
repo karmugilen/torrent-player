@@ -17,25 +17,23 @@ wt-parity     [##############################] 100%  done     grok-1, codex-3
 wt-engine     [#############################.]  95%  running  codex-2+5
 ```
 
-Started 10:59 · elapsed 1.9 h · now 95%
+Started 10:59 · elapsed 2.0 h · now 95%
 
-Critical path: wt-engine
+ETA (rough, from the last 59 min at 5.7%/h):
 
-ETA (rough, from the last 59 min at 8.9%/h):
-
-- crates complete: ~14:54 (in 2.0 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~18:54 (in 6.0 h; the 4 h after the crates is a planning guess)
+- crates complete: ~13:53 (in 0.9 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~17:53 (in 4.9 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | codex-1+4 | running | 13626 | 11303 | 121 | 207 | 1 | codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig) |
-| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5019 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
+| wt-core | codex-1+4 | running | 13626 | 11570 | 121 | 211 | 1 | codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig) |
+| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 2642 | 65 | 110 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
 | wt-parity | grok-1, codex-3 | done | 0 | 3374 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
-| wt-engine | codex-2+5 | running | 5609 | 5098 | 71 | 178 | 0 | codex-2 (server on wt_core, api-diff 29 match / 1 critical) + codex-5 (types.rs, 11 real engine tests, 132 placeholders) |
+| wt-engine | codex-2+5 | running | 5609 | 5169 | 71 | 178 | 0 | codex-2 (server on wt_core, api-diff 29 match / 1 critical) + codex-5 (types.rs, 11 real engine tests, 132 placeholders) |
 ## Milestones (the real finish line): 6/13
 
 ```text
@@ -69,8 +67,8 @@ The crate bars above count code written; these milestones count things that work
 
 ## Pending
 
-- [ ] wt-core (codex-1+4): 90%, 11303 of ~10900 Rust lines, 207/121 tests
-- [ ] wt-engine (codex-2+5): 95%, 5098 of ~4487 Rust lines, 178/71 tests
+- [ ] wt-core (codex-1+4): 90%, 11570 of ~10900 Rust lines, 211/121 tests
+- [ ] wt-engine (codex-2+5): 95%, 5169 of ~4487 Rust lines, 178/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
 - [ ] Android: libengine.so (arm64) + APK build
@@ -178,10 +176,12 @@ The crate bars above count code written; these milestones count things that work
 - codex-3 perf bug: Direct Play startup-piece save does hash+write+fsync under the global storage lock (Go queues it to a background drain); approved fix in storage.rs
 - ClientConfig + Callbacks moved to codex-4 (tracker dial hook, completed_handshake callback); coordinator stops editing codex-1 files on request
 - New connection path: TCP transfer with automatic add_peers dialing passes (256 KiB verified, hash completion)
+- Two-engine test: seeder restored 100%, leecher fetched metadata over the wire (magnet works), then stalled at 0% / 0 peers; routed to codex-1 + codex-4
 
 ## Commits
 
 ```text
+092396b engine-rs: milestone - automatic-dial TCP transfer
 b5bed0d engine-rs: codex checkpoint (new connection path TCP transfer with automatic dialing passes)
 d370599 engine-rs: milestone checklist in the progress report
 4ff7b0e engine-rs: progress report update

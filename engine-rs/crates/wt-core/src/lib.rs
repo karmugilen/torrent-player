@@ -576,6 +576,9 @@ impl Torrent {
     }
 
     pub fn peer_conns(&self) -> Vec<PeerConnInfo> {
+        let snapshots = self.inner.peer_snapshots.read();
+        if !snapshots.is_empty() { return snapshots.values().cloned().collect(); }
+        drop(snapshots);
         let conns = self.inner.conns.read();
         conns
             .values()
@@ -616,6 +619,10 @@ impl Torrent {
     }
 
     pub fn drop_peer(&self, addr: SocketAddr) -> bool {
+        if let Some(handle) = self.inner.conn_handles.read().get(&addr).cloned() {
+            handle.close("dropped by caller");
+            return true;
+        }
         let mut conns = self.inner.conns.write();
         if let Some(conn) = conns.remove(&addr) {
             conn.close();
@@ -709,10 +716,13 @@ impl Torrent {
 
     pub fn drop_torrent(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
+        for handle in self.inner.conn_handles.read().values() { handle.close("torrent dropped"); }
         let conns = self.inner.conns.write();
         for c in conns.values() {
             c.close();
         }
+        drop(conns);
+        self.inner.bump_change();
     }
 
     // ------------------------------------------------ Webtor extensions
@@ -729,6 +739,7 @@ impl Torrent {
     }
 
     pub fn refocus_requests(&self) {
+        self.inner.bump_change();
         let conns = self.inner.conns.read();
         for c in conns.values() {
             self.inner.refill_peer_requests(c);
@@ -751,9 +762,13 @@ impl Torrent {
                 .interest_end
                 .store(end as i64 + 1, Ordering::Relaxed);
         }
+        self.inner.bump_change();
     }
 
     pub fn peer_counts(&self) -> (usize, usize) {
+        let snapshots = self.inner.peer_snapshots.read();
+        if !snapshots.is_empty() { return (snapshots.len(), snapshots.values().filter(|s| !s.peer_choking).count()); }
+        drop(snapshots);
         let conns = self.inner.conns.read();
         let total = conns.len();
         let unchoked = conns
@@ -764,6 +779,17 @@ impl Torrent {
     }
 
     pub fn drop_chokers(&self, after: Duration) -> usize {
+        let snapshots = self.inner.peer_snapshots.read();
+        let since = self.inner.choked_since.read();
+        let selected: Vec<_> = snapshots.values().filter(|p| p.peer_choking && p.am_interested && since.get(&p.remote_addr).is_some_and(|t| t.elapsed() >= after)).take(2).map(|p| p.remote_addr).collect();
+        drop(since);
+        drop(snapshots);
+        if !selected.is_empty() {
+            let handles = self.inner.conn_handles.read();
+            for addr in &selected { if let Some(handle) = handles.get(addr) { handle.close("choked too long"); } }
+            self.inner.chokers_dropped.fetch_add(selected.len() as i64, Ordering::Relaxed);
+            return selected.len();
+        }
         let mut conns = self.inner.conns.write();
         let mut to_drop = Vec::new();
         for (&addr, c) in conns.iter() {

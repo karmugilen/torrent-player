@@ -705,3 +705,61 @@ async fn test_shared_socket_demux_delivers_dht_while_utp_runs() {
         b"d1:rd2:id20:0123456789abcdefghije1:t2:011:y1:re"
     );
 }
+
+#[tokio::test]
+async fn request_wake_is_coalesced_and_does_not_extend_read_deadline() {
+    struct WakeHandler(Arc<AtomicUsize>);
+    impl ConnHandler for WakeHandler {
+        fn on_message(&mut self, _: &ConnHandle, _: Message) -> Result<()> {
+            Ok(())
+        }
+        fn on_closed(&mut self, _: &ConnHandle, _: &str) {}
+        fn on_wake(&mut self, _: &ConnHandle) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let (stream, _peer) = tokio::io::duplex(1024);
+    let (tx, rx) = mpsc::channel(8);
+    let waker = Arc::new(Notify::new());
+    let handle = ConnHandle::new(
+        "127.0.0.1:1".parse().unwrap(),
+        true,
+        Transport::Tcp,
+        false,
+        InfoHash([0; 20]),
+        None,
+        PeerSource::Direct,
+        tx,
+        waker.clone(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(wt_core::stats::AtomicConnStats::default()),
+    );
+    let count = Arc::new(AtomicUsize::new(0));
+    handle.wake();
+    handle.wake();
+    let (reader, writer) = spawn_connection_driver(
+        stream,
+        WakeHandler(count.clone()),
+        handle.clone(),
+        rx,
+        waker,
+        None,
+        None,
+        Duration::from_secs(60),
+        Duration::from_millis(150),
+    );
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    handle.wake();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    tokio::time::timeout(Duration::from_millis(200), reader)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        handle.close_reason().as_deref(),
+        Some("read deadline exceeded (keepalive timeout)")
+    );
+    writer.abort();
+}

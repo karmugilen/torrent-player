@@ -12,6 +12,39 @@ use e2e_support::{
     testing_config, torrent_spec, wait_bytes_completed, wait_local_port, GREETING_CONTENTS,
 };
 use wt_core::{Client, MemoryClientStorage};
+use wt_types::ClientStorage;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restored_seeder_to_magnet_download() {
+    let (info, ih, data, info_bytes) = patterned_torrent("restored.bin", 256 * 1024, 16 * 1024);
+    let seed_storage = Arc::new(MemoryClientStorage::new());
+    let store = seed_storage.open_torrent(&info, ih).unwrap();
+    for i in 0..info.num_pieces() {
+        let piece = info.piece(i);
+        let storage = store.piece(piece, info.piece_hash_v1(i));
+        let start = i as usize * info.piece_length as usize;
+        storage.write_at(&data[start..start + piece.length as usize], 0).unwrap();
+        storage.mark_complete().unwrap();
+    }
+    let mut seed_config = testing_config(seed_storage.clone(), true);
+    seed_config.disable_utp = true;
+    let seed = Client::new(seed_config).unwrap();
+    let (seed_t, _) = seed.add_torrent_spec(torrent_spec(ih, Some(info_bytes), "restored", Some(seed_storage))).unwrap();
+    assert_eq!(seed_t.bytes_completed(), data.len() as i64);
+    let addr = format!("127.0.0.1:{}", wait_local_port(&seed).await).parse().unwrap();
+
+    let download_storage = Arc::new(MemoryClientStorage::new());
+    let mut download_config = testing_config(download_storage.clone(), false);
+    download_config.disable_utp = true;
+    let download = Client::new(download_config).unwrap();
+    let (torrent, _) = download.add_torrent_spec(torrent_spec(ih, None, "magnet", Some(download_storage.clone()))).unwrap();
+    torrent.download_all();
+    add_client_peer(&download, &torrent, addr).await;
+    wait_bytes_completed(&torrent, data.len() as i64, Duration::from_secs(20)).await;
+    assert_eq!(read_all_from_storage(&download_storage, &info, ih), data);
+    download.close();
+    seed.close();
+}
 
 /// Go `testClientTransfer` default (TCP+uTP enabled) reading the greeting torrent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

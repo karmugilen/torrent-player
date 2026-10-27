@@ -86,8 +86,8 @@ Recorded by running the ignored 64 MiB test and the closest Go transfer.
 
 | Engine | Command | MiB/s | Notes |
 |--------|---------|-------|-------|
-| Rust `wt-core` | `cargo test -p wt-core --test e2e_throughput throughput_64mib_tcp -- --ignored --nocapture` | _TBD — fill after first ignored run_ | 64 MiB, 1 MiB pieces, TCP-only, MemoryClientStorage, loopback |
-| Go anacrolix | Closest: `go test` `TestClientTransferDefault` / transfer path in `engine-go/patches/torrent/test` (no dedicated 64 MiB BenchmarkDownload in tree; use timed transfer or existing `transfer_test.rs` parity) | _TBD_ | See § Go throughput note |
+| Rust `wt-core` | `cargo test -p wt-core --test e2e_throughput throughput_64mib_tcp -- --ignored --nocapture` | 2.4429 | 64 MiB, 1 MiB pieces, TCP-only, MemoryClientStorage, loopback, unoptimized test profile (2026-10-27) |
+| Go engine parity harness | `engine-rs/docs/events.txt` recorded baseline | 19.5 | Different harness; not a comparable Go library benchmark. A matched Go library measurement remains outstanding. |
 
 ### Go throughput note
 

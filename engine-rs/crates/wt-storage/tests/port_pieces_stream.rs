@@ -66,11 +66,15 @@ fn test_direct_play_piece_grid_tracks_ram_replacement() {
             // Wait briefly for startup save of piece 0.
             let deadline = std::time::Instant::now() + Duration::from_secs(1);
             while std::time::Instant::now() < deadline {
-                if st.piece_complete(0) {
+                if st.startup_piece_path(0).exists() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
+            assert!(
+                st.startup_piece_path(0).exists(),
+                "startup save did not finish"
+            );
         }
 
         let runs = st.stream_piece_runs(8).unwrap();

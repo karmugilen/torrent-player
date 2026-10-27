@@ -412,6 +412,9 @@ fn main() {
     println!("=== RUST STORAGE BENCHMARKS ===");
 
     let measure = |name: &str, bytes: i64, f: &mut dyn FnMut() -> Duration| {
+        if std::env::var("WT_STORAGE_BENCH_FILTER").is_ok_and(|filter| !name.contains(&filter)) {
+            return;
+        }
         let bytes_before = ALLOCATED_BYTES.load(Ordering::Relaxed);
         let count_before = ALLOC_COUNT.load(Ordering::Relaxed);
 

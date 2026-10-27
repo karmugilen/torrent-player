@@ -109,6 +109,8 @@ pub struct TorrentInner {
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
     pub dial_backoff: Mutex<HashMap<SocketAddr, Instant>>,
     pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
+    pub peer_snapshots: RwLock<HashMap<SocketAddr, crate::stats::PeerConnInfo>>,
+    pub choked_since: RwLock<HashMap<SocketAddr, Instant>>,
     pub peer_notify: tokio::sync::Notify,
     pub trackers: RwLock<Vec<Vec<String>>>,
     pub web_seeds: RwLock<Vec<String>>,
@@ -174,6 +176,8 @@ impl TorrentInner {
             dialing_peers: Mutex::new(HashSet::new()),
             dial_backoff: Mutex::new(HashMap::new()),
             conn_handles: RwLock::new(HashMap::new()),
+            peer_snapshots: RwLock::new(HashMap::new()),
+            choked_since: RwLock::new(HashMap::new()),
             peer_notify: tokio::sync::Notify::new(),
             trackers: RwLock::new(Vec::new()),
             web_seeds: RwLock::new(Vec::new()),
@@ -201,6 +205,7 @@ impl TorrentInner {
     pub fn bump_change(&self) {
         self.change_version.fetch_add(1, Ordering::SeqCst);
         self.peer_notify.notify_one();
+        for handle in self.conn_handles.read().values() { handle.wake(); }
         let _guard = self.change_mutex.lock();
         self.change_cond.notify_all();
     }
@@ -303,8 +308,6 @@ impl TorrentInner {
         self.bump_change();
     }
     pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify { &self.peer_notify }
-    pub(crate) fn infohashes(&self) -> (InfoHash, Option<InfoHash>) { (self.info_hash, self.info_hash_v2.map(|h| h.to_short())) }
-    pub(crate) fn skey_matches(&self, skey: &[u8; 20]) -> bool { self.info_hash.0 == *skey || self.info_hash_v2.is_some_and(|h| h.to_short().0 == *skey) }
 
     pub fn set_info(&self, info: Arc<Info>) -> Result<()> {
         let num_pieces = info.num_pieces() as usize;
@@ -592,6 +595,7 @@ impl TorrentInner {
         {
             return 0;
         }
+        for handle in self.conn_handles.read().values() { handle.wake(); }
         self.rescue_head_of_line();
         self.hedge_head_of_line();
 

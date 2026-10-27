@@ -394,6 +394,10 @@ fn test_next_episode_preload_has_its_own_startup_budget() {
 
     for &index in &[0usize, 2, 3, 5] {
         let path = st.startup_piece_path(index);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(
             path.exists(),
             "startup piece {index} not saved at {}",

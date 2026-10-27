@@ -2,8 +2,7 @@
 //!
 //! Ports the Client side of `engine-go/patches/torrent/client.go`: one Tokio
 //! runtime, hybrid short-hash registry, PeerListener (TCP+uTP), half-open /
-//! dial limiters, Sources (DHT/trackers/WebTorrent), and legacy PeerConn attach
-//! after `conn::dial_peer` / accept (until `PeerTorrent` is wired by agy-2).
+//! dial limiters, Sources (DHT/trackers/WebTorrent), and peer connection drivers.
 
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
@@ -103,7 +102,7 @@ impl TorrentAnnounceInfo for TorrentSourcesAdapter {
             .torrent
             .data_download_disallowed
             .load(Ordering::Relaxed)
-            && !self.torrent.seeding.load(Ordering::Relaxed)
+            && !self.completed()
     }
 
     fn want_peers(&self) -> bool {
@@ -150,30 +149,33 @@ pub struct ClientInner {
     pub active_half_open: AtomicUsize,
     pub closed: AtomicBool,
     pub tokio_handle: tokio::runtime::Handle,
-    pub _runtime: Option<tokio::runtime::Runtime>,
+    _runtime: ClientRuntime,
     listener: RwLock<Option<Arc<PeerListener>>>,
     sources: RwLock<Option<Arc<Sources>>>,
     accept_tx_closed: AtomicBool,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+struct ClientRuntime(Option<tokio::runtime::Runtime>);
+
+impl Drop for ClientRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl ClientInner {
     pub fn new(cfg: ClientConfig) -> Result<Arc<Self>> {
-        let (handle, rt) = match tokio::runtime::Handle::try_current() {
-            Ok(h) => (h, None),
-            Err(_) => {
-                // Android-sized: few async workers; blocking pool for storage/hash.
-                let blocking = cfg.piece_hashers_per_torrent.saturating_mul(4).max(8);
-                let r = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(4)
-                    .max_blocking_threads(blocking)
-                    .thread_name("wt-client")
-                    .enable_all()
-                    .build()?;
-                let h = r.handle().clone();
-                (h, Some(r))
-            }
-        };
+        let blocking = cfg.piece_hashers_per_torrent.saturating_mul(4).max(8);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .max_blocking_threads(blocking)
+            .thread_name("wt-client")
+            .enable_all()
+            .build()?;
+        let handle = rt.handle().clone();
 
         let mut peer_id = [0u8; 20];
         peer_id[..8].copy_from_slice(b"-WT0100-");
@@ -208,7 +210,6 @@ impl ClientInner {
 
         let listen_port = Arc::new(RwLock::new(cfg.listen_port));
         let half_open = HalfOpenTracker::new();
-        let owns_runtime = rt.is_some();
 
         let client = Arc::new(Self {
             peer_id,
@@ -227,7 +228,7 @@ impl ClientInner {
             active_half_open: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             tokio_handle: handle.clone(),
-            _runtime: rt,
+            _runtime: ClientRuntime(Some(rt)),
             listener: RwLock::new(None),
             sources: RwLock::new(None),
             accept_tx_closed: AtomicBool::new(false),
@@ -238,13 +239,7 @@ impl ClientInner {
         // Bind listeners + Sources on the client runtime.
         let cl = client.clone();
         let boot = async move { cl.bootstrap_networking().await };
-        let boot_res = if owns_runtime {
-            // We own the runtime and are not inside it yet.
-            handle.block_on(boot)
-        } else {
-            // Already on a runtime (e.g. #[tokio::test]): allow nested block_on.
-            tokio::task::block_in_place(|| handle.block_on(boot))
-        };
+        let boot_res = client.block_on(boot);
         boot_res.map_err(|e| CoreError::Other(format!("client bootstrap: {e}")))?;
 
         Ok(client)
@@ -345,6 +340,7 @@ impl ClientInner {
     fn register_sources(
         &self,
         torrent: &Arc<TorrentInner>,
+        keys: TorrentKeys,
         trackers: Vec<Vec<String>>,
         web_seeds: Vec<String>,
     ) {
@@ -358,12 +354,13 @@ impl ClientInner {
             peers_low_water: self.config.torrent_peers_low_water,
         });
         let reg = RegisterTorrent {
-            keys: Self::torrent_keys_for(torrent),
+            keys,
             trackers,
             web_seeds,
             info: adapter.clone() as Arc<dyn TorrentAnnounceInfo>,
             sink: adapter as Arc<dyn PeerSink>,
         };
+        let _entered = self.tokio_handle.enter();
         if let Err(e) = sources.register_torrent(reg) {
             tracing::debug!("register_torrent: {e}");
         }
@@ -411,6 +408,19 @@ impl ClientInner {
                         .and_then(|v2| short_map.get(&v2.to_short()).cloned())
                 });
             if let Some(existing) = existing {
+                if spec
+                    .info_hash_v2
+                    .and_then(|v2| short_map.get(&v2.to_short()))
+                    .is_some_and(|other| !Arc::ptr_eq(other, &existing))
+                    || spec
+                        .info_hash
+                        .and_then(|v1| short_map.get(&v1))
+                        .is_some_and(|other| !Arc::ptr_eq(other, &existing))
+                {
+                    return Err(CoreError::Other(
+                        "torrent hashes already belong to different torrents".into(),
+                    ));
+                }
                 drop(short_map);
                 drop(torrents_map);
                 self.merge_spec(&existing, &spec, info_obj)?;
@@ -420,6 +430,24 @@ impl ClientInner {
                 }
                 if let Some(v2) = spec.info_hash_v2 {
                     aliases.insert(v2.to_short(), Arc::clone(&existing));
+                }
+                drop(aliases);
+                let mut new_keys = TorrentKeys {
+                    v1: None,
+                    v2_short: None,
+                };
+                if spec.info_hash.is_some_and(|v1| v1 != existing.info_hash) {
+                    new_keys.v1 = spec.info_hash;
+                }
+                if let Some(v2) = spec.info_hash_v2 {
+                    if existing.info_hash_v2.is_none() && v2.to_short() != existing.info_hash {
+                        new_keys.v2_short = Some(v2.to_short());
+                    }
+                }
+                if new_keys.v1.is_some() || new_keys.v2_short.is_some() {
+                    let trackers = existing.trackers.read().clone();
+                    let web_seeds = existing.web_seeds.read().clone();
+                    self.register_sources(&existing, new_keys, trackers, web_seeds);
                 }
                 return Ok((existing, false));
             }
@@ -440,10 +468,6 @@ impl ClientInner {
         torrent_inner
             .max_established_conns
             .store(self.config.established_conns_per_torrent, Ordering::Relaxed);
-        if self.config.seed {
-            torrent_inner.seeding.store(true, Ordering::Relaxed);
-        }
-
         if let Some(info) = info_obj {
             torrent_inner.set_info(Arc::new(info))?;
         }
@@ -472,6 +496,7 @@ impl ClientInner {
 
         self.register_sources(
             &torrent_inner,
+            Self::torrent_keys_for(&torrent_inner),
             spec.trackers.clone(),
             spec.web_seeds.clone(),
         );
@@ -522,6 +547,7 @@ impl ClientInner {
         }
 
         if let Some(sources) = self.sources.read().clone() {
+            let _entered = self.tokio_handle.enter();
             let keys = Self::torrent_keys_for(torrent);
             let _ = sources.add_trackers(&keys, spec.trackers.clone());
             if !spec.web_seeds.is_empty() {
@@ -567,9 +593,17 @@ impl ClientInner {
         self.block_on(async move { sources.dht_contacts().await })
     }
 
-    fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
+    fn block_on<F: std::future::Future + Send>(&self, fut: F) -> F::Output
+    where
+        F::Output: Send,
+    {
         if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| self.tokio_handle.block_on(fut))
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.tokio_handle.block_on(fut))
+                    .join()
+                    .expect("client runtime operation panicked")
+            })
         } else {
             self.tokio_handle.block_on(fut)
         }
@@ -632,9 +666,18 @@ impl ClientInner {
                 if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
                     break;
                 }
-                let count = torrent
-                    .wants_conns()
-                    .min(client.config.half_open_conns_per_torrent);
+                let count =
+                    torrent
+                        .wants_conns()
+                        .min(client.config.half_open_conns_per_torrent.saturating_sub(
+                            client.half_open.current_for_torrent(&torrent.info_hash),
+                        ))
+                        .min(
+                            client
+                                .config
+                                .total_half_open_conns
+                                .saturating_sub(client.half_open.current_total()),
+                        );
                 for peer in torrent.take_dial_candidates(count) {
                     let cl = Arc::clone(&client);
                     let tor = Arc::clone(&torrent);
@@ -723,6 +766,13 @@ impl ClientInner {
             .as_ref()
             .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
+        let mut cfg = self.config.clone();
+        let half_open_limit = cfg.half_open_conns_per_torrent.max(1);
+        let pending = torrent.known_peers.read().len();
+        let divisor = pending.saturating_add(half_open_limit) / half_open_limit;
+        cfg.nominal_dial_timeout = (cfg.nominal_dial_timeout
+            / divisor.min(u32::MAX as usize) as u32)
+            .max(cfg.min_dial_timeout);
         let utp = self
             .listener
             .read()
@@ -735,7 +785,7 @@ impl ClientInner {
             transport: Some(transport),
             source,
             metadata_size,
-            cfg: &self.config,
+            cfg: &cfg,
             tracker: &self.half_open,
             dial_limiter: Some(&self.dial_limiter),
             tcp_conn_hook: hook.as_ref(),

@@ -112,16 +112,16 @@ Status values: `pass` (real test runs and passes), `waiting` (real test ignored 
 | `TestSeekResumeComparison` | `engine_seek_http::test_seek_resume_comparison` | placeholder |
 | `TestStatusReportsConnectionsNotDiscoveredCandidates` | `engine_server::test_status_reports_connections_not_discovered_candidates` | placeholder |
 | `TestAddMagnetBeforeMetadataReturnsRecord` | `engine_server::test_add_magnet_before_metadata_returns_record` | pass |
-| `TestPauseIsReportedAndResumeRestoresSelection` | `engine_server::test_pause_is_reported_and_resume_restores_selection` | placeholder |
+| `TestPauseIsReportedAndResumeRestoresSelection` | `engine_server::test_pause_is_reported_and_resume_restores_selection` | pass |
 | `TestPayloadTransferSettingGatesBytesButPreservesManualPause` | `engine_server::test_payload_transfer_setting_gates_bytes_but_preserves_manual_pause` | placeholder |
-| `TestPayloadGateKeepsPendingMagnetDiscoverable` | `engine_server::test_payload_gate_keeps_pending_magnet_discoverable` | placeholder |
-| `TestPayloadGateRejectsIncompletePlaybackClearly` | `engine_server::test_payload_gate_rejects_incomplete_playback_clearly` | placeholder |
+| `TestPayloadGateKeepsPendingMagnetDiscoverable` | `engine_server::test_payload_gate_keeps_pending_magnet_discoverable` | pass |
+| `TestPayloadGateRejectsIncompletePlaybackClearly` | `engine_server::test_payload_gate_rejects_incomplete_playback_clearly` | waiting |
 | `TestPieceTelemetryReportsSelectedPieces` | `engine_server::test_piece_telemetry_reports_selected_pieces` | placeholder |
 | `TestAccumulateBucketPieceSelectedMixedCounts` | `engine_server::test_accumulate_bucket_piece_selected_mixed_counts` | placeholder |
 | `TestPieceTelemetrySelectedVerifiedIgnoresExcluded` | `engine_server::test_piece_telemetry_selected_verified_ignores_excluded` | placeholder |
 | `TestPieceTelemetrySharedBoundaryCountsAsSelected` | `engine_server::test_piece_telemetry_shared_boundary_counts_as_selected` | placeholder |
 | `TestPieceTelemetryInclusiveRangesAndMaxBuckets` | `engine_server::test_piece_telemetry_inclusive_ranges_and_max_buckets` | placeholder |
-| `TestSettingsApplyToExistingAndFutureTorrents` | `engine_settings::test_settings_apply_to_existing_and_future_torrents` | placeholder |
+| `TestSettingsApplyToExistingAndFutureTorrents` | `engine_settings::test_settings_apply_to_existing_and_future_torrents` | pass |
 | `TestCacheShrinkPreservesDirtyDownloadBytes` | `engine_settings::test_cache_shrink_preserves_dirty_download_bytes` | placeholder |
 | `TestCacheResizeKeepsDirectPlayReadableAndPreviewBounded` | `engine_settings::test_cache_resize_keeps_direct_play_readable_and_preview_bounded` | placeholder |
 | `TestSmallRAMSettingKeepsFourDirectPlayPieces` | `engine_settings::test_small_ram_setting_keeps_four_direct_play_pieces` | placeholder |
@@ -172,9 +172,9 @@ Status values: `pass` (real test runs and passes), `waiting` (real test ignored 
 ## Counts
 
 - total mapped: 143
-- real and passing: 11
-- real but waiting: 0
-- placeholders: 132
+- real and passing: 14
+- real but waiting: 1 (playback must reject incomplete files while payload transfers are disabled)
+- placeholders: 128
 - fails: 0
 
 ## Compile note

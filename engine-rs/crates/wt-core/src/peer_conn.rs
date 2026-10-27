@@ -154,6 +154,7 @@ pub trait PeerTorrent: Send + Sync {
     fn note_availability(&self, piece: PieceIndex, delta: i32);
     fn note_peer_piece(&self, _peer: PeerKey, _piece: PieceIndex, _has: bool) {}
     fn peer_closed(&self, _addr: SocketAddr) {}
+    fn update_peer_snapshot(&self, _info: PeerConnInfo) {}
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes>;
@@ -640,6 +641,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.send(handle, Message::Unchoke);
         }
         self.update_requests(handle);
+        self.torrent.update_peer_snapshot(self.peer_conn_info());
     }
 
     pub fn peer_conn_info(&self) -> PeerConnInfo {
@@ -1306,6 +1308,34 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 }
 
 impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
+    fn on_wake(&mut self, handle: &ConnHandle) {
+        let should_choke = self.torrent.data_upload_disallowed();
+        if self.state.am_choking != should_choke {
+            self.state.am_choking = should_choke;
+            self.send(handle, if should_choke { Message::Choke } else { Message::Unchoke });
+        }
+        if self.torrent.data_download_disallowed() {
+            let requests: Vec<_> = self.state.outstanding_requests.drain().collect();
+            for req in requests {
+                let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
+                self.send(handle, Message::Cancel { index: coord.piece, begin: coord.offset, length: coord.length });
+                self.torrent.clear_chunk_requested(req);
+                if self.torrent.requesting_peer(req) == Some(self.key()) { self.torrent.clear_assignment(req); }
+            }
+        } else {
+            self.update_requests(handle);
+        }
+        self.torrent.update_peer_snapshot(self.peer_conn_info());
+    }
+
+    fn wake_interval(&self) -> Option<Duration> {
+        if (0..self.torrent.num_pieces()).any(|i| self.torrent.piece_priority(i) >= PiecePriority::Next && !self.torrent.piece_complete(i)) {
+            Some(Duration::from_millis(100))
+        } else {
+            None
+        }
+    }
+
     fn on_message(&mut self, handle: &ConnHandle, msg: Message) -> Result<()> {
         match msg {
             Message::Keepalive => {}
@@ -1423,6 +1453,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         if self.state.need_request_update {
             self.update_requests(handle);
         }
+        self.torrent.update_peer_snapshot(self.peer_conn_info());
         Ok(())
     }
 

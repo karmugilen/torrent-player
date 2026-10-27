@@ -141,41 +141,22 @@ impl EngineHostApi for AndroidEngineHost {
         if file_index < 0 {
             return 0;
         }
-        let index = file_index as usize;
-        // Open via public EngineServer fields so we stay resilient while
-        // agy-4 settles open_playback's return type (Arc vs (handle, Arc)).
-        let length = {
-            let records = server.records.read();
-            let Some(rec) = records.get(id) else {
-                log_error("torrent not found");
-                return 0;
-            };
-            let rec = rec.read();
-            if index >= rec.files.len() {
-                log_error("invalid file index");
+        let reader = match server.open_playback(id, file_index as usize) {
+            Ok(reader) => reader,
+            Err(err) => {
+                log_error(&format!("open playback: {err}"));
                 return 0;
             }
-            rec.files[index].length
         };
-        let read_fn = Arc::new(|buf: &mut [u8], _offset: i64| {
-            buf.fill(0);
-            Ok(buf.len())
-        });
-        let reader = Arc::new(PlaybackReader::new(
-            id.to_string(),
-            index,
-            length,
-            read_fn,
-            false,
-            false,
-            false,
-            None,
-        ));
-        let handle = server.next_reader_id.fetch_add(1, Ordering::SeqCst);
-        server
+        let handle = match server
             .playback_readers
             .lock()
-            .insert(handle, reader.clone());
+            .iter()
+            .find_map(|(&handle, candidate)| Arc::ptr_eq(candidate, &reader).then_some(handle))
+        {
+            Some(handle) => handle,
+            None => return 0,
+        };
         self.playback.lock().insert(handle, reader);
         handle
     }
@@ -218,38 +199,22 @@ impl EngineHostApi for AndroidEngineHost {
         if file_index < 0 {
             return 0;
         }
-        let index = file_index as usize;
-        {
-            let active = server.preview_active.lock();
-            if active.is_some() {
-                log_error("preview already active");
+        let reader = match server.open_preview(id, file_index as usize) {
+            Ok(reader) => reader,
+            Err(err) => {
+                log_error(&format!("open preview: {err}"));
                 return 0;
             }
-        }
-        let length = {
-            let records = server.records.read();
-            let Some(rec) = records.get(id) else {
-                log_error("torrent not found");
-                return 0;
-            };
-            let rec = rec.read();
-            if index >= rec.files.len() {
-                log_error("invalid file index");
-                return 0;
-            }
-            rec.files[index].length
         };
-        let reader = Arc::new(PreviewReader::new(
-            index,
-            length,
-            Box::new(|buf: &mut [u8], _offset: i64| {
-                buf.fill(0);
-                Ok(buf.len())
-            }),
-        ));
-        *server.preview_active.lock() = Some(reader.clone());
-        let handle = server.next_reader_id.fetch_add(1, Ordering::SeqCst);
-        server.preview_readers.lock().insert(handle, reader.clone());
+        let handle = match server
+            .preview_readers
+            .lock()
+            .iter()
+            .find_map(|(&handle, candidate)| Arc::ptr_eq(candidate, &reader).then_some(handle))
+        {
+            Some(handle) => handle,
+            None => return 0,
+        };
         self.preview.lock().insert(handle, reader);
         handle
     }

@@ -281,7 +281,7 @@ mod tests {
         let mut admitted_n = 0i64;
         let complete = |i: u32| i == 1;
         // piece 0 needs admission (1 MiB), piece 1 complete, piece 2 would exceed.
-        let budget = 1 * 1024 * 1024;
+        let budget = 1024 * 1024;
         let new_pieces = admit_preview_range(
             &mut admitted,
             &mut admitted_n,

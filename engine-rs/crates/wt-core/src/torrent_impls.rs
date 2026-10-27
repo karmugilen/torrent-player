@@ -203,7 +203,17 @@ impl PeerTorrent for TorrentInner {
             self.dial_backoff.lock().insert(addr, Instant::now() + Duration::from_secs(30));
         }
         self.peer_pieces.write().remove(&peer_key_from_addr(addr));
+        self.peer_snapshots.write().remove(&addr);
+        self.choked_since.write().remove(&addr);
         self.bump_change();
+    }
+
+    fn update_peer_snapshot(&self, info: crate::stats::PeerConnInfo) {
+        let mut since = self.choked_since.write();
+        if info.peer_choking { since.entry(info.remote_addr).or_insert_with(Instant::now); }
+        else { since.remove(&info.remote_addr); }
+        drop(since);
+        self.peer_snapshots.write().insert(info.remote_addr, info);
     }
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()> {
@@ -444,6 +454,9 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn webtor_peer_snap(&self, peer: PeerKey) -> Option<WebtorPeerSnap> {
+        if let Some(info) = self.peer_snapshots.read().values().find(|p| peer_key_from_addr(p.remote_addr) == peer) {
+            return Some(WebtorPeerSnap { key: peer, download_rate_bps: info.download_rate, rtt: info.rtt, queued: info.queued as u32, cancelled: info.cancelled as u32, nominal_max: 64, peer_choking: info.peer_choking, closed: false, last_useful: info.last_useful_data.and_then(|d| Instant::now().checked_sub(d)) });
+        }
         let addr = addr_for_key(self, peer)?;
         let conns = self.conns.read();
         let conn = conns.get(&addr)?;
@@ -463,6 +476,9 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn connected_peer_keys(&self) -> Vec<PeerKey> {
+        if !self.conn_handles.read().is_empty() {
+            return self.conn_handles.read().keys().map(|&addr| peer_key_from_addr(addr)).collect();
+        }
         self.conns
             .read()
             .keys()
@@ -580,18 +596,6 @@ pub fn note_peer_piece(t: &TorrentInner, peer: PeerKey, piece: PieceIndex, has: 
 impl TorrentInner {
     pub fn as_reader_host(self: &Arc<Self>) -> Arc<dyn crate::reader::ReaderHost> {
         Arc::clone(self) as Arc<dyn crate::reader::ReaderHost>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::Ipv4Addr;
-
-    #[test]
-    fn peer_key_stable() {
-        let a = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 6881));
-        assert_eq!(peer_key_from_addr(a), peer_key_from_addr(a));
     }
 }
 
@@ -759,3 +763,16 @@ impl ReaderHost for TorrentInner {
         self.nudge_urgent_requests();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn peer_key_stable() {
+        let a = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 6881));
+        assert_eq!(peer_key_from_addr(a), peer_key_from_addr(a));
+    }
+}
+

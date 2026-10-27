@@ -209,6 +209,9 @@ pub struct DocumentTorrentStorage {
     restore_verify: AtomicBool,
     freeze_trusted: AtomicBool,
     weak_self: Mutex<Weak<DocumentTorrentStorage>>,
+    startup_drained: Condvar,
+    #[cfg(test)]
+    startup_save_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 pub struct StorageInner {
@@ -243,6 +246,10 @@ pub struct StorageInner {
     pub pending_sync_fds: HashSet<RawFd>,
 
     // Direct play
+    startup_pending: HashMap<usize, Vec<u8>>,
+    startup_in_flight: Option<usize>,
+    startup_pending_bytes: usize,
+    startup_writing: bool,
     pub startup_pieces: HashMap<usize, bool>,
     pub startup_saved: HashMap<usize, bool>,
     pub startup_on_disk: HashMap<usize, bool>,
@@ -311,6 +318,10 @@ impl DocumentTorrentStorage {
                 flush_err: None,
                 pending_sync_fds: HashSet::new(),
 
+                startup_pending: HashMap::new(),
+                startup_in_flight: None,
+                startup_pending_bytes: 0,
+                startup_writing: false,
                 startup_pieces: HashMap::new(),
                 startup_saved: HashMap::new(),
                 startup_on_disk: HashMap::new(),
@@ -344,6 +355,9 @@ impl DocumentTorrentStorage {
             restore_verify: AtomicBool::new(false),
             freeze_trusted: AtomicBool::new(false),
             weak_self: Mutex::new(Weak::new()),
+            startup_drained: Condvar::new(),
+            #[cfg(test)]
+            startup_save_hook: Mutex::new(None),
         });
         *st.weak_self.lock() = Arc::downgrade(&st);
         if let Some(inf) = info {
@@ -2322,43 +2336,96 @@ impl DocumentTorrentStorage {
     fn save_startup_piece_locked(&self, inner: &mut StorageInner, index: usize) {
         if !inner.startup_pieces.get(&index).copied().unwrap_or(false)
             || inner.startup_saved.get(&index).copied().unwrap_or(false)
+            || inner.startup_pending.contains_key(&index)
+            || inner.startup_in_flight == Some(index)
         {
             return;
         }
-        let data = match inner.cache.get(&index) {
-            Some(d) => d,
-            None => return,
+        let Some(data) = inner.cache.get(&index) else {
+            return;
         };
-        let p_len = inner
+        let length = inner
             .info
             .as_ref()
             .map(|i| i.piece(index as u32).length)
             .unwrap_or(0);
-        if data.len() as i64 != p_len {
+        if data.len() as i64 != length
+            || inner.startup_pending_bytes + data.len()
+                > (DIRECT_STARTUP_BUDGET + DIRECT_PRELOAD_BUDGET) as usize
+        {
             return;
         }
-
-        let mut sha2 = Sha256::new();
-        sha2.update(data);
-        let sum2 = sha2.finalize();
-
-        let path = self.startup_piece_path(index);
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+        inner.startup_pending_bytes += data.len();
+        inner.startup_pending.insert(index, data.clone());
+        if !inner.startup_writing {
+            inner.startup_writing = true;
+            let storage = self.weak_self.lock().upgrade().expect("storage dropped");
+            std::thread::spawn(move || storage.drain_startup_pieces());
         }
-        let tmp = path.with_extension("tmp");
-        if let Ok(mut f) = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-        {
-            if f.write_all(sum2.as_slice()).is_ok()
-                && f.write_all(data).is_ok()
-                && f.sync_all().is_ok()
-                && fs::rename(tmp, path).is_ok()
-            {
+    }
+
+    fn drain_startup_pieces(&self) {
+        loop {
+            let (index, data) = {
+                let mut inner = self.inner.lock();
+                let Some(index) = inner.startup_pending.keys().next().copied() else {
+                    inner.startup_writing = false;
+                    self.startup_drained.notify_all();
+                    return;
+                };
+                inner.startup_in_flight = Some(index);
+                (index, inner.startup_pending.remove(&index).unwrap())
+            };
+            #[cfg(test)]
+            if let Some(hook) = self.startup_save_hook.lock().clone() {
+                hook();
+            }
+            let path = self.startup_piece_path(index);
+            let tmp = path.with_extension("tmp");
+            let written = (|| -> std::io::Result<()> {
+                let sum = Sha256::digest(&data);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut f = OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&tmp)?;
+                f.write_all(&sum)?;
+                f.write_all(&data)?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            let mut inner = self.inner.lock();
+            inner.startup_pending_bytes -= data.len();
+            inner.startup_in_flight = None;
+            let committed = written.is_ok()
+                && !inner.closed
+                && inner.startup_pieces.get(&index).copied().unwrap_or(false)
+                && fs::rename(&tmp, &path).is_ok();
+            if committed {
+                if inner.cache.get(&index) != Some(&data) {
+                    self.drop_cache_locked(&mut inner, index);
+                    inner.stream_ranges.remove(&index);
+                    inner.stream_whole.remove(&index);
+                }
+                inner.stream_lost.remove(&index);
                 inner.startup_saved.insert(index, true);
+                inner.completed.insert(index, true);
+                inner.stream_ready.notify();
+                // Retry verified startup pieces skipped while the bounded queue was full.
+                let candidates: Vec<usize> = inner
+                    .startup_pieces
+                    .keys()
+                    .copied()
+                    .filter(|p| inner.completed.get(p).copied().unwrap_or(false))
+                    .collect();
+                for p in candidates {
+                    self.save_startup_piece_locked(&mut inner, p);
+                }
+            } else {
+                let _ = fs::remove_file(&tmp);
             }
         }
     }
@@ -2375,6 +2442,12 @@ impl TorrentStorage for DocumentTorrentStorage {
 
     fn close(&self) -> StorageResult<()> {
         let mut inner = self.inner.lock();
+        if inner.closed {
+            return Ok(());
+        }
+        while inner.startup_writing {
+            self.startup_drained.wait(&mut inner);
+        }
         if inner.closed {
             return Ok(());
         }
@@ -2872,4 +2945,65 @@ pub fn delete_engine_owned_storage(base_dir: &Path, info_hash_hex: &str) -> Stor
         let _ = fs::remove_dir_all(dir);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_save_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use wt_types::FileInfo;
+
+    #[test]
+    fn slow_startup_save_does_not_block_piece_traffic() {
+        let base = PathBuf::from("/home/kar/.cache/wt-tmp/perf");
+        fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("startup-save-")
+            .tempdir_in(base)
+            .unwrap();
+        let info = Info {
+            name: "movie.mp4".into(),
+            piece_length: 16,
+            pieces: vec![0; 80],
+            files: vec![FileInfo {
+                length: 64,
+                path: vec![],
+                torrent_offset: 0,
+                attr: String::new(),
+                pieces_root: None,
+            }],
+            single_file: true,
+            private: None,
+            source: String::new(),
+            meta_version: 0,
+            file_tree_raw: None,
+        };
+        let storage = DocumentTorrentStorage::new(Some(info), InfoHash([7; 20]), dir.path());
+        storage.attach_direct_play(&[None], &[0]).unwrap();
+        storage.inner.lock().startup_pieces.insert(0, true);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *storage.startup_save_hook.lock() = Some(Arc::new(move || {
+            started_tx.send(()).unwrap();
+            release_rx.lock().recv().unwrap();
+        }));
+        let piece = storage.piece_at(0);
+        piece.write_at(&[1; 16], 0).unwrap();
+        piece.mark_complete().unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let other = storage.piece_at(1);
+        let thread = std::thread::spawn(move || {
+            done_tx.send(other.write_at(&[2; 16], 0)).unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(
+            result.unwrap().is_ok(),
+            "piece write blocked by startup save"
+        );
+        storage.close().unwrap();
+    }
 }

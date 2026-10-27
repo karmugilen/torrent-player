@@ -30,7 +30,11 @@ fn test_settings_apply_to_existing_and_future_torrents() {
     for id in [&first, &second] {
         let record = eng.server.records.read().get(id).unwrap().clone();
         let rec = record.read();
-        assert_eq!(rec.torrent.set_max_established_conns(500), 500, "torrent {id}");
+        assert_eq!(
+            rec.torrent.set_max_established_conns(500),
+            500,
+            "torrent {id}"
+        );
         let storage = eng
             .server
             .storage

@@ -24,10 +24,6 @@ fn create_torrent_with_data(size: usize, piece_len: usize) -> (Info, InfoHash, V
         piece_hashes.extend_from_slice(&hash);
     }
 
-    let mut info_hasher = Sha1::new();
-    info_hasher.update(&piece_hashes);
-    let ih: [u8; 20] = info_hasher.finalize().into();
-
     let info = Info {
         name: "test_transfer".to_string(),
         piece_length: piece_len as i64,
@@ -46,7 +42,8 @@ fn create_torrent_with_data(size: usize, piece_len: usize) -> (Info, InfoHash, V
         file_tree_raw: None,
     };
 
-    (info, InfoHash(ih), data)
+    let ih = wt_meta::info_hash_v1(&wt_meta::encode_info(&info).unwrap());
+    (info, ih, data)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

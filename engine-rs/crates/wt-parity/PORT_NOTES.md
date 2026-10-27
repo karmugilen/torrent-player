@@ -50,3 +50,5 @@ host binaries over the same HTTP control + stream API the Android app uses.
 - Optional: multi-file download scenario using `parity-multi` fixture
 - Optional: force fully cold seeks between repeats (fresh leecher + swarm)
 - Optional: tighter integration with wt-engine feature flags once the API lands
+
+Parity measurement updates: samples retain repeat order, Direct Play and seek latency measure receipt of the first response body byte, and resource and control API metrics use independent per-repeat measurements. Seeder payloads are hard-linked and host data directories are removed when processes exit. Existing pre-update JSON sorted its samples and cannot reliably identify repeat 0; recollect both hosts with the updated harness.

@@ -58,7 +58,7 @@ pub struct StatsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddRequest {
-    #[serde(alias = "torrent_id")]
+    #[serde(default, alias = "torrent_id")]
     pub torrent_id: String,
     #[serde(default)]
     pub prepare: bool,
@@ -154,6 +154,7 @@ pub struct TorrentView {
 pub struct PlayRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
+    #[serde(default)]
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_index: Option<usize>,
@@ -172,6 +173,7 @@ pub struct PlayRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FocusRequest {
+    #[serde(default)]
     pub id: String,
     pub file_index: Option<usize>,
 }
@@ -220,6 +222,7 @@ pub struct SelectResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdRequest {
+    #[serde(default)]
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destroy_store: Option<bool>,
@@ -435,6 +438,7 @@ pub struct PreviewStateResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkChangeRequest {
+    #[serde(default)]
     pub generation: i64,
     pub connected: Option<bool>,
 }

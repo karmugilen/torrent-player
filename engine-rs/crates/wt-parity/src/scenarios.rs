@@ -52,7 +52,7 @@ pub fn run(opts: RunOpts) -> Result<RunReport, String> {
 
     let started = unix_ms();
     let mut metrics = BTreeMap::new();
-    let mut notes = vec![
+    let notes = vec![
         format!(
             "scale video={}B seek={}B piece={}",
             scale.video_bytes, scale.seek_bytes, scale.piece_length
@@ -457,10 +457,7 @@ fn scenario_cold_seek(
             Ok((buf, _)) => {
                 return Err(format!("seek short read {} at off={off}", buf.len()));
             }
-            Err(e) => {
-                eprintln!("  seek err at off={off}: {e}");
-                samples_ms.push(15_000.0);
-            }
+            Err(e) => return Err(format!("seek at off={off} failed: {e}")),
         }
         std::thread::sleep(Duration::from_millis(300));
     }

@@ -87,7 +87,9 @@ async fn run_reader_loop<H>(
     let mut deadline = tokio::time::Instant::now() + read_deadline;
 
     while !handle.is_closed() {
-        let interval = handler.wake_interval().map(|d| d.max(Duration::from_millis(1)));
+        let interval = handler
+            .wake_interval()
+            .map(|d| d.max(Duration::from_millis(1)));
         let msg = tokio::select! {
             result = reader.read_msg() => result,
             _ = handle.read_waker().notified() => {
