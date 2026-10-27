@@ -1,6 +1,6 @@
 # Rust engine port progress
 
-## In plain words (updated 17:45)
+## In plain words (updated 18:05)
 
 **Where we are:** 7 of the 8 parts are finished and tested, including the
 torrent core. Two full Rust engines now download a torrent from each other
@@ -16,8 +16,10 @@ runs off the storage lock, like Go.
 
 **What is left (3 of 13 milestones):**
 
-1. The engine features that the ported Go tests wait on (about 95). Every Go
-   test has a real Rust port now.
+1. The engine features the Go tests check. All 143 tests are written in Rust
+   and 51 pass. 92 wait on features that agy-engine and agy-core are building.
+   63 of the ports were too thin compared with Go (6 of them "passed" without
+   really testing), so agy-tests is redoing those properly.
 2. Speed/RAM/CPU comparison of the full engine against Go (agy-perf is
    running it now). The Rust core alone downloads at 43 MiB/s on loopback,
    against the Go engine's 19.5.
@@ -32,7 +34,7 @@ agents. Their work was saved and committed before the new agents started.
 |---|---|
 | agy-core | core done; now the playback and preview features the tests need |
 | agy-engine | two-engine download done; now the server-side features the tests need |
-| agy-tests | all tests ported; switches each one on as its feature lands |
+| agy-tests | redoing the 63 thin test ports faithfully; switches tests on as features land |
 | agy-perf | full-engine speed/RAM/CPU comparison vs Go |
 
 **Safety:** builds stay out of `/tmp`, at least 25 GB of disk is kept free, and
@@ -55,7 +57,7 @@ wt-parity     [##############################] 100%  done     grok-1, codex-3
 wt-engine     [#############################.]  95%  running  agy-engine+tests
 ```
 
-Started 10:59 · elapsed 6.6 h · now 99%
+Started 10:59 · elapsed 6.7 h · now 99%
 
 ETA: not enough history yet to estimate.
 
@@ -84,7 +86,7 @@ MILESTONES [#######################.......] 10/13
 - [x] Magnet (ut_metadata) transfer and reader seek on the new connection path (library tests: magnet 256 KiB verified, seek first 64 KiB in 76 ms)
 - [x] Two engine-host processes transfer a torrent through the control API (engine_two_host: real processes, magnet + x.pe, SHA-1 checked; c5a7a13)
 - [x] Control API JSON: 0 CRITICAL (30 MATCH / 0 DIFF / 0 CRITICAL, re-verified by the coordinator after c5a7a13)
-- [ ] Engine integration tests: real ports passing (all ported; about 95 wait on engine features)
+- [ ] Engine integration tests: real ports passing (all 143 written, 51 pass, 92 wait on features; 63 hollow ports being redone)
 - [x] Direct Play startup saves off the storage lock (bounded background queue, slow-save test passes, codex-3)
 - [ ] Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
 - [ ] Rust APK built with -Pwebtor.engine=rust and tested on a device (debug APK installed on the phone, engine starts; release APK at the end)
@@ -114,7 +116,7 @@ The crate bars above count code written; these milestones count things that work
 |---|---|---|---|
 | agy-core | wt-core (all) + wt-engine playback, preview, stream | wt-core done and verified (d348339: all tests pass, 43 MiB/s release); now the playback and preview engine features the tests need | running |
 | agy-engine | wt-engine server | round 1 done and verified (c5a7a13: two engines download, api-diff 30/0/0); now the server-side features the ported tests wait on | running |
-| agy-tests | wt-engine tests | port the 132 placeholder engine tests from Go for real | running |
+| agy-tests | wt-engine tests | round 1: all 143 tests written, 51 pass, 92 wait on features (53962a0), but 63 ports are hollow vs Go; now making those faithful | running |
 | agy-perf | wt-storage, wt-parity, Android | Direct Play startup save off the lock, Rust APK build, Go-vs-Rust parity run | running |
 
 ## Earlier workers (finished or closed)
@@ -229,10 +231,14 @@ The crate bars above count code written; these milestones count things that work
 - agy-core round 2: takes wt-engine preview/playback/stream files and their test requests from agy-engine's backlog
 - agy-engine round 1 done and verified (c5a7a13): two engine-host processes download by magnet + x.pe to 100 % with SHA-1 checked bytes; api-diff 30/0/0 re-run by the coordinator; clippy clean
 - All Go engine tests now have real ports (0 placeholders); about 95 wait on named engine features; agy-engine (server) and agy-core (preview/playback) build them
+- agy-tests round 1 (53962a0): 87 pass / 0 fail / 92 ignored, but NOT accepted: 63 tests are under 40 % of their Go size (6 of them run and pass hollowly, e.g. seek comparisons); round 2 makes them faithful (docs/specs/weak_ports.py checks it)
 
 ## Commits
 
 ```text
+66a7830 engine-rs: agy-tests round 2 (hollow ports list)
+53962a0 wt-engine: port full engine integration test suite from Go with zero placeholders
+2149464 engine-rs: two-engine transfer verified, milestones 10/13
 9c79764 engine-rs: agy-engine round 2 spec
 b3691c7 docs/requests: notify agy-perf two-engine transfer works
 c5a7a13 wt-engine: complete core integration, wire transfer state and two-host test

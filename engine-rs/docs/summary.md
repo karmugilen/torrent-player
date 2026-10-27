@@ -1,4 +1,4 @@
-## In plain words (updated 17:45)
+## In plain words (updated 18:05)
 
 **Where we are:** 7 of the 8 parts are finished and tested, including the
 torrent core. Two full Rust engines now download a torrent from each other
@@ -14,8 +14,10 @@ runs off the storage lock, like Go.
 
 **What is left (3 of 13 milestones):**
 
-1. The engine features that the ported Go tests wait on (about 95). Every Go
-   test has a real Rust port now.
+1. The engine features the Go tests check. All 143 tests are written in Rust
+   and 51 pass. 92 wait on features that agy-engine and agy-core are building.
+   63 of the ports were too thin compared with Go (6 of them "passed" without
+   really testing), so agy-tests is redoing those properly.
 2. Speed/RAM/CPU comparison of the full engine against Go (agy-perf is
    running it now). The Rust core alone downloads at 43 MiB/s on loopback,
    against the Go engine's 19.5.
@@ -30,7 +32,7 @@ agents. Their work was saved and committed before the new agents started.
 |---|---|
 | agy-core | core done; now the playback and preview features the tests need |
 | agy-engine | two-engine download done; now the server-side features the tests need |
-| agy-tests | all tests ported; switches each one on as its feature lands |
+| agy-tests | redoing the 63 thin test ports faithfully; switches tests on as features land |
 | agy-perf | full-engine speed/RAM/CPU comparison vs Go |
 
 **Safety:** builds stay out of `/tmp`, at least 25 GB of disk is kept free, and

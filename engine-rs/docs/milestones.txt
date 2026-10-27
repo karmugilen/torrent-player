@@ -7,7 +7,7 @@ x|Transfer driven only by add_peers (automatic dialing) on the new connection pa
 x|Magnet (ut_metadata) transfer and reader seek on the new connection path (library tests: magnet 256 KiB verified, seek first 64 KiB in 76 ms)
 x|Two engine-host processes transfer a torrent through the control API (engine_two_host: real processes, magnet + x.pe, SHA-1 checked; c5a7a13)
 x|Control API JSON: 0 CRITICAL (30 MATCH / 0 DIFF / 0 CRITICAL, re-verified by the coordinator after c5a7a13)
- |Engine integration tests: real ports passing (all ported; about 95 wait on engine features)
+ |Engine integration tests: real ports passing (all 143 written, 51 pass, 92 wait on features; 63 hollow ports being redone)
 x|Direct Play startup saves off the storage lock (bounded background queue, slow-save test passes, codex-3)
  |Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
  |Rust APK built with -Pwebtor.engine=rust and tested on a device (debug APK installed on the phone, engine starts; release APK at the end)
