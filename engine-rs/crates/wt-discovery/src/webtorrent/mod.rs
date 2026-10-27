@@ -32,7 +32,9 @@ use crate::status::{StatusCallback, TrackerStatusEvent};
 use crate::tracker::{AnnounceEvent, DialerHook};
 
 const PING_INTERVAL: Duration = Duration::from_secs(60);
-const RECONNECT_DELAY: Duration = Duration::from_secs(60);
+/// Go reconnects promptly; 60s left WebTorrent trackers stuck on "waiting"
+/// for a full minute after the first dial failure.
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const OFFER_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +74,9 @@ pub struct TrackerClientConfig {
     pub ws_headers: Vec<(String, String)>,
     /// Custom TCP dialer (Go `trackerSockets.DialContext` for WS trackers).
     pub dialer: Option<DialerHook>,
+    /// Infohash used for Connected/Disconnected status (engine matches by hash+url).
+    /// Zero hash made every WebTorrent tracker appear stuck on "waiting".
+    pub status_info_hash: InfoHash,
 }
 
 impl Default for TrackerClientConfig {
@@ -85,6 +90,7 @@ impl Default for TrackerClientConfig {
             max_outstanding_offers: DEFAULT_MAX_OUTSTANDING_OFFERS,
             ws_headers: Vec::new(),
             dialer: None,
+            status_info_hash: InfoHash::default(),
         }
     }
 }
@@ -237,14 +243,18 @@ impl TrackerClient {
             }
             if let Err(e) = self.do_websocket().await {
                 tracing::debug!(error = %e, "websocket ended");
-                let (cb, url) = {
+                let (cb, url, ih) = {
                     let g = self.inner.lock();
-                    (g.cfg.status.clone(), g.cfg.url.clone())
+                    (
+                        g.cfg.status.clone(),
+                        g.cfg.url.clone(),
+                        g.cfg.status_info_hash,
+                    )
                 };
                 if let Some(cb) = cb {
                     cb(&TrackerStatusEvent::Disconnected {
                         url,
-                        info_hash: InfoHash::default(),
+                        info_hash: ih,
                         error: Some(e.to_string()),
                     });
                 }
@@ -285,14 +295,18 @@ impl TrackerClient {
         };
 
         {
-            let (cb, url) = {
+            let (cb, url, ih) = {
                 let g = self.inner.lock();
-                (g.cfg.status.clone(), g.cfg.url.clone())
+                (
+                    g.cfg.status.clone(),
+                    g.cfg.url.clone(),
+                    g.cfg.status_info_hash,
+                )
             };
             if let Some(cb) = cb {
                 cb(&TrackerStatusEvent::Connected {
                     url,
-                    info_hash: InfoHash::default(),
+                    info_hash: ih,
                 });
             }
         }

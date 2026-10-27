@@ -42,6 +42,11 @@ pub trait TorrentAnnounceInfo: Send + Sync {
     fn need_data(&self) -> bool;
     /// Typically `known_peers.len() <= torrent_peers_low_water`.
     fn want_peers(&self) -> bool;
+    /// Go `Torrent.wantAnyConns`: still room under max established conns.
+    /// Used by the DHT announcer to keep get_peers running (Go `dhtAnnouncer`).
+    fn want_conns(&self) -> bool {
+        self.need_data() || self.want_peers()
+    }
     fn completed(&self) -> bool;
     /// Edge trigger for the Completed announce event.
     fn newly_completed(&self) -> bool;

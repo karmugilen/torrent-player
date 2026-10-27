@@ -21,9 +21,12 @@ use crate::conn::{
 use crate::ratelimit::{Limiter, DEFAULT_DOWNLOAD_BURST};
 use crate::sources::{
     PeerSink, RegisterTorrent, Sources, SourcesConfig, TorrentAnnounceInfo, TorrentKeys,
+    WebRtcOpenedPeer,
 };
 use crate::torrent::{AttachInfo, TorrentInner};
 use crate::{ClientConfig, CoreError, Result, TcpConnHook, TorrentSpec};
+use tokio::sync::Notify;
+use wt_wire::handshake::{default_peer_extension_bytes, handshake, handshake_incoming};
 
 /// Thin Sources sink / announce adapter over [`TorrentInner`] (agy-2 owns the
 /// eventual first-class impls; Client registers torrents immediately).
@@ -32,6 +35,7 @@ struct TorrentSourcesAdapter {
     peer_id: PeerId,
     listen_port: Arc<RwLock<u16>>,
     peers_low_water: usize,
+    always_want_conns: bool,
 }
 
 impl PeerSink for TorrentSourcesAdapter {
@@ -48,6 +52,30 @@ impl PeerSink for TorrentSourcesAdapter {
         }
         self.torrent.bump_change();
     }
+
+    fn add_webrtc_peer(&self, _info_hash: InfoHash, peer: WebRtcOpenedPeer) {
+        let Some(client) = self.torrent.client.read().upgrade() else {
+            return;
+        };
+        let torrent = Arc::clone(&self.torrent);
+        let handle = client.tokio_handle.clone();
+        handle.spawn(async move {
+            if let Err(e) = client.attach_webrtc_peer(torrent, peer).await {
+                tracing::debug!("webrtc peer attach failed: {e}");
+            }
+        });
+    }
+}
+
+/// Synthetic remote addr for a WebRTC data channel (no ICE pair exposed yet).
+fn webrtc_synthetic_addr(offer_id: &str, peer_id: PeerId) -> SocketAddr {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in offer_id.as_bytes().iter().chain(peer_id.iter()) {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    let port = ((h % 55_000) + 10_000) as u16;
+    SocketAddr::from(([127, 0, 0, 2], port))
 }
 
 impl TorrentAnnounceInfo for TorrentSourcesAdapter {
@@ -107,6 +135,18 @@ impl TorrentAnnounceInfo for TorrentSourcesAdapter {
 
     fn want_peers(&self) -> bool {
         self.torrent.known_peers.read().len() <= self.peers_low_water
+    }
+
+    fn want_conns(&self) -> bool {
+        // Go `wantAnyConns` + `AlwaysWantConns`: keep discovering while under
+        // established cap (server sets AlwaysWantConns=true).
+        if self.torrent.wants_conns() == 0 {
+            return false;
+        }
+        if self.always_want_conns {
+            return true;
+        }
+        self.need_data() || self.torrent.seeding.load(Ordering::Relaxed)
     }
 
     fn completed(&self) -> bool {
@@ -362,6 +402,7 @@ impl ClientInner {
             peer_id: self.peer_id,
             listen_port: Arc::clone(&self.listen_port),
             peers_low_water: self.config.torrent_peers_low_water,
+            always_want_conns: self.config.always_want_conns,
         });
         let reg = RegisterTorrent {
             keys,
@@ -743,26 +784,102 @@ impl ClientInner {
         )
     }
 
+    /// Go `Torrent.onWebRtcConn`: BT handshake over the data channel (no MSE).
+    async fn attach_webrtc_peer(
+        self: &Arc<Self>,
+        torrent: Arc<TorrentInner>,
+        peer: WebRtcOpenedPeer,
+    ) -> Result<()> {
+        if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
+            return Err(CoreError::Closed);
+        }
+        if peer.info_hash != torrent.info_hash
+            && !self
+                .torrents_by_short
+                .read()
+                .get(&peer.info_hash)
+                .is_some_and(|t| Arc::ptr_eq(t, &torrent))
+        {
+            return Err(CoreError::Other("webrtc infohash mismatch".into()));
+        }
+
+        let remote = webrtc_synthetic_addr(&peer.offer_id, peer.peer_id);
+        if torrent.conn_handles.read().contains_key(&remote) {
+            return Ok(());
+        }
+
+        let outgoing = peer.local_offered;
+        let source = if outgoing {
+            PeerSource::Tracker
+        } else {
+            PeerSource::Incoming
+        };
+        let mut stream: Box<dyn crate::PeerStream> = Box::new(peer.stream);
+        let reserved = default_peer_extension_bytes();
+        let hs_timeout = self.config.handshakes_timeout.max(Duration::from_secs(5));
+
+        let peer_hs = if outgoing {
+            let fut = handshake(
+                &mut stream,
+                &torrent.info_hash,
+                &self.peer_id,
+                &reserved,
+            );
+            tokio::time::timeout(hs_timeout, fut)
+                .await
+                .map_err(|_| CoreError::Other("webrtc handshake timeout".into()))?
+                .map_err(|e| CoreError::Other(format!("webrtc handshake: {e}")))?
+        } else {
+            let expected = torrent.info_hash;
+            let fut = handshake_incoming(&mut stream, &self.peer_id, &reserved, |ih| {
+                *ih == expected
+                    || self.torrents_by_short.read().contains_key(ih)
+            });
+            tokio::time::timeout(hs_timeout, fut)
+                .await
+                .map_err(|_| CoreError::Other("webrtc incoming handshake timeout".into()))?
+                .map_err(|e| CoreError::Other(format!("webrtc incoming handshake: {e}")))?
+        };
+
+        let (write_tx, write_rx) = mpsc::unbounded_channel();
+        let write_waker = Arc::new(Notify::new());
+        let closed = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(crate::stats::AtomicConnStats::default());
+        let handle = crate::conn::ConnHandle::new(
+            remote,
+            outgoing,
+            wt_types::Transport::WebRtc,
+            false,
+            torrent.info_hash,
+            Some(peer_hs.peer_id),
+            source,
+            peer_hs.extensions.0,
+            write_tx,
+            write_waker.clone(),
+            closed,
+            stats,
+        );
+        let info = AttachInfo {
+            remote,
+            outgoing,
+            transport: wt_types::Transport::WebRtc,
+            encrypted: false,
+            peer_id: peer_hs.peer_id,
+            reserved: peer_hs.extensions.0,
+            source,
+        };
+        self.attach_driver(torrent, info, stream, handle, write_rx, write_waker)
+    }
+
     pub async fn dial_peer(
         self: &Arc<Self>,
         torrent: Arc<TorrentInner>,
         addr: SocketAddr,
         source: PeerSource,
     ) -> Result<()> {
-        let transport = if !self.config.disable_tcp {
-            wt_types::Transport::Tcp
-        } else {
-            wt_types::Transport::Utp
-        };
-        let result = self
-            .dial_peer_transport(Arc::clone(&torrent), addr, source, transport, false)
-            .await;
-        if result.is_err() && transport == wt_types::Transport::Tcp && !self.config.disable_utp {
-            return self
-                .dial_peer_transport(torrent, addr, source, wt_types::Transport::Utp, false)
-                .await;
-        }
-        result
+        // None => dialer races TCP+uTP under one half-open slot (Go dialPool).
+        self.dial_peer_transport(torrent, addr, source, None, false)
+            .await
     }
 
     pub async fn dial_peer_transport(
@@ -770,7 +887,7 @@ impl ClientInner {
         torrent: Arc<TorrentInner>,
         addr: SocketAddr,
         source: PeerSource,
-        transport: wt_types::Transport,
+        transport: Option<wt_types::Transport>,
         require_plain: bool,
     ) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
@@ -801,7 +918,7 @@ impl ClientInner {
             remote_addr: addr,
             info_hash: torrent.info_hash,
             our_peer_id: self.peer_id,
-            transport: Some(transport),
+            transport,
             source,
             metadata_size,
             cfg: &cfg,
@@ -846,7 +963,7 @@ impl ClientInner {
         info: AttachInfo,
         stream: Box<dyn crate::PeerStream>,
         handle: crate::conn::ConnHandle,
-        write_rx: mpsc::Receiver<crate::wire::Message>,
+        write_rx: mpsc::UnboundedReceiver<crate::wire::Message>,
         write_waker: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {

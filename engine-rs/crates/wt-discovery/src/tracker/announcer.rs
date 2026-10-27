@@ -25,8 +25,10 @@ pub const MAX_CONCURRENT_ANNOUNCES_PER_TRACKER: usize = 2;
 
 /// Default re-announce when the tracker returns interval 0 / missing.
 pub const DEFAULT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30 * 60);
-/// Backoff after a failed announce (before retry).
-pub const ANNOUNCE_ERROR_BACKOFF: Duration = Duration::from_secs(60);
+/// Backoff after a failed announce (before retry). 15s matches the default
+/// announce timeout so dead trackers do not sit idle for a full minute while
+/// the dialer is starved for candidates.
+pub const ANNOUNCE_ERROR_BACKOFF: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TorrentAnnounceKey {
@@ -267,7 +269,8 @@ impl AnnounceDispatcher {
                     event,
                     ip_address: 0,
                     key: snap.key,
-                    num_want: if snap.want_peers { -1 } else { 0 },
+                    // Go `Torrent.announceRequest` uses 200 when wantPeers (Windozer UDP limit).
+                    num_want: if snap.want_peers { 200 } else { 0 },
                     port: snap.port,
                 };
                 if let Some(slot) = g.slots.get_mut(&key) {

@@ -152,3 +152,31 @@ runs `adb install -r`, starts an explicit magnet VIEW intent in `webtor.app`,
 and captures bounded engine/error/crash logcat without clearing it. It never
 uninstalls or clears app data. Installation, VIEW delivery and logs still need
 a connected device; Play, seek and preview require actual UI/native verification.
+
+## Peer parity (grok-swarm)
+
+Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
+Network conditions today are softer than the original Go 10–11 MiB/s baseline.
+
+### Fixes landed (swarm / dial / metadata / PEX)
+
+- Continuous DHT announcer while `want_conns` / `AlwaysWantConns`
+- Tracker/WS `numwant` 200/10; announce error backoff 15 s
+- Go `dialPool`: race TCP+uTP under one half-open slot; MSE fallback redials winning transport
+- Go `PopMax`: remove dial candidates on dial; trusted/source dial order; high-water trim
+- `peer_closed` re-queues outgoing peers with 5 s dial backoff (local + public churn)
+- ut_metadata: `PeerMetadataState` timeout retry + parallel piece requests
+- PEX: add/drop on conn lifecycle + periodic `genmsg` send (receive already worked)
+- `/connections` downloaded uses `bytes_read_data` (kept in sync with useful bytes)
+
+### Numbers (single runs unless noted)
+
+| Label | meta s | peers (min→max over 5 s samples) | speed peak MiB/s |
+|-------|--------|-----------------------------------|------------------|
+| go-ubuntu-baseline | 9.0 | 10→30 | 0.68 |
+| rust-ubuntu-v5 | 5.5 | 1→6 | 0.68 |
+| go-sintel-baseline | 20.5 | 17→36 | 0.65 |
+| rust-sintel-v4 | 3.0 | 3→11 | 3.68 |
+
+**Status:** metadata time beats Go on both samples. Sintel speed can beat Go under current conditions. **Peer count still short** (Ubuntu ~6 vs ~30; Sintel ~11 vs ~36). Discovery supply is healthy (zz_diag max_known≈220 at high-water); remaining gap is dial/handshake success rate and post-handshake retention (coordinate with grok-wire on MSE / interested-unchoke). Not yet acceptance (≥ Go peers+speed+meta ×3 runs).
+

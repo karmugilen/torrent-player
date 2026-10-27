@@ -48,6 +48,9 @@ pub use wt_wire::ext::METADATA_PIECE_SIZE;
 
 /// Go `maxMetadataSize` (16 MiB).
 pub const MAX_METADATA_SIZE: u32 = 16 * 1024 * 1024;
+/// Default per-piece request timeout before clearing and retrying on another
+/// (or the same) peer — anacrolix retries on reject/timeout.
+pub const METADATA_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub use wt_wire::ext::METADATA_PIECE_SIZE as PIECE_LEN;
 
@@ -330,6 +333,8 @@ fn info_has_v2(info: &Info) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct PeerMetadataState {
     requested: Vec<bool>,
+    /// When each piece was last requested (for timeout retry).
+    requested_at: Vec<Option<std::time::Instant>>,
 }
 
 impl PeerMetadataState {
@@ -341,18 +346,57 @@ impl PeerMetadataState {
         self.requested.get(piece as usize).copied().unwrap_or(false)
     }
 
+    pub fn outstanding(&self) -> usize {
+        self.requested.iter().filter(|&&r| r).count()
+    }
+
     pub fn mark_requested(&mut self, piece: u32) {
+        self.mark_requested_at(piece, std::time::Instant::now());
+    }
+
+    pub fn mark_requested_at(&mut self, piece: u32, now: std::time::Instant) {
         let i = piece as usize;
         if i >= self.requested.len() {
             self.requested.resize(i + 1, false);
+            self.requested_at.resize(i + 1, None);
         }
         self.requested[i] = true;
+        self.requested_at[i] = Some(now);
     }
 
     pub fn clear_requested(&mut self, piece: u32) {
         if let Some(slot) = self.requested.get_mut(piece as usize) {
             *slot = false;
         }
+        if let Some(slot) = self.requested_at.get_mut(piece as usize) {
+            *slot = None;
+        }
+    }
+
+    /// Clear pieces whose request is older than `timeout` so they can be
+    /// re-requested (Go ut_metadata reject/timeout retry).
+    pub fn expire_timed_out(
+        &mut self,
+        now: std::time::Instant,
+        timeout: std::time::Duration,
+    ) -> Vec<u32> {
+        let mut expired = Vec::new();
+        for i in 0..self.requested.len() {
+            if !self.requested[i] {
+                continue;
+            }
+            let Some(at) = self.requested_at.get(i).copied().flatten() else {
+                continue;
+            };
+            if now.saturating_duration_since(at) >= timeout {
+                self.requested[i] = false;
+                if let Some(slot) = self.requested_at.get_mut(i) {
+                    *slot = None;
+                }
+                expired.push(i as u32);
+            }
+        }
+        expired
     }
 
     pub fn expect_data(&self, piece: u32) -> Result<(), MetadataError> {

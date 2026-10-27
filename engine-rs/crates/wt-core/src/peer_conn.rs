@@ -88,11 +88,19 @@ use wt_wire::ext::{
     ExtendedHandshake, MetadataMsg, MetadataMsgType, PexMsg, EXTENSION_NAME_METADATA,
     EXTENSION_NAME_PEX,
 };
+use wt_wire::handshake::PeerExtensionBits;
 use wt_wire::message::{unmarshal_bitfield, Message};
+
+/// Go `PeerMaxRequests` default before the peer's LTEP `reqq` arrives.
+pub const DEFAULT_PEER_MAX_REQUESTS: usize = 250;
+/// Go `localClientReqq` — how many requests we advertise we can accept.
+pub const LOCAL_CLIENT_REQQ: u32 = 1024;
 
 use crate::arrival::{ArrivalPeer, ArrivalSample, ARRIVAL_FEATURES, ARRIVAL_UNCHOKE_CAP};
 use crate::choking::{upload_allowed, ChokeConfig, PeerChokeInput};
 use crate::conn::{ConnHandle, ConnHandler};
+use crate::metadata::{PeerMetadataState, METADATA_REQUEST_TIMEOUT};
+use crate::pex::{PexCursor, PEX_INTERVAL};
 use crate::picker::{block_coord_from_req_index, req_index_from_piece_and_offset};
 use crate::stats::{AtomicConnStats, PeerConnInfo, RateEstimator};
 use crate::strategy::{
@@ -184,13 +192,63 @@ pub trait PeerTorrent: Send + Sync {
     fn metadata_piece(&self, piece: u32) -> Option<(u32, Bytes)>;
     fn metadata_size(&self) -> Option<u32>;
     fn has_metadata(&self) -> bool;
+    /// Ensure ut_metadata total size is known before requesting pieces.
+    fn ensure_metadata_size(&self, size: u32) -> Result<()> {
+        let _ = size;
+        Ok(())
+    }
+    /// Pieces still needed from this peer (excludes peer-local in-flight).
+    fn metadata_pieces_to_request(
+        &self,
+        peer: &crate::metadata::PeerMetadataState,
+    ) -> Vec<u32> {
+        let _ = peer;
+        Vec::new()
+    }
     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()>;
+    /// Record a live conn for outbound PEX (Go `pex.Add`).
+    fn pex_note_connected(&self, addr: SocketAddr, encrypted: bool, utp: bool) {}
+    /// Record a disconnect for outbound PEX (Go `pex.Drop`).
+    fn pex_note_closed(&self, addr: SocketAddr, encrypted: bool, utp: bool) {}
+    /// Build next ut_pex payload; updates `cursor`.
+    fn pex_genmsg(
+        &self,
+        cursor: &mut Option<crate::pex::PexCursor>,
+    ) -> Option<PexMsg> {
+        let _ = cursor;
+        None
+    }
     fn add_dht_node(&self, addr: SocketAddr);
     fn on_peer_listen_port(&self, peer_addr: SocketAddr, port: u16);
 
     fn choke_config(&self) -> ChokeConfig;
     fn bump_change(&self);
     fn on_chunk_received(&self, peer: PeerKey, req: RequestIndex, len: usize);
+
+    /// LTEP `v` field (Go `ExtendedHandshakeClientVersion`).
+    fn extended_handshake_client_version(&self) -> String {
+        "Webtor 2.0".to_string()
+    }
+    /// LTEP `p` / listen port for incoming peers.
+    fn listen_port(&self) -> u16 {
+        0
+    }
+    /// When true, omit `ut_pex` from the LTEP `m` dict.
+    fn pex_disabled(&self) -> bool {
+        false
+    }
+    /// LTEP `reqq` we advertise (Go `localClientReqq` = 1024).
+    fn local_reqq(&self) -> u32 {
+        LOCAL_CLIENT_REQQ
+    }
+    /// LTEP `encryption` preference bit.
+    fn prefers_encryption(&self) -> bool {
+        true
+    }
+    /// BEP 5 Port message value when both sides support DHT.
+    fn dht_port(&self) -> Option<u16> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------- RTT / legacy PeerConn
@@ -261,8 +319,11 @@ pub struct PeerConnInner {
     pub peer_pieces: HashSet<PieceIndex>,
     pub peer_sent_have_all: bool,
     pub peer_allowed_fast: HashSet<PieceIndex>,
+    /// Peer's reserved handshake bits (Fast / LTEP / DHT).
+    pub peer_extension_bits: [u8; 8],
 
     pub max_requests: usize,
+    /// Go `peakRequests` starts at 0 and ramps via `next_peak_requests`.
     pub peak_requests: usize,
     pub outstanding_requests: HashSet<RequestIndex>,
     pub cancelled_requests: HashSet<RequestIndex>,
@@ -326,8 +387,10 @@ impl PeerConn {
                 peer_pieces: HashSet::new(),
                 peer_sent_have_all: false,
                 peer_allowed_fast: HashSet::new(),
-                max_requests: 64,
-                peak_requests: 64,
+                peer_extension_bits: [0u8; 8],
+                max_requests: DEFAULT_PEER_MAX_REQUESTS,
+                // Ramp like HEAD (16); Go starts at 0 but our WholeQueue+wake path needs a floor.
+                peak_requests: 16,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),
@@ -555,6 +618,10 @@ impl PeerConn {
 
 // ---------------------------------------------------------------- ConnHandler
 
+/// Max in-flight ut_metadata piece requests per peer. High enough to fill
+/// typical magnet info (~64 KiB pieces) in one burst; timeout retry refills.
+const METADATA_OUTSTANDING_PER_PEER: usize = 128;
+
 /// ConnHandler-backed peer state machine.
 pub struct PeerConnHandler<T: PeerTorrent> {
     torrent: Arc<T>,
@@ -562,7 +629,10 @@ pub struct PeerConnHandler<T: PeerTorrent> {
     closed: Arc<AtomicBool>,
     our_ext_metadata: u8,
     our_ext_pex: u8,
-    metadata_requested: HashSet<u32>,
+    peer_metadata: PeerMetadataState,
+    pex_cursor: Option<PexCursor>,
+    last_pex_sent: Option<Instant>,
+    pex_listed: bool,
 }
 
 impl<T: PeerTorrent> PeerConnHandler<T> {
@@ -577,7 +647,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 peer_id: handle.peer_id(),
                 client_name: String::new(),
                 transport: handle.transport(),
-                source: PeerSource::Direct,
+                source: handle.source(),
                 encrypted: handle.is_encrypted(),
                 connected_at: now,
                 peer_choking: true,
@@ -587,7 +657,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 peer_pieces: HashSet::new(),
                 peer_sent_have_all: false,
                 peer_allowed_fast: HashSet::new(),
-                max_requests: 64,
+                peer_extension_bits: handle.peer_extension_bits(),
+                max_requests: DEFAULT_PEER_MAX_REQUESTS,
+                // Ramp like HEAD (16); Go starts at 0 but our WholeQueue+wake path needs a floor.
                 peak_requests: 16,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
@@ -612,7 +684,64 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             closed: Arc::new(AtomicBool::new(false)),
             our_ext_metadata: DEFAULT_UT_METADATA_ID,
             our_ext_pex: DEFAULT_UT_PEX_ID,
-            metadata_requested: HashSet::new(),
+            peer_metadata: PeerMetadataState::new(),
+            pex_cursor: None,
+            last_pex_sent: None,
+            pex_listed: false,
+        }
+    }
+
+    fn maybe_send_pex(&mut self, handle: &ConnHandle) {
+        if self.torrent.pex_disabled() {
+            return;
+        }
+        let Some(pex_id) = self.state.peer_ext_ut_pex else {
+            return;
+        };
+        let now = Instant::now();
+        if self
+            .last_pex_sent
+            .is_some_and(|t| now.saturating_duration_since(t) < PEX_INTERVAL)
+        {
+            return;
+        }
+        let Some(msg) = self.torrent.pex_genmsg(&mut self.pex_cursor) else {
+            return;
+        };
+        if msg.is_empty() && self.last_pex_sent.is_some() {
+            return;
+        }
+        self.send(handle, msg.to_message(pex_id));
+        self.last_pex_sent = Some(now);
+    }
+
+    /// Request missing ut_metadata pieces with timeout retry (anacrolix-style).
+    fn request_metadata_pieces(&mut self, handle: &ConnHandle) {
+        if self.torrent.has_metadata() {
+            return;
+        }
+        let Some(m_id) = self.state.peer_ext_ut_metadata else {
+            return;
+        };
+        let size = self.state.peer_metadata_size.unwrap_or(0);
+        if size == 0 {
+            return;
+        }
+        if self.torrent.ensure_metadata_size(size).is_err() {
+            return;
+        }
+        let now = Instant::now();
+        self.peer_metadata
+            .expire_timed_out(now, METADATA_REQUEST_TIMEOUT);
+        let slots = METADATA_OUTSTANDING_PER_PEER.saturating_sub(self.peer_metadata.outstanding());
+        if slots == 0 {
+            return;
+        }
+        let needed = self.torrent.metadata_pieces_to_request(&self.peer_metadata);
+        for piece in needed.into_iter().take(slots) {
+            self.peer_metadata.mark_requested_at(piece, now);
+            let req = MetadataMsg::request(piece);
+            self.send(handle, req.to_message(m_id));
         }
     }
 
@@ -620,6 +749,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.torrent.peer_key(self.state.remote_addr)
     }
 
+    /// Go `sendInitialMessages`.
     pub fn start(&mut self, handle: &ConnHandle) {
         let mut ext = ExtendedHandshake::default();
         ext.m
@@ -636,13 +766,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         );
         let count = self.torrent.num_pieces();
         if count > 0 {
-            let mut bits = vec![0u8; (count as usize).div_ceil(8)];
-            for piece in 0..count {
-                if self.torrent.piece_complete(piece) {
-                    bits[piece as usize / 8] |= 0x80 >> (piece % 8);
-                }
-            }
-            self.send(handle, Message::Bitfield(Bytes::from(bits)));
+            self.send_bitfield(handle, count);
         }
         if !self.torrent.data_upload_disallowed() {
             self.state.am_choking = false;
@@ -650,6 +774,16 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
         self.update_requests(handle);
         self.torrent.update_peer_snapshot(self.peer_conn_info());
+    }
+
+    fn send_bitfield(&self, handle: &ConnHandle, count: u32) {
+        let mut bits = vec![0u8; (count as usize).div_ceil(8)];
+        for piece in 0..count {
+            if self.torrent.piece_complete(piece) {
+                bits[piece as usize / 8] |= 0x80 >> (piece % 8);
+            }
+        }
+        self.send(handle, Message::Bitfield(Bytes::from(bits)));
     }
 
     pub fn peer_conn_info(&self) -> PeerConnInfo {
@@ -902,14 +1036,14 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
 
             let coord = block_coord_from_req_index(r, plen, total);
-            self.send(
-                handle,
-                Message::Request {
-                    index: coord.piece,
-                    begin: coord.offset,
-                    length: coord.length.max(1),
-                },
-            );
+            let queued = handle.send_message(Message::Request {
+                index: coord.piece,
+                begin: coord.offset,
+                length: coord.length.max(1),
+            });
+            if !queued {
+                break;
+            }
             self.state.outstanding_requests.insert(r);
             self.state.cancelled_requests.remove(&r);
             self.state.rtt.on_request_sent(r);
@@ -926,13 +1060,13 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             added,
             was_empty,
         );
-        self.state.peak_requests = peak as usize;
+        self.state.peak_requests = (peak as usize).max(1).min(self.state.max_requests.max(1));
         let _ = before;
     }
 
     fn nominal_max(&self) -> usize {
         let tuning = self.torrent.seek_tuning();
-        let base = (self.state.peak_requests * 2).max(1);
+        let base = (self.state.peak_requests.max(1) * 2).max(1);
         if let Some(pipe) = self.state.webtor_pipeline_limit.checked_mul(1) {
             if pipe > 0 && self.torrent.request_focus_index().is_some() {
                 return base.min(pipe).max(1);
@@ -1249,17 +1383,17 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return Ok(());
         }
         let data = self.torrent.read_chunk(index, begin, length)?;
-        self.state.upload_rate.add_bytes(data.len());
-        self.state.stats.add_bytes_written(data.len() as i64);
-        handle.stats().add_bytes_written(data.len() as i64);
-        self.send(
-            handle,
-            Message::Piece {
-                index,
-                begin,
-                piece: data,
-            },
-        );
+        let len = data.len();
+        if !handle.send_message(Message::Piece {
+            index,
+            begin,
+            piece: data,
+        }) {
+            return Ok(());
+        }
+        self.state.upload_rate.add_bytes(len);
+        self.state.stats.add_bytes_written(len as i64);
+        handle.stats().add_bytes_written(len as i64);
         Ok(())
     }
 
@@ -1273,21 +1407,22 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             if let Some(name) = ext.v.clone() {
                 self.state.client_name = name;
             }
-            // Request metadata if we lack it
-            if !self.torrent.has_metadata() {
-                if let Some(m_id) = self.state.peer_ext_ut_metadata {
-                    let size = self.state.peer_metadata_size.unwrap_or(0);
-                    if size > 0 {
-                        let count = (size as usize).div_ceil(16 * 1024);
-                        for piece in 0..count as u32 {
-                            if self.metadata_requested.insert(piece) {
-                                let req = MetadataMsg::request(piece);
-                                self.send(handle, req.to_message(m_id));
-                            }
-                        }
-                    }
+            if let Some(reqq) = ext.reqq {
+                if reqq > 0 {
+                    self.state.max_requests =
+                        (reqq as usize).clamp(1, DEFAULT_PEER_MAX_REQUESTS);
                 }
             }
+            if let Some(port) = ext.p {
+                if port > 0 {
+                    self.state.peer_listen_port = port;
+                    self.torrent
+                        .on_peer_listen_port(self.state.remote_addr, port);
+                }
+            }
+            self.request_metadata_pieces(handle);
+            self.state.need_request_update = true;
+            self.update_requests(handle);
             return Ok(());
         }
         if Some(id) == self.state.peer_ext_ut_metadata || id == self.our_ext_metadata {
@@ -1303,17 +1438,21 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                     }
                 }
                 MetadataMsgType::Data => {
+                    self.peer_metadata.clear_requested(msg.piece);
                     if let Some(data) = msg.data {
                         let total = msg.total_size.unwrap_or(data.len() as u32);
                         let done = self.torrent.on_metadata_data(msg.piece, total, data)?;
                         if done {
                             self.state.need_request_update = true;
                             self.update_requests(handle);
+                        } else {
+                            self.request_metadata_pieces(handle);
                         }
                     }
                 }
                 MetadataMsgType::Reject => {
-                    self.metadata_requested.remove(&msg.piece);
+                    self.peer_metadata.clear_requested(msg.piece);
+                    self.request_metadata_pieces(handle);
                 }
             }
             return Ok(());
@@ -1362,16 +1501,30 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 }
             }
         } else {
+            self.expire_stale_requests(handle);
             self.update_requests(handle);
         }
+        self.request_metadata_pieces(handle);
+        self.maybe_send_pex(handle);
         self.torrent.update_peer_snapshot(self.peer_conn_info());
     }
 
     fn wake_interval(&self) -> Option<Duration> {
+        if !self.torrent.has_metadata() {
+            return Some(Duration::from_secs(1));
+        }
+        // Always tick while we have in-flight requests so a stalled pipeline can
+        // be refilled (download_all uses Normal priority, not only Next).
+        if !self.state.outstanding_requests.is_empty() || self.state.need_request_update {
+            return Some(Duration::from_millis(100));
+        }
         if (0..self.torrent.num_pieces()).any(|i| {
-            self.torrent.piece_priority(i) >= PiecePriority::Next && !self.torrent.piece_complete(i)
+            self.torrent.piece_priority(i) > PiecePriority::None && !self.torrent.piece_complete(i)
         }) {
-            Some(Duration::from_millis(100))
+            return Some(Duration::from_millis(100));
+        }
+        if self.state.peer_ext_ut_pex.is_some() && !self.torrent.pex_disabled() {
+            Some(PEX_INTERVAL)
         } else {
             None
         }
@@ -1419,12 +1572,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 begin,
                 length: _,
             } => {
-                let plen = self.torrent.piece_length();
-                let total = self.torrent.total_length();
-                let req = req_index_from_piece_and_offset(index, begin, plen);
-                let _ = total;
-                // Upload-side cancel: nothing queued yet in this simplified path.
-                let _ = req;
+                let _ = (index, begin);
             }
             Message::Port(port) => {
                 self.state.peer_listen_port = port;
@@ -1500,6 +1648,15 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
 
     fn on_closed(&mut self, _handle: &ConnHandle, _reason: &str) {
         self.closed.store(true, Ordering::Relaxed);
+        if self.pex_listed {
+            let utp = matches!(self.state.transport, Transport::Utp);
+            self.torrent.pex_note_closed(
+                self.state.remote_addr,
+                self.state.encrypted,
+                utp,
+            );
+            self.pex_listed = false;
+        }
         // Drop availability
         if self.state.peer_sent_have_all {
             let n = self.torrent.num_pieces();
@@ -1531,6 +1688,8 @@ trait ConnStatsExt {
 
 impl ConnStatsExt for AtomicConnStats {
     fn add_bytes_read_useful(&self, n: i64) {
+        // Keep bytes_read_data in sync — /connections reports that field.
+        self.bytes_read_data.fetch_add(n, Ordering::Relaxed);
         self.bytes_read_useful_data.fetch_add(n, Ordering::Relaxed);
     }
     fn add_bytes_written(&self, n: i64) {

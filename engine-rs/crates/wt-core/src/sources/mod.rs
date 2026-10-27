@@ -72,8 +72,13 @@ use wt_types::{InfoHash, PeerId, PeerInfo, PeerSource};
 
 use crate::{ClientConfig, CoreError, Result, StatusEvent, TorrentSpec};
 
-/// Default DHT re-announce interval (Go `dhtAnnouncer` cadence is driven by
-/// the DHT itself; we refresh get_peers/announce on this period when enabled).
+/// Fallback poll when a torrent does not currently want connections (Go waits
+/// on `cl.event`; we poll so want_conns flips wake us without a condvar).
+pub const DHT_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Go `dhtAnnouncer` sleeps 5 minutes after an announce error (DNS etc.).
+pub const DHT_ANNOUNCE_ERROR_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// Kept for SourcesConfig / callers; continuous announcer supersedes the old
+/// 15-minute timer while `want_conns` is true (Go `dhtAnnouncer`).
 pub const DEFAULT_DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Status callback list (same shape as `ClientConfig.callbacks.status_updated`).
@@ -128,6 +133,8 @@ struct TorrentEntry {
     paused: bool,
     /// WebSocket tracker clients keyed by URL.
     ws_clients: Vec<Arc<TrackerClient>>,
+    /// Per-torrent Go-style `dhtAnnouncer` task (aborted on unregister/pause).
+    dht_announcer: Option<JoinHandle<()>>,
 }
 
 struct Inner {
@@ -236,12 +243,11 @@ impl Sources {
         let handle = tokio::spawn(async move { run.peers_loop(peers_rx).await });
         *me.peers_rx_task.lock() = Some(handle);
 
-        if cfg.periodically_announce_torrents_to_dht && me.dht.is_some() {
-            let run = Arc::clone(&me);
-            let interval = cfg.dht_announce_interval;
-            let handle = tokio::spawn(async move { run.dht_periodic_loop(interval).await });
-            *me.dht_periodic.lock() = Some(handle);
-        }
+        // Per-torrent continuous DHT announcers are spawned in register_torrent
+        // (Go dhtAnnouncer). The old client-wide 15-minute timer is unused when
+        // periodically_announce_torrents_to_dht is true; keep the flag as the
+        // gate for spawning those tasks.
+        let _ = cfg.periodically_announce_torrents_to_dht;
 
         Ok(me)
     }
@@ -281,6 +287,7 @@ impl Sources {
             web_seeds: reg.web_seeds.clone(),
             paused: false,
             ws_clients: Vec::new(),
+            dht_announcer: None,
         }));
 
         for ih in &shorts {
@@ -312,16 +319,8 @@ impl Sources {
             }
         }
 
-        // Kick DHT announce for this torrent when enabled.
-        if let Some(dht) = &self.dht {
-            let dht = Arc::clone(dht);
-            let sink = Arc::clone(&reg.sink);
-            let keys = reg.keys.clone();
-            let port = reg.info.port().max(self.inner.lock().cfg.listen_port);
-            tokio::spawn(async move {
-                announce_to_dht(&dht, &keys, port, &sink, PeerSource::DhtGetPeers).await;
-            });
-        }
+        // Go `dhtAnnouncer`: keep get_peers/announce running while want_conns.
+        self.spawn_dht_announcer(Arc::clone(&entry));
 
         Ok(())
     }
@@ -411,11 +410,16 @@ impl Sources {
             for c in e.ws_clients.drain(..) {
                 c.close();
             }
+            if let Some(h) = e.dht_announcer.take() {
+                h.abort();
+            }
         } else {
             let port = e.info.port().max(self.inner.lock().cfg.listen_port);
             for ih in &shorts {
                 self.push_snapshot(*ih, &e.info, port);
             }
+            drop(e);
+            self.spawn_dht_announcer(entry);
         }
     }
 
@@ -439,6 +443,9 @@ impl Sources {
             let mut e = entry.lock();
             for c in e.ws_clients.drain(..) {
                 c.close();
+            }
+            if let Some(h) = e.dht_announcer.take() {
+                h.abort();
             }
         }
     }
@@ -500,6 +507,9 @@ impl Sources {
                 }
                 for c in ent.ws_clients.drain(..) {
                     c.close();
+                }
+                if let Some(h) = ent.dht_announcer.take() {
+                    h.abort();
                 }
             }
         }
@@ -564,37 +574,74 @@ impl Sources {
         }
     }
 
-    async fn dht_periodic_loop(self: Arc<Self>, interval: Duration) {
-        let mut tick = tokio::time::interval(interval);
-        loop {
-            tick.tick().await;
-            if self.inner.lock().closed {
-                break;
+    /// Spawn Go `dhtAnnouncer`: continuous get_peers while `want_conns`.
+    fn spawn_dht_announcer(&self, entry: Arc<Mutex<TorrentEntry>>) {
+        let enabled = {
+            let g = self.inner.lock();
+            g.cfg.periodically_announce_torrents_to_dht && !g.closed
+        };
+        let Some(dht) = self.dht.clone() else {
+            return;
+        };
+        if !enabled {
+            return;
+        }
+
+        {
+            let mut e = entry.lock();
+            if e.paused {
+                return;
             }
-            let Some(dht) = self.dht.clone() else {
-                break;
-            };
-            let batch: Vec<(TorrentKeys, Arc<dyn PeerSink>, u16)> = {
-                let g = self.inner.lock();
-                g.by_identity
-                    .values()
-                    .filter_map(|e| {
-                        let ent = e.lock();
-                        if ent.paused {
-                            return None;
-                        }
-                        Some((
-                            ent.keys.clone(),
-                            Arc::clone(&ent.sink),
-                            ent.info.port().max(g.cfg.listen_port),
-                        ))
-                    })
-                    .collect()
-            };
-            for (keys, sink, port) in batch {
-                announce_to_dht(&dht, &keys, port, &sink, PeerSource::DhtGetPeers).await;
+            if let Some(h) = e.dht_announcer.take() {
+                h.abort();
             }
         }
+
+        let sources = Arc::clone(&self.inner);
+        let entry_task = Arc::clone(&entry);
+        let handle = tokio::spawn(async move {
+            loop {
+                let listen_port = {
+                    let g = sources.lock();
+                    if g.closed {
+                        break;
+                    }
+                    g.cfg.listen_port
+                };
+                let (keys, sink, port, want, paused) = {
+                    let e = entry_task.lock();
+                    (
+                        e.keys.clone(),
+                        Arc::clone(&e.sink),
+                        e.info.port().max(listen_port),
+                        e.info.want_conns(),
+                        e.paused,
+                    )
+                };
+                if paused {
+                    break;
+                }
+                if !want {
+                    tokio::time::sleep(DHT_IDLE_POLL_INTERVAL).await;
+                    continue;
+                }
+                // One full traversal (up to 60s); then immediately again while
+                // want_conns — Go timeboxes to 15m but restarts as soon as the
+                // announce ends.
+                let ok = announce_to_dht(&dht, &keys, port, &sink, PeerSource::DhtGetPeers).await;
+                if !ok {
+                    tracing::warn!(
+                        "dht announce error; backing off {:?}",
+                        DHT_ANNOUNCE_ERROR_BACKOFF
+                    );
+                    tokio::time::sleep(DHT_ANNOUNCE_ERROR_BACKOFF).await;
+                    continue;
+                }
+                // Brief yield so a stuck announce cannot spin the runtime.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        entry.lock().dht_announcer = Some(handle);
     }
 
     fn start_ws_tracker(
@@ -631,6 +678,7 @@ impl Sources {
             ice_servers: ice,
             status: Some(status),
             dialer,
+            status_info_hash: primary,
             ..Default::default()
         });
         let mut peers_rx = client.take_peers().expect("peers rx");
@@ -646,7 +694,12 @@ impl Sources {
             let c = Arc::clone(&client);
             let ih = *ih;
             tokio::spawn(async move {
-                c.announce(ih, wt_discovery::tracker::AnnounceEvent::Started, 1)
+                // Wait briefly for the WebSocket to come up so the first
+                // announce is not lost on a reconnect that replaces the outbox.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                // Go WebTorrent trackers request multiple offers; 1 was starving
+                // the WebRTC peer pool on public magnets.
+                c.announce(ih, wt_discovery::tracker::AnnounceEvent::Started, 10)
                     .await;
             });
         }
@@ -670,25 +723,40 @@ impl Sources {
     }
 }
 
+/// Returns false when every short-hash announce failed to start (Go backs off).
 async fn announce_to_dht(
     dht: &DhtNode,
     keys: &TorrentKeys,
     port: u16,
     sink: &Arc<dyn PeerSink>,
     source: PeerSource,
-) {
+) -> bool {
+    let mut any_ok = false;
+    let mut total_peers = 0usize;
     for ih in keys.all_short() {
         // Explicit port: the DHT socket's port is not the peer listen port.
-        let Ok(mut handle) = dht.announce(ih, port, false).await else {
-            continue;
+        let mut handle = match dht.announce(ih, port, false).await {
+            Ok(h) => {
+                any_ok = true;
+                h
+            }
+            Err(e) => {
+                tracing::debug!("dht announce start failed for {}: {e}", ih.to_hex());
+                continue;
+            }
         };
-        // Let the traversal run to completion (Go timeboxes it, it does not
-        // stop at the first quiet gap): values arrive in bursts as the lookup
-        // moves closer to the infohash, so a short idle timeout dropped most
-        // of the peers.
+        // Hard cap 60s (Go timeboxes much longer). After the first peer batch,
+        // finish on 5s idle so the continuous dhtAnnouncer can start another
+        // traversal sooner — a fixed short idle from t=0 dropped late peers.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut got_peers = false;
         while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout_at(deadline, handle.next()).await {
+            let wait = if got_peers {
+                Duration::from_secs(5)
+            } else {
+                deadline.saturating_duration_since(tokio::time::Instant::now())
+            };
+            match tokio::time::timeout(wait, handle.next()).await {
                 Ok(Some(vals)) => {
                     let peers: Vec<PeerInfo> = vals
                         .peers
@@ -704,6 +772,13 @@ async fn announce_to_dht(
                         })
                         .collect();
                     if !peers.is_empty() {
+                        got_peers = true;
+                        total_peers += peers.len();
+                        tracing::debug!(
+                            "dht get_peers +{} for {} (batch)",
+                            peers.len(),
+                            ih.to_hex()
+                        );
                         sink.add_peers(ih, peers);
                     }
                 }
@@ -713,6 +788,8 @@ async fn announce_to_dht(
         }
         handle.close();
     }
+    tracing::debug!("dht announce finished: any_ok={any_ok} peers={total_peers}");
+    any_ok
 }
 
 fn split_tracker_urls(tiers: &[Vec<String>]) -> (Vec<String>, Vec<String>) {

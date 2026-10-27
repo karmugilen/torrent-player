@@ -25,6 +25,18 @@ use crate::tuning::current_seek_tuning;
 use crate::wire::Message;
 use crate::{CoreError, PieceState, Result};
 
+/// Higher = dial sooner (Go prioritizedPeers: Trusted then peerPriority).
+fn source_dial_rank(source: PeerSource) -> u8 {
+    match source {
+        PeerSource::Tracker | PeerSource::Direct => 5,
+        PeerSource::Pex => 4,
+        PeerSource::Incoming => 3,
+        PeerSource::DhtGetPeers | PeerSource::DhtAnnouncePeer => 2,
+        PeerSource::UtHolepunch | PeerSource::WebRtc => 1,
+        PeerSource::WebSeed => 0,
+    }
+}
+
 pub struct PieceEntry {
     pub index: PieceIndex,
     pub priority: PiecePriority,
@@ -221,13 +233,35 @@ impl TorrentInner {
         self.bump_change();
     }
 
-    pub fn add_peers(self: &Arc<Self>, peers: Vec<PeerInfo>) -> usize {
+    pub fn add_peers(&self, peers: Vec<PeerInfo>) -> usize {
+        let high_water = self
+            .client
+            .read()
+            .upgrade()
+            .map(|c| c.config.torrent_peers_high_water)
+            .unwrap_or(500)
+            .max(1);
         let mut added = Vec::new();
         {
             let mut known = self.known_peers.write();
             for peer in peers {
                 if known.insert(peer.clone()) {
                     added.push(peer);
+                }
+            }
+            // Go DeleteMin while over high water: drop untrusted first.
+            while known.len() > high_water {
+                let victim = known
+                    .iter()
+                    .filter(|p| !p.trusted)
+                    .min_by_key(|p| source_dial_rank(p.source))
+                    .cloned()
+                    .or_else(|| known.iter().next().cloned());
+                match victim {
+                    Some(p) => {
+                        known.remove(&p);
+                    }
+                    None => break,
                 }
             }
         }
@@ -358,26 +392,33 @@ impl TorrentInner {
     }
 
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
+        // Go `openNewConns` / `peers.PopMax`: remove from the dial pool when
+        // initiating. Prefer trusted then higher-value sources (tracker/PEX).
         let handles = self.conn_handles.read();
         let mut dialing = self.dialing_peers.lock();
         let backoff = self.dial_backoff.lock();
         let now = Instant::now();
-        self.known_peers
-            .read()
+        let mut known = self.known_peers.write();
+        let mut eligible: Vec<PeerInfo> = known
             .iter()
             .filter(|p| {
                 !handles.contains_key(&p.addr)
                     && !dialing.contains(&p.addr)
                     && backoff.get(&p.addr).is_none_or(|until| *until <= now)
             })
-            .take(max)
             .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .inspect(|p| {
-                dialing.insert(p.addr);
-            })
-            .collect()
+            .collect();
+        eligible.sort_by(|a, b| {
+            b.trusted
+                .cmp(&a.trusted)
+                .then_with(|| source_dial_rank(b.source).cmp(&source_dial_rank(a.source)))
+        });
+        eligible.truncate(max);
+        for p in &eligible {
+            known.retain(|x| x.addr != p.addr);
+            dialing.insert(p.addr);
+        }
+        eligible
     }
 
     pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {
@@ -385,9 +426,11 @@ impl TorrentInner {
         if ok {
             self.dial_backoff.lock().remove(&addr);
         } else {
+            // Candidate already PopMax'd out of known_peers. Brief backoff so
+            // an immediate rediscovery does not redial the same dead addr.
             self.dial_backoff
                 .lock()
-                .insert(addr, Instant::now() + Duration::from_secs(30));
+                .insert(addr, Instant::now() + Duration::from_secs(5));
         }
         self.bump_change();
     }

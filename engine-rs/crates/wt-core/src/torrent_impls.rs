@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use wt_types::{PieceIndex, PiecePriority, RequestIndex, BLOCK_SIZE};
+use wt_types::{PeerInfo, PeerSource, PieceIndex, PiecePriority, RequestIndex, BLOCK_SIZE};
 use wt_wire::ext::PexMsg;
 
 use crate::choking::ChokeConfig;
@@ -214,10 +214,27 @@ impl PeerTorrent for TorrentInner {
     fn peer_closed(&self, addr: SocketAddr) {
         let old = self.conn_handles.write().remove(&addr);
         self.conns.write().remove(&addr);
-        if old.is_some_and(|handle| handle.is_outgoing()) {
-            self.dial_backoff
-                .lock()
-                .insert(addr, Instant::now() + Duration::from_secs(30));
+        if let Some(handle) = old {
+            if handle.is_outgoing() {
+                // PopMax removed this addr on dial; re-queue so we redial after
+                // backoff (local swarm + public churn). Failed dials stay out
+                // until DHT/tracker/PEX rediscovery.
+                self.dial_backoff
+                    .lock()
+                    .insert(addr, Instant::now() + Duration::from_secs(5));
+                let source = handle.source();
+                self.known_peers.write().insert(PeerInfo {
+                    id: handle.peer_id(),
+                    addr,
+                    source,
+                    supports_encryption: handle.is_encrypted(),
+                    pex: Default::default(),
+                    trusted: matches!(
+                        source,
+                        PeerSource::Tracker | PeerSource::Direct | PeerSource::Pex
+                    ),
+                });
+            }
         }
         self.peer_pieces.write().remove(&peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);
@@ -620,6 +637,66 @@ impl PeerTorrent for TorrentInner {
         self.info.read().is_some()
     }
 
+    fn ensure_metadata_size(&self, size: u32) -> Result<()> {
+        self.metadata
+            .write()
+            .set_size(size)
+            .map_err(|e| CoreError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn metadata_pieces_to_request(
+        &self,
+        peer: &crate::metadata::PeerMetadataState,
+    ) -> Vec<u32> {
+        self.metadata.read().pieces_to_request(peer)
+    }
+
+    fn extended_handshake_client_version(&self) -> String {
+        self.client
+            .read()
+            .upgrade()
+            .map(|c| c.config.extended_handshake_client_version.clone())
+            .unwrap_or_else(|| "Webtor 2.0".to_string())
+    }
+
+    fn listen_port(&self) -> u16 {
+        self.client
+            .read()
+            .upgrade()
+            .map(|c| *c.listen_port.read())
+            .unwrap_or(0)
+    }
+
+    fn pex_disabled(&self) -> bool {
+        self.client
+            .read()
+            .upgrade()
+            .map(|c| c.config.disable_pex)
+            .unwrap_or(false)
+    }
+
+    fn prefers_encryption(&self) -> bool {
+        self.client
+            .read()
+            .upgrade()
+            .map(|c| c.config.header_obfuscation_policy.preferred)
+            .unwrap_or(true)
+    }
+
+    fn dht_port(&self) -> Option<u16> {
+        let client = self.client.read().upgrade()?;
+        if client.config.no_dht {
+            return None;
+        }
+        let port = *client.listen_port.read();
+        if port == 0 {
+            None
+        } else {
+            Some(port)
+        }
+    }
+
     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()> {
         let mut last = self.pex_last_recv.lock();
         let mut prior = last.get(&from).copied();
@@ -632,9 +709,38 @@ impl PeerTorrent for TorrentInner {
             last.insert(from, time);
         }
         drop(last);
-        self.known_peers.write().extend(peers);
-        self.bump_change();
+        // Route through add_peers for high-water trim + dialer wake.
+        let _ = self.add_peers(peers);
         Ok(())
+    }
+
+    fn pex_note_connected(&self, addr: SocketAddr, encrypted: bool, utp: bool) {
+        let flags = wt_types::PexFlags {
+            prefers_encryption: encrypted,
+            seed_only: self.seeding.load(Ordering::Relaxed),
+            supports_utp: utp,
+            supports_holepunch: false,
+            reachable: true,
+        };
+        self.pex.lock().add(addr, flags);
+    }
+
+    fn pex_note_closed(&self, addr: SocketAddr, encrypted: bool, utp: bool) {
+        let flags = wt_types::PexFlags {
+            prefers_encryption: encrypted,
+            seed_only: false,
+            supports_utp: utp,
+            supports_holepunch: false,
+            reachable: false,
+        };
+        self.pex.lock().drop_listed(addr, flags);
+    }
+
+    fn pex_genmsg(&self, cursor: &mut Option<crate::pex::PexCursor>) -> Option<PexMsg> {
+        let pex = self.pex.lock();
+        let (msg, new_cursor) = pex.genmsg(*cursor);
+        *cursor = Some(new_cursor);
+        Some(msg)
     }
 
     fn add_dht_node(&self, addr: SocketAddr) {
