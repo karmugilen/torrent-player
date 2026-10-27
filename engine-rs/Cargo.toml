@@ -9,6 +9,7 @@ members = [
     "crates/wt-storage",
     "crates/wt-policy",
     "crates/wt-engine",
+    "crates/wt-parity",
 ]
 
 [workspace.package]

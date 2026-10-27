@@ -20,6 +20,7 @@ The Go engine is the reference. When in doubt, read the Go code and do what it d
 | `wt-core` | agy-2 | rest of `patches/torrent` (client.go, torrent.go, peerconn.go, requesting.go, request-strategy, reader.go, piece.go, ...) + **all Webtor patches** (`webtor_urgent.go`, `webtor_arrival.go`, hybrid-magnet fix, outgoing TCP hook, CacheDialAddr) |
 | `wt-storage` | agy-3 | storage.go, direct_storage.go, cache_store.go, cache_lru.go, checkpoint.go, extent*.go, pieces*.go, stream_ranges*.go, sparse_*.go, verification.go, restore_hash.go, zero_hash.go, and existing `engine-rust/src/{hash,ranges,lib}.rs` |
 | `wt-policy` | grok-3 | adaptive_buffer.go, arrival_model.go, video_priority.go, playback_grid.go, playback_resume.go, next_preload.go, peer_exploration.go, seek_log.go, ghost_mode.go, ghost_pro.go, bypass.go, transfer_rates.go, direct_play_idle.go, claude_seek.go — as self-contained structs/functions with explicit inputs |
+| `wt-parity` | grok-1 | parity + benchmark harness driving Go and Rust host engines over the control API |
 | `wt-engine` | agy-4 | main.go (JNI exports, lib name `engine`), main_host.go (host binary), server.go, types.go, playback.go, preview.go, live_preview.go, trackers.go, tracker_status.go, network.go, connections.go, seeding.go, version.go; `build.sh` equivalent for Android |
 
 Out of scope: `engine-go/cmd/discovery` (separate tool).
