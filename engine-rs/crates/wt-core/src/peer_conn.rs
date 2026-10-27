@@ -152,6 +152,8 @@ pub trait PeerTorrent: Send + Sync {
     fn mark_chunk_requested(&self, req: RequestIndex);
     fn piece_all_dirty(&self, piece: PieceIndex) -> bool;
     fn note_availability(&self, piece: PieceIndex, delta: i32);
+    fn note_peer_piece(&self, _peer: PeerKey, _piece: PieceIndex, _has: bool) {}
+    fn peer_closed(&self, _addr: SocketAddr) {}
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes>;
@@ -617,6 +619,24 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.torrent.peer_key(self.state.remote_addr)
     }
 
+    pub fn start(&mut self, handle: &ConnHandle) {
+        let count = self.torrent.num_pieces();
+        if count > 0 {
+            let mut bits = vec![0u8; (count as usize).div_ceil(8)];
+            for piece in 0..count {
+                if self.torrent.piece_complete(piece) {
+                    bits[piece as usize / 8] |= 0x80 >> (piece % 8);
+                }
+            }
+            self.send(handle, Message::Bitfield(Bytes::from(bits)));
+        }
+        if !self.torrent.data_upload_disallowed() {
+            self.state.am_choking = false;
+            self.send(handle, Message::Unchoke);
+        }
+        self.update_requests(handle);
+    }
+
     pub fn peer_conn_info(&self) -> PeerConnInfo {
         PeerConnInfo {
             remote_addr: self.state.remote_addr,
@@ -1080,6 +1100,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     fn handle_have(&mut self, index: u32) {
         if self.state.peer_pieces.insert(index) {
             self.torrent.note_availability(index, 1);
+            self.torrent.note_peer_piece(self.key(), index, true);
             self.state.need_request_update = true;
             self.torrent.bump_change();
         }
@@ -1095,6 +1116,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
             if has && self.state.peer_pieces.insert(idx) {
                 self.torrent.note_availability(idx, 1);
+                self.torrent.note_peer_piece(self.key(), idx, true);
             }
         }
         self.state.need_request_update = true;
@@ -1225,23 +1247,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             if let Some(name) = ext.v.clone() {
                 self.state.client_name = name;
             }
-            // Send our LTEP handshake
-            let mut ours = ExtendedHandshake::default();
-            ours.m
-                .insert(EXTENSION_NAME_METADATA.to_string(), self.our_ext_metadata);
-            ours.m
-                .insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
-            if let Some(sz) = self.torrent.metadata_size() {
-                ours.metadata_size = Some(sz);
-            }
-            let bytes = ours.encode();
-            self.send(
-                handle,
-                Message::Extended {
-                    id: EXT_HANDSHAKE_ID,
-                    payload: bytes,
-                },
-            );
             // Request metadata if we lack it
             if !self.torrent.has_metadata() {
                 if let Some(m_id) = self.state.peer_ext_ut_metadata {
@@ -1362,6 +1367,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                     for i in 0..n {
                         if self.state.peer_pieces.insert(i) {
                             self.torrent.note_availability(i, 1);
+                            self.torrent.note_peer_piece(self.key(), i, true);
                         }
                     }
                     self.state.peer_sent_have_all = true;
@@ -1434,6 +1440,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 self.torrent.clear_assignment(r);
             }
         }
+        self.torrent.peer_closed(self.state.remote_addr);
         self.torrent.bump_change();
     }
 }

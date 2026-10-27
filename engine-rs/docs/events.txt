@@ -65,3 +65,4 @@
 -|Coordinator defined the Client <-> Torrent connection interface (attach_connection, wants_conns, take_dial_candidates, peers_changed) for codex-1 and codex-4
 -|First real transfer: e2e transfer_patterned_tcp_256kib passes (legacy peer loop, explicit dial)
 -|codex-5 finding: most of the 136 ignored engine tests are unimplemented!() placeholders, not ports (c841eac overstated); codex-5 now writing real ports in priority order
+-|codex-3 storage bench: checkpoint save 11.3 s Rust vs 1.36 s Go (2,000 saves); codex-3 fixing checkpoint.rs
