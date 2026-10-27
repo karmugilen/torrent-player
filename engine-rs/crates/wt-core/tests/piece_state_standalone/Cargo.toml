@@ -1,0 +1,17 @@
+[package]
+name = "wt-core-piece-state-standalone"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep out of the engine-rs workspace (coordinator owns workspace.members).
+[workspace]
+
+[dependencies]
+wt-types = { path = "../../../wt-types" }
+parking_lot = "0.12"
+sha1 = { version = "0.10", features = ["asm"] }
+roaring = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
