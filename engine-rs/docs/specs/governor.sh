@@ -3,7 +3,7 @@
 # - Keeps at least 10% of RAM available: pauses (SIGSTOP) the largest build
 #   processes below that, resumes them (SIGCONT) once 15% is available again.
 # - Never touches agent CLIs, the editor, or anything outside the build tools.
-# - Exits (alerting the coordinator) only when disk free drops below 30 GB or
+# - Exits (alerting the coordinator) only when disk free drops below 26 GB or
 #   /tmp below 2 GB, which need a human decision.
 set -u
 LOG=/tmp/wt-specs/governor.log
@@ -50,7 +50,7 @@ while true; do
         continue
     fi
 
-    if [ "$disk" -lt 30 ] || [ "$tmp" -lt 2048 ]; then
+    if [ "$disk" -lt 26 ] || [ "$tmp" -lt 2048 ]; then
         echo "LIMIT disk=${disk}G tmp=${tmp}M mem=${avail}M"
         du -sh /home/kar/.cache/wt-targets/* /home/kar/.cache/wt-tmp/* 2>/dev/null | sort -h | tail -12
         exit 0
