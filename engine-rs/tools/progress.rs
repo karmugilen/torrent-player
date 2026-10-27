@@ -25,11 +25,11 @@ fn crates() -> Vec<Crate> {
         Crate { name: "wt-meta", owner: "grok-1", go: &["patches/torrent/bencode/", "patches/torrent/metainfo/", "patches/torrent/merkle/", "patches/torrent/types/infohash/", "patches/torrent/types/infohash-v2/"] },
         Crate { name: "wt-wire", owner: "agy-1", go: &["patches/torrent/peer_protocol/", "patches/torrent/mse/", "patches/torrent/handshake.go", "patches/torrent/ltep.go"] },
         Crate { name: "wt-discovery", owner: "grok-2", go: &["patches/torrent/tracker/", "patches/torrent/webtorrent/", "patches/torrent/webseed/", "patches/torrent/client-tracker-announcer.go", "patches/torrent/dht.go", "patches/torrent/bep40.go"] },
-        Crate { name: "wt-core", owner: "agy-2", go: &["@core"] },
-        Crate { name: "wt-storage", owner: "agy-3", go: &["storage.go", "direct_storage.go", "cache_store.go", "cache_lru.go", "checkpoint.go", "extent.go", "extent_host.go", "pieces.go", "pieces_host.go", "stream_ranges_host.go", "sparse_unix.go", "sparse_other.go", "verification.go", "restore_hash.go", "zero_hash.go"] },
+        Crate { name: "wt-core", owner: "codex-1+4", go: &["@core"] },
+        Crate { name: "wt-storage", owner: "agy-3, grok-5, grok-7", go: &["storage.go", "direct_storage.go", "cache_store.go", "cache_lru.go", "checkpoint.go", "extent.go", "extent_host.go", "pieces.go", "pieces_host.go", "stream_ranges_host.go", "sparse_unix.go", "sparse_other.go", "verification.go", "restore_hash.go", "zero_hash.go"] },
         Crate { name: "wt-policy", owner: "grok-3", go: &["adaptive_buffer.go", "arrival_model.go", "video_priority.go", "playback_grid.go", "playback_resume.go", "next_preload.go", "peer_exploration.go", "seek_log.go", "ghost_mode.go", "ghost_pro.go", "bypass.go", "transfer_rates.go", "direct_play_idle.go", "claude_seek.go"] },
-        Crate { name: "wt-parity", owner: "grok-1", go: &[] },
-        Crate { name: "wt-engine", owner: "agy-4", go: &["main.go", "main_host.go", "server.go", "types.go", "playback.go", "preview.go", "live_preview.go", "trackers.go", "tracker_status.go", "network.go", "connections.go", "seeding.go", "version.go"] },
+        Crate { name: "wt-parity", owner: "grok-1, codex-3", go: &[] },
+        Crate { name: "wt-engine", owner: "codex-2+5", go: &["main.go", "main_host.go", "server.go", "types.go", "playback.go", "preview.go", "live_preview.go", "trackers.go", "tracker_status.go", "network.go", "connections.go", "seeding.go", "version.go"] },
     ]
 }
 

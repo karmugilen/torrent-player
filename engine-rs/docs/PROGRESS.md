@@ -10,18 +10,18 @@ OVERALL   [#############################.]  95%   crates complete 6/8, pending 2
 wt-meta       [##############################] 100%  done     grok-1
 wt-wire       [##############################] 100%  done     agy-1
 wt-discovery  [##############################] 100%  done     grok-2
-wt-core       [###########################...]  90%  running  agy-2
-wt-storage    [##############################] 100%  done     agy-3
+wt-core       [###########################...]  90%  running  codex-1+4
+wt-storage    [##############################] 100%  done     agy-3, grok-5, grok-7
 wt-policy     [##############################] 100%  done     grok-3
-wt-parity     [##############################] 100%  done     grok-1
-wt-engine     [#############################.]  95%  running  agy-4
+wt-parity     [##############################] 100%  done     grok-1, codex-3
+wt-engine     [#############################.]  95%  running  codex-2+5
 ```
 
 Started 10:59 · elapsed 1.8 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 52 min at 10.9%/h):
+ETA (rough, from the last 53 min at 10.9%/h):
 
 - crates complete: ~14:33 (in 1.8 h)
 - whole port incl. integration, benchmarks vs Go, Android APK: ~18:33 (in 5.8 h; the 4 h after the crates is a planning guess)
@@ -31,25 +31,25 @@ ETA (rough, from the last 52 min at 10.9%/h):
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | agy-2 | running | 13626 | 11451 | 121 | 204 | 1 | codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections) |
-| wt-storage | agy-3 | done | 4572 | 5011 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
+| wt-core | codex-1+4 | running | 13626 | 11469 | 121 | 204 | 1 | codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections) |
+| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5011 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
-| wt-parity | grok-1 | done | 0 | 3328 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
-| wt-engine | agy-4 | running | 5609 | 4664 | 71 | 176 | 0 | codex-2 (server on wt_core, engine-host builds) + codex-5 (types.rs, engine tests) |
+| wt-parity | grok-1, codex-3 | done | 0 | 3328 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
+| wt-engine | codex-2+5 | running | 5609 | 4690 | 71 | 176 | 0 | codex-2 (server on wt_core, engine-host builds) + codex-5 (types.rs, engine tests) |
 
 ## Complete
 
 - [x] wt-meta (grok-1)
 - [x] wt-wire (agy-1)
 - [x] wt-discovery (grok-2)
-- [x] wt-storage (agy-3)
+- [x] wt-storage (agy-3, grok-5, grok-7)
 - [x] wt-policy (grok-3)
-- [x] wt-parity (grok-1)
+- [x] wt-parity (grok-1, codex-3)
 
 ## Pending
 
-- [ ] wt-core (agy-2): 90%, 11451 of ~10900 Rust lines, 204/121 tests
-- [ ] wt-engine (agy-4): 95%, 4664 of ~4487 Rust lines, 176/71 tests
+- [ ] wt-core (codex-1+4): 90%, 11469 of ~10900 Rust lines, 204/121 tests
+- [ ] wt-engine (codex-2+5): 95%, 4690 of ~4487 Rust lines, 176/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
 - [ ] Android: libengine.so (arm64) + APK build
@@ -148,6 +148,7 @@ ETA (rough, from the last 52 min at 10.9%/h):
 ## Commits
 
 ```text
+67cd0f1 engine-rs: progress update and codex checkpoint
 930cee0 engine-rs: codex-4 and codex-5 join
 fbd723b engine-rs: codex checkpoint (wt-core clippy clean, engine-host builds)
 f1ebb59 engine-rs: only Codex workers remain
