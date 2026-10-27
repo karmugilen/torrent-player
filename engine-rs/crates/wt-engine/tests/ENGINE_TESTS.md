@@ -67,7 +67,7 @@ Status values: `pass` (runs and asserts), `ignored-waiting` (compiles, `#[ignore
 | `TestPeerExplorationSettingsAreIndependent` | `engine_peer_exploration::test_peer_exploration_settings_are_independent` | pass |
 | `TestPeerExplorationProtectsTheOnlyKnownSeed` | `engine_peer_exploration::test_peer_exploration_protects_the_only_known_seed` | ignored-waiting |
 | `TestPeerExplorationReleasesOneRealIdleConnection` | `engine_peer_exploration::test_peer_exploration_releases_one_real_idle_connection` | ignored-waiting |
-| `TestRangeStartParsesSingleRanges` | `engine_playback_grid::test_range_start_parses_single_ranges` | ignored-waiting |
+| `TestRangeStartParsesSingleRanges` | `engine_playback_grid::test_range_start_parses_single_ranges` | pass |
 | `TestSeekRangeOpensTheWindowAtTheRange` | `engine_playback_grid::test_seek_range_opens_the_window_at_the_range` | ignored-waiting |
 | `TestPiecesReportsPlaybackTiersPlayheadAndDetail` | `engine_playback_grid::test_pieces_reports_playback_tiers_playhead_and_detail` | ignored-waiting |
 | `TestPlaybackReadsVerifiedBytesWithoutWaiting` | `engine_playback::test_playback_reads_verified_bytes_without_waiting` | ignored-waiting |
@@ -172,8 +172,8 @@ Status values: `pass` (runs and asserts), `ignored-waiting` (compiles, `#[ignore
 ## Counts
 
 - total mapped: 143
-- pass: 8
-- ignored-waiting: 135
+- pass: 9
+- ignored-waiting: 134
 - fails: 0
 
 ## Compile note
@@ -184,9 +184,10 @@ is blocked by `tests/jni_exports.rs` (grok-4 owned) until its `wt_engine::` impo
 become `engine::`.
 
 
-## Helper modules (stream / preview / network)
+## Helper modules (stream / preview / network / playback)
 
-- `src/stream_http.rs`: Go-faithful Range/HEAD/206 server (`/torrent/{id}/file/{index}`), unit + live Range test with fake `StreamSource`.
+- `src/stream_http.rs`: Go-faithful Range/HEAD/206 server (`/torrent/{id}/file/{index}`), unit + live Range test with fake `StreamSource`; `range_start` exported (powers `engine_playback_grid::test_range_start_parses_single_ranges`).
 - `src/preview.rs`: budgeted `PreviewReader` + `admit_preview_range`.
 - `src/live_preview.rs`: preview-state signature helpers.
 - `src/network.rs`: generation gate + `NetworkDialer` reset/track.
+- `src/playback.rs` + `playback_core.rs`: `PlaybackHost` / `ReaderBackend` / `PlaybackSession` / `PlaybackPriorityCoordinator` on wt-core + wt-policy; 6 lib unit tests with `FakeReaderBackend`. Integration `engine_playback*` remain ignored until agy-4 implements `PlaybackHost` and wires `open_playback` → `PlaybackReader::open_for_host`.
