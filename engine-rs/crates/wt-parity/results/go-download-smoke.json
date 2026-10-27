@@ -1,0 +1,24 @@
+{
+  "label": "go",
+  "engine": "/tmp/engine-go-host",
+  "scenario": "download",
+  "started_unix_ms": 1793080757176,
+  "finished_unix_ms": 1793080763015,
+  "repeats": 1,
+  "metrics": {
+    "download_throughput_mib_s": {
+      "unit": "MiB/s",
+      "samples": [
+        0.18402524238917006
+      ],
+      "median": 0.18402524238917006,
+      "p90": 0.18402524238917006,
+      "max": 0.18402524238917006,
+      "higher_is_better": true
+    }
+  },
+  "notes": [
+    "scale video=1048576B seek=1048576B piece=262144",
+    "seeders=2"
+  ]
+}

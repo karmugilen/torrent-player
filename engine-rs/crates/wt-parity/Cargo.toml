@@ -5,8 +5,19 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "wt-parity"
+path = "src/main.rs"
+
 [dependencies]
 wt-types.workspace = true
 wt-meta.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1.workspace = true
+hex.workspace = true
+rand.workspace = true
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+ctrlc = "3"
+libc = "0.2"
