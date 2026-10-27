@@ -23,3 +23,4 @@ grok-4 api-diff DONE task_8e0dddebdb13 ctx_00bd1df9a3da
 grok-8 wt-core-reader DONE task_30752dd75277 ctx_afd27ec663d7
 agy-1 wt-core-conn DONE task_ca78c574cc4a ctx_a2a4beb9af9a commit b1f35f8
 grok-3 wt-playback DONE task_0799f8a5fd55 ctx_b81566ef61ff commit 07f3163
+grok-6 wt-core-client SETTLED-PAUSED ctx_7c0bb47c5ea6 task_a92f237e38d7 (resume: new dispatch from tests/CLIENT_HANDOFF.md)

@@ -66,3 +66,5 @@ In progress when paused:
    Workers whose limit has reset continue in the same terminal.
 3. Restart the resource governor: `bash engine-rs/docs/specs/governor.sh` (run in the background).
 4. Delete `.wt-target-discovery/` in the worktree root once nothing uses it (stray build output, 2.7 GB).
+5. Settled during the pause, need a NEW dispatch on resume (same task spec + their handoff note):
+   grok-6 client.rs (`engine-rs/crates/wt-core/tests/CLIENT_HANDOFF.md`, spec `docs/specs/client.md`); grok-1 peer_conn.rs is reported done but must be re-verified in-crate.
