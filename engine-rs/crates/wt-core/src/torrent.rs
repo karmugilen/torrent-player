@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use wt_types::{
-    ClientStorage, Info, InfoHash, InfoHashV2, MetaInfo, PeerInfo, PieceIndex, PiecePriority,
-    RequestIndex, TorrentStorage, BLOCK_SIZE,
+    ClientStorage, Info, InfoHash, InfoHashV2, MetaInfo, PeerId, PeerInfo, PeerSource, PieceIndex, PiecePriority,
+    RequestIndex, TorrentStorage, Transport, BLOCK_SIZE,
 };
 
 use crate::arrival::ArrivalModel;
@@ -34,6 +34,16 @@ pub struct PieceEntry {
     pub ok: bool,
     pub chunks_total: usize,
     pub chunks_received: HashSet<u32>, // offsets in piece
+}
+
+pub(crate) struct AttachInfo {
+    pub remote: SocketAddr,
+    pub outgoing: bool,
+    pub transport: Transport,
+    pub encrypted: bool,
+    pub peer_id: PeerId,
+    pub reserved: [u8; 8],
+    pub source: PeerSource,
 }
 
 impl PieceEntry {
@@ -90,6 +100,9 @@ pub struct TorrentInner {
     pub known_peers: RwLock<HashSet<PeerInfo>>,
     pub client: RwLock<Weak<crate::client::ClientInner>>,
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
+    pub dial_backoff: Mutex<HashMap<SocketAddr, Instant>>,
+    pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
+    pub peer_notify: tokio::sync::Notify,
     pub trackers: RwLock<Vec<Vec<String>>>,
     pub web_seeds: RwLock<Vec<String>>,
 
@@ -146,6 +159,9 @@ impl TorrentInner {
             known_peers: RwLock::new(HashSet::new()),
             client: RwLock::new(Weak::new()),
             dialing_peers: Mutex::new(HashSet::new()),
+            dial_backoff: Mutex::new(HashMap::new()),
+            conn_handles: RwLock::new(HashMap::new()),
+            peer_notify: tokio::sync::Notify::new(),
             trackers: RwLock::new(Vec::new()),
             web_seeds: RwLock::new(Vec::new()),
             request_focus: AtomicI64::new(0),
@@ -170,6 +186,7 @@ impl TorrentInner {
 
     pub fn bump_change(&self) {
         self.change_version.fetch_add(1, Ordering::SeqCst);
+        self.peer_notify.notify_one();
         let _guard = self.change_mutex.lock();
         self.change_cond.notify_all();
     }
@@ -185,29 +202,48 @@ impl TorrentInner {
             }
         }
         let count = added.len();
-        if let Some(client) = self.client.read().upgrade() {
-            if client.config.dial_for_peer_conns {
-                for peer in added {
-                    let mut dialing = self.dialing_peers.lock();
-                    if self.conns.read().len() + dialing.len() >= self.max_established_conns.load(Ordering::Relaxed)
-                        || self.conns.read().contains_key(&peer.addr)
-                        || !dialing.insert(peer.addr)
-                    {
-                        continue;
-                    }
-                    drop(dialing);
-                    let torrent = Arc::clone(self);
-                    let cl = Arc::clone(&client);
-                    client.tokio_handle.spawn(async move {
-                        let _ = cl.dial_peer(Arc::clone(&torrent), peer.addr, peer.source).await;
-                        torrent.dialing_peers.lock().remove(&peer.addr);
-                    });
-                }
-            }
-        }
         if count > 0 { self.bump_change(); }
         count
     }
+
+    pub(crate) fn attach_connection(self: &Arc<Self>, info: AttachInfo, handle: crate::conn::ConnHandle) -> Result<crate::peer_conn::PeerConnHandler<Self>> {
+        if self.closed.load(Ordering::Relaxed) { return Err(CoreError::Closed); }
+        if info.remote != handle.remote_addr() { return Err(CoreError::Other("peer address mismatch".into())); }
+        let _ = (info.outgoing, info.transport, info.encrypted, info.peer_id, info.reserved, info.source);
+        let mut handles = self.conn_handles.write();
+        if handles.contains_key(&info.remote) || handles.len() >= self.max_established_conns.load(Ordering::Relaxed) {
+            return Err(CoreError::Other("duplicate peer or connection limit reached".into()));
+        }
+        handles.insert(info.remote, handle.clone());
+        drop(handles);
+        let mut handler = crate::peer_conn::PeerConnHandler::new(Arc::clone(self), &handle);
+        handler.start(&handle);
+        self.bump_change();
+        Ok(handler)
+    }
+
+    pub(crate) fn wants_conns(&self) -> usize {
+        if self.closed.load(Ordering::Relaxed) { return 0; }
+        self.max_established_conns.load(Ordering::Relaxed).saturating_sub(self.conn_handles.read().len() + self.dialing_peers.lock().len())
+    }
+
+    pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
+        let handles = self.conn_handles.read();
+        let mut dialing = self.dialing_peers.lock();
+        let backoff = self.dial_backoff.lock();
+        let now = Instant::now();
+        self.known_peers.read().iter().filter(|p| !handles.contains_key(&p.addr) && !dialing.contains(&p.addr) && backoff.get(&p.addr).is_none_or(|until| *until <= now)).take(max).cloned().collect::<Vec<_>>().into_iter().inspect(|p| { dialing.insert(p.addr); }).collect()
+    }
+
+    pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {
+        self.dialing_peers.lock().remove(&addr);
+        if ok { self.dial_backoff.lock().remove(&addr); }
+        else { self.dial_backoff.lock().insert(addr, Instant::now() + Duration::from_secs(30)); }
+        self.bump_change();
+    }
+    pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify { &self.peer_notify }
+    pub(crate) fn infohashes(&self) -> (InfoHash, Option<InfoHash>) { (self.info_hash, self.info_hash_v2.map(|h| h.to_short())) }
+    pub(crate) fn skey_matches(&self, skey: &[u8; 20]) -> bool { self.info_hash.0 == *skey || self.info_hash_v2.is_some_and(|h| h.to_short().0 == *skey) }
 
     pub fn set_info(&self, info: Arc<Info>) -> Result<()> {
         let num_pieces = info.num_pieces() as usize;
