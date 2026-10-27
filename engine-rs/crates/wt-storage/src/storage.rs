@@ -3006,4 +3006,72 @@ mod startup_save_tests {
         );
         storage.close().unwrap();
     }
+
+    #[test]
+    fn slow_startup_save_does_not_block_readers() {
+        let base = PathBuf::from("/home/kar/.cache/wt-tmp/perf");
+        fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("startup-save-readers-")
+            .tempdir_in(base)
+            .unwrap();
+        let info = Info {
+            name: "movie.mp4".into(),
+            piece_length: 16,
+            pieces: vec![0; 80],
+            files: vec![FileInfo {
+                length: 64,
+                path: vec![],
+                torrent_offset: 0,
+                attr: String::new(),
+                pieces_root: None,
+            }],
+            single_file: true,
+            private: None,
+            source: String::new(),
+            meta_version: 0,
+            file_tree_raw: None,
+        };
+        let storage = DocumentTorrentStorage::new(Some(info), InfoHash([7; 20]), dir.path());
+        storage.attach_direct_play(&[None], &[0]).unwrap();
+        storage.inner.lock().startup_pieces.insert(0, true);
+
+        // Populate piece 1 in cache before startup save starts.
+        let other = storage.piece_at(1);
+        other.write_at(&[42; 16], 0).unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *storage.startup_save_hook.lock() = Some(Arc::new(move || {
+            started_tx.send(()).unwrap();
+            release_rx.lock().recv().unwrap();
+        }));
+
+        let piece = storage.piece_at(0);
+        piece.write_at(&[1; 16], 0).unwrap();
+        piece.mark_complete().unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // While startup save of piece 0 is blocked in I/O hook, read from piece 1 in RAM.
+        let (done_tx, done_rx) = mpsc::channel();
+        let reader_other = storage.piece_at(1);
+        let reader_piece0 = storage.piece_at(0);
+        let thread = std::thread::spawn(move || {
+            let mut buf1 = [0u8; 16];
+            let n1 = reader_other.read_at(&mut buf1, 0).expect("read piece 1");
+            let mut buf0 = [0u8; 16];
+            let n0 = reader_piece0.read_at(&mut buf0, 0).expect("read piece 0");
+            done_tx.send((n1, buf1, n0, buf0)).unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        let (n1, buf1, n0, buf0) = result.expect("read timed out: reader blocked by startup save");
+        assert_eq!(n1, 16);
+        assert_eq!(buf1, [42; 16]);
+        assert_eq!(n0, 16);
+        assert_eq!(buf0, [1; 16]);
+        storage.close().unwrap();
+    }
 }

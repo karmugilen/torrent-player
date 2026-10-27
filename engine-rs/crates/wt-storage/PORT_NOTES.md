@@ -142,4 +142,4 @@ background `scheduleDiskFlushLocked` yet).
 Verify: `CARGO_BUILD_JOBS=3 cargo test -p wt-storage -- --test-threads=1`
 → 109 pass / 0 ignored / 0 fail; clippy `--all-targets -D warnings` clean.
 
-Startup-piece persistence uses one bounded background writer and drains on close. It keeps Rust's existing file fsync; Go's startup-cache drain closes and renames without fsync. Checkpoint persistence is unchanged. The storage benchmark and its current measurement limitations are documented in BENCH.md.
+Startup-piece persistence uses one bounded background writer and drains on close. It keeps Rust's existing file fsync; Go's startup-cache drain closes and renames without fsync. Checkpoint persistence is unchanged. The storage benchmark and its current measurement limitations are documented in BENCH.md. Unit tests `slow_startup_save_does_not_block_piece_traffic` and `slow_startup_save_does_not_block_readers` verify writers and readers continue unblocked during disk I/O.

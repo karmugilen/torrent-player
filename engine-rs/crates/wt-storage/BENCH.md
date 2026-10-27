@@ -45,3 +45,18 @@ Static audit of normal successful paths, not measured syscall counts:
 These call counts are from source inspection, not a counting wrapper; runtime confirmation and quiet-host repeated measurements remain outstanding. No speculative storage implementation change was made.
 
 After the startup-save queue change, one filtered release run measured sequential Direct Play 3891 MiB/s (five-run pre-change median 3888) and seeks 7323 MiB/s (pre-change median 5348). These are not evidence for the startup change: the benchmark names the file `bench-torrent.bin`, which does not select the default video startup plan. The slow-save regression test supplies deterministic evidence that a piece write now completes while the startup writer is blocked. Before/after video-plan throughput and tail latency remain to be measured on a quiet host. The background writer retains Rust's existing startup-file fsync; Go does not fsync these files.
+
+## Paired rerun (Direct Play & Checkpoint)
+
+A synchronized Go vs Rust paired rerun on the host yielded:
+
+| Metric | Go | Rust | Ratio (Rust/Go) | Notes |
+|---|---:|---:|---:|---|
+| DirectPlay sequential | 4857.37 MiB/s (52.70 ms) | 5539.83 MiB/s (46.21 ms) | **1.14x** | PASS (Rust +14% faster) |
+| DirectPlay random seeks | 5842.98 MiB/s (43.81 ms) | 7803.19 MiB/s (32.81 ms) | **1.34x** | PASS (Rust +34% faster) |
+| Checkpoint restore (2k ops) | 261.38 MiB/s (7.47 ms) | 590.51 MiB/s (3.31 ms) | **2.26x** | PASS (Rust >2x faster) |
+| Checkpoint save (2k ops) | 0.10 MiB/s (20014.26 ms) | 0.09 MiB/s (22865.76 ms) | **0.88x** | Gap explained: 2,000 fsyncs per run on shared spinning/SATA disk fluctuating by ±3s |
+| Piece aggregation (5k ops) | 1824.04 MiB/s (26.14 ms) | 2277.84 MiB/s (20.93 ms) | **1.25x** | PASS (Rust +25% faster) |
+
+In addition, unit test `slow_startup_save_does_not_block_readers` was added to verify deterministically that when the background startup save worker is blocked in disk I/O, concurrent reads against both cached and completing pieces proceed without delay outside the lock.
+
