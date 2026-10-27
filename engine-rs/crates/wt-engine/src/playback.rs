@@ -109,6 +109,7 @@ pub trait PlaybackHost: Send + Sync {
     fn refresh_playback_completion(&self, _id: &str, _pieces: &[u32]) {}
     fn set_playback_storage_demand(&self, _id: &str, _demand: &HashMap<u32, PiecePriority>) {}
     fn playback_readers_changed(&self, _id: &str) {}
+    fn on_playback_closed(&self, _id: &str, _file_index: usize) {}
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -207,6 +208,7 @@ struct CoordinatorInner {
     active: HashMap<usize, u64>,
     playing: Option<u64>,
     resume_positions: HashMap<usize, i64>,
+    resume_generation: u64,
     closed: bool,
 }
 
@@ -233,6 +235,7 @@ impl PlaybackPriorityCoordinator {
                 active: HashMap::new(),
                 playing: None,
                 resume_positions: HashMap::new(),
+                resume_generation: 0,
                 closed: false,
             }),
         }
@@ -291,7 +294,41 @@ impl PlaybackPriorityCoordinator {
     }
 
     pub fn set_resume_demand(&self, demand: HashMap<u32, PiecePriority>) {
-        self.inner.lock().resume_demand = demand;
+        let mut inner = self.inner.lock();
+        inner.resume_demand = demand;
+        Self::apply_locked(&mut inner);
+    }
+
+    pub fn remember_resume(&self, file_index: usize, offset: i64) {
+        self.inner.lock().resume_positions.entry(file_index).or_insert(offset);
+    }
+
+    pub fn prepare_resume(&self, file_index: usize, offset: i64) {
+        let mut inner = self.inner.lock();
+        inner.resume_positions.insert(file_index, offset);
+        inner.resume_generation += 1;
+        inner.resume_demand.clear();
+        Self::apply_locked(&mut inner);
+    }
+
+    pub fn hold_resume(&self, demand: HashMap<u32, PiecePriority>) -> u64 {
+        let mut inner = self.inner.lock();
+        inner.resume_generation += 1;
+        inner.resume_demand = demand;
+        Self::apply_locked(&mut inner);
+        inner.resume_generation
+    }
+
+    pub fn has_resume_demand(&self) -> bool {
+        !self.inner.lock().resume_demand.is_empty()
+    }
+
+    pub fn expire_resume(&self, generation: u64) -> Option<HashMap<u32, PiecePriority>> {
+        let mut inner = self.inner.lock();
+        if inner.resume_generation != generation { return None }
+        inner.resume_demand.clear();
+        Self::apply_locked(&mut inner);
+        Some(inner.effective.clone())
     }
 
     pub fn take_active(&self, session_id: u64, file_index: usize) -> (Vec<u64>, bool) {
@@ -630,7 +667,10 @@ impl PlaybackReader {
             })
         };
         *self.simple_reader.lock() = None;
-        if let Some(host) = host { host.playback_readers_changed(&self.id); }
+        if let Some(host) = host {
+            host.on_playback_closed(&self.id, self.file_index);
+            host.playback_readers_changed(&self.id);
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -976,8 +1016,10 @@ impl PlaybackSession {
         }
         if !self.open_phase {
             self.coordinator.set_playing(self.session_id);
-            if n > 0 {
-                self.coordinator.inner.lock().resume_positions.insert(self.file_index, offset + n as i64);
+            let head = if self.boost { self.startup_head_bytes } else { VIDEO_STARTUP_HEAD_BYTES };
+            let tail = if self.boost { self.startup_tail_bytes } else { VIDEO_STARTUP_TAIL_BYTES };
+            if n > 0 && offset >= head && offset < self.length - tail {
+                self.coordinator.inner.lock().resume_positions.insert(self.file_index, offset);
             }
         }
         Ok(n)
@@ -1367,6 +1409,17 @@ mod tests {
         let _ = coord.update(1, d1, w);
         let eff = coord.update(2, d2, w);
         assert_eq!(eff.get(&1), Some(&PiecePriority::High));
+    }
+
+    #[test]
+    fn resume_hold_ignores_stale_expiry_and_preserves_newer_generation() {
+        let coordinator = PlaybackPriorityCoordinator::new();
+        let first = coordinator.hold_resume(HashMap::from([(10, PiecePriority::High)]));
+        let second = coordinator.hold_resume(HashMap::from([(14, PiecePriority::High)]));
+        assert!(coordinator.expire_resume(first).is_none());
+        assert_eq!(coordinator.effective().get(&14), Some(&PiecePriority::High));
+        assert!(coordinator.expire_resume(second).unwrap().is_empty());
+        assert!(!coordinator.has_resume_demand());
     }
 
     #[test]

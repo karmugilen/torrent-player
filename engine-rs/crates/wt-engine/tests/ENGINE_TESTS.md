@@ -1,6 +1,8 @@
 # wt-engine integration test map
 
-Engine integration tests declared: 149 | Enabled: 105 | Waiting: 44 | Known core-blocked failures: 2
+Engine integration tests declared: 152 | Enabled: 113 | Waiting: 39 | Known core-blocked failures: 2
+
+Round 3 group 4: five more tests enabled (39 waiting overall); debounced verified resume persistence, shutdown flush, RAM reuse, restored completion, useful body positions, explicit start hints, and generation-safe resume holds. Three new integration regressions and one stale-expiry unit test cover the previously missing Go assertions; library tests now 49.
 
 Round 3 group 3: six more JSON/telemetry/tracker tests pass unchanged; all integration needs ignores are down to 44. Descriptor selection now updates destinations, preserves null versus empty responses, and original trackers survive metainfo/magnet exports.
 
@@ -52,10 +54,10 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestAddHybridMagnetWithTrackersKeepsEngineAlive` | `engine_hybrid_magnet::test_add_hybrid_magnet_with_trackers_keeps_engine_alive` | pass |
 | `TestPlayingReaderKeepsWindowAndPeersWhileIdle` | `engine_idle_buffer::test_playing_reader_keeps_window_and_peers_while_idle` | waiting: playing reader idle window management |
 | `TestFormerPlayheadParksOnceItIsNoLongerPlaying` | `engine_idle_buffer::test_former_playhead_parks_once_it_is_no_longer_playing` | waiting: former playhead parking when no longer playing |
-| `TestSeekServesDeliveredBlocksBeforeThePieceIsVerified` | `engine_instant_seek::test_seek_serves_delivered_blocks_before_the_piece_is_verified` | waiting: delivered blocks stream without full piece verification |
+| `TestSeekServesDeliveredBlocksBeforeThePieceIsVerified` | `engine_instant_seek::test_seek_serves_delivered_blocks_before_the_piece_is_verified` | pass |
 | `TestReopeningTheSameFileDoesNotReplanMetadata` | `engine_instant_seek::test_reopening_the_same_file_does_not_replan_metadata` | waiting: reopening file avoids replanning metadata |
-| `TestReinjectingResumeBytesDoesNotLeakCacheAccounting` | `engine_instant_seek::test_reinjecting_resume_bytes_does_not_leak_cache_accounting` | waiting: re-injecting resume bytes cache accounting |
-| `TestResumeWindowSavesOnceSeekingSettlesAndReopensFromRAM` | `engine_instant_seek::test_resume_window_saves_once_seeking_settles_and_reopens_from_ram` | waiting: resume window scheduled persistence and reopen from RAM |
+| `TestReinjectingResumeBytesDoesNotLeakCacheAccounting` | `engine_instant_seek::test_reinjecting_resume_bytes_does_not_leak_cache_accounting` | pass |
+| `TestResumeWindowSavesOnceSeekingSettlesAndReopensFromRAM` | `engine_instant_seek::test_resume_window_saves_once_seeking_settles_and_reopens_from_ram` | pass |
 | `TestHTTPReadHandsOverTheFirstBlockAtOnce` | `engine_instant_seek::test_http_read_hands_over_the_first_block_at_once` | waiting: HTTP read hands over first block immediately (ReadSome) |
 | `TestLivePreviewStateFollowsVerifiedPlaybackPosition` | `engine_live_preview::test_live_preview_state_follows_verified_playback_position` | pass |
 | `TestPlaybackHandleSurvivesDownloadCompletion` | `engine_live_preview::test_playback_handle_survives_download_completion` | pass |
@@ -101,8 +103,8 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestUnverifiedReadsSkipTheStartAndEndOfTheFile` | `engine_playback::test_unverified_reads_skip_the_start_and_end_of_the_file` | waiting: unverified reads skip head and tail hints |
 | `TestOnlyTheLatestSeekPositionIsFetched` | `engine_playback_active::test_only_the_latest_seek_position_is_fetched` | waiting: active playback coordinator demoting older seek positions |
 | `TestBlockedReadAtAnEarlierSpotStopsAndStaysStopped` | `engine_playback_active::test_blocked_read_at_an_earlier_spot_stops_and_stays_stopped` | waiting: blocked read at earlier spot superseded by new seek |
-| `TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes` | `engine_playback_resume::test_playback_close_reopen_preserves_resume_across_metadata_probes` | waiting: playback close/reopen preserving resume across metadata probes |
-| `TestOpenPlaybackReusesValidatedResumeWindow` | `engine_playback_resume::test_open_playback_reuses_validated_resume_window` | waiting: open_playback reusing validated resume window |
+| `TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes` | `engine_playback_resume::test_playback_close_reopen_preserves_resume_across_metadata_probes` | pass |
+| `TestOpenPlaybackReusesValidatedResumeWindow` | `engine_playback_resume::test_open_playback_reuses_validated_resume_window` | pass |
 | `TestOpenPreviewReadsVerifiedBytesWithoutFocusChange` | `engine_preview::test_open_preview_reads_verified_bytes_without_focus_change` | pass |
 | `TestPreviewRejectsSecondConcurrentJob` | `engine_preview::test_preview_rejects_second_concurrent_job` | pass |
 | `TestPreviewTempForReadyDraftWithoutFullFile` | `engine_preview::test_preview_temp_for_ready_draft_without_full_file` | pass |

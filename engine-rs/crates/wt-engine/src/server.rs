@@ -30,6 +30,8 @@ use crate::types::*;
 mod metadata_sources;
 #[path = "torrent_status.rs"]
 mod torrent_status;
+#[path = "playback_resume.rs"]
+mod playback_resume;
 #[cfg(test)]
 #[path = "server_settings_tests.rs"]
 mod settings_tests;
@@ -126,6 +128,7 @@ pub struct EngineServer {
     pub preview_active_id: Mutex<Option<String>>,
     pub preview_readers: Mutex<HashMap<i64, Arc<PreviewReader>>>,
     pub playback_readers: Mutex<HashMap<i64, Arc<PlaybackReader>>>,
+    resume_state: Mutex<playback_resume::ResumeState>,
     pub next_reader_id: AtomicI64,
     pub bypass_enabled: AtomicBool,
 }
@@ -358,6 +361,7 @@ impl EngineServer {
             preview_active_id: Mutex::new(None),
             preview_readers: Mutex::new(HashMap::new()),
             playback_readers: Mutex::new(HashMap::new()),
+            resume_state: Mutex::new(playback_resume::ResumeState::default()),
             next_reader_id: AtomicI64::new(1),
             bypass_enabled: AtomicBool::new(false),
         });
@@ -443,6 +447,7 @@ impl EngineServer {
         if !active {
             rec.torrent.disallow_data_download();
             rec.torrent.disallow_data_upload();
+            rec.playback_coordinator.hold_resume(HashMap::new());
         }
         if rec.torrent.info().is_some() {
             let files = rec.torrent.files();
@@ -555,7 +560,6 @@ impl EngineServer {
         self.trackers.close();
         self.seed_tick();
         self.seeding.save();
-        self.client.close();
         if let Some(server) = self.stream_server.lock().take() {
             server.close();
         }
@@ -563,6 +567,8 @@ impl EngineServer {
         for (_, r) in readers {
             r.close();
         }
+        self.flush_resume_saves();
+        self.client.close();
         let preview = self.preview_active.lock().take();
         if let Some(p) = preview {
             p.close();
@@ -1018,6 +1024,9 @@ impl EngineServer {
                 serde_json::to_vec(&json!({"error": "payload transfers are disabled in settings"}))
                     .unwrap(),
             );
+        }
+        if let Some(offset) = req.offset {
+            rec.playback_coordinator.prepare_resume(file_index, offset.clamp(0, (file.length - 1).max(0)));
         }
         let stream_url = format!(
             "http://127.0.0.1:{}/torrent/{}/file/{}",
@@ -1794,7 +1803,7 @@ impl EngineServer {
             .get("categories")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        match wt_storage::clear_cache_categories(&self.download_dir, &categories) {
+        match self.clear_engine_cache(&categories) {
             Ok(()) => self.handle_get_cache(),
             Err(e) => (
                 400,
@@ -1824,13 +1833,17 @@ impl EngineServer {
         self.wait_for_info(&torrent)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::WouldBlock, e))?;
         let coordinator = rec_arc.read().playback_coordinator.clone();
+        if let Some(offset) = self.apply_resume_window_to_storage(id, index) {
+            coordinator.remember_resume(index, offset);
+        }
+        let start = coordinator.preview_position(index);
         let host = self
             .self_ref
             .get()
             .and_then(Weak::upgrade)
             .ok_or_else(|| std::io::Error::other("engine closed"))?;
         let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
-        let (_, reader) = PlaybackReader::open_for_host(host, coordinator, id, index, 0, handle)?;
+        let (_, reader) = PlaybackReader::open_for_host(host, coordinator, id, index, start, handle)?;
         let mut readers = self.playback_readers.lock();
         readers.retain(|_, reader| !reader.is_closed());
         readers.insert(handle, reader.clone());
@@ -1890,6 +1903,44 @@ impl crate::playback::PlaybackHost for EngineServer {
     fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
     }
+    fn on_playback_closed(&self, id: &str, file_index: usize) {
+        if let Some(record) = self.record_by_id(id) {
+            let rec = record.read();
+            let coordinator = rec.playback_coordinator.clone();
+            let offset = coordinator.preview_position(file_index);
+            if offset <= 0 { return }
+            let has_other_reader = self.playback_readers.lock().values().any(|reader| {
+                reader.id == id && reader.file_index == file_index && !reader.is_closed()
+            });
+            if !has_other_reader && !rec.paused && !self.shutting_down.load(Ordering::SeqCst)
+                && self.payload_transfers_allowed.load(Ordering::SeqCst)
+            {
+                if let Some(file) = rec.torrent.files().get(file_index) {
+                    let piece_length = rec.piece_length;
+                    if piece_length > 0 {
+                        let begin = (file.offset() + offset) / piece_length;
+                        let end = (file.offset() + (offset + wt_policy::constants::PLAYBACK_URGENT_BYTES).min(file.length()) + piece_length - 1) / piece_length;
+                        let generation = coordinator.hold_resume((begin..end).map(|piece| (piece as u32, wt_types::PiecePriority::High)).collect());
+                        let weak = self.self_ref.get().cloned().unwrap_or_default();
+                        let id = id.to_owned();
+                        self.client.inner.tokio_handle.spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(90)).await;
+                            if let (Some(server), Some(demand)) = (weak.upgrade(), coordinator.expire_resume(generation)) {
+                                server.set_playback_storage_demand(&id, &demand);
+                                server.apply_piece_priorities(&id, &demand);
+                            }
+                        });
+                    }
+                }
+            }
+            let effective = rec.playback_coordinator.effective();
+            drop(rec);
+            self.set_playback_storage_demand(id, &effective);
+            self.apply_piece_priorities(id, &effective);
+            self.schedule_resume_persist(id, file_index, offset);
+        }
+    }
+
     fn playback_readers_changed(&self, id: &str) {
         if !self.shutting_down.load(Ordering::SeqCst) { self.refresh_playback_windows(id); }
     }
