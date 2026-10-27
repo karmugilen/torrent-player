@@ -40,6 +40,7 @@ tracing = "0.1"
 futures = "0.3"
 libc = "0.2"
 hex = "0.4"
+socket2 = { version = "0.6", features = ["all"] }
 
 [profile.release]
 opt-level = 3
