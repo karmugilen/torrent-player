@@ -2,3 +2,5 @@ run run_861102160a1b
 codex-1 wt-core-all task_6a0d8c2edad2 ctx_357f6e8f7888 term_379b26f4-ace6-4144-b15a-b81640c2aa3c
 codex-2 wt-engine-all task_dc6d01a094df ctx_4c4567df42bd term_d7e4eb3f-cc46-4036-9575-5a194d9bd224
 codex-3 perf task_ab9c9b28fa4f ctx_e827eb631be6 term_0b06f557-b63c-43ef-b684-ce3a61b09df8
+codex-4 wt-core-client task_6b03aaf9812f ctx_d5be9e3aaf09 term_ec71ceec-f684-431c-b3d4-e2e8d7826119
+codex-5 wt-engine-tests task_b1807abd88e7 ctx_b1b1f3c834bc term_430db882-6e6c-4721-bd13-0e7584bd7e22
