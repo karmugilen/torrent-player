@@ -739,19 +739,30 @@ impl ClientInner {
                     let cl = Arc::clone(&client);
                     let tor = Arc::clone(&torrent);
                     let task = client.tokio_handle.spawn(async move {
-                        let ok = cl
+                        let result = cl
                             .dial_peer(Arc::clone(&tor), peer.addr, peer.source)
-                            .await
-                            .is_ok();
+                            .await;
+                        let ok = result.is_ok();
+                        if let Err(ref e) = result {
+                            let msg = e.to_string();
+                            // PopMax already removed the candidate; half-open
+                            // races must not permanently discard reachable peers.
+                            if msg.contains("half-open limit exceeded") {
+                                tor.add_peers(vec![peer.clone()]);
+                                tor.dial_finished(peer.addr, true); // clear backoff
+                                return;
+                            }
+                        }
                         tor.dial_finished(peer.addr, ok);
                     });
                     let mut tasks = client.tasks.lock();
                     tasks.retain(|t| !t.is_finished());
                     tasks.push(task);
                 }
+                // Poll half-open turnover faster than 1s (Go openNewConns is event-driven).
                 tokio::select! {
                     _ = torrent.peers_changed().notified() => {},
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {},
                 }
             }
         });
@@ -841,7 +852,7 @@ impl ClientInner {
                 .map_err(|e| CoreError::Other(format!("webrtc incoming handshake: {e}")))?
         };
 
-        let (write_tx, write_rx) = mpsc::unbounded_channel();
+        let (write_tx, write_rx) = mpsc::channel(crate::conn::OUTBOUND_MSG_QUEUE);
         let write_waker = Arc::new(Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(crate::stats::AtomicConnStats::default());
@@ -963,7 +974,7 @@ impl ClientInner {
         info: AttachInfo,
         stream: Box<dyn crate::PeerStream>,
         handle: crate::conn::ConnHandle,
-        write_rx: mpsc::UnboundedReceiver<crate::wire::Message>,
+        write_rx: mpsc::Receiver<crate::wire::Message>,
         write_waker: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
