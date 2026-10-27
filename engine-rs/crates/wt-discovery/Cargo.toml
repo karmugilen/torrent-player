@@ -8,8 +8,41 @@ publish.workspace = true
 [dependencies]
 wt-types.workspace = true
 wt-meta.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 bytes.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 tracing.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+hex.workspace = true
+sha1.workspace = true
+
+# HTTP(S) tracker + webseed (pure Rust TLS)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+url = "2"
+
+# WebSocket tracker (WebTorrent)
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+http = "1"
+
+# WebRTC data channels (webrtc-rs)
+webrtc = "0.12"
+
+# Mainline DHT (BEP 5); dedicated-socket mode. Shared-socket demux is via DhtPacketIo.
+mainline = { version = "8", default-features = false, features = ["async"] }
+
+crc32c = "0.6"
+tokio-util = { version = "0.7", features = ["io", "codec"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+anyhow = "1"
+webrtc = "0.12"
+bytes = { workspace = true }
