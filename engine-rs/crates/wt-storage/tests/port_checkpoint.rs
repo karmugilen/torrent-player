@@ -4,6 +4,9 @@ mod support;
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use wt_storage::{
@@ -11,10 +14,11 @@ use wt_storage::{
     write_piece_checkpoint, DocumentTorrentStorage, FileIdentity, PieceCheckpoint, TorrentStorage,
     CHECKPOINT_MAGIC, CHECKPOINT_VERSION, MAX_CHECKPOINT_PIECES,
 };
-use wt_types::InfoHash;
+use wt_types::{InfoHash, StorageError};
 
 use support::{
-    fds_from_files, info_hash_bytes, open_rw, open_rw_no_trunc, single_file_info, test_temp_dir,
+    fds_from_files, info_hash_bytes, info_hash_zero, open_rw, open_rw_no_trunc, single_file_info,
+    test_temp_dir,
 };
 
 #[test]
@@ -210,24 +214,182 @@ fn test_malformed_checkpoint_piece_count_rejected() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: fault-injectable drain_sync / fsync error surfacing"]
-fn test_drain_sync_failure_preserves_dirty_and_pending() {}
+fn test_drain_sync_failure_preserves_dirty_and_pending() {
+    let dir = test_temp_dir("drain_sync_fail");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fd = dest.as_raw_fd();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+    st.piece_at(0).write_at(b"ABCDEFGH", 0).unwrap();
+    st.piece_at(0).mark_complete().unwrap();
+
+    let sync_calls = Arc::new(AtomicI32::new(0));
+    let sync_calls2 = sync_calls.clone();
+    st.set_file_sync_hook(Some(Arc::new(move |_| {
+        sync_calls2.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::other("injected sync failure"))
+    })));
+    st.set_write_checkpoint_hook(Some(Arc::new(|_, _| {
+        Err(StorageError::Other(
+            "checkpoint write must not run after failed data sync".into(),
+        ))
+    })));
+    st.note_pending_sync_fd(fd);
+    st.set_checkpoint_dirty(true);
+
+    let before_exists =
+        checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();
+    st.drain_sync_and_checkpoint();
+
+    assert!(
+        st.checkpoint_dirty(),
+        "failed sync cleared dirty/pending state"
+    );
+    assert!(
+        st.checkpoint_persist_error().is_some(),
+        "expected persist error feedback"
+    );
+    assert!(
+        sync_calls.load(Ordering::SeqCst) > 0,
+        "sync seam was not exercised"
+    );
+    let after_exists =
+        checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();
+    assert!(
+        !after_exists || before_exists,
+        "checkpoint must not be published after failed data sync"
+    );
+    st.set_file_sync_hook(None);
+    st.set_write_checkpoint_hook(None);
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
-#[ignore = "waiting for agy-3: fault-injectable checkpoint write failure"]
-fn test_drain_checkpoint_write_failure_preserves_dirty() {}
+fn test_drain_checkpoint_write_failure_preserves_dirty() {
+    let dir = test_temp_dir("drain_cp_fail");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+    st.piece_at(0).write_at(b"ABCDEFGH", 0).unwrap();
+    st.piece_at(0).mark_complete().unwrap();
+
+    st.set_write_checkpoint_hook(Some(Arc::new(|_, _| {
+        Err(StorageError::Other("injected checkpoint write failure".into()))
+    })));
+    st.set_checkpoint_dirty(true);
+    st.drain_sync_and_checkpoint();
+    assert!(
+        st.checkpoint_dirty(),
+        "failed checkpoint write cleared dirty state"
+    );
+    assert!(
+        st.checkpoint_persist_error().is_some(),
+        "expected checkpoint write error"
+    );
+    st.set_write_checkpoint_hook(None);
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
-#[ignore = "waiting for agy-3: fault-injectable transient checkpoint failure"]
-fn test_drain_checkpoint_succeeds_after_transient_failure() {}
+fn test_drain_checkpoint_succeeds_after_transient_failure() {
+    let dir = test_temp_dir("drain_cp_retry");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+    st.piece_at(0).write_at(b"ABCDEFGH", 0).unwrap();
+    st.piece_at(0).mark_complete().unwrap();
+
+    let writes = Arc::new(AtomicI32::new(0));
+    let writes2 = writes.clone();
+    st.set_write_checkpoint_hook(Some(Arc::new(move |path, cp| {
+        if writes2.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(StorageError::Other("transient write failure".into()));
+        }
+        write_piece_checkpoint(path, cp)
+    })));
+    st.set_checkpoint_dirty(true);
+    st.drain_sync_and_checkpoint();
+    assert!(
+        st.checkpoint_dirty(),
+        "first failure should keep dirty"
+    );
+    st.set_checkpoint_dirty(true);
+    st.drain_sync_and_checkpoint();
+    assert!(
+        !st.checkpoint_dirty(),
+        "retry success should clear dirty"
+    );
+    assert!(
+        checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists(),
+        "checkpoint missing after retry"
+    );
+    st.set_write_checkpoint_hook(None);
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
-#[ignore = "waiting for agy-3: drain vs delete race hooks"]
-fn test_drain_does_not_rewrite_deleted_checkpoint() {}
+fn test_drain_does_not_rewrite_deleted_checkpoint() {
+    let dir = test_temp_dir("drain_no_rewrite");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+    st.piece_at(0).write_at(b"ABCDEFGH", 0).unwrap();
+    st.piece_at(0).mark_complete().unwrap();
+    st.set_checkpoint_dirty(true);
+    st.delete_checkpoint().unwrap();
+    st.drain_sync_and_checkpoint();
+    assert!(
+        !checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists(),
+        "deleted checkpoint was recreated"
+    );
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
-#[ignore = "waiting for agy-3: drain vs delete race hooks"]
-fn test_checkpoint_delete_during_publish_does_not_resurrect() {}
+fn test_checkpoint_delete_during_publish_does_not_resurrect() {
+    let dir = test_temp_dir("drain_delete_race");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+    st.piece_at(0).write_at(b"ABCDEFGH", 0).unwrap();
+    st.piece_at(0).mark_complete().unwrap();
+
+    let st_hook = st.clone();
+    let gen_before = st.checkpoint_gen();
+    st.set_write_checkpoint_hook(Some(Arc::new(move |path, cp| {
+        // Concurrent delete bumps generation while the stale writer is publishing.
+        st_hook.delete_checkpoint().unwrap();
+        write_piece_checkpoint(path, cp)
+    })));
+    st.set_checkpoint_dirty(true);
+    st.drain_sync_and_checkpoint();
+    assert!(
+        !checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists(),
+        "checkpoint resurrected after delete during publish"
+    );
+    assert_ne!(
+        st.checkpoint_gen(),
+        gen_before,
+        "delete must bump generation"
+    );
+    st.set_write_checkpoint_hook(None);
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
 fn test_checkpoint_persist_error_surfaced_in_torrent_status() {

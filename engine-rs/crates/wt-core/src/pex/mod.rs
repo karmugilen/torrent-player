@@ -436,8 +436,10 @@ mod tests {
     #[test]
     fn add_and_genmsg_mixed() {
         let mut s = PexState::new();
-        let mut f = PexFlags::default();
-        f.reachable = true;
+        let f = PexFlags {
+            reachable: true,
+            ..Default::default()
+        };
         s.add(v6(4747), PexFlags::default());
         s.add(v6(4748), f);
         s.add(v4(4747), f);
@@ -445,7 +447,7 @@ mod tests {
         let (m, _) = s.genmsg(None);
         assert_eq!(m.added6.len(), 2);
         assert_eq!(m.added.len(), 2);
-        assert_eq!(m.added_flags[0].reachable, true);
+        assert!(m.added_flags[0].reachable);
     }
 
     #[test]

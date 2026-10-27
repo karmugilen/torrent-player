@@ -1,0 +1,57 @@
+05:29|Run run_861102160a1b created; 7 workers started (4 agy, 3 grok)
+-|wt-meta done and verified: 39 tests, clippy+fmt clean (c191e96)
+-|wt-parity harness crate added (a3c04e9); grok-1 reassigned
+-|wt-policy committed (463dfe8), follow-up for full Go test parity
+-|agy-1 and agy-2 told to drop duplicate bencode/wire copies and use wt-meta/wt-wire
+-|grok-4 added for wt-engine JNI/host/build; grok-5 added for wt-core strategy/choking
+-|wt-policy done and verified: 40 tests, all 45 Go tests mapped (882bc1e); grok-3 moved to engine integration tests
+-|Blocker: wt-storage mid-edit compile errors blocked grok-3; agy-3 asked to keep it compiling
+-|Blocker: wt-wire mse.rs:627 compile error blocked agy-2; routed to agy-1, fixed
+-|Rule sent to all: keep crates compiling at every checkpoint
+-|Conflict: agy-4 wrote duplicate JNI exports (jni_export.rs); resolved, grok-4 owns JNI, agy-4 deletes its copy
+-|Blocker: tests/jni_exports.rs used crate name wt_engine (lib is engine); routed to grok-4
+-|Builds crashing with SIGBUS: /tmp tmpfs nearly full from build dirs; all workers moved to /home/kar/.cache/wt-targets, 3 jobs each
+-|Resource rules: keep 25 GB disk free; smaller debug info (c1a693a); 4 GB per target dir; fixtures <=256 MiB; guard script alerts at 30 GB disk / 2 GB tmp / 1.5 GB RAM
+-|grok-3 opened an on-screen menu (stalled); answered option 1; all workers told to ask via Orca
+-|agy-4 and grok-4 kept undoing each other in server.rs; open_playback/open_preview frozen as Result<(i64, Arc<_>)>, JNI bridge owned by grok-4
+-|RAM governor started: pauses largest build process below 10% free RAM, resumes above 15%; disk alert at 30 GB
+-|grok-5 published wt-core strategy + choking APIs (28 tests); forwarded to agy-2
+-|grok-5 strategy+choking done and verified (ef844c8); grok-5 reassigned, grok-6 and grok-7 added (now 7 grok + 4 agy)
+-|wt-wire manifest used socket2 not in workspace deps; added (35c8f63); utp.rs borrow errors routed to agy-1
+-|wt-discovery done, 24 tests pass (fb0e093); engine integration suite committed (c841eac)
+-|grok-3 moved to wt-engine stream server/preview/network; grok-2 on discovery leftovers
+-|JNI layer done and verified: arm64 libengine.so exports all 9 symbols, 16 KiB LOAD alignment (ff2794a)
+-|grok-7 given all of wt-storage/tests/ after collisions with agy-3 stubs
+-|grok-4 on Android integration (Gradle engine switch, emulator ABI)
+-|Go baseline recorded (518f33f): 19.5 MiB/s download, 30 ms TTFB, seek p50/p90 3.6/24.5 ms, 308 ms magnet, 174 MiB RSS
+-|grok-1 moved to wt-core Webtor seek logic
+-|grok-5 metadata/pex/ratelimit done and verified, 18 tests (76e488f); moved to wt-storage Direct Play + restore hash
+-|grok-4 writing the missing HTTP control listener (ctl_http.rs) so engine-host and parity runs work
+-|wt-wire done and verified (9721c3f); agy-1 moved to wt-core connection driver + shared UDP socket
+-|Found: EngineServer not built on wt_core/wt_storage/wt_policy at all; agy-4 told to rebuild on them (top priority). grok-3 had removed those deps; restored
+-|wt-types: ClientStorage::remove_torrent default method added to fix storage build (e08c539)
+-|grok-3 stream server, preview, live preview, network done and verified, 17 tests (9ccd54b); grok-3 takes playback.rs
+-|Build breaks routed: client.rs braces (agy-2), direct_storage.rs imports (grok-5), ctor in wt-discovery (grok-2)
+-|wt-discovery leftovers done and verified, 28 tests (2648dd6); grok-2 moved to wt-core peer sources glue
+-|grok-5 Direct Play API published and forwarded to agy-4, grok-3, grok-7
+-|grok-5 Direct Play storage done and verified, 18 tests (5f688b0); grok-5 on wt-core e2e tests
+-|User asked for more grok on wt-core: grok-8 (reader) and grok-9 (piece state) added; agy-2 left with central wiring only
+-|wt-core broken by conn/listener.rs (agy-1); routed urgent
+-|grok-1 webtor seek decisions done (3c0d3fc, 16 tests standalone); grok-4 Android Gradle switch + control listener done (3c0d3fc)
+-|agy-4 reported done but server.rs had no wt_core use; not accepted; re-dispatched to wire EngineServer onto the core (committed WIP e25edb6)
+-|grok-1 takes peer_conn.rs; grok-4 builds the Go-vs-Rust API diff tool
+-|grok-7 storage test suite done and verified (9eb5a54): 93 pass, 16 ignored, 0 fail; API gaps sent to agy-3
+-|conn/dialer.rs and supports_ltep errors fixed by agy-1; wt-core compiles again
+-|Forwarded to agy-2: agy-1 conn API, grok-1 webtor API, grok-8 ReaderHost, grok-9 piece_state
+-|Policy from user: coordinator fixes small cross-crate build breaks directly instead of waiting
+-|Coordinator fixed a ratelimit wait_n infinite-loop bug found by agy-1 (f9ce3cf)
+-|grok-6 hashing + web seed peer done and verified, 16 tests, SHA-1 2245 MiB/s release (0dc46ba); grok-6 takes client.rs
+-|wt-storage done and verified (b29e56c): 93 pass, 0 fail; agy-3 added only 1 of 8 requested accessors, so grok-7 takes storage.rs to add the rest
+-|agy-3 moved to Go-vs-Rust storage benchmarks; grok-1 PeerTorrent trait forwarded to agy-2
+-|grok-9 piece_state + storage glue done and verified (7a327e6); grok-9 takes torrent_impls.rs
+-|grok-6 allowed to own the impl Client block in lib.rs
+-|grok-2 sources glue done (1a08cbc); now clippy cleanup of finished wt-core modules
+-|Disk at 32 GB: deleted finished build dirs (now 36 GB); rule: one build dir per worker
+-|grok-4 API diff tool done (6969bd9): 11 MATCH / 19 DIFF / 14 critical, sent to agy-4; grok-4 takes types.rs
+-|grok-8 Reader done (e6be3ec), released; grok-9 took over its ReaderHost impl
+-|TorrentInner field list from grok-9 sent to agy-2 (urgent)

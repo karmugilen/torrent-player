@@ -59,15 +59,19 @@ mod tests {
 
     #[test]
     fn disallowed_when_seed_policy_blocks() {
-        let mut cfg = ChokeConfig::default();
-        cfg.data_upload_disallowed = true;
+        let cfg = ChokeConfig {
+            data_upload_disallowed: true,
+            ..Default::default()
+        };
         assert!(!upload_allowed(&peer(0, 0), &cfg, true));
     }
 
     #[test]
     fn seeding_always_allows() {
-        let mut cfg = ChokeConfig::default();
-        cfg.seeding = true;
+        let cfg = ChokeConfig {
+            seeding: true,
+            ..Default::default()
+        };
         assert!(upload_allowed(&peer(1_000_000, 0), &cfg, false));
     }
 

@@ -572,11 +572,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "waiting for agy-3: cache_bytes()/max_cache_bytes() and clear_startup_pieces()"]
     fn direct_play_evicts_partial_without_returning_fabricated_bytes() {
-        // Port of TestDirectPlayEvictsPartialWithoutReturningFabricatedBytes.
-        // Needs: clear startup_pieces for tiny pieceLength=8 fixtures, and
-        // cache_bytes/max_cache_bytes observers.
         let base = fixture_dir("evict");
         let piece_length = 8i64;
         let (info, data) = single_file_info("movie.mp4", piece_length * 8, piece_length, true);
@@ -584,7 +580,8 @@ mod tests {
         client.set_cache_limit(4 * piece_length).unwrap();
         let hash = InfoHash([1; 20]);
         let st = open_direct_play(&client, &info, hash, &[0]).unwrap();
-        // Without clearing startup_pieces, head/tail pieces are protected.
+        st.set_cache_limit(4 * piece_length);
+        st.clear_startup_pieces();
         for i in 0..4usize {
             let p = st.piece_at(i);
             let _ = p.write_at(&data[i * 8..i * 8 + 4], 0);
@@ -592,6 +589,10 @@ mod tests {
         let p4 = st.piece_at(4);
         p4.write_at(&data[32..40], 0).unwrap();
         p4.mark_complete().unwrap();
+        assert!(
+            st.cache_bytes() <= st.max_cache_bytes(),
+            "cache over budget"
+        );
         let p0 = st.piece_at(0);
         let err = p0.read_at(&mut [0u8; 8], 0).unwrap_err();
         assert!(
@@ -603,7 +604,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "waiting for agy-3: clear_startup_pieces() for tiny-piece eviction fixtures"]
     fn direct_play_protects_fully_received_pieces_until_verification() {
         let base = fixture_dir("protect");
         let piece_length = 8i64;
@@ -611,6 +611,8 @@ mod tests {
         let client = DocumentStorageClient::new(&base);
         client.set_cache_limit(4 * piece_length).unwrap();
         let st = open_direct_play(&client, &info, InfoHash([2; 20]), &[0]).unwrap();
+        st.set_cache_limit(4 * piece_length);
+        st.clear_startup_pieces();
         for i in 0..4usize {
             let p = st.piece_at(i);
             p.write_at(&data[i * 8..i * 8 + 8], 0).unwrap();
@@ -629,16 +631,47 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "waiting for agy-3: set_on_stream_evict()"]
     fn direct_play_close_does_not_join_blocked_completion_callback() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
         let base = fixture_dir("close-cb");
         let piece_length = 8i64;
         let (info, data) = single_file_info("movie.mp4", piece_length * 8, piece_length, true);
         let client = DocumentStorageClient::new(&base);
         client.set_cache_limit(4 * piece_length).unwrap();
         let st = open_direct_play(&client, &info, InfoHash([3; 20]), &[0]).unwrap();
-        // Would set on_stream_evict that blocks; then Close must not join it.
-        let _ = (st, data);
+        st.set_cache_limit(4 * piece_length);
+        st.clear_startup_pieces();
+
+        let entered = Arc::new(Mutex::new(false));
+        let release = Arc::new(Mutex::new(()));
+        let block = release.lock().unwrap();
+        let entered_cb = entered.clone();
+        let release_cb = release.clone();
+        st.set_on_stream_evict(Some(Arc::new(move |_| {
+            *entered_cb.lock().unwrap() = true;
+            let _g = release_cb.lock().unwrap();
+        })));
+
+        let p = st.piece_at(0);
+        p.write_at(&data[0..8], 0).unwrap();
+        p.mark_complete().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if *entered.lock().unwrap() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(*entered.lock().unwrap(), "no completion callback");
+
+        let st2 = st.clone();
+        let handle = std::thread::spawn(move || st2.close());
+        let result = handle.join().expect("close thread panicked");
+        assert!(result.is_ok(), "close error: {result:?}");
+        drop(block);
         let _ = fs::remove_dir_all(&base);
     }
 

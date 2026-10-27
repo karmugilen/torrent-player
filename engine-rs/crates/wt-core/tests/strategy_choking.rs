@@ -30,7 +30,7 @@ fn bep6_vectors() {
 
 #[test]
 fn piece_order_priority_then_index_not_rarest() {
-    let mut items = vec![
+    let mut items = [
         PieceRequestOrderItem {
             key: PieceRequestOrderKey {
                 info_hash: [0; 20],
@@ -65,7 +65,7 @@ fn piece_order_priority_then_index_not_rarest() {
             },
         },
     ];
-    items.sort_by(|a, b| piece_order_cmp(a, b));
+    items.sort_by(piece_order_cmp);
     // Now before Normal; within Now, lower index first (file order), availability ignored.
     assert_eq!(items[0].key.index, 1);
     assert_eq!(items[1].key.index, 2);

@@ -176,8 +176,43 @@ fn test_direct_play_protects_fully_received_pieces_until_verification() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: public on_stream_evict setter for completion-callback tests"]
-fn test_direct_play_close_does_not_join_blocked_completion_callback() {}
+fn test_direct_play_close_does_not_join_blocked_completion_callback() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    let dir = test_temp_dir("dp_close_cb");
+    let (st, data, info) = direct_storage_fixture(dir.path(), 8, 8, "movie.mp4");
+    st.clear_startup_pieces();
+
+    let entered = Arc::new(Mutex::new(false));
+    let release = Arc::new(Mutex::new(()));
+    let block = release.lock().unwrap();
+    let entered_cb = entered.clone();
+    let release_cb = release.clone();
+    st.set_on_stream_evict(Some(Arc::new(move |_| {
+        *entered_cb.lock().unwrap() = true;
+        let _g = release_cb.lock().unwrap();
+    })));
+
+    put_direct_piece(&st, &info, &data, 0);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if *entered.lock().unwrap() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(*entered.lock().unwrap(), "no completion callback");
+
+    let st2 = st.clone();
+    let handle = std::thread::spawn(move || TorrentStorage::close(&*st2));
+    // Close must finish without waiting for the blocked callback.
+    let result = handle
+        .join()
+        .expect("close thread panicked");
+    assert!(result.is_ok(), "close error: {result:?}");
+    drop(block); // release callback
+}
 
 #[test]
 fn test_startup_pruning_keeps_active_readers_cache() {

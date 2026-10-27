@@ -1,0 +1,1 @@
+wt-core::conn compiled cleanly. Signatures: ConnHandler trait (on_message, on_closed), ConnHandle (send_message, send_message_async, flush, close, stats, info), dial_peer(DialParams) -> Result<DialOutcome>, PeerListener::bind/spawn_accept_loop, spawn_connection_driver, and SharedDatagramAdapter implementing wt_discovery::DatagramIo over wt_wire::UtpSocket.

@@ -15,6 +15,21 @@ bytes.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
-sha1.workspace = true
+# asm feature is a no-op on sha1 0.10 but builds for aarch64-linux-android;
+# x86/x86_64 still get SHA-NI via cpufeatures automatically.
+sha1 = { workspace = true, features = ["asm"] }
 sha2.workspace = true
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Hardware SHA-1 on aarch64 / x86_64 (Go parity on phones).
+ring = "0.17"
+# Compact bitmaps for dirty/completed/requested chunk sets (Go RoaringBitmap).
+roaring = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+hex.workspace = true
+mainline = { version = "8", default-features = false, features = ["async"] }
+parking_lot.workspace = true
+wt-discovery.workspace = true

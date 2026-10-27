@@ -1,19 +1,44 @@
-//! BitTorrent client core: the Rust replacement for the patched
+//! BitTorrent client core: pure Rust replacement for the patched
 //! `engine-go/patches/torrent` (anacrolix/torrent v1.61.0 + Webtor patches).
-//!
-//! CONTRACT: the public items below are what `wt-engine` is written against.
-//! The `wt-core` owner implements them and may add items freely, but must ask
-//! the coordinator before renaming, removing or changing a signature here.
-//!
-//! The API is blocking, like the Go one: methods take an internal lock and
-//! return; `Reader::read` blocks until data is verified. Networking runs on an
-//! internal Tokio runtime owned by `Client`.
+
+#![allow(clippy::type_complexity)]
 
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use wt_types::*;
+
+pub mod arrival;
+pub mod choking;
+pub mod client;
+pub mod conn;
+pub mod hashing;
+pub mod metadata;
+pub mod peer_conn;
+pub mod pex;
+pub mod picker;
+pub mod piece_state;
+pub mod ratelimit;
+pub mod reader;
+pub mod sources;
+pub mod stats;
+pub mod storage_adapter;
+pub mod strategy;
+pub mod torrent;
+mod torrent_impls;
+pub mod tuning;
+pub mod webseed_peer;
+pub mod webtor;
+pub mod wire;
+
+pub use arrival::ArrivalStats;
+pub use client::ClientInner;
+pub use stats::{ClientStats, ConnStats, PeerConnInfo, TorrentStats};
+pub use storage_adapter::{verify_piece_hash, MemoryClientStorage};
+pub use torrent::TorrentInner;
+pub use tuning::{current_seek_tuning, set_seek_tuning, PeakMode, SeekTuning};
 
 // ---------------------------------------------------------------- config
 
@@ -52,6 +77,41 @@ pub struct ClientConfig {
     pub callbacks: Callbacks,
 }
 
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: 0,
+            no_dht: false,
+            disable_utp: false,
+            disable_tcp: false,
+            disable_webtorrent: false,
+            disable_pex: false,
+            seed: false,
+            dial_for_peer_conns: true,
+            accept_peer_connections: true,
+            always_want_conns: false,
+            periodically_announce_torrents_to_dht: false,
+            piece_hashers_per_torrent: 2,
+            dial_rate: 100.0,
+            download_rate: None,
+            upload_rate: None,
+            nominal_dial_timeout: Duration::from_secs(10),
+            min_dial_timeout: Duration::from_millis(500),
+            handshakes_timeout: Duration::from_secs(4),
+            established_conns_per_torrent: 80,
+            half_open_conns_per_torrent: 20,
+            total_half_open_conns: 100,
+            torrent_peers_high_water: 200,
+            torrent_peers_low_water: 50,
+            http_user_agent: "Webtor/2.0".to_string(),
+            extended_handshake_client_version: "Webtor 2.0".to_string(),
+            ice_servers: Vec::new(),
+            default_storage: Arc::new(MemoryClientStorage::new()),
+            callbacks: Callbacks::default(),
+        }
+    }
+}
+
 /// Library callbacks (`torrent.Callbacks`). Called without the client lock held.
 #[derive(Clone, Default)]
 pub struct Callbacks {
@@ -62,82 +122,24 @@ pub struct Callbacks {
 /// Tracker status events (`torrent.StatusUpdatedEvent`).
 #[derive(Clone, Debug)]
 pub enum StatusEvent {
-    TrackerConnected { url: String, info_hash: InfoHash },
-    TrackerDisconnected { url: String, info_hash: InfoHash, error: Option<String> },
-    TrackerAnnounceSuccessful { url: String, info_hash: InfoHash },
-    TrackerAnnounceError { url: String, info_hash: InfoHash, error: String },
-}
-
-/// Webtor seek rules (`torrent.SeekTuning` in webtor_urgent.go). Field
-/// meanings are documented on the Go struct.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SeekTuning {
-    pub focus_blocks: i32,
-    pub focus_steal_divisor: i32,
-    pub faster_ratio: f64,
-    pub queue_aware: bool,
-    pub bound_candidates: bool,
-    pub pipeline_seconds: f64,
-    pub min_pipeline: i32,
-    pub full_pipeline: bool,
-    pub pipeline_rtt: f64,
-    pub arrival_aware: bool,
-    pub arrival_ratio: f64,
-    pub no_balance_steal: bool,
-    pub refill_at: f64,
-    pub hol_rescue: bool,
-    pub hol_after_ms: f64,
-    pub hedge: bool,
-    pub slow_peer_yield: bool,
-    pub learned_arrival: bool,
-    pub peak_mode: PeakMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PeakMode {
-    /// Upstream: the peak is the blocks the update added.
-    #[default]
-    Added,
-    /// The peak is every outstanding request.
-    WholeQueue,
-    /// Keep the peak when a busy peer is topped up; only a refill from empty sets it.
-    KeepOnTopUp,
-}
-
-impl Default for SeekTuning {
-    /// `DefaultSeekTuning` in Go.
-    fn default() -> Self {
-        SeekTuning {
-            focus_blocks: 8,
-            focus_steal_divisor: 2,
-            faster_ratio: 3.0,
-            queue_aware: false,
-            bound_candidates: true,
-            pipeline_seconds: 0.0,
-            min_pipeline: 0,
-            full_pipeline: false,
-            pipeline_rtt: 2.0,
-            arrival_aware: true,
-            arrival_ratio: 1.5,
-            no_balance_steal: false,
-            refill_at: 0.0,
-            hol_rescue: false,
-            hol_after_ms: 300.0,
-            hedge: false,
-            slow_peer_yield: false,
-            learned_arrival: false,
-            peak_mode: PeakMode::WholeQueue,
-        }
-    }
-}
-
-/// Process-wide seek rules for every client (`torrent.SetSeekTuning`;
-/// clamps `focus_blocks` and `focus_steal_divisor` to at least 1).
-pub fn set_seek_tuning(_tuning: SeekTuning) {
-    unimplemented!()
-}
-pub fn current_seek_tuning() -> SeekTuning {
-    unimplemented!()
+    TrackerConnected {
+        url: String,
+        info_hash: InfoHash,
+    },
+    TrackerDisconnected {
+        url: String,
+        info_hash: InfoHash,
+        error: Option<String>,
+    },
+    TrackerAnnounceSuccessful {
+        url: String,
+        info_hash: InfoHash,
+    },
+    TrackerAnnounceError {
+        url: String,
+        info_hash: InfoHash,
+        error: String,
+    },
 }
 
 /// What a torrent is added from (`torrent.TorrentSpec`).
@@ -175,113 +177,122 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 
 #[derive(Clone)]
 pub struct Client {
-    _inner: Arc<()>,
+    pub inner: Arc<ClientInner>,
 }
 
 /// Wraps outgoing TCP peer streams (`Client.SetOutgoingTCPConnHook`, used by anti-DPI).
 pub type TcpConnHook = Arc<dyn Fn(tokio::net::TcpStream) -> Box<dyn PeerStream> + Send + Sync>;
 
 /// Any byte stream a peer connection can run on.
-pub trait PeerStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static {}
+pub trait PeerStream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static
+{
+}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static> PeerStream for T {}
 
 impl Client {
-    pub fn new(_cfg: ClientConfig) -> Result<Client> {
-        unimplemented!()
+    pub fn new(cfg: ClientConfig) -> Result<Client> {
+        let inner = ClientInner::new(cfg)?;
+        Ok(Client { inner })
     }
+
     /// Returns the torrent and whether it was newly added.
-    pub fn add_torrent_spec(&self, _spec: TorrentSpec) -> Result<(Torrent, bool)> {
-        unimplemented!()
+    pub fn add_torrent_spec(&self, spec: TorrentSpec) -> Result<(Torrent, bool)> {
+        let (inner, newly) = self.inner.add_torrent_spec(spec)?;
+        Ok((Torrent { inner }, newly))
     }
-    pub fn torrent(&self, _ih: InfoHash) -> Option<Torrent> {
-        unimplemented!()
+
+    pub fn torrent(&self, ih: InfoHash) -> Option<Torrent> {
+        self.inner.torrent(ih).map(|inner| Torrent { inner })
     }
+
     pub fn torrents(&self) -> Vec<Torrent> {
-        unimplemented!()
+        self.inner
+            .torrents()
+            .into_iter()
+            .map(|inner| Torrent { inner })
+            .collect()
     }
+
     pub fn local_port(&self) -> u16 {
-        unimplemented!()
+        self.inner.local_port()
     }
+
     pub fn listen_addrs(&self) -> Vec<SocketAddr> {
-        unimplemented!()
+        self.inner.listen_addrs()
     }
-    pub fn add_dht_nodes(&self, _nodes: &[String]) {
-        unimplemented!()
+
+    pub fn add_dht_nodes(&self, nodes: &[String]) {
+        self.inner.add_dht_nodes(nodes);
     }
-    /// Good DHT contacts, for persisting across restarts.
+
     pub fn dht_contacts(&self) -> Vec<SocketAddr> {
-        unimplemented!()
+        self.inner.dht_contacts()
     }
-    pub fn set_outgoing_tcp_conn_hook(&self, _hook: Option<TcpConnHook>) {
-        unimplemented!()
+
+    pub fn set_outgoing_tcp_conn_hook(&self, hook: Option<TcpConnHook>) {
+        self.inner.set_outgoing_tcp_conn_hook(hook);
     }
-    /// Zero disables (upstream behaviour).
-    pub fn set_urgent_request_stealing(&self, _after: Duration) {
-        unimplemented!()
+
+    pub fn set_urgent_request_stealing(&self, after: Duration) {
+        self.inner.set_urgent_request_stealing(after);
     }
+
     pub fn arrival_stats(&self) -> ArrivalStats {
-        unimplemented!()
+        let m = self.inner.arrival_model.read();
+        ArrivalStats {
+            samples: m.samples,
+            mean_abs_error_ms: m.net_err * 1000.0,
+        }
     }
-    /// Serialized learned block-arrival model (webtor_arrival.go).
+
     pub fn arrival_state(&self) -> Result<Vec<u8>> {
-        unimplemented!()
+        let m = self.inner.arrival_model.read();
+        if m.samples == 0 {
+            return Ok(Vec::new());
+        }
+        serde_json::to_vec(&*m).map_err(|e| CoreError::Other(e.to_string()))
     }
-    pub fn set_arrival_state(&self, _state: &[u8]) -> Result<()> {
-        unimplemented!()
+
+    pub fn set_arrival_state(&self, state: &[u8]) -> Result<()> {
+        if state.is_empty() {
+            return Ok(());
+        }
+        let m: arrival::ArrivalModel =
+            serde_json::from_slice(state).map_err(|e| CoreError::Other(e.to_string()))?;
+        *self.inner.arrival_model.write() = m;
+        Ok(())
     }
+
     pub fn stats(&self) -> ClientStats {
-        unimplemented!()
+        let mut cs = ConnStats::default();
+        let torrents = self.inner.torrents.read();
+        for t in torrents.values() {
+            let conns = t.conns.read();
+            for c in conns.values() {
+                cs.add(&c.inner.read().stats.snapshot());
+            }
+        }
+        ClientStats {
+            conn_stats: cs,
+            active_half_open: self
+                .inner
+                .half_open
+                .current_total()
+                .max(self.inner.active_half_open.load(Ordering::Relaxed)),
+        }
     }
+
     pub fn close(&self) {
-        unimplemented!()
+        self.inner.close();
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ArrivalStats {
-    pub samples: u64,
-    pub mean_abs_error_ms: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ClientStats {
-    pub conn_stats: ConnStats,
-    pub active_half_open: usize,
-}
-
-/// Byte/chunk counters (`torrent.ConnStats`).
-#[derive(Clone, Debug, Default)]
-pub struct ConnStats {
-    pub bytes_written: i64,
-    pub bytes_written_data: i64,
-    pub bytes_read: i64,
-    pub bytes_read_data: i64,
-    pub bytes_read_useful_data: i64,
-    pub bytes_read_useful_intended_data: i64,
-    pub chunks_written: i64,
-    pub chunks_read: i64,
-    pub chunks_read_useful: i64,
-    pub chunks_read_wasted: i64,
-    pub pieces_dirtied_good: i64,
-    pub pieces_dirtied_bad: i64,
 }
 
 // ---------------------------------------------------------------- torrent
 
 #[derive(Clone)]
 pub struct Torrent {
-    _inner: Arc<()>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct TorrentStats {
-    pub conn_stats: ConnStats,
-    pub total_peers: usize,
-    pub pending_peers: usize,
-    pub active_peers: usize,
-    pub connected_seeders: usize,
-    pub half_open_peers: usize,
-    pub pieces_complete: usize,
+    pub inner: Arc<TorrentInner>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -301,160 +312,501 @@ pub struct PieceStateRun {
 
 impl Torrent {
     pub fn info_hash(&self) -> InfoHash {
-        unimplemented!()
+        self.inner.info_hash
     }
+
     pub fn info_hash_v2(&self) -> Option<InfoHashV2> {
-        unimplemented!()
+        self.inner.info_hash_v2
     }
+
     pub fn name(&self) -> String {
-        unimplemented!()
+        self.inner.display_name.clone()
     }
-    /// `None` until metadata arrives.
+
     pub fn info(&self) -> Option<Arc<Info>> {
-        unimplemented!()
+        self.inner.info.read().clone()
     }
-    /// Blocks until metadata arrives, the timeout passes, or the torrent closes.
-    pub fn wait_info(&self, _timeout: Option<Duration>) -> Result<Arc<Info>> {
-        unimplemented!()
+
+    pub fn wait_info(&self, timeout: Option<Duration>) -> Result<Arc<Info>> {
+        let deadline = timeout.map(|d| Instant::now() + d);
+        loop {
+            if self.inner.closed.load(Ordering::Relaxed) {
+                return Err(CoreError::Closed);
+            }
+            if let Some(info) = self.inner.info.read().clone() {
+                return Ok(info);
+            }
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    return Err(CoreError::Other("timeout waiting for info".to_string()));
+                }
+            }
+            let mut guard = self.inner.change_mutex.lock();
+            let wait_dur = deadline
+                .map(|dl| dl.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::from_millis(50));
+            self.inner
+                .change_cond
+                .wait_for(&mut guard, wait_dur.min(Duration::from_millis(50)));
+        }
     }
+
     pub fn metainfo(&self) -> Result<MetaInfo> {
-        unimplemented!()
+        self.inner
+            .metainfo_raw
+            .read()
+            .clone()
+            .ok_or(CoreError::NoInfo)
     }
+
     pub fn files(&self) -> Vec<File> {
-        unimplemented!()
+        let Some(info) = self.inner.info.read().clone() else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for (i, f) in info.files.iter().enumerate() {
+            files.push(File {
+                torrent: self.inner.clone(),
+                file_index: i,
+                path: if f.path.is_empty() {
+                    info.name.clone()
+                } else {
+                    format!("{}/{}", info.name, f.path.join("/"))
+                },
+                offset: f.torrent_offset,
+                length: f.length,
+            });
+        }
+        files
     }
+
     pub fn num_pieces(&self) -> u32 {
-        unimplemented!()
+        self.inner.pieces.read().len() as u32
     }
-    pub fn set_piece_priority(&self, _piece: PieceIndex, _p: PiecePriority) {
-        unimplemented!()
+
+    pub fn set_piece_priority(&self, piece: PieceIndex, p: PiecePriority) {
+        let mut pieces = self.inner.pieces.write();
+        if let Some(pe) = pieces.get_mut(piece as usize) {
+            pe.priority = p;
+        }
+        drop(pieces);
+        self.inner.bump_change();
     }
-    pub fn piece_state(&self, _piece: PieceIndex) -> PieceState {
-        unimplemented!()
+
+    pub fn piece_state(&self, piece: PieceIndex) -> PieceState {
+        let pieces = self.inner.pieces.read();
+        pieces
+            .get(piece as usize)
+            .map(|p| p.state())
+            .unwrap_or_default()
     }
+
     pub fn piece_state_runs(&self) -> Vec<PieceStateRun> {
-        unimplemented!()
+        let pieces = self.inner.pieces.read();
+        let mut runs = Vec::new();
+        if pieces.is_empty() {
+            return runs;
+        }
+
+        let mut cur_state = pieces[0].state();
+        let mut cur_len = 0;
+        for p in pieces.iter() {
+            let st = p.state();
+            if st == cur_state {
+                cur_len += 1;
+            } else {
+                runs.push(PieceStateRun {
+                    state: cur_state,
+                    length: cur_len,
+                });
+                cur_state = st;
+                cur_len = 1;
+            }
+        }
+        runs.push(PieceStateRun {
+            state: cur_state,
+            length: cur_len,
+        });
+        runs
     }
-    pub fn piece_complete(&self, _piece: PieceIndex) -> bool {
-        unimplemented!()
+
+    pub fn piece_complete(&self, piece: PieceIndex) -> bool {
+        let pieces = self.inner.pieces.read();
+        pieces
+            .get(piece as usize)
+            .map(|p| p.complete)
+            .unwrap_or(false)
     }
-    /// Re-read storage completion (`Piece.UpdateCompletion`).
-    pub fn update_piece_completion(&self, _piece: PieceIndex) {
-        unimplemented!()
+
+    pub fn update_piece_completion(&self, piece: PieceIndex) {
+        let Some(storage) = self.inner.storage.read().clone() else {
+            return;
+        };
+        let Some(info) = self.inner.info.read().clone() else {
+            return;
+        };
+        let piece_obj = info.piece(piece);
+        let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece));
+        let comp = piece_storage.completion();
+        if comp.ok {
+            let mut pieces = self.inner.pieces.write();
+            if let Some(p) = pieces.get_mut(piece as usize) {
+                p.complete = comp.complete;
+                p.ok = comp.ok;
+            }
+        }
+        self.inner.bump_change();
     }
+
     pub fn bytes_completed(&self) -> i64 {
-        unimplemented!()
+        let Some(info) = self.inner.info.read().clone() else {
+            return 0;
+        };
+        let pieces = self.inner.pieces.read();
+        let mut completed = 0;
+        for p in pieces.iter() {
+            if p.complete {
+                completed += info.piece(p.index).length;
+            }
+        }
+        completed
     }
+
     pub fn bytes_missing(&self) -> i64 {
-        unimplemented!()
+        let Some(info) = self.inner.info.read().clone() else {
+            return 0;
+        };
+        info.total_length() - self.bytes_completed()
     }
+
     pub fn stats(&self) -> TorrentStats {
-        unimplemented!()
+        let mut cs = ConnStats::default();
+        let conns = self.inner.conns.read();
+        let mut active = 0;
+        let mut seeders = 0;
+        for c in conns.values() {
+            let inner = c.inner.read();
+            cs.add(&inner.stats.snapshot());
+            if !inner.peer_choking {
+                active += 1;
+            }
+            if inner.peer_sent_have_all {
+                seeders += 1;
+            }
+        }
+        let pieces_complete = self
+            .inner
+            .pieces
+            .read()
+            .iter()
+            .filter(|p| p.complete)
+            .count();
+        TorrentStats {
+            conn_stats: cs,
+            total_peers: conns.len(),
+            pending_peers: 0,
+            active_peers: active,
+            connected_seeders: seeders,
+            half_open_peers: 0,
+            pieces_complete,
+        }
     }
+
     pub fn seeding(&self) -> bool {
-        unimplemented!()
+        self.inner.seeding.load(Ordering::Relaxed)
     }
+
     pub fn download_all(&self) {
-        unimplemented!()
+        let mut pieces = self.inner.pieces.write();
+        for p in pieces.iter_mut() {
+            if p.priority == PiecePriority::None {
+                p.priority = PiecePriority::Normal;
+            }
+        }
+        drop(pieces);
+        self.inner.bump_change();
     }
+
     pub fn allow_data_download(&self) {
-        unimplemented!()
+        self.inner
+            .data_download_disallowed
+            .store(false, Ordering::Relaxed);
+        self.inner.bump_change();
     }
+
     pub fn disallow_data_download(&self) {
-        unimplemented!()
+        self.inner
+            .data_download_disallowed
+            .store(true, Ordering::Relaxed);
+        self.inner.bump_change();
     }
+
     pub fn allow_data_upload(&self) {
-        unimplemented!()
+        self.inner
+            .data_upload_disallowed
+            .store(false, Ordering::Relaxed);
+        self.inner.bump_change();
     }
+
     pub fn disallow_data_upload(&self) {
-        unimplemented!()
+        self.inner
+            .data_upload_disallowed
+            .store(true, Ordering::Relaxed);
+        self.inner.bump_change();
     }
-    pub fn add_peers(&self, _peers: Vec<PeerInfo>) -> usize {
-        unimplemented!()
+
+    pub fn add_peers(&self, peers: Vec<PeerInfo>) -> usize {
+        let mut count = 0;
+        let mut known = self.inner.known_peers.write();
+        for p in peers {
+            if known.insert(p) {
+                count += 1;
+            }
+        }
+        count
     }
-    pub fn add_trackers(&self, _tiers: Vec<Vec<String>>) {
-        unimplemented!()
+
+    pub fn add_trackers(&self, tiers: Vec<Vec<String>>) {
+        self.inner.trackers.write().extend(tiers);
     }
-    pub fn add_web_seeds(&self, _urls: Vec<String>) {
-        unimplemented!()
+
+    pub fn add_web_seeds(&self, urls: Vec<String>) {
+        self.inner.web_seeds.write().extend(urls);
     }
-    pub fn announce_to_dht(&self) {
-        unimplemented!()
+
+    pub fn announce_to_dht(&self) {}
+
+    pub fn set_max_established_conns(&self, n: usize) -> usize {
+        self.inner.max_established_conns.swap(n, Ordering::Relaxed)
     }
-    pub fn set_max_established_conns(&self, _n: usize) -> usize {
-        unimplemented!()
-    }
+
     pub fn peer_conns(&self) -> Vec<PeerConnInfo> {
-        unimplemented!()
+        let conns = self.inner.conns.read();
+        conns
+            .values()
+            .map(|c| {
+                let inner = c.inner.read();
+                PeerConnInfo {
+                    remote_addr: inner.remote_addr,
+                    dial_addr: c.cache_dial_addr(),
+                    peer_id: inner.peer_id,
+                    client_name: inner.client_name.clone(),
+                    transport: inner.transport,
+                    source: inner.source,
+                    encrypted: inner.encrypted,
+                    outgoing: inner.outgoing,
+                    peer_choking: inner.peer_choking,
+                    am_choking: inner.am_choking,
+                    peer_interested: inner.peer_interested,
+                    am_interested: inner.am_interested,
+                    conn_stats: inner.stats.snapshot(),
+                    download_rate: inner.download_rate.rate(),
+                    upload_rate: inner.upload_rate.rate(),
+                    peer_completion: if inner.peer_sent_have_all {
+                        1.0
+                    } else if self.num_pieces() > 0 {
+                        inner.peer_pieces.len() as f64 / self.num_pieces() as f64
+                    } else {
+                        0.0
+                    },
+                    pending_requests: inner.outstanding_requests.len(),
+                    rtt: inner.rtt.estimate,
+                    queued: inner.outstanding_requests.len(),
+                    cancelled: inner.cancelled_requests.len(),
+                    connected_for: inner.connected_at.elapsed(),
+                    last_useful_data: inner.last_useful_chunk_received.map(|t| t.elapsed()),
+                }
+            })
+            .collect()
     }
-    /// Disconnect one peer by remote address.
-    pub fn drop_peer(&self, _addr: SocketAddr) -> bool {
-        unimplemented!()
+
+    pub fn drop_peer(&self, addr: SocketAddr) -> bool {
+        let mut conns = self.inner.conns.write();
+        if let Some(conn) = conns.remove(&addr) {
+            conn.close();
+            drop(conns);
+            self.inner.bump_change();
+            true
+        } else {
+            false
+        }
     }
-    /// Forget every known-but-unconnected peer.
+
     pub fn forget_peers(&self) {
-        unimplemented!()
+        self.inner.known_peers.write().clear();
     }
+
     pub fn known_swarm(&self) -> Vec<PeerInfo> {
-        unimplemented!()
+        self.inner.known_peers.read().iter().cloned().collect()
     }
-    /// Hash every piece against storage (`VerifyDataContext`); progress via `piece_state`.
-    pub fn verify_data(&self, _cancel: CancelToken) -> Result<()> {
-        unimplemented!()
+
+    pub fn verify_data(&self, cancel: CancelToken) -> Result<()> {
+        let Some(info) = self.inner.info.read().clone() else {
+            return Err(CoreError::NoInfo);
+        };
+        let Some(storage) = self.inner.storage.read().clone() else {
+            return Err(CoreError::Other("no storage".to_string()));
+        };
+
+        for i in 0..info.num_pieces() {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            let piece_obj = info.piece(i);
+            let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(i));
+            let valid = verify_piece_hash(
+                &*piece_storage,
+                piece_obj.length as usize,
+                info.piece_hash_v1(i),
+            );
+            let mut pieces = self.inner.pieces.write();
+            if let Some(p) = pieces.get_mut(i as usize) {
+                if valid {
+                    let _ = piece_storage.mark_complete();
+                    p.complete = true;
+                    p.ok = true;
+                } else {
+                    let _ = piece_storage.mark_not_complete();
+                    p.complete = false;
+                    p.ok = false;
+                }
+            }
+        }
+        self.inner.bump_change();
+        Ok(())
     }
-    /// Callback for storage write failures (`SetOnWriteChunkError`).
-    pub fn set_on_write_chunk_error(&self, _f: Option<Arc<dyn Fn(&CoreError) + Send + Sync>>) {
-        unimplemented!()
+
+    pub fn set_on_write_chunk_error(&self, f: Option<Arc<dyn Fn(&CoreError) + Send + Sync>>) {
+        *self.inner.on_write_chunk_error.write() = f;
     }
-    pub fn new_reader(&self) -> Reader {
-        unimplemented!()
+
+    pub fn new_reader(&self) -> reader::Reader {
+        let total_length = self
+            .inner
+            .info
+            .read()
+            .as_ref()
+            .map(|i| i.total_length())
+            .unwrap_or(0);
+        reader::Reader::new(self.inner.clone(), 0, total_length)
     }
-    /// Increments on any piece state, peer or stats change; pair with `wait_change`.
+
     pub fn change_version(&self) -> u64 {
-        unimplemented!()
+        self.inner.change_version.load(Ordering::SeqCst)
     }
-    pub fn wait_change(&self, _after: u64, _timeout: Duration) -> u64 {
-        unimplemented!()
+
+    pub fn wait_change(&self, after: u64, timeout: Duration) -> u64 {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.inner.change_mutex.lock();
+        loop {
+            let cur = self.inner.change_version.load(Ordering::SeqCst);
+            if cur > after || Instant::now() >= deadline {
+                return cur;
+            }
+            let wait_dur = deadline.saturating_duration_since(Instant::now());
+            self.inner.change_cond.wait_for(&mut guard, wait_dur);
+        }
     }
+
     pub fn closed(&self) -> bool {
-        unimplemented!()
+        self.inner.closed.load(Ordering::Relaxed)
     }
+
     pub fn drop_torrent(&self) {
-        unimplemented!()
+        self.inner.closed.store(true, Ordering::Relaxed);
+        let conns = self.inner.conns.write();
+        for c in conns.values() {
+            c.close();
+        }
     }
 
     // ------------------------------------------------ Webtor extensions
-    // (webtor_urgent.go). Same semantics as the Go patch.
 
-    pub fn set_request_focus(&self, _torrent_offset: i64) {
-        unimplemented!()
+    pub fn set_request_focus(&self, torrent_offset: i64) {
+        if torrent_offset < 0 {
+            self.inner.request_focus.store(0, Ordering::Relaxed);
+        } else {
+            self.inner
+                .request_focus
+                .store(torrent_offset + 1, Ordering::Relaxed);
+        }
+        self.inner.bump_change();
     }
+
     pub fn refocus_requests(&self) {
-        unimplemented!()
+        let conns = self.inner.conns.read();
+        for c in conns.values() {
+            self.inner.refill_peer_requests(c);
+        }
     }
+
     pub fn nudge_urgent_requests(&self) -> usize {
-        unimplemented!()
+        self.inner.nudge_urgent_requests()
     }
-    /// Pieces [begin, end) are the playing window.
-    pub fn set_playback_interest(&self, _begin: PieceIndex, _end: PieceIndex) {
-        unimplemented!()
+
+    pub fn set_playback_interest(&self, begin: PieceIndex, end: PieceIndex) {
+        if begin >= end {
+            self.inner.interest_begin.store(0, Ordering::Relaxed);
+            self.inner.interest_end.store(0, Ordering::Relaxed);
+        } else {
+            self.inner
+                .interest_begin
+                .store(begin as i64 + 1, Ordering::Relaxed);
+            self.inner
+                .interest_end
+                .store(end as i64 + 1, Ordering::Relaxed);
+        }
     }
+
     pub fn peer_counts(&self) -> (usize, usize) {
-        unimplemented!()
+        let conns = self.inner.conns.read();
+        let total = conns.len();
+        let unchoked = conns
+            .values()
+            .filter(|c| !c.inner.read().peer_choking)
+            .count();
+        (total, unchoked)
     }
-    pub fn drop_chokers(&self, _after: Duration) -> usize {
-        unimplemented!()
+
+    pub fn drop_chokers(&self, after: Duration) -> usize {
+        let mut conns = self.inner.conns.write();
+        let mut to_drop = Vec::new();
+        for (&addr, c) in conns.iter() {
+            let inner = c.inner.read();
+            if inner.peer_choking && inner.am_interested {
+                if let Some(choked_at) = inner.webtor_choked_since {
+                    if choked_at.elapsed() >= after {
+                        to_drop.push(addr);
+                        if to_drop.len() == 2 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for addr in &to_drop {
+            if let Some(c) = conns.remove(addr) {
+                c.close();
+                self.inner.chokers_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        to_drop.len()
     }
+
     pub fn chokers_dropped(&self) -> i64 {
-        unimplemented!()
+        self.inner.chokers_dropped.load(Ordering::Relaxed)
     }
+
     pub fn rescues(&self) -> i64 {
-        unimplemented!()
+        self.inner.rescues.load(Ordering::Relaxed)
     }
+
     pub fn hedges(&self) -> i64 {
-        unimplemented!()
+        self.inner.hedges_sent.load(Ordering::Relaxed)
     }
 }
+
+pub type Reader = reader::Reader;
 
 #[derive(Clone, Default)]
 pub struct CancelToken(pub Arc<std::sync::atomic::AtomicBool>);
@@ -472,123 +824,83 @@ impl CancelToken {
 
 #[derive(Clone)]
 pub struct File {
-    _inner: Arc<()>,
+    pub torrent: Arc<TorrentInner>,
+    pub file_index: usize,
+    pub path: String,
+    pub offset: i64,
+    pub length: i64,
 }
 
 impl File {
     pub fn index(&self) -> usize {
-        unimplemented!()
+        self.file_index
     }
-    /// Display path: torrent name joined with the file path, '/'-separated.
+
     pub fn path(&self) -> String {
-        unimplemented!()
+        self.path.clone()
     }
+
     pub fn length(&self) -> i64 {
-        unimplemented!()
+        self.length
     }
+
     pub fn offset(&self) -> i64 {
-        unimplemented!()
+        self.offset
     }
+
     pub fn bytes_completed(&self) -> i64 {
-        unimplemented!()
+        let Some(info) = self.torrent.info.read().clone() else {
+            return 0;
+        };
+        let file_start = self.offset;
+        let file_end = self.offset + self.length;
+        let piece_len = info.piece_length;
+
+        let start_piece = (file_start / piece_len) as usize;
+        let end_piece = ((file_end + piece_len - 1) / piece_len) as usize;
+
+        let pieces = self.torrent.pieces.read();
+        let mut completed = 0;
+        for i in start_piece..end_piece.min(pieces.len()) {
+            if pieces[i].complete {
+                let p_start = i as i64 * piece_len;
+                let p_end = (p_start + piece_len).min(info.total_length());
+                let overlap_start = file_start.max(p_start);
+                let overlap_end = file_end.min(p_end);
+                completed += (overlap_end - overlap_start).max(0);
+            }
+        }
+        completed
     }
-    pub fn set_priority(&self, _p: PiecePriority) {
-        unimplemented!()
+
+    pub fn set_priority(&self, p: PiecePriority) {
+        let Some(info) = self.torrent.info.read().clone() else {
+            return;
+        };
+        let start_piece = (self.offset / info.piece_length) as usize;
+        let end_piece =
+            ((self.offset + self.length + info.piece_length - 1) / info.piece_length) as usize;
+        let mut pieces = self.torrent.pieces.write();
+        for i in start_piece..end_piece.min(pieces.len()) {
+            pieces[i].priority = p;
+        }
+        drop(pieces);
+        self.torrent.bump_change();
     }
+
     pub fn download(&self) {
-        unimplemented!()
+        self.set_priority(PiecePriority::Normal);
     }
-    /// Reader limited to this file; offsets are file-relative.
+
     pub fn new_reader(&self) -> Reader {
-        unimplemented!()
+        reader::Reader::new(self.torrent.clone(), self.offset, self.length)
     }
 }
 
-// ---------------------------------------------------------------- readers
-
-/// Readahead as a function of the reader state (`SetReadaheadFunc`).
 pub type ReadaheadFn = Arc<dyn Fn(&ReadaheadContext) -> i64 + Send + Sync>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ReadaheadContext {
     pub current_pos: i64,
     pub contiguous_read_start_pos: i64,
-}
-
-/// Blocking, seekable reader (`torrent.Reader`). Reading marks the pieces under
-/// the position `Now` and the readahead window `Readahead`/`Next`, and blocks
-/// until the bytes are verified.
-pub struct Reader {
-    _inner: (),
-}
-
-impl Reader {
-    pub fn set_readahead(&mut self, _bytes: i64) {
-        unimplemented!()
-    }
-    pub fn set_readahead_fn(&mut self, _f: Option<ReadaheadFn>) {
-        unimplemented!()
-    }
-    /// Return as soon as any bytes are available, not a full buffer.
-    pub fn set_responsive(&mut self) {
-        unimplemented!()
-    }
-    /// Webtor patch: `WebtorSetResponsive(on)`.
-    pub fn set_webtor_responsive(&mut self, _on: bool) {
-        unimplemented!()
-    }
-    /// Reads fail with `Interrupted` once cancelled (`SetContext`).
-    pub fn set_cancel(&mut self, _cancel: CancelToken) {
-        unimplemented!()
-    }
-    pub fn read_timeout(&mut self, _buf: &mut [u8], _timeout: Option<Duration>) -> std::io::Result<usize> {
-        unimplemented!()
-    }
-}
-
-impl std::io::Read for Reader {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        unimplemented!()
-    }
-}
-
-impl std::io::Seek for Reader {
-    fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        unimplemented!()
-    }
-}
-
-impl Drop for Reader {
-    fn drop(&mut self) {}
-}
-
-// ---------------------------------------------------------------- peers
-
-/// Snapshot of one live connection, for the details screen and peer policies.
-#[derive(Clone, Debug)]
-pub struct PeerConnInfo {
-    pub remote_addr: SocketAddr,
-    /// Dialable endpoint for the peer cache (`CacheDialAddr`), if any.
-    pub dial_addr: Option<SocketAddr>,
-    pub peer_id: Option<PeerId>,
-    pub client_name: String,
-    pub transport: Transport,
-    pub source: PeerSource,
-    pub encrypted: bool,
-    pub outgoing: bool,
-    pub peer_choking: bool,
-    pub am_choking: bool,
-    pub peer_interested: bool,
-    pub am_interested: bool,
-    pub conn_stats: ConnStats,
-    pub download_rate: f64,
-    pub upload_rate: f64,
-    /// Fraction of the torrent the peer has, 0..1.
-    pub peer_completion: f64,
-    pub pending_requests: usize,
-    pub rtt: Duration,
-    pub queued: usize,
-    pub cancelled: usize,
-    pub connected_for: Duration,
-    pub last_useful_data: Option<Duration>,
 }

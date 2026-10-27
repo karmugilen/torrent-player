@@ -1,0 +1,971 @@
+//! Torrent state machine, piece management, and reader synchronization.
+
+use bytes::Bytes;
+use parking_lot::{Condvar, Mutex, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use wt_types::{
+    ClientStorage, Info, InfoHash, InfoHashV2, MetaInfo, PeerInfo, PieceIndex, PiecePriority,
+    RequestIndex, TorrentStorage, BLOCK_SIZE,
+};
+
+use crate::arrival::ArrivalModel;
+use crate::peer_conn::PeerConn;
+use crate::picker::{
+    block_coord_from_req_index, candidate_budget, compute_playback_pipeline_limit, focus_distance,
+    piece_req_index_range, req_index_from_piece_and_offset, should_steal_urgent, ActiveRequest,
+    HEDGES_PER_NUDGE, HOL_RESCUES_PER_NUDGE, HOL_WINDOW_BLOCKS, SLOW_PEER_BYTES_PER_SEC,
+};
+use crate::reader::{reader_piece_priorities, PieceRange, ReaderHost};
+use crate::storage_adapter::verify_piece_hash;
+use crate::tuning::current_seek_tuning;
+use crate::wire::Message;
+use crate::{CoreError, PieceState, Result};
+
+pub struct PieceEntry {
+    pub index: PieceIndex,
+    pub priority: PiecePriority,
+    pub complete: bool,
+    pub checking: bool,
+    pub partial: bool,
+    pub ok: bool,
+    pub chunks_total: usize,
+    pub chunks_received: HashSet<u32>, // offsets in piece
+}
+
+impl PieceEntry {
+    pub fn new(index: PieceIndex, piece_length: i64, total_length: i64) -> Self {
+        let piece_start = index as i64 * piece_length;
+        let piece_end = ((index as i64 + 1) * piece_length).min(total_length);
+        let actual_len = (piece_end - piece_start).max(0) as usize;
+        let chunks_total = actual_len.div_ceil(BLOCK_SIZE as usize);
+        Self {
+            index,
+            priority: PiecePriority::None,
+            complete: false,
+            checking: false,
+            partial: false,
+            ok: false,
+            chunks_total,
+            chunks_received: HashSet::new(),
+        }
+    }
+
+    pub fn state(&self) -> PieceState {
+        PieceState {
+            priority: self.priority,
+            complete: self.complete,
+            checking: self.checking,
+            partial: self.partial,
+            ok: self.ok,
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub struct TorrentInner {
+    pub info_hash: InfoHash,
+    pub info_hash_v2: Option<InfoHashV2>,
+    pub display_name: String,
+    pub info: RwLock<Option<Arc<Info>>>,
+    pub metainfo_raw: RwLock<Option<MetaInfo>>,
+    pub storage: RwLock<Option<Arc<dyn TorrentStorage>>>,
+    pub default_storage: Arc<dyn ClientStorage>,
+
+    pub pieces: RwLock<Vec<PieceEntry>>,
+    pub dirty_chunks: RwLock<HashSet<RequestIndex>>,
+    pub request_state: RwLock<HashMap<RequestIndex, ActiveRequest>>,
+    pub hedges: RwLock<HashMap<RequestIndex, SocketAddr>>,
+
+    pub conns: RwLock<HashMap<SocketAddr, PeerConn>>,
+    pub known_peers: RwLock<HashSet<PeerInfo>>,
+    pub trackers: RwLock<Vec<Vec<String>>>,
+    pub web_seeds: RwLock<Vec<String>>,
+
+    pub request_focus: AtomicI64, // 0 = none, offset + 1
+    pub interest_begin: AtomicI64,
+    pub interest_end: AtomicI64,
+
+    pub data_download_disallowed: AtomicBool,
+    pub data_upload_disallowed: AtomicBool,
+    pub max_established_conns: AtomicUsize,
+    pub seeding: AtomicBool,
+    pub closed: AtomicBool,
+
+    pub change_version: AtomicU64,
+    pub rescues: AtomicI64,
+    pub hedges_sent: AtomicI64,
+    pub chokers_dropped: AtomicI64,
+
+    pub change_cond: Arc<Condvar>,
+    pub change_mutex: Arc<Mutex<()>>,
+    pub on_write_chunk_error: RwLock<Option<Arc<dyn Fn(&CoreError) + Send + Sync>>>,
+
+    pub arrival_model: Arc<RwLock<ArrivalModel>>,
+    pub reader_ranges: RwLock<HashMap<u64, PieceRange>>,
+}
+
+impl TorrentInner {
+    pub fn new(
+        info_hash: InfoHash,
+        info_hash_v2: Option<InfoHashV2>,
+        display_name: String,
+        default_storage: Arc<dyn ClientStorage>,
+        arrival_model: Arc<RwLock<ArrivalModel>>,
+    ) -> Self {
+        Self {
+            info_hash,
+            info_hash_v2,
+            display_name,
+            info: RwLock::new(None),
+            metainfo_raw: RwLock::new(None),
+            storage: RwLock::new(None),
+            default_storage,
+            pieces: RwLock::new(Vec::new()),
+            dirty_chunks: RwLock::new(HashSet::new()),
+            request_state: RwLock::new(HashMap::new()),
+            hedges: RwLock::new(HashMap::new()),
+            conns: RwLock::new(HashMap::new()),
+            known_peers: RwLock::new(HashSet::new()),
+            trackers: RwLock::new(Vec::new()),
+            web_seeds: RwLock::new(Vec::new()),
+            request_focus: AtomicI64::new(0),
+            interest_begin: AtomicI64::new(0),
+            interest_end: AtomicI64::new(0),
+            data_download_disallowed: AtomicBool::new(false),
+            data_upload_disallowed: AtomicBool::new(false),
+            max_established_conns: AtomicUsize::new(100),
+            seeding: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            change_version: AtomicU64::new(1),
+            rescues: AtomicI64::new(0),
+            hedges_sent: AtomicI64::new(0),
+            chokers_dropped: AtomicI64::new(0),
+            change_cond: Arc::new(Condvar::new()),
+            change_mutex: Arc::new(Mutex::new(())),
+            on_write_chunk_error: RwLock::new(None),
+            arrival_model,
+            reader_ranges: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn bump_change(&self) {
+        self.change_version.fetch_add(1, Ordering::SeqCst);
+        let _guard = self.change_mutex.lock();
+        self.change_cond.notify_all();
+    }
+
+    pub fn set_info(&self, info: Arc<Info>) -> Result<()> {
+        let num_pieces = info.num_pieces() as usize;
+        let mut piece_entries = Vec::with_capacity(num_pieces);
+        let piece_len = info.piece_length;
+        let total_len = info.total_length();
+        for i in 0..num_pieces {
+            piece_entries.push(PieceEntry::new(i as PieceIndex, piece_len, total_len));
+        }
+
+        // Open storage
+        let storage = self.default_storage.open_torrent(&info, self.info_hash)?;
+        *self.storage.write() = Some(storage);
+        *self.pieces.write() = piece_entries;
+        *self.info.write() = Some(info);
+        self.bump_change();
+        Ok(())
+    }
+
+    pub fn piece_request_index_begin(&self, piece: PieceIndex) -> RequestIndex {
+        let info_guard = self.info.read();
+        if let Some(info) = &*info_guard {
+            let (begin, _) = piece_req_index_range(piece, info.piece_length, info.total_length());
+            begin
+        } else {
+            0
+        }
+    }
+
+    pub fn request_focus_index(&self) -> Option<RequestIndex> {
+        let val = self.request_focus.load(Ordering::Relaxed);
+        if val <= 0 {
+            return None;
+        }
+        let off = val - 1;
+        let info = self.info.read();
+        let info = info.as_ref()?;
+        if off < 0 || off >= info.total_length() {
+            return None;
+        }
+        let piece = (off / info.piece_length) as PieceIndex;
+        let in_piece_offset = (off % info.piece_length) as u32;
+        let req_in_piece = in_piece_offset / BLOCK_SIZE;
+        let (start, _) = piece_req_index_range(piece, info.piece_length, info.total_length());
+        Some(start + req_in_piece)
+    }
+
+    pub fn is_block_arrived(&self, req: RequestIndex) -> bool {
+        if self.dirty_chunks.read().contains(&req) {
+            return true;
+        }
+        let info_guard = self.info.read();
+        if let Some(info) = &*info_guard {
+            let coord = block_coord_from_req_index(req, info.piece_length, info.total_length());
+            let pieces = self.pieces.read();
+            if let Some(p) = pieces.get(coord.piece as usize) {
+                return p.complete;
+            }
+        }
+        false
+    }
+
+    pub fn max_end_request(&self) -> RequestIndex {
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return 0;
+        };
+        let num_pieces = info.pieces.len() / 20;
+        if num_pieces == 0 {
+            return 0;
+        }
+        let last_piece = (num_pieces - 1) as u32;
+        let (_, end_req) =
+            piece_req_index_range(last_piece, info.piece_length, info.total_length());
+        end_req
+    }
+
+    pub fn head_of_line(&self) -> Option<RequestIndex> {
+        let focus = self.request_focus_index()?;
+        let total_reqs = self.max_end_request();
+        let end = (focus + HOL_WINDOW_BLOCKS).min(total_reqs);
+        (focus..end).find(|&r| !self.is_block_arrived(r))
+    }
+
+    pub fn rescue_head_of_line(&self) -> usize {
+        let tuning = current_seek_tuning();
+        if !tuning.hol_rescue {
+            return 0;
+        }
+        let Some(head) = self.head_of_line() else {
+            return 0;
+        };
+        let Some(focus) = self.request_focus_index() else {
+            return 0;
+        };
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return 0;
+        };
+
+        let total_reqs = self.max_end_request();
+        let end = (focus + HOL_WINDOW_BLOCKS).min(total_reqs);
+        let after = Duration::from_secs_f64(tuning.hol_after_ms / 1000.0);
+        let mut moved = 0;
+
+        let mut req_state_lock = self.request_state.write();
+        let conns_lock = self.conns.read();
+
+        for r in head..end {
+            if moved >= HOL_RESCUES_PER_NUDGE {
+                break;
+            }
+            if self.is_block_arrived(r) {
+                continue;
+            }
+            let Some(holder_state) = req_state_lock.get(&r) else {
+                continue;
+            };
+            let Some(holder_conn) = conns_lock.get(&holder_state.peer) else {
+                continue;
+            };
+
+            let holder_rtt = holder_conn.inner.read().rtt.estimate;
+            if holder_state.when.elapsed() < after.max(2 * holder_rtt) {
+                continue;
+            }
+
+            let coord = block_coord_from_req_index(r, info.piece_length, info.total_length());
+            let piece = coord.piece;
+
+            let mut best_conn: Option<PeerConn> = None;
+            let mut best_arrival = f64::MAX;
+            let holder_arrival =
+                holder_conn.expected_arrival(BLOCK_SIZE as usize, tuning.learned_arrival, None);
+
+            for conn in conns_lock.values() {
+                if conn.inner.read().remote_addr == holder_state.peer || conn.is_closed() {
+                    continue;
+                }
+                let c_inner = conn.inner.read();
+                if c_inner.peer_choking || !c_inner.peer_pieces.contains(&piece) {
+                    continue;
+                }
+                drop(c_inner);
+                let arrival =
+                    conn.expected_arrival(BLOCK_SIZE as usize, tuning.learned_arrival, None);
+                if arrival < best_arrival {
+                    best_arrival = arrival;
+                    best_conn = Some(conn.clone());
+                }
+            }
+
+            if let Some(best) = best_conn {
+                if best_arrival < holder_arrival {
+                    // Steal/rescue
+                    holder_conn.send_message(Message::Cancel {
+                        index: piece,
+                        begin: coord.offset,
+                        length: coord.length,
+                    });
+                    best.send_message(Message::Request {
+                        index: piece,
+                        begin: coord.offset,
+                        length: coord.length,
+                    });
+                    req_state_lock.insert(
+                        r,
+                        ActiveRequest {
+                            peer: best.inner.read().remote_addr,
+                            when: Instant::now(),
+                            cancelled: false,
+                        },
+                    );
+                    self.rescues.fetch_add(1, Ordering::Relaxed);
+                    moved += 1;
+                }
+            }
+        }
+
+        moved
+    }
+
+    pub fn hedge_head_of_line(&self) -> usize {
+        let tuning = current_seek_tuning();
+        if !tuning.hedge {
+            return 0;
+        }
+        let Some(head) = self.head_of_line() else {
+            return 0;
+        };
+        let Some(focus) = self.request_focus_index() else {
+            return 0;
+        };
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return 0;
+        };
+
+        let total_reqs = self.max_end_request();
+        let end = (focus + HOL_WINDOW_BLOCKS).min(total_reqs);
+        let after = Duration::from_secs_f64(tuning.hol_after_ms / 1000.0);
+        let mut sent = 0;
+
+        let req_state_lock = self.request_state.read();
+        let mut hedges_lock = self.hedges.write();
+        let conns_lock = self.conns.read();
+
+        for r in head..end {
+            if sent >= HEDGES_PER_NUDGE {
+                break;
+            }
+            if self.is_block_arrived(r) {
+                continue;
+            }
+            let Some(holder_state) = req_state_lock.get(&r) else {
+                continue;
+            };
+            if hedges_lock.contains_key(&r) {
+                continue;
+            }
+            let Some(holder_conn) = conns_lock.get(&holder_state.peer) else {
+                continue;
+            };
+
+            let overdue = if tuning.learned_arrival {
+                holder_conn.block_overdue(r, Duration::from_millis(100), true)
+            } else {
+                let rtt = holder_conn.inner.read().rtt.estimate;
+                holder_state.when.elapsed() >= after.max(2 * rtt)
+            };
+
+            if !overdue {
+                continue;
+            }
+
+            let coord = block_coord_from_req_index(r, info.piece_length, info.total_length());
+            let piece = coord.piece;
+
+            let mut best_conn: Option<PeerConn> = None;
+            let mut best_arrival = f64::MAX;
+
+            for conn in conns_lock.values() {
+                if conn.inner.read().remote_addr == holder_state.peer || conn.is_closed() {
+                    continue;
+                }
+                let c_inner = conn.inner.read();
+                if c_inner.peer_choking || !c_inner.peer_pieces.contains(&piece) {
+                    continue;
+                }
+                drop(c_inner);
+                let arrival =
+                    conn.expected_arrival(BLOCK_SIZE as usize, tuning.learned_arrival, None);
+                if arrival < best_arrival {
+                    best_arrival = arrival;
+                    best_conn = Some(conn.clone());
+                }
+            }
+
+            if let Some(best) = best_conn {
+                best.send_message(Message::Request {
+                    index: piece,
+                    begin: coord.offset,
+                    length: coord.length,
+                });
+                hedges_lock.insert(r, best.inner.read().remote_addr);
+                self.hedges_sent.fetch_add(1, Ordering::Relaxed);
+                sent += 1;
+            }
+        }
+
+        sent
+    }
+
+    pub fn nudge_urgent_requests(&self) -> usize {
+        if self.closed.load(Ordering::Relaxed)
+            || self.data_download_disallowed.load(Ordering::Relaxed)
+        {
+            return 0;
+        }
+        self.rescue_head_of_line();
+        self.hedge_head_of_line();
+
+        let pieces = self.pieces.read();
+        let urgent_pieces: Vec<PieceIndex> = pieces
+            .iter()
+            .filter(|p| !p.complete && p.priority >= PiecePriority::Now)
+            .map(|p| p.index)
+            .collect();
+        drop(pieces);
+
+        if urgent_pieces.is_empty() {
+            return 0;
+        }
+
+        let eligible: Vec<PeerConn> = {
+            let conns = self.conns.read();
+            conns
+                .values()
+                .filter_map(|conn| {
+                    if conn.is_closed() {
+                        return None;
+                    }
+                    let c_inner = conn.inner.read();
+                    if c_inner.outstanding_requests.len() >= c_inner.max_requests {
+                        return None;
+                    }
+                    let has_urgent = urgent_pieces.iter().any(|&i| {
+                        (c_inner.peer_pieces.contains(&i) || c_inner.peer_sent_have_all)
+                            && (!c_inner.peer_choking || c_inner.peer_allowed_fast.contains(&i))
+                    });
+                    if has_urgent {
+                        Some(conn.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        let mut nudged = 0;
+        for conn in eligible {
+            self.refill_peer_requests(&conn);
+            nudged += 1;
+        }
+        nudged
+    }
+
+    pub fn refill_peer_requests(&self, conn: &PeerConn) {
+        if self.closed.load(Ordering::Relaxed)
+            || self.data_download_disallowed.load(Ordering::Relaxed)
+            || conn.is_closed()
+        {
+            return;
+        }
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return;
+        };
+
+        let tuning = current_seek_tuning();
+        let c_inner = conn.inner.read();
+        if c_inner.peer_choking && c_inner.peer_allowed_fast.is_empty() {
+            return;
+        }
+
+        let pipeline_limit = compute_playback_pipeline_limit(
+            c_inner.download_rate.rate(),
+            c_inner.rtt.estimate,
+            self.request_focus.load(Ordering::Relaxed) > 0,
+        );
+        let max_reqs = if pipeline_limit > 0 {
+            pipeline_limit
+        } else {
+            c_inner.max_requests
+        };
+
+        if c_inner.outstanding_requests.len() >= max_reqs {
+            return;
+        }
+
+        let slots_available = max_reqs - c_inner.outstanding_requests.len();
+        let budget = candidate_budget(max_reqs);
+        let budget_limit = if budget > 0 { budget } else { usize::MAX };
+        drop(c_inner);
+
+        let focus_opt = self.request_focus_index();
+        let sorted_pieces: Vec<(PieceIndex, PiecePriority)> = {
+            let pieces_guard = self.pieces.read();
+            let mut list: Vec<(PieceIndex, PiecePriority)> = pieces_guard
+                .iter()
+                .filter(|p| !p.complete && p.priority > PiecePriority::None)
+                .map(|p| (p.index, p.priority))
+                .collect();
+            drop(pieces_guard);
+
+            let focus_piece = focus_opt
+                .map(|r| {
+                    let coord =
+                        block_coord_from_req_index(r, info.piece_length, info.total_length());
+                    coord.piece
+                })
+                .unwrap_or(0);
+
+            list.sort_by(|a, b| {
+                // First by priority descending
+                b.1.cmp(&a.1).then_with(|| {
+                    // If priority is Now, order by distance from playhead
+                    if a.1 >= PiecePriority::Now {
+                        focus_distance(a.0, focus_piece).cmp(&focus_distance(b.0, focus_piece))
+                    } else {
+                        a.0.cmp(&b.0)
+                    }
+                })
+            });
+            list
+        };
+
+        let mut sent = 0;
+        let mut candidates_scanned = 0;
+        let mut req_state_lock = self.request_state.write();
+        let urgent_steal_age = Duration::from_secs(1); // default 1s for urgent stealing
+
+        if !conn.inner.read().am_interested {
+            conn.inner.write().am_interested = true;
+            conn.send_message(Message::Interested);
+        }
+
+        for (piece, priority) in sorted_pieces {
+            if sent >= slots_available || candidates_scanned >= budget_limit {
+                break;
+            }
+            let c_inner = conn.inner.read();
+            if !c_inner.peer_pieces.contains(&piece) && !c_inner.peer_sent_have_all {
+                continue;
+            }
+            if c_inner.peer_choking && !c_inner.peer_allowed_fast.contains(&piece) {
+                continue;
+            }
+
+            // WebTorrent slow peer yield
+            if tuning.slow_peer_yield
+                && c_inner.download_rate.rate() < SLOW_PEER_BYTES_PER_SEC
+                && priority >= PiecePriority::Next
+            {
+                // Yield to faster peers if available
+                let speed = c_inner.download_rate.rate().max(1.0);
+                let _needed_secs = (c_inner.outstanding_requests.len().max(1) as f64)
+                    * (BLOCK_SIZE as f64)
+                    / speed;
+                let conns_lock = self.conns.read();
+                let faster_exists = conns_lock.values().any(|other| {
+                    if other.inner.read().remote_addr == c_inner.remote_addr || other.is_closed() {
+                        return false;
+                    }
+                    let o_inner = other.inner.read();
+                    !o_inner.peer_choking
+                        && (o_inner.peer_pieces.contains(&piece) || o_inner.peer_sent_have_all)
+                        && o_inner.download_rate.rate() > SLOW_PEER_BYTES_PER_SEC
+                });
+                drop(conns_lock);
+                if faster_exists {
+                    continue;
+                }
+            }
+            drop(c_inner);
+
+            let (start_req, end_req) =
+                piece_req_index_range(piece, info.piece_length, info.total_length());
+            for r in start_req..end_req {
+                if sent >= slots_available || candidates_scanned >= budget_limit {
+                    break;
+                }
+                candidates_scanned += 1;
+                if self.is_block_arrived(r) {
+                    continue;
+                }
+
+                let coord = block_coord_from_req_index(r, info.piece_length, info.total_length());
+
+                // Check if already requested
+                if let Some(active) = req_state_lock.get(&r) {
+                    if active.peer == conn.inner.read().remote_addr {
+                        continue;
+                    }
+                    // Check urgent stealing
+                    let conns_lock = self.conns.read();
+                    let existing_last_useful = conns_lock
+                        .get(&active.peer)
+                        .and_then(|c| c.inner.read().last_useful_chunk_received);
+                    let stealer_last_useful = conn.inner.read().last_useful_chunk_received;
+                    drop(conns_lock);
+
+                    if should_steal_urgent(
+                        r,
+                        priority,
+                        existing_last_useful,
+                        stealer_last_useful,
+                        active.when,
+                        urgent_steal_age,
+                        focus_opt,
+                    ) {
+                        // Cancel from existing peer
+                        let conns_lock = self.conns.read();
+                        if let Some(existing) = conns_lock.get(&active.peer) {
+                            existing.send_message(Message::Cancel {
+                                index: piece,
+                                begin: coord.offset,
+                                length: coord.length,
+                            });
+                        }
+                        drop(conns_lock);
+
+                        conn.send_message(Message::Request {
+                            index: piece,
+                            begin: coord.offset,
+                            length: coord.length,
+                        });
+                        conn.note_request_sent(r, BLOCK_SIZE as usize, None);
+                        req_state_lock.insert(
+                            r,
+                            ActiveRequest {
+                                peer: conn.inner.read().remote_addr,
+                                when: Instant::now(),
+                                cancelled: false,
+                            },
+                        );
+                        sent += 1;
+                    }
+                } else {
+                    // Not requested yet!
+                    conn.send_message(Message::Request {
+                        index: piece,
+                        begin: coord.offset,
+                        length: coord.length,
+                    });
+                    conn.note_request_sent(r, BLOCK_SIZE as usize, None);
+                    req_state_lock.insert(
+                        r,
+                        ActiveRequest {
+                            peer: conn.inner.read().remote_addr,
+                            when: Instant::now(),
+                            cancelled: false,
+                        },
+                    );
+                    sent += 1;
+                }
+            }
+        }
+    }
+
+    pub fn on_block_received(
+        &self,
+        from_peer: SocketAddr,
+        piece: PieceIndex,
+        begin: u32,
+        data: Bytes,
+    ) {
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return;
+        };
+
+        let storage_guard = self.storage.read();
+        let Some(storage) = &*storage_guard else {
+            return;
+        };
+
+        let piece_obj = info.piece(piece);
+        let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece));
+
+        // Write block to storage
+        if let Err(err) = piece_storage.write_at(&data, begin as i64) {
+            let error = CoreError::Storage(err);
+            if let Some(cb) = &*self.on_write_chunk_error.read() {
+                cb(&error);
+            }
+            return;
+        }
+
+        let req_idx = req_index_from_piece_and_offset(piece, begin, info.piece_length);
+
+        // Update stats
+        self.dirty_chunks.write().insert(req_idx);
+        self.request_state.write().remove(&req_idx);
+
+        let conns = self.conns.read();
+        if let Some(conn) = conns.get(&from_peer) {
+            conn.note_block_received(req_idx, Some(&mut *self.arrival_model.write()));
+            conn.inner
+                .read()
+                .stats
+                .bytes_read_data
+                .fetch_add(data.len() as i64, Ordering::Relaxed);
+            conn.inner
+                .read()
+                .stats
+                .bytes_read_useful_data
+                .fetch_add(data.len() as i64, Ordering::Relaxed);
+            conn.inner
+                .read()
+                .stats
+                .chunks_read
+                .fetch_add(1, Ordering::Relaxed);
+            conn.inner
+                .read()
+                .stats
+                .chunks_read_useful
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Cancel hedge if hedged
+        if let Some(hedged_peer) = self.hedges.write().remove(&req_idx) {
+            if hedged_peer != from_peer {
+                if let Some(other_conn) = conns.get(&hedged_peer) {
+                    other_conn.send_message(Message::Cancel {
+                        index: piece,
+                        begin,
+                        length: data.len() as u32,
+                    });
+                }
+            }
+        }
+        drop(conns);
+
+        // Check if piece is complete
+        let mut pieces_lock = self.pieces.write();
+        if let Some(piece_entry) = pieces_lock.get_mut(piece as usize) {
+            piece_entry.partial = true;
+            piece_entry.chunks_received.insert(begin);
+            if piece_entry.chunks_received.len() >= piece_entry.chunks_total {
+                piece_entry.checking = true;
+                let expected_hash = info.piece_hash_v1(piece);
+                let valid =
+                    verify_piece_hash(&*piece_storage, piece_obj.length as usize, expected_hash);
+                piece_entry.checking = false;
+                if valid {
+                    let _ = piece_storage.mark_complete();
+                    piece_entry.complete = true;
+                    piece_entry.ok = true;
+                    drop(pieces_lock);
+                    // Broadcast Have to all peers
+                    let conns = self.conns.read();
+                    for conn in conns.values() {
+                        conn.send_message(Message::Have { index: piece });
+                    }
+                } else {
+                    let _ = piece_storage.mark_not_complete();
+                    piece_entry.complete = false;
+                    piece_entry.ok = false;
+                    piece_entry.chunks_received.clear();
+                    piece_entry.partial = false;
+                }
+            }
+        }
+
+        self.bump_change();
+    }
+}
+
+impl ReaderHost for TorrentInner {
+    fn have(&self, offset: i64, len: i64, responsive: bool) -> i64 {
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return 0;
+        };
+        let piece_len = info.piece_length;
+        let total = info.total_length();
+        let mut off = offset;
+        let mut max = len;
+        let mut ret = 0i64;
+        let pieces = self.pieces.read();
+        let dirty = self.dirty_chunks.read();
+        while max > 0 {
+            if off < 0 || off >= total {
+                break;
+            }
+            let piece = (off / piece_len) as u32;
+            let in_piece = off % piece_len;
+            let chunk_start = (in_piece / BLOCK_SIZE as i64) * BLOCK_SIZE as i64;
+            let piece_end = ((piece as i64 + 1) * piece_len).min(total);
+            let piece_base = piece as i64 * piece_len;
+            let chunk_len = (piece_end - (piece_base + chunk_start)).min(BLOCK_SIZE as i64);
+            if chunk_len <= 0 {
+                break;
+            }
+            let complete = pieces.get(piece as usize).map(|p| p.complete).unwrap_or(false);
+            if !responsive && !complete {
+                break;
+            }
+            if !complete {
+                let req = req_index_from_piece_and_offset(piece, chunk_start as u32, piece_len);
+                if !dirty.contains(&req) {
+                    break;
+                }
+            }
+            let len1 = chunk_len - (in_piece - chunk_start);
+            if len1 <= 0 {
+                break;
+            }
+            max -= len1;
+            ret += len1;
+            off += len1;
+        }
+        if max < 0 {
+            ret += max;
+        }
+        ret
+    }
+
+    fn wait_change(&self, after: u64, timeout: Duration) -> u64 {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut g = self.change_mutex.lock();
+        loop {
+            let cur = self.change_version.load(Ordering::SeqCst);
+            if cur > after || std::time::Instant::now() >= deadline {
+                return cur;
+            }
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            if wait.is_zero() {
+                return cur;
+            }
+            self.change_cond.wait_for(&mut g, wait);
+        }
+    }
+
+    fn change_version(&self) -> u64 {
+        self.change_version.load(Ordering::SeqCst)
+    }
+
+    fn set_reader_positions(&self, reader_id: u64, range: PieceRange) {
+        self.reader_ranges.write().insert(reader_id, range);
+        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
+        let (now, readahead) = reader_piece_priorities(&ranges);
+        let mut pieces = self.pieces.write();
+        for piece in pieces.iter_mut() {
+            if now.contains(&piece.index) {
+                piece.priority = PiecePriority::Now;
+            } else if readahead.contains(&piece.index) {
+                piece.priority = PiecePriority::High;
+            }
+        }
+        drop(pieces);
+        self.bump_change();
+        self.nudge_urgent_requests();
+    }
+
+    fn clear_reader(&self, reader_id: u64) {
+        self.reader_ranges.write().remove(&reader_id);
+        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
+        let (now, readahead) = reader_piece_priorities(&ranges);
+        let mut pieces = self.pieces.write();
+        for piece in pieces.iter_mut() {
+            if now.contains(&piece.index) {
+                piece.priority = PiecePriority::Now;
+            } else if readahead.contains(&piece.index) {
+                piece.priority = PiecePriority::High;
+            }
+        }
+        drop(pieces);
+        self.bump_change();
+    }
+
+    fn read_at(&self, buf: &mut [u8], torrent_offset: i64) -> std::io::Result<usize> {
+        let info_guard = self.info.read();
+        let Some(info) = &*info_guard else {
+            return Ok(0);
+        };
+        let storage_guard = self.storage.read();
+        let Some(storage) = &*storage_guard else {
+            return Ok(0);
+        };
+        if torrent_offset < 0 || torrent_offset >= info.total_length() || buf.is_empty() {
+            return Ok(0);
+        }
+
+        let piece_len = info.piece_length;
+        let mut total_read = 0;
+        let mut cur_offset = torrent_offset;
+
+        while total_read < buf.len() && cur_offset < info.total_length() {
+            let piece_idx = (cur_offset / piece_len) as u32;
+            let offset_in_piece = cur_offset % piece_len;
+            let piece_obj = info.piece(piece_idx);
+            let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece_idx));
+            let bytes_in_piece = (piece_obj.length - offset_in_piece) as usize;
+            let want = (buf.len() - total_read).min(bytes_in_piece);
+
+            match piece_storage.read_at(&mut buf[total_read..total_read + want], offset_in_piece) {
+                Ok(n) => {
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n;
+                    cur_offset += n as i64;
+                }
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("storage read error: {e}"),
+                    ));
+                }
+            }
+        }
+
+        Ok(total_read)
+    }
+
+    fn piece_length(&self) -> Option<i64> {
+        self.info.read().as_ref().map(|i| i.piece_length)
+    }
+
+    fn torrent_length(&self) -> i64 {
+        self.info.read().as_ref().map(|i| i.total_length()).unwrap_or(0)
+    }
+
+    fn num_pieces(&self) -> u32 {
+        self.info.read().as_ref().map(|i| i.num_pieces()).unwrap_or(0)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    fn has_info(&self) -> bool {
+        self.info.read().is_some()
+    }
+
+    fn on_read_waiting(&self, torrent_offset: i64) {
+        self.request_focus.store(torrent_offset + 1, Ordering::Relaxed);
+        self.nudge_urgent_requests();
+    }
+}

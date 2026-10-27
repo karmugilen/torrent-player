@@ -443,10 +443,11 @@ impl UtpSocket {
                     continue;
                 }
 
+                let original = raw.clone();
                 let hdr = match PacketHeader::decode(&mut raw) {
                     Ok(h) => h,
                     Err(_) => {
-                        let _ = non_utp_tx.send((raw, peer));
+                        let _ = non_utp_tx.send((original, peer));
                         continue;
                     }
                 };

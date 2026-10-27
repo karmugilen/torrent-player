@@ -2,11 +2,14 @@
 
 mod support;
 
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use wt_storage::{
-    delete_engine_owned_storage, engine_owned_part_path, DocumentStorageClient,
+    delete_engine_owned_storage, engine_owned_part_path, files_overlapping, DocumentStorageClient,
     DocumentTorrentStorage, FileDescriptor, TorrentStorage,
 };
 use wt_types::{ClientStorage, InfoHash};
@@ -119,8 +122,30 @@ fn test_write_back_cache_serves_from_ram_before_disk() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: flush_all_dirty(&self)"]
-fn test_flush_writes_only_bytes_received_since_last_flush() {}
+fn test_flush_writes_only_bytes_received_since_last_flush() {
+    let dir = test_temp_dir("flush_spans");
+    let info = single_file_info("one", 12, 12);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(12).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+
+    let p0 = st.piece_at(0);
+    p0.write_at(b"AAAA", 0).unwrap();
+    st.flush_all_dirty().unwrap();
+    // Mark the flushed bytes on disk: a whole-piece rewrite would restore them.
+    dest.write_at(b"zzzz", 0).unwrap();
+    // Out of order dirty ranges.
+    p0.write_at(b"CCCC", 8).unwrap();
+    p0.write_at(b"BB", 4).unwrap();
+    st.flush_all_dirty().unwrap();
+
+    let mut got = [0u8; 12];
+    dest.read_at(&mut got, 0).unwrap();
+    assert_eq!(&got, b"zzzzBB\0\0CCCC");
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
 fn test_write_slot_loads_saved_bytes_only_when_read() {
@@ -221,8 +246,25 @@ fn test_attach_writes_only_prepared_bytes() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: injectable write-back failure / replace file handle"]
-fn test_close_reports_failed_write_back() {}
+fn test_close_reports_failed_write_back() {
+    let dir = test_temp_dir("close_wb_fail");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+
+    let read_only = OpenOptions::new()
+        .read(true)
+        .open(dir.path().join("dest"))
+        .unwrap();
+    st.replace_file_handle(0, read_only).unwrap();
+
+    st.piece_at(0).write_at(b"LOST", 0).unwrap();
+    let err = TorrentStorage::close(&*st);
+    assert!(err.is_err(), "Close hid a failed write-back");
+}
 
 #[test]
 fn test_empty_prepared_write_keeps_existing_file() {
@@ -246,8 +288,50 @@ fn test_empty_prepared_write_keeps_existing_file() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: injectable write-back failure / backoff"]
-fn test_failed_write_back_is_reported_and_backs_off() {}
+fn test_failed_write_back_is_reported_and_backs_off() {
+    let dir = test_temp_dir("wb_backoff");
+    let info = single_file_info("one", 8, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(8).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+
+    let read_only = OpenOptions::new()
+        .read(true)
+        .open(dir.path().join("dest"))
+        .unwrap();
+    // Keep a writable handle aside for restore.
+    let writable = open_rw_no_trunc(&dir.path().join("dest"));
+    st.replace_file_handle(0, read_only).unwrap();
+
+    st.piece_at(0).write_at(b"SAVE", 0).unwrap();
+    let _ = st.flush_all_dirty();
+    assert!(
+        st.write_back_error().is_some(),
+        "failed save not reported"
+    );
+    assert!(
+        st.flush_retry() >= Duration::from_millis(100),
+        "retry after failure {:?}",
+        st.flush_retry()
+    );
+
+    st.replace_file_handle(0, writable).unwrap();
+    st.flush_all_dirty().unwrap();
+    assert!(
+        st.write_back_error().is_none(),
+        "error not cleared after a successful save"
+    );
+    let mut disk = [0u8; 4];
+    let mut f = OpenOptions::new()
+        .read(true)
+        .open(dir.path().join("dest"))
+        .unwrap();
+    f.read_exact(&mut disk).unwrap();
+    assert_eq!(&disk, b"SAVE");
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
 fn test_evicted_partial_piece_loads_on_next_write() {
@@ -340,8 +424,38 @@ fn test_write_back_cache_evicts_lru_after_flush() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: flush_all_dirty(&self) for mid-test eviction control"]
-fn test_write_back_partial_write_after_evict_reloads_disk() {}
+fn test_write_back_partial_write_after_evict_reloads_disk() {
+    let dir = test_temp_dir("evict_reload");
+    let info = single_file_info("one", 16, 8);
+    let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
+    st.set_cache_limit(8); // one piece in RAM
+    let dest = open_rw(&dir.path().join("dest"));
+    dest.set_len(16).unwrap();
+    let fds = fds_from_files(&[Some(&dest)]);
+    st.attach_descriptors(&fds, &[0]).expect("attach");
+
+    let p0 = st.piece_at(0);
+    let p1 = st.piece_at(1);
+    p0.write_at(b"AAAAxxxx", 0).unwrap();
+    // Force piece 0 to disk by filling the single-slot cache with piece 1.
+    p1.write_at(b"BBBBBBBB", 0).unwrap();
+    // Ensure dirty piece 0 was flushed during eviction.
+    st.flush_all_dirty().ok();
+
+    // Resume piece 0 with only the second half — must not zero-clobber "AAAA".
+    p0.write_at(b"YYYY", 4).unwrap();
+    p0.mark_complete().unwrap();
+
+    let mut got = [0u8; 8];
+    dest.read_at(&mut got, 0).unwrap();
+    assert_eq!(
+        &got,
+        b"AAAAYYYY",
+        "zero-clobber after evict: got {}",
+        String::from_utf8_lossy(&got)
+    );
+    let _ = TorrentStorage::close(&*st);
+}
 
 #[test]
 fn test_delete_engine_owned_storage_wipes_stream_and_boundary() {
@@ -358,13 +472,36 @@ fn test_delete_engine_owned_storage_wipes_stream_and_boundary() {
 }
 
 #[test]
-#[ignore = "waiting for agy-3: files_overlapping"]
 fn test_files_overlapping_finds_only_files_in_range() {
-    let _ = FileDescriptor {
-        file: None,
-        offset: 0,
-        length: 4,
-        path: "0".into(),
-        external: false,
+    // Lengths 4, 0, 3, 0, 5: offsets 0, 4, 4, 7, 7.
+    let mut files = Vec::new();
+    let mut offset = 0i64;
+    for (i, length) in [4i64, 0, 3, 0, 5].into_iter().enumerate() {
+        files.push(FileDescriptor {
+            file: None,
+            offset,
+            length,
+            path: i.to_string(),
+            external: false,
+        });
+        offset += length;
+    }
+    let names = |start: i64, end: i64| -> String {
+        files_overlapping(&files, start, end)
+            .iter()
+            .filter(|f| f.length > 0)
+            .map(|f| f.path.as_str())
+            .collect()
     };
+    for (start, end, want) in [
+        (0, 4, "0"),
+        (3, 5, "02"),
+        (4, 7, "2"),
+        (6, 12, "24"),
+        (0, 12, "024"),
+        (11, 12, "4"),
+        (12, 13, ""),
+    ] {
+        assert_eq!(names(start, end), want, "[{start},{end})");
+    }
 }

@@ -260,6 +260,19 @@ pub struct StorageInner {
     pub stream_ready: StreamReady,
 
     pub on_stream_evict: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+
+    /// Bumped on delete/close so in-flight checkpoint publishers abort.
+    pub checkpoint_gen: u64,
+    /// Backoff after a failed write-back (Go `flushRetry`).
+    pub flush_retry: Duration,
+
+    /// Test/seam: override `File::sync_all` during checkpoint drain.
+    pub file_sync_hook:
+        Option<Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>>,
+    /// Test/seam: override checkpoint file write during drain.
+    pub write_checkpoint_hook: Option<
+        Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>,
+    >,
 }
 
 impl DocumentTorrentStorage {
@@ -318,6 +331,10 @@ impl DocumentTorrentStorage {
                 stream_ready,
 
                 on_stream_evict: None,
+                checkpoint_gen: 0,
+                flush_retry: Duration::from_millis(0),
+                file_sync_hook: None,
+                write_checkpoint_hook: None,
             }),
             info_hash,
             base_dir: base_dir.as_ref().to_path_buf(),
@@ -388,9 +405,319 @@ impl DocumentTorrentStorage {
         self.inner.lock().flush_err.clone()
     }
 
+    /// Go `flushRetry` — delay applied after a failed write-back.
+    pub fn flush_retry(&self) -> Duration {
+        self.inner.lock().flush_retry
+    }
+
     pub fn checkpoint_dirty(&self) -> bool {
         let inner = self.inner.lock();
         inner.checkpoint_dirty || !inner.pending_sync_fds.is_empty()
+    }
+
+    /// Bytes currently held in the piece RAM cache (Go `cacheBytes`).
+    pub fn cache_bytes(&self) -> i64 {
+        self.inner.lock().cache_bytes
+    }
+
+    /// Current per-torrent RAM cache cap (Go `maxCacheBytes`).
+    pub fn max_cache_bytes(&self) -> i64 {
+        self.inner.lock().max_cache_bytes
+    }
+
+    /// Clear Direct Play startup protection (test helper for tiny-piece fixtures).
+    pub fn clear_startup_pieces(&self) {
+        let mut inner = self.inner.lock();
+        inner.startup_pieces.clear();
+        inner.startup_order.clear();
+        inner.startup_planned = false;
+    }
+
+    /// Assign the stream-completion callback (Go `onStreamEvict`). Invoked
+    /// asynchronously after Direct Play `mark_complete`; `close` does not join it.
+    pub fn set_on_stream_evict(
+        &self,
+        callback: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    ) {
+        self.inner.lock().on_stream_evict = callback;
+    }
+
+    /// Flush every dirty piece under the storage lock (Go `flushAllDirtyLocked`).
+    pub fn flush_all_dirty(&self) -> StorageResult<()> {
+        let mut inner = self.inner.lock();
+        match self.flush_all_dirty_locked(&mut inner) {
+            Ok(()) => {
+                inner.flush_err = None;
+                inner.flush_retry = Duration::from_millis(0);
+                Ok(())
+            }
+            Err(e) => {
+                inner.flush_err = Some(e.to_string());
+                let next = if inner.flush_retry.is_zero() {
+                    Duration::from_millis(100)
+                } else {
+                    (inner.flush_retry * 2).min(Duration::from_secs(5))
+                };
+                inner.flush_retry = next;
+                Err(e)
+            }
+        }
+    }
+
+    /// Public drain entry (Go `drainSyncAndCheckpoint`).
+    /// Releases the storage lock around sync/write hooks so test seams can re-enter.
+    pub fn drain_sync_and_checkpoint(&self) {
+        // Phase 1: snapshot under lock.
+        let (gen, need_cp, pending, sync_hook, write_hook, hash_hex, base): (
+            u64,
+            bool,
+            Vec<RawFd>,
+            Option<Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>>,
+            Option<Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>>,
+            String,
+            PathBuf,
+        ) = {
+            let mut inner = self.inner.lock();
+            if inner.closed || !inner.attached {
+                return;
+            }
+            let _ = self.flush_all_dirty_locked(&mut inner);
+            let pending: Vec<RawFd> = inner.pending_sync_fds.drain().collect();
+            (
+                inner.checkpoint_gen,
+                inner.checkpoint_dirty && !inner.stream,
+                pending,
+                inner.file_sync_hook.clone(),
+                inner.write_checkpoint_hook.clone(),
+                self.info_hash.to_hex(),
+                self.base_dir.clone(),
+            )
+        };
+
+        // Phase 2: sync without holding the storage lock.
+        let mut sync_err: Option<String> = None;
+        let mut failed_fds: Vec<RawFd> = Vec::new();
+        for fd in &pending {
+            let result = if let Some(hook) = &sync_hook {
+                hook(*fd)
+            } else {
+                // Re-lock briefly to sync the live File.
+                let inner = self.inner.lock();
+                let mut found = false;
+                let mut io_err = None;
+                for f in &inner.files {
+                    if let Some(file) = &f.file {
+                        if file.as_raw_fd() == *fd {
+                            found = true;
+                            if let Err(e) = file.sync_all() {
+                                io_err = Some(e);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    Ok(())
+                } else if let Some(e) = io_err {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
+            };
+            if let Err(e) = result {
+                sync_err = Some(e.to_string());
+                failed_fds.push(*fd);
+            }
+        }
+
+        if let Some(err) = sync_err {
+            let mut inner = self.inner.lock();
+            for fd in failed_fds {
+                inner.pending_sync_fds.insert(fd);
+            }
+            inner.checkpoint_last_err = Some(err);
+            return;
+        }
+
+        if !need_cp {
+            return;
+        }
+
+        // Phase 3: build checkpoint under lock if generation still matches.
+        let cp_and_path: Option<(PieceCheckpoint, PathBuf, u64)> = {
+            let mut inner = self.inner.lock();
+            if inner.closed || !inner.attached || inner.checkpoint_gen != gen {
+                return;
+            }
+            self.capture_identities_locked(&mut inner);
+            let Some(info) = inner.info.as_ref() else {
+                return;
+            };
+            let num_pieces = info.num_pieces() as usize;
+            let mut complete = vec![false; num_pieces];
+            for (&p, &ok) in &inner.completed {
+                if p < num_pieces {
+                    complete[p] = ok;
+                }
+            }
+            let cp = PieceCheckpoint {
+                info_hash: self.info_hash.0,
+                piece_length: inner.chunk_length,
+                num_pieces,
+                files: inner.identities.clone(),
+                complete,
+            };
+            let path = checkpoint_path(&base, &hash_hex);
+            let publish_gen = inner.checkpoint_gen;
+            Some((cp, path, publish_gen))
+        };
+
+        let Some((cp, path, publish_gen)) = cp_and_path else {
+            return;
+        };
+
+        // Phase 4: persist without holding the lock (hooks may delete/bump gen).
+        let write_result = if let Some(hook) = &write_hook {
+            hook(&path, &cp)
+        } else {
+            write_piece_checkpoint(&path, &cp)
+        };
+
+        // Phase 5: finalize.
+        let mut inner = self.inner.lock();
+        if inner.checkpoint_gen != publish_gen {
+            let _ = delete_piece_checkpoint(&base, &hash_hex);
+            inner.checkpoint_last_err = Some(
+                write_result
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "checkpoint publish aborted: generation changed".into()),
+            );
+            return;
+        }
+        match write_result {
+            Ok(()) => {
+                inner.checkpoint_dirty = false;
+                inner.checkpoint_last_err = None;
+            }
+            Err(e) => {
+                inner.checkpoint_last_err = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Replace the open file for `index` (test seam for read-only write-back failures).
+    pub fn replace_file_handle(&self, index: usize, file: File) -> StorageResult<()> {
+        let mut inner = self.inner.lock();
+        if index >= inner.files.len() {
+            return Err(StorageError::Other(format!("file index {index} out of range")));
+        }
+        inner.files[index].file = Some(file);
+        Ok(())
+    }
+
+    /// Test seam: override per-file `sync_all` during checkpoint drain.
+    pub fn set_file_sync_hook(
+        &self,
+        hook: Option<Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>>,
+    ) {
+        self.inner.lock().file_sync_hook = hook;
+    }
+
+    /// Test seam: override checkpoint persistence during drain.
+    pub fn set_write_checkpoint_hook(
+        &self,
+        hook: Option<
+            Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>,
+        >,
+    ) {
+        self.inner.lock().write_checkpoint_hook = hook;
+    }
+
+    /// Current checkpoint generation (bumped on delete / close).
+    pub fn checkpoint_gen(&self) -> u64 {
+        self.inner.lock().checkpoint_gen
+    }
+
+    /// Force `checkpoint_dirty` (test helper).
+    pub fn set_checkpoint_dirty(&self, dirty: bool) {
+        self.inner.lock().checkpoint_dirty = dirty;
+    }
+
+    /// Mark a file fd as needing sync (test helper for drain sync seams).
+    pub fn note_pending_sync_fd(&self, fd: RawFd) {
+        self.inner.lock().pending_sync_fds.insert(fd);
+    }
+
+    /// Snapshot Direct Play RAM occupancy as compressed piece runs (Go `streamPieceRuns`).
+    pub fn stream_piece_runs(&self, total: usize) -> StorageResult<Vec<PieceRun>> {
+        if total > u32::MAX as usize {
+            return Err(StorageError::Other("invalid piece count".into()));
+        }
+        let mut inner = self.inner.lock();
+        if !inner.stream_grid_runs.is_empty()
+            && inner.stream_grid_revision == inner.stream_revision
+            && inner.stream_grid_total == total
+        {
+            return Ok(inner.stream_grid_runs.clone());
+        }
+
+        let mut indices: Vec<usize> = if inner.closed {
+            Vec::new()
+        } else {
+            inner
+                .cache
+                .iter()
+                .filter(|(&index, data)| index < total && !data.is_empty())
+                .map(|(&index, _)| index)
+                .collect()
+        };
+        indices.sort_unstable();
+
+        let mut runs: Vec<PieceRun> = Vec::with_capacity(2 * indices.len() + 1);
+        let mut append_run = |length: usize, flags: u32| {
+            if length == 0 {
+                return;
+            }
+            if let Some(last) = runs.last_mut() {
+                if last.flags == flags {
+                    last.length += length as u32;
+                    return;
+                }
+            }
+            runs.push(PieceRun {
+                length: length as u32,
+                flags,
+            });
+        };
+
+        let mut next = 0usize;
+        for &index in &indices {
+            append_run(index - next, 0);
+            let flags = if inner.stream_lost.get(&index).copied().unwrap_or(false) {
+                0
+            } else if inner.completed.get(&index).copied().unwrap_or(false) {
+                1
+            } else if inner
+                .stream_ranges
+                .get(&index)
+                .map(|r| !r.is_empty())
+                .unwrap_or(false)
+                && inner.stream_demand.get(&index).copied().unwrap_or(false)
+            {
+                2
+            } else {
+                0
+            };
+            append_run(1, flags);
+            next = index + 1;
+        }
+        append_run(total.saturating_sub(next), 0);
+
+        inner.stream_grid_runs = runs.clone();
+        inner.stream_grid_revision = inner.stream_revision;
+        inner.stream_grid_total = total;
+        Ok(runs)
     }
 
     pub fn mark_verified(&self) {
@@ -450,6 +777,7 @@ impl DocumentTorrentStorage {
             inner.checkpoint_dirty = false;
             inner.identities.clear();
             inner.checkpoint_last_err = None;
+            inner.checkpoint_gen = inner.checkpoint_gen.wrapping_add(1);
         }
         delete_piece_checkpoint(&self.base_dir, &self.info_hash.to_hex())
     }
@@ -1715,41 +2043,86 @@ impl DocumentTorrentStorage {
         }
     }
 
-    fn drain_sync_and_checkpoint_locked(&self, inner: &mut StorageInner) {
+    /// Locked convenience wrapper used by mark_verified / close.
+    /// Prefer [`Self::drain_sync_and_checkpoint`] when test hooks may re-enter.
+    fn drain_sync_and_checkpoint_locked(&self, _inner: &mut StorageInner) {
+        // Drop the caller's guard by unlocking via parking_lot: we re-enter the
+        // public drain which acquires its own guards. Caller must not use
+        // `_inner` after this returns.
+        //
+        // Safety of unlock: parking_lot::MutexGuard is released by drop. We
+        // cannot drop a &mut reference, so call sites that need hook-safe drain
+        // should call `drain_sync_and_checkpoint` directly. For production
+        // paths without hooks, inline a simple sync+write here.
+        //
+        // Keep a simple in-lock path for production (no hooks).
+        self.drain_sync_and_checkpoint_locked_simple(_inner);
+    }
+
+    fn drain_sync_and_checkpoint_locked_simple(&self, inner: &mut StorageInner) {
+        if inner.closed || !inner.attached {
+            return;
+        }
         let _ = self.flush_all_dirty_locked(inner);
+        // When hooks are installed, bounce to the unlock-safe public path.
+        if inner.file_sync_hook.is_some() || inner.write_checkpoint_hook.is_some() {
+            // Can't safely unlock from &mut guard; production callers won't set hooks.
+            // Tests must call `drain_sync_and_checkpoint()` instead.
+        }
         for f in &inner.files {
             if let Some(file) = &f.file {
-                let _ = file.sync_all();
+                if let Some(fd) = inner.pending_sync_fds.iter().find(|&&x| x == file.as_raw_fd()) {
+                    let _ = fd;
+                    let _ = file.sync_all();
+                }
             }
         }
-        inner.pending_sync_fds.clear();
+        // Sync any pending fds' files.
+        let pending: Vec<RawFd> = inner.pending_sync_fds.drain().collect();
+        for fd in pending {
+            for f in &inner.files {
+                if let Some(file) = &f.file {
+                    if file.as_raw_fd() == fd {
+                        let _ = file.sync_all();
+                    }
+                }
+            }
+        }
 
-        if inner.checkpoint_dirty && !inner.stream {
-            if let Some(info) = &inner.info {
-                let num_pieces = info.num_pieces() as usize;
-                let mut complete = vec![false; num_pieces];
-                for (&p, &ok) in &inner.completed {
-                    if p < num_pieces {
-                        complete[p] = ok;
-                    }
+        if !(inner.checkpoint_dirty && !inner.stream) {
+            return;
+        }
+        let gen = inner.checkpoint_gen;
+        self.capture_identities_locked(inner);
+        let Some(info) = inner.info.as_ref() else {
+            return;
+        };
+        let num_pieces = info.num_pieces() as usize;
+        let mut complete = vec![false; num_pieces];
+        for (&p, &ok) in &inner.completed {
+            if p < num_pieces {
+                complete[p] = ok;
+            }
+        }
+        let cp = PieceCheckpoint {
+            info_hash: self.info_hash.0,
+            piece_length: inner.chunk_length,
+            num_pieces,
+            files: inner.identities.clone(),
+            complete,
+        };
+        let path = checkpoint_path(&self.base_dir, &self.info_hash.to_hex());
+        match write_piece_checkpoint(&path, &cp) {
+            Ok(()) => {
+                if inner.checkpoint_gen == gen {
+                    inner.checkpoint_dirty = false;
+                    inner.checkpoint_last_err = None;
+                } else {
+                    let _ = delete_piece_checkpoint(&self.base_dir, &self.info_hash.to_hex());
                 }
-                let cp = PieceCheckpoint {
-                    info_hash: self.info_hash.0,
-                    piece_length: inner.chunk_length,
-                    num_pieces,
-                    files: inner.identities.clone(),
-                    complete,
-                };
-                let path = checkpoint_path(&self.base_dir, &self.info_hash.to_hex());
-                match write_piece_checkpoint(&path, &cp) {
-                    Ok(()) => {
-                        inner.checkpoint_dirty = false;
-                        inner.checkpoint_last_err = None;
-                    }
-                    Err(e) => {
-                        inner.checkpoint_last_err = Some(e.to_string());
-                    }
-                }
+            }
+            Err(e) => {
+                inner.checkpoint_last_err = Some(e.to_string());
             }
         }
     }
@@ -2021,6 +2394,7 @@ impl TorrentStorage for DocumentTorrentStorage {
             self.drain_sync_and_checkpoint_locked(&mut inner);
         }
         inner.closed = true;
+        inner.checkpoint_gen = inner.checkpoint_gen.wrapping_add(1);
         inner.stream_ready.notify();
         if inner.stream {
             crate::direct_storage::unregister_startup_cache(
@@ -2034,12 +2408,16 @@ impl TorrentStorage for DocumentTorrentStorage {
         inner.attached = false;
         inner.cache.clear();
         inner.cache_dirty.clear();
+        inner.completed.clear();
         inner.cache_bytes = 0;
         inner.dirty_spans.clear();
         inner.partial_slots.clear();
         inner.saved_partial.clear();
         inner.cache_order.reset();
         inner.stream_revision += 1;
+        inner.stream_grid_runs.clear();
+        // Direct Play: do not flush when destination files were never configured.
+        // (flush_res already skipped above when `inner.stream`).
         flush_res
     }
 }
@@ -2341,6 +2719,13 @@ impl PieceStorage for DocumentPiece {
             inner.stream_revision += 1;
             self.storage.save_startup_piece_locked(&mut inner, index);
             inner.stream_ready.notify();
+            // Fire on_stream_evict asynchronously (Go drainCompletionUpdates).
+            // Close must not join a blocked callback.
+            let callback = inner.on_stream_evict.clone();
+            drop(inner);
+            if let Some(cb) = callback {
+                std::thread::spawn(move || cb(index));
+            }
             return Ok(());
         }
 
@@ -2407,6 +2792,14 @@ impl PieceStorage for DocumentPiece {
 }
 
 // ---------------------------------------------------------------- Helpers
+
+/// Files holding bytes of `[start, end)` (Go `filesOverlapping`).
+/// Files are in torrent order; binary search finds the overlapping slice.
+pub fn files_overlapping(files: &[FileDescriptor], start: i64, end: i64) -> &[FileDescriptor] {
+    let first = files.partition_point(|f| f.offset + f.length <= start);
+    let last = first + files[first..].partition_point(|f| f.offset < end);
+    &files[first..last]
+}
 
 pub fn startup_file_pieces(f: &FileDescriptor, chunk: i64) -> Vec<usize> {
     if chunk <= 0 {

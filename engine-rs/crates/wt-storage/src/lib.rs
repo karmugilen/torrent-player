@@ -43,9 +43,9 @@ pub use pieces::{
 pub use ranges::{merge_received_range, ranges_cover, ByteRange};
 pub use sparse::{file_occupied_bytes, punch_hole, seek_data, seek_hole};
 pub use storage::{
-    delete_engine_owned_storage, engine_owned_part_path, is_video_file_name, startup_file_pieces,
-    DocumentPiece, DocumentStorageClient, DocumentTorrentStorage, FileDescriptor,
-    DEFAULT_MAX_CACHE_BYTES, DEFAULT_STREAM_CACHE_MAX_BYTES, DIRECT_PLAY_MIN_PIECES,
+    delete_engine_owned_storage, engine_owned_part_path, files_overlapping, is_video_file_name,
+    startup_file_pieces, DocumentPiece, DocumentStorageClient, DocumentTorrentStorage,
+    FileDescriptor, DEFAULT_MAX_CACHE_BYTES, DEFAULT_STREAM_CACHE_MAX_BYTES, DIRECT_PLAY_MIN_PIECES,
     DIRECT_PRELOAD_BUDGET, DIRECT_STARTUP_BUDGET, DIRECT_STARTUP_HEAD, DIRECT_STARTUP_TAIL,
     DIRECT_STARTUP_TOTAL_BUDGET, MAX_RAM_CACHE_BYTES, MEMORY_LIMIT_OVERHEAD, MIN_RAM_CACHE_BYTES,
     PREVIEW_BUDGET_BYTES, STREAM_CACHE_KEEP_BYTES,

@@ -27,3 +27,4 @@ engine-go/engine-go
 engine-go/engine-go.test
 android/seekprobe/build/
 *.aab
+.wt-target*/

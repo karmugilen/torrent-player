@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use num_bigint::BigUint;
 use rand::Rng;
 use sha1::{Digest, Sha1};
@@ -517,8 +517,8 @@ where
     if !policy.require_preferred || !policy.preferred {
         // Peek or test for plain BitTorrent handshake
         let mut proto = [0u8; 20];
-        let n = stream.read(&mut proto).await?;
-        if n == 20 && &proto == crate::handshake::PROTOCOL_HEADER {
+        stream.read_exact(&mut proto).await?;
+        if &proto == crate::handshake::PROTOCOL_HEADER {
             let res_stream = MseStream::new(stream, None, None, Bytes::copy_from_slice(&proto));
             return Ok((res_stream, false, CryptoMethod::PLAINTEXT));
         }
@@ -531,15 +531,9 @@ where
         }
 
         // Put bytes back into stream wrapper and proceed with MSE
-        let mut initial = BytesMut::new();
-        initial.extend_from_slice(&proto[..n]);
-        // For MSE, read Y_A (96 bytes). The first n bytes are already in initial!
         let mut y_a = vec![0u8; 96];
-        let copy_len = min(n, 96);
-        y_a[..copy_len].copy_from_slice(&proto[..copy_len]);
-        if copy_len < 96 {
-            stream.read_exact(&mut y_a[copy_len..96]).await?;
-        }
+        y_a[..20].copy_from_slice(&proto);
+        stream.read_exact(&mut y_a[20..96]).await?;
         // Create an adapter that feeds the 96-byte Y_A to receive_handshake
         // We can run receive_handshake directly:
         let p = prime_p();

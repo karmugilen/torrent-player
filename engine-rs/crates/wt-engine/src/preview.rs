@@ -30,6 +30,7 @@ pub fn preview_dir(base_dir: impl AsRef<Path>, info_hash_hex: &str) -> PathBuf {
 ///
 /// `piece_length` / `file_torrent_offset` describe the torrent layout;
 /// `piece_complete` reports verified pieces that need no network admission.
+#[allow(clippy::too_many_arguments)]
 pub fn admit_preview_range(
     admitted: &mut HashMap<u32, bool>,
     admitted_bytes: &mut i64,
