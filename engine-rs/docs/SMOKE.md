@@ -185,7 +185,9 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 |-------|--------|---------------|------------------|-------|
 | go-ubuntu-r17 | 11.0 | 10→37 | **7.15** | TCP 30 + uTP 5; **34/35** downloaded>0; 297 MiB |
 | go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
-| rust-ubuntu-r41 | 4.0 | 8→18 | **1.58** | TCP 15 + uTP 3; 7/18 active; 22 MiB; SlowPeerYield fix |
+| go-ubuntu-r18 | 14.0 | 16→32 | **10.55** | TCP 23 + uTP 9; 29/32 active; **452 MiB** |
+| rust-ubuntu-r43 | 4.5 | 13→14 | 1.46 | TCP 12 + uTP 2; 9/14 active; 27 MiB; pipeline floor |
+| rust-ubuntu-r41 | 4.0 | 8→18 | 1.58 | TCP 15 + uTP 3; 7/18 active; 22 MiB; SlowPeerYield fix |
 | rust-ubuntu-r38 | 5.5 | **10→33** | 0.75 | TCP 26 + **uTP 7**; 13/33 active; 15 MiB — peer count peak |
 | rust-ubuntu-forceutp-r2 | 5.0 | 6→16 | 0.08 | **uTP 16**; was 0 dial_ok before BEP29 |
 | rust-sintel-r7 | 1.5 | **21→39** | **34.8** | TCP 32 + **uTP 5**; **30/37** active; **855 MiB** |
