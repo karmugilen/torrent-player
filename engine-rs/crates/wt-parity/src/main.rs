@@ -1,5 +1,6 @@
 //! wt-parity: Go vs Rust engine host parity + performance harness.
 
+mod api_diff;
 mod client;
 mod compare;
 mod engine;
@@ -10,6 +11,7 @@ mod report;
 mod scenarios;
 mod swarm;
 
+use api_diff::{run_api_diff, ApiDiffOpts};
 use clap::{Parser, Subcommand};
 use compare::{compare_files, print_table, DEFAULT_NOISE};
 use scenarios::{run, RunOpts};
@@ -61,6 +63,27 @@ enum Cmd {
         /// Allowed fraction Rust may be worse (default 0.05).
         #[arg(long, default_value_t = DEFAULT_NOISE)]
         noise: f64,
+    },
+    /// Diff Go vs Rust control API responses (HTTP status + JSON contract).
+    ApiDiff {
+        /// Path to Go `engine-go-host` binary (built if missing / with `--build`).
+        #[arg(long)]
+        go: PathBuf,
+        /// Path to Rust `engine-host` binary (built if missing / with `--build`).
+        #[arg(long)]
+        rust: PathBuf,
+        /// Work/fixtures dir (localhost only; cleaned after run).
+        #[arg(long, default_value = "/home/kar/.cache/wt-tmp/api-diff")]
+        work: PathBuf,
+        /// Markdown report path.
+        #[arg(long, default_value = "crates/wt-parity/API_DIFF.md")]
+        report: PathBuf,
+        /// Repo root containing `engine-go/` and `engine-rs/` (for builds).
+        #[arg(long, default_value = "..")]
+        repo: PathBuf,
+        /// Force rebuild of both host binaries before the run.
+        #[arg(long, default_value_t = false)]
+        build: bool,
     },
 }
 
@@ -149,5 +172,55 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Cmd::ApiDiff {
+            go,
+            rust,
+            work,
+            report,
+            repo,
+            build,
+        } => {
+            let repo = if repo.is_relative() {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(repo)
+            } else {
+                repo
+            };
+            // Resolve report relative to engine-rs when run from there.
+            let report = if report.is_relative() {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(report)
+            } else {
+                report
+            };
+            match run_api_diff(ApiDiffOpts {
+                go_bin: go,
+                rust_bin: rust,
+                work,
+                report,
+                repo,
+                build,
+            }) {
+                Ok(summary) => {
+                    eprintln!(
+                        "api-diff: {} MATCH, {} DIFF, {} CRITICAL",
+                        summary.match_count,
+                        summary.diff_count,
+                        summary.critical_diffs.len()
+                    );
+                    for c in &summary.critical_diffs {
+                        eprintln!("  CRITICAL: {c}");
+                    }
+                    eprintln!("api-diff: report {}", summary.report_path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("api-diff failed: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
     }
 }

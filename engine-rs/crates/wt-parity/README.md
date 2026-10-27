@@ -59,6 +59,31 @@ CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
 `compare` prints a table of medians and ratios. Exit code `1` means Rust is
 worse than Go beyond the noise tolerance (default 5%).
 
+## Control API contract (`api-diff`)
+
+Diffs every `engine-go` `handleControl` route between Go and Rust hosts and
+writes `API_DIFF.md`. Kotlin-parsed fields (`EngineClient.kt`) are marked
+CRITICAL when they differ.
+
+```bash
+# Build hosts (one at a time)
+cd engine-go && go build -tags=nosqlite,noboltdb -o /home/kar/.cache/wt-tmp/engine-go-host .
+cd ../engine-rs
+CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
+  cargo build -p wt-engine --bin engine-host
+
+CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
+  cargo run -p wt-parity -- api-diff \
+  --go /home/kar/.cache/wt-tmp/engine-go-host \
+  --rust /home/kar/.cache/wt-targets/wt-parity/debug/engine-host \
+  --work /home/kar/.cache/wt-tmp/api-diff \
+  --report crates/wt-parity/API_DIFF.md \
+  --repo ..
+```
+
+Pass `--build` to rebuild both hosts before the run. Localhost only; children
+are shut down and data dirs under `api-diff` are removed afterward.
+
 ## Scenarios
 
 | Name | What it measures |
