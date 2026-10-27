@@ -205,6 +205,7 @@ struct CoordinatorInner {
     /// file_index → active session id
     active: HashMap<usize, u64>,
     playing: Option<u64>,
+    resume_positions: HashMap<usize, i64>,
     closed: bool,
 }
 
@@ -230,6 +231,7 @@ impl PlaybackPriorityCoordinator {
                 burst_buffers: HashMap::new(),
                 active: HashMap::new(),
                 playing: None,
+                resume_positions: HashMap::new(),
                 closed: false,
             }),
         }
@@ -342,6 +344,10 @@ impl PlaybackPriorityCoordinator {
 
     pub fn set_playing(&self, session_id: u64) {
         self.inner.lock().playing = Some(session_id);
+    }
+
+    pub fn preview_position(&self, file_index: usize) -> i64 {
+        self.inner.lock().resume_positions.get(&file_index).copied().unwrap_or(0)
     }
 
     pub fn effective(&self) -> HashMap<u32, PiecePriority> {
@@ -953,6 +959,9 @@ impl PlaybackSession {
         }
         if !self.open_phase {
             self.coordinator.set_playing(self.session_id);
+            if n > 0 {
+                self.coordinator.inner.lock().resume_positions.insert(self.file_index, offset + n as i64);
+            }
         }
         Ok(n)
     }

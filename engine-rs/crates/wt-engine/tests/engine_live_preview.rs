@@ -4,7 +4,6 @@
 
 mod support;
 
-#[ignore = "needs: preview-state tracking live playback position"]
 #[test]
 fn test_live_preview_state_follows_verified_playback_position() {
     // Port of Go `TestLivePreviewStateFollowsVerifiedPlaybackPosition`.
@@ -26,7 +25,6 @@ fn test_live_preview_state_follows_verified_playback_position() {
     p.close();
 }
 
-#[ignore = "needs: playback handle surviving download completion"]
 #[test]
 fn test_playback_handle_survives_download_completion() {
     // Port of Go `TestPlaybackHandleSurvivesDownloadCompletion`.
@@ -54,7 +52,6 @@ fn test_playback_handle_survives_download_completion() {
     p.close();
 }
 
-#[ignore = "needs: preview does not demand missing pieces alongside player"]
 #[test]
 fn test_playing_preview_does_not_demand_missing_pieces() {
     // Port of Go `TestPlayingPreviewDoesNotDemandMissingPieces`.

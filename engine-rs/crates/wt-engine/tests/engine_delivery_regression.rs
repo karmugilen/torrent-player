@@ -67,7 +67,6 @@ fn test_delivery_concurrent_cache_clears() {
     }
 }
 
-#[ignore = "needs: preview expiration task to clear preview_active"]
 #[test]
 fn test_delivery_expired_preview_releases_slot() {
     // Port of Go `TestDeliveryExpiredPreviewReleasesSlot`.
@@ -91,7 +90,6 @@ fn test_delivery_expired_preview_releases_slot() {
     );
 }
 
-#[ignore = "needs: preview temporary piece discarding"]
 #[test]
 fn test_preview_release_invalidates_temporary_completion() {
     // Port of Go `TestPreviewReleaseInvalidatesTemporaryCompletion`.
@@ -112,7 +110,6 @@ fn test_preview_release_invalidates_temporary_completion() {
     );
 }
 
-#[ignore = "needs: preview read to check payload gate / admit_preview_range"]
 #[test]
 fn test_preview_honors_payload_gate() {
     // Port of Go `TestPreviewHonorsPayloadGate`.

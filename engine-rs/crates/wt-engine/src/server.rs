@@ -559,12 +559,12 @@ impl EngineServer {
         if let Some(server) = self.stream_server.lock().take() {
             server.close();
         }
-        let mut readers = self.playback_readers.lock();
-        for (_, r) in readers.drain() {
+        let readers = std::mem::take(&mut *self.playback_readers.lock());
+        for (_, r) in readers {
             r.close();
         }
-        let mut preview = self.preview_active.lock();
-        if let Some(p) = preview.take() {
+        let preview = self.preview_active.lock().take();
+        if let Some(p) = preview {
             p.close();
         }
         *self.preview_active_id.lock() = None;
@@ -1377,8 +1377,10 @@ impl EngineServer {
         );
         let response =
             crate::live_preview::build_preview_state(crate::live_preview::PreviewStateInput {
-                active: false,
-                byte_offset: 0,
+                active: self.playback_readers.lock().values().any(|reader| {
+                    reader.id == id && reader.file_index == file.index() && !reader.is_closed()
+                }),
+                byte_offset: rec.playback_coordinator.preview_position(file.index()),
                 completed_piece_indices: pieces,
             });
         (200, serde_json::to_vec(&response).unwrap())

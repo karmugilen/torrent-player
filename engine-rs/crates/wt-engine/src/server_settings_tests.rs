@@ -281,3 +281,16 @@ fn control_routes_handle_malformed_and_extreme_inputs_without_panicking() {
     }
     server.close();
 }
+
+#[test]
+fn shutdown_closes_preview_without_holding_its_registry_lock() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    let id = rec.read().id.clone();
+    let preview = server.open_preview(&id, 0).unwrap();
+    let (done, result) = std::sync::mpsc::channel();
+    let worker = server.clone();
+    std::thread::spawn(move || { worker.close(); done.send(()).unwrap(); });
+    result.recv_timeout(Duration::from_secs(1)).expect("shutdown deadlocked in preview cleanup");
+    assert!(preview.is_closed());
+}

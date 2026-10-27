@@ -10,7 +10,6 @@ use std::time::Duration;
 use support::TestEngine;
 use support::playback::{add_recovery_torrent, recovery_metadata, write_verified_piece};
 
-#[ignore = "needs: preview read verified bytes without mutating focus"]
 #[test]
 fn test_open_preview_reads_verified_bytes_without_focus_change() {
     // Port of Go TestOpenPreviewReadsVerifiedBytesWithoutFocusChange
@@ -100,7 +99,6 @@ fn test_preview_rejects_second_concurrent_job() {
     }
 }
 
-#[ignore = "needs: preview temp storage cleanup on close"]
 #[test]
 fn test_preview_temp_for_ready_draft_without_full_file() {
     // Port of Go TestPreviewTempForReadyDraftWithoutFullFile
@@ -150,7 +148,6 @@ fn test_preview_close_is_idempotent_and_cancels_read() {
     assert!(res.is_err(), "read after close should fail");
 }
 
-#[ignore = "needs: POST /pause to release preview demand and close active preview"]
 #[test]
 fn test_pause_releases_preview_demand() {
     // Port of Go TestPauseReleasesPreviewDemand
@@ -229,7 +226,6 @@ fn test_preview_budget_enforced_across_seeks() {
     );
 }
 
-#[ignore = "needs: preview session deadline timeout"]
 #[test]
 fn test_preview_session_deadline_blocks_unlimited_reads() {
     // Port of Go TestPreviewSessionDeadlineBlocksUnlimitedReads
@@ -265,7 +261,6 @@ fn test_preview_session_deadline_blocks_unlimited_reads() {
     assert!(preview.read_at(&mut buf, 0).is_err());
 }
 
-#[ignore = "needs: preview close to join blocked read"]
 #[test]
 fn test_preview_close_joins_blocked_read() {
     // Port of Go TestPreviewCloseJoinsBlockedRead
@@ -361,7 +356,6 @@ fn test_preview_concurrent_open_atomic() {
     }
 }
 
-#[ignore = "needs: target-aware pause keeping unrelated preview open"]
 #[test]
 fn test_pause_other_torrent_leaves_preview() {
     // Port of Go TestPauseOtherTorrentLeavesPreview

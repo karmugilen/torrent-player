@@ -383,7 +383,8 @@ pub fn open_preview(
     let file_offset = file.offset();
     let backend_read = backend.clone();
 
-    let cached_only = rec.direct_play && rec.playback_readers > 0;
+    let cached_only = rec.direct_play && server.playback_readers.lock().values()
+        .any(|reader| reader.id == id && !reader.is_closed());
     let read_fn: PreviewReadFn = Box::new(move |buf, offset| {
         let abs = file_offset + offset;
         let want = buf.len();
