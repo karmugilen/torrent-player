@@ -40,6 +40,12 @@ pub const DIRECT_PRELOAD_BUDGET: i64 = 8 << 20;
 pub const PREVIEW_BUDGET_BYTES: i64 = 8 << 20;
 pub const MEMORY_LIMIT_OVERHEAD: i64 = 256 * 1024 * 1024;
 
+/// Test/seam hook replacing `File::sync_all` during checkpoint drain.
+pub type FileSyncHook = Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>;
+/// Test/seam hook replacing checkpoint file persistence during drain.
+pub type WriteCheckpointHook =
+    Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>;
+
 // ---------------------------------------------------------------- StreamReady
 
 #[derive(Clone, Default)]
@@ -267,12 +273,9 @@ pub struct StorageInner {
     pub flush_retry: Duration,
 
     /// Test/seam: override `File::sync_all` during checkpoint drain.
-    pub file_sync_hook:
-        Option<Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>>,
+    pub file_sync_hook: Option<FileSyncHook>,
     /// Test/seam: override checkpoint file write during drain.
-    pub write_checkpoint_hook: Option<
-        Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>,
-    >,
+    pub write_checkpoint_hook: Option<WriteCheckpointHook>,
 }
 
 impl DocumentTorrentStorage {
@@ -435,10 +438,7 @@ impl DocumentTorrentStorage {
 
     /// Assign the stream-completion callback (Go `onStreamEvict`). Invoked
     /// asynchronously after Direct Play `mark_complete`; `close` does not join it.
-    pub fn set_on_stream_evict(
-        &self,
-        callback: Option<Arc<dyn Fn(usize) + Send + Sync>>,
-    ) {
+    pub fn set_on_stream_evict(&self, callback: Option<Arc<dyn Fn(usize) + Send + Sync>>) {
         self.inner.lock().on_stream_evict = callback;
     }
 
@@ -468,15 +468,7 @@ impl DocumentTorrentStorage {
     /// Releases the storage lock around sync/write hooks so test seams can re-enter.
     pub fn drain_sync_and_checkpoint(&self) {
         // Phase 1: snapshot under lock.
-        let (gen, need_cp, pending, sync_hook, write_hook, hash_hex, base): (
-            u64,
-            bool,
-            Vec<RawFd>,
-            Option<Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>>,
-            Option<Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>>,
-            String,
-            PathBuf,
-        ) = {
+        let (gen, need_cp, pending, sync_hook, write_hook, hash_hex, base) = {
             let mut inner = self.inner.lock();
             if inner.closed || !inner.attached {
                 return;
@@ -610,27 +602,21 @@ impl DocumentTorrentStorage {
     pub fn replace_file_handle(&self, index: usize, file: File) -> StorageResult<()> {
         let mut inner = self.inner.lock();
         if index >= inner.files.len() {
-            return Err(StorageError::Other(format!("file index {index} out of range")));
+            return Err(StorageError::Other(format!(
+                "file index {index} out of range"
+            )));
         }
         inner.files[index].file = Some(file);
         Ok(())
     }
 
     /// Test seam: override per-file `sync_all` during checkpoint drain.
-    pub fn set_file_sync_hook(
-        &self,
-        hook: Option<Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>>,
-    ) {
+    pub fn set_file_sync_hook(&self, hook: Option<FileSyncHook>) {
         self.inner.lock().file_sync_hook = hook;
     }
 
     /// Test seam: override checkpoint persistence during drain.
-    pub fn set_write_checkpoint_hook(
-        &self,
-        hook: Option<
-            Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>,
-        >,
-    ) {
+    pub fn set_write_checkpoint_hook(&self, hook: Option<WriteCheckpointHook>) {
         self.inner.lock().write_checkpoint_hook = hook;
     }
 
@@ -2071,7 +2057,11 @@ impl DocumentTorrentStorage {
         }
         for f in &inner.files {
             if let Some(file) = &f.file {
-                if let Some(fd) = inner.pending_sync_fds.iter().find(|&&x| x == file.as_raw_fd()) {
+                if let Some(fd) = inner
+                    .pending_sync_fds
+                    .iter()
+                    .find(|&&x| x == file.as_raw_fd())
+                {
                     let _ = fd;
                     let _ = file.sync_all();
                 }

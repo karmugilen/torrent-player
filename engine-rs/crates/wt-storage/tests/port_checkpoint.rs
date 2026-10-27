@@ -240,8 +240,7 @@ fn test_drain_sync_failure_preserves_dirty_and_pending() {
     st.note_pending_sync_fd(fd);
     st.set_checkpoint_dirty(true);
 
-    let before_exists =
-        checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();
+    let before_exists = checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();
     st.drain_sync_and_checkpoint();
 
     assert!(
@@ -256,8 +255,7 @@ fn test_drain_sync_failure_preserves_dirty_and_pending() {
         sync_calls.load(Ordering::SeqCst) > 0,
         "sync seam was not exercised"
     );
-    let after_exists =
-        checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();
+    let after_exists = checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();
     assert!(
         !after_exists || before_exists,
         "checkpoint must not be published after failed data sync"
@@ -280,7 +278,9 @@ fn test_drain_checkpoint_write_failure_preserves_dirty() {
     st.piece_at(0).mark_complete().unwrap();
 
     st.set_write_checkpoint_hook(Some(Arc::new(|_, _| {
-        Err(StorageError::Other("injected checkpoint write failure".into()))
+        Err(StorageError::Other(
+            "injected checkpoint write failure".into(),
+        ))
     })));
     st.set_checkpoint_dirty(true);
     st.drain_sync_and_checkpoint();
@@ -318,16 +318,10 @@ fn test_drain_checkpoint_succeeds_after_transient_failure() {
     })));
     st.set_checkpoint_dirty(true);
     st.drain_sync_and_checkpoint();
-    assert!(
-        st.checkpoint_dirty(),
-        "first failure should keep dirty"
-    );
+    assert!(st.checkpoint_dirty(), "first failure should keep dirty");
     st.set_checkpoint_dirty(true);
     st.drain_sync_and_checkpoint();
-    assert!(
-        !st.checkpoint_dirty(),
-        "retry success should clear dirty"
-    );
+    assert!(!st.checkpoint_dirty(), "retry success should clear dirty");
     assert!(
         checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists(),
         "checkpoint missing after retry"

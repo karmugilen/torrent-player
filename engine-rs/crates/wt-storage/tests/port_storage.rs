@@ -307,10 +307,7 @@ fn test_failed_write_back_is_reported_and_backs_off() {
 
     st.piece_at(0).write_at(b"SAVE", 0).unwrap();
     let _ = st.flush_all_dirty();
-    assert!(
-        st.write_back_error().is_some(),
-        "failed save not reported"
-    );
+    assert!(st.write_back_error().is_some(), "failed save not reported");
     assert!(
         st.flush_retry() >= Duration::from_millis(100),
         "retry after failure {:?}",

@@ -6,20 +6,25 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wt_storage::{
-    aggregate_piece_buckets, DocumentTorrentStorage, PieceRange, TorrentStorage,
-};
-use wt_types::InfoHash;
+use wt_storage::{aggregate_piece_buckets, DocumentTorrentStorage, PieceRange, TorrentStorage};
 
 use support::{info_hash_zero, info_with_hashes, patterned_payload, test_temp_dir};
 
 fn direct_fixture(
     pieces: usize,
     piece_length: i64,
-) -> (tempfile::TempDir, Arc<DocumentTorrentStorage>, Vec<u8>, wt_types::Info) {
+) -> (
+    tempfile::TempDir,
+    Arc<DocumentTorrentStorage>,
+    Vec<u8>,
+    wt_types::Info,
+) {
     let dir = test_temp_dir("pieces_stream");
     let data = patterned_payload(piece_length as usize, pieces);
-    let info = info_with_hashes("movie.mp4", piece_length, &data);
+    let mut info = info_with_hashes("movie.mp4", piece_length, &data);
+    // Video path so attach_direct_play builds a startup plan (Go fixture uses .mp4).
+    info.files[0].path = vec!["movie.mp4".into()];
+    info.single_file = false;
     let st = DocumentTorrentStorage::new(Some(info.clone()), info_hash_zero(), dir.path());
     st.set_cache_limit(4 * piece_length);
     st.attach_descriptors_mode(&[None], &[0], true)
@@ -154,8 +159,7 @@ fn test_stream_piece_grid_partial_replacement_and_close() {
 
     piece.write_at(&data[36..40], 4).unwrap();
     piece.mark_complete().unwrap();
-    let filled =
-        aggregate_piece_buckets(&st.stream_piece_runs(8).unwrap(), &ranges, 8, 8).unwrap();
+    let filled = aggregate_piece_buckets(&st.stream_piece_runs(8).unwrap(), &ranges, 8, 8).unwrap();
     assert_eq!(filled[4].selected_verified, 1);
     assert_eq!(filled[4].receiving, 0);
 

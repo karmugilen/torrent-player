@@ -65,7 +65,7 @@ use crate::torrent::TorrentInner;
 use crate::tuning::{current_seek_tuning, SeekTuning};
 use crate::{CoreError, Result};
 
-fn peer_key_from_addr(addr: SocketAddr) -> PeerKey {
+pub fn peer_key_from_addr(addr: SocketAddr) -> PeerKey {
     let port = u64::from(addr.port());
     match addr.ip() {
         std::net::IpAddr::V4(v) => (u64::from(u32::from(v)) << 16) | port,
@@ -202,7 +202,11 @@ impl PeerTorrent for TorrentInner {
             .read()
             .as_ref()
             .map(|b| {
-                b.effective_priority(piece, true, self.data_download_disallowed.load(Ordering::Relaxed))
+                b.effective_priority(
+                    piece,
+                    true,
+                    self.data_download_disallowed.load(Ordering::Relaxed),
+                )
             })
             .unwrap_or(PiecePriority::None)
     }
@@ -454,7 +458,7 @@ impl PeerTorrent for TorrentInner {
             piece_of_request,
             assignments,
             focus_request,
-            has_active_webseed_requests: !self.web_seeds.read().is_empty() && false,
+            has_active_webseed_requests: false,
             limits: StrategyLimits::default(),
         };
 

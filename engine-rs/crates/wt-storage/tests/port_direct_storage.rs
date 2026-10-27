@@ -207,9 +207,7 @@ fn test_direct_play_close_does_not_join_blocked_completion_callback() {
     let st2 = st.clone();
     let handle = std::thread::spawn(move || TorrentStorage::close(&*st2));
     // Close must finish without waiting for the blocked callback.
-    let result = handle
-        .join()
-        .expect("close thread panicked");
+    let result = handle.join().expect("close thread panicked");
     assert!(result.is_ok(), "close error: {result:?}");
     drop(block); // release callback
 }

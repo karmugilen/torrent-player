@@ -123,3 +123,21 @@ Implements `wt_types::{ClientStorage, TorrentStorage, PieceStorage}`:
 - **Linters**:
   - `cargo clippy -p wt-storage --all-targets -- -D warnings`: 0 warnings, clean.
   - `cargo fmt --package wt-storage --check`: Clean, formatted.
+
+## Accessors + test seams (2026-10-27)
+
+Added on `DocumentTorrentStorage` / free functions for Go parity and the ported
+integration suite (all previously `#[ignore]` tests now pass):
+
+- `flush_all_dirty`, `files_overlapping`, `stream_piece_runs`
+- `set_on_stream_evict`, `cache_bytes`, `max_cache_bytes`, `clear_startup_pieces`
+- `replace_file_handle`, `set_file_sync_hook`, `set_write_checkpoint_hook`
+- `drain_sync_and_checkpoint` (unlock-safe), `checkpoint_gen`, `flush_retry`
+- Direct Play `close` skips flush when `stream` (no configured destination files)
+- Async `on_stream_evict` after Direct Play `mark_complete` (close does not join)
+
+Differs from Go: write-back backoff is driven by sync `flush_all_dirty` (no
+background `scheduleDiskFlushLocked` yet).
+
+Verify: `CARGO_BUILD_JOBS=3 cargo test -p wt-storage -- --test-threads=1`
+→ 109 pass / 0 ignored / 0 fail; clippy `--all-targets -D warnings` clean.

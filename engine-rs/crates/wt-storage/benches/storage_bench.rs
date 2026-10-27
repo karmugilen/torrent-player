@@ -86,7 +86,7 @@ fn run_rust_download_write_seq(base_dir: &Path) -> Duration {
         .open(&dest_path)
         .expect("open dest");
 
-    let fd = dest.as_rawFd();
+    let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
     let chunk = vec![0xAAu8; BENCH_CHUNK_SIZE];
@@ -123,7 +123,7 @@ fn run_rust_download_read_seq(base_dir: &Path) -> Duration {
         .expect("open dest");
 
     dest.set_len(BENCH_TORRENT_BYTES as u64).expect("truncate");
-    let fd = dest.as_rawFd();
+    let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
     let mut buf = vec![0u8; BENCH_CHUNK_SIZE];
@@ -167,7 +167,7 @@ fn run_rust_download_write_random(base_dir: &Path) -> Duration {
         .open(&dest_path)
         .expect("open dest");
 
-    let fd = dest.as_rawFd();
+    let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
     let chunk = vec![0xBBu8; BENCH_CHUNK_SIZE];
@@ -204,7 +204,7 @@ fn run_rust_download_read_random(base_dir: &Path) -> Duration {
         .expect("open dest");
 
     dest.set_len(BENCH_TORRENT_BYTES as u64).expect("truncate");
-    let fd = dest.as_rawFd();
+    let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
     let perm = make_permutation(BENCH_NUM_PIECES, 42);
@@ -232,7 +232,8 @@ fn run_rust_direct_play_seq(base_dir: &Path) -> Duration {
     let st = DocumentTorrentStorage::new(Some(info), hash, base_dir);
 
     st.set_cache_limit(64 * 1024 * 1024);
-    st.attach_direct_play(&[None], &[0]).expect("attach direct play");
+    st.attach_direct_play(&[None], &[0])
+        .expect("attach direct play");
 
     let chunk = vec![0xCCu8; BENCH_CHUNK_SIZE];
     let mut read_buf = vec![0u8; BENCH_CHUNK_SIZE];
@@ -266,7 +267,8 @@ fn run_rust_direct_play_random_seeks(base_dir: &Path) -> Duration {
     let st = DocumentTorrentStorage::new(Some(info), hash, base_dir);
 
     st.set_cache_limit(64 * 1024 * 1024);
-    st.attach_direct_play(&[None], &[0]).expect("attach direct play");
+    st.attach_direct_play(&[None], &[0])
+        .expect("attach direct play");
 
     let chunk = vec![0xDDu8; BENCH_CHUNK_SIZE];
     let mut read_buf = vec![0u8; BENCH_CHUNK_SIZE];
@@ -393,13 +395,8 @@ fn run_rust_piece_aggregation(iters: usize) -> Duration {
 
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = aggregate_piece_buckets(
-            &runs,
-            &ranges,
-            TOTAL_PIECES as u32,
-            MAX_BUCKETS as u32,
-        )
-        .expect("aggregate piece buckets");
+        let _ = aggregate_piece_buckets(&runs, &ranges, TOTAL_PIECES as u32, MAX_BUCKETS as u32)
+            .expect("aggregate piece buckets");
     }
     start.elapsed()
 }
@@ -411,7 +408,7 @@ fn main() {
 
     println!("=== RUST STORAGE BENCHMARKS ===");
 
-    let mut measure = |name: &str, bytes: i64, f: &mut dyn FnMut() -> Duration| {
+    let measure = |name: &str, bytes: i64, f: &mut dyn FnMut() -> Duration| {
         let bytes_before = ALLOCATED_BYTES.load(Ordering::Relaxed);
         let count_before = ALLOC_COUNT.load(Ordering::Relaxed);
 
@@ -438,35 +435,45 @@ fn main() {
     };
 
     // 1. Download Write-Back
-    measure("Download_Write_Seq_256MiB", BENCH_TORRENT_BYTES, &mut || {
-        run_rust_download_write_seq(&fixture_dir)
-    });
+    measure(
+        "Download_Write_Seq_256MiB",
+        BENCH_TORRENT_BYTES,
+        &mut || run_rust_download_write_seq(&fixture_dir),
+    );
     measure("Download_Read_Seq_256MiB", BENCH_TORRENT_BYTES, &mut || {
         run_rust_download_read_seq(&fixture_dir)
     });
-    measure("Download_Write_Rand_256MiB", BENCH_TORRENT_BYTES, &mut || {
-        run_rust_download_write_random(&fixture_dir)
-    });
-    measure("Download_Read_Rand_256MiB", BENCH_TORRENT_BYTES, &mut || {
-        run_rust_download_read_random(&fixture_dir)
-    });
+    measure(
+        "Download_Write_Rand_256MiB",
+        BENCH_TORRENT_BYTES,
+        &mut || run_rust_download_write_random(&fixture_dir),
+    );
+    measure(
+        "Download_Read_Rand_256MiB",
+        BENCH_TORRENT_BYTES,
+        &mut || run_rust_download_read_random(&fixture_dir),
+    );
 
     // 2. Direct Play
     measure("DirectPlay_Seq_256MiB", BENCH_TORRENT_BYTES, &mut || {
         run_rust_direct_play_seq(&fixture_dir)
     });
-    measure("DirectPlay_RandSeek_256MiB", BENCH_TORRENT_BYTES, &mut || {
-        run_rust_direct_play_random_seeks(&fixture_dir)
-    });
+    measure(
+        "DirectPlay_RandSeek_256MiB",
+        BENCH_TORRENT_BYTES,
+        &mut || run_rust_direct_play_random_seeks(&fixture_dir),
+    );
 
     // 3. Checkpoint (2000 iters)
     let chk_iters = 2000;
     measure("Checkpoint_Save_2k", (chk_iters * 1024) as i64, &mut || {
         run_rust_checkpoint_save(&fixture_dir, chk_iters)
     });
-    measure("Checkpoint_Restore_2k", (chk_iters * 1024) as i64, &mut || {
-        run_rust_checkpoint_restore(&fixture_dir, chk_iters)
-    });
+    measure(
+        "Checkpoint_Restore_2k",
+        (chk_iters * 1024) as i64,
+        &mut || run_rust_checkpoint_restore(&fixture_dir, chk_iters),
+    );
 
     // 4. Piece Aggregation (5000 iters)
     let agg_iters = 5000;
