@@ -193,11 +193,13 @@ async fn test_two_engine_host_transfer() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
+    let seeder_id = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_owned();
+
     // Configure seeder to verify completed data
     let resp = http
         .post(format!("http://127.0.0.1:{seeder_port}/configure"))
         .json(&json!({
-            "id": info_hash,
+            "id": seeder_id,
             "selected": [0],
             "descriptors": [null],
         }))
@@ -211,7 +213,7 @@ async fn test_two_engine_host_transfer() {
     for _ in 0..50 {
         let resp = http
             .get(format!(
-                "http://127.0.0.1:{seeder_port}/torrent/{info_hash}"
+                "http://127.0.0.1:{seeder_port}/torrent/{seeder_id}"
             ))
             .send()
             .await
@@ -275,11 +277,13 @@ async fn test_two_engine_host_transfer() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
+    let leecher_id = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_owned();
+
     // Immediate configure call right after add, before metadata arrives (matches Android app behavior):
     let c_resp = http
         .post(format!("http://127.0.0.1:{leecher_port}/configure"))
         .json(&json!({
-            "id": info_hash,
+            "id": leecher_id,
             "selected": [0],
             "descriptors": [null],
         }))
@@ -299,7 +303,7 @@ async fn test_two_engine_host_transfer() {
     while start.elapsed() < Duration::from_secs(45) {
         let resp = http
             .get(format!(
-                "http://127.0.0.1:{leecher_port}/torrent/{info_hash}"
+                "http://127.0.0.1:{leecher_port}/torrent/{leecher_id}"
             ))
             .send()
             .await

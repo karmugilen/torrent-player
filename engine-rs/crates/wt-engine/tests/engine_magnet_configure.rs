@@ -7,7 +7,7 @@ use std::time::Duration;
 use engine::EngineServer;
 use serde_json::json;
 
-fn pending_magnet() -> (tempfile::TempDir, Arc<EngineServer>, String, Vec<u8>) {
+fn pending_magnet() -> (tempfile::TempDir, Arc<EngineServer>, String, String, Vec<u8>) {
     let root = "/home/kar/.cache/wt-tmp/codex-engine";
     std::fs::create_dir_all(root).unwrap();
     let dir = tempfile::tempdir_in(root).unwrap();
@@ -22,22 +22,23 @@ fn pending_magnet() -> (tempfile::TempDir, Arc<EngineServer>, String, Vec<u8>) {
         .to_string(),
     );
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"].as_str().unwrap().to_owned();
     assert!(server
-        .record_by_id(&hash)
+        .record_by_id(&id)
         .unwrap()
         .read()
         .torrent
         .info()
         .is_none());
-    (dir, server, hash, metainfo)
+    (dir, server, id, hash, metainfo)
 }
 
 #[test]
 fn immediate_configure_waits_for_magnet_metadata() {
-    let (_dir, server, hash, metainfo) = pending_magnet();
+    let (_dir, server, id, hash, metainfo) = pending_magnet();
     let (tx, rx) = mpsc::channel();
     let worker = server.clone();
-    let body = json!({"id": hash, "selected": [0], "descriptors": [null]}).to_string();
+    let body = json!({"id": id, "selected": [0], "descriptors": [null]}).to_string();
     let join = std::thread::spawn(move || {
         tx.send(worker.request("POST", "/configure", &body))
             .unwrap();
@@ -54,7 +55,7 @@ fn immediate_configure_waits_for_magnet_metadata() {
         .records
         .try_read()
         .expect("records lock held during wait")
-        .get(&hash)
+        .get(&id)
         .unwrap()
         .clone();
     assert!(rec.try_write().is_some(), "record lock held during wait");
@@ -78,10 +79,10 @@ fn immediate_configure_waits_for_magnet_metadata() {
 #[test]
 fn metadata_wait_returns_conflict_when_magnet_is_removed() {
     for route in ["/configure", "/play", "/select"] {
-        let (_dir, server, hash, _) = pending_magnet();
+        let (_dir, server, id, _hash, _) = pending_magnet();
         let (tx, rx) = mpsc::channel();
         let worker = server.clone();
-        let body = json!({"id": hash, "selected": [0], "descriptors": [null]}).to_string();
+        let body = json!({"id": id, "selected": [0], "descriptors": [null]}).to_string();
         let join = std::thread::spawn(move || {
             tx.send(worker.request("POST", route, &body)).unwrap();
         });
@@ -91,7 +92,7 @@ fn metadata_wait_returns_conflict_when_magnet_is_removed() {
         ));
         assert_eq!(
             server
-                .request("POST", "/remove", &json!({"id": hash}).to_string())
+                .request("POST", "/remove", &json!({"id": id}).to_string())
                 .0,
             200
         );

@@ -45,7 +45,6 @@ fn test_pending_magnet_can_resume_before_storage_is_configured() {
     eng.close();
 }
 
-#[ignore = "needs: cold restored magnet metadata via local tracker"]
 #[test]
 fn test_cold_restored_pending_magnet_discovers_tracker_peer_and_metadata() {
     use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};

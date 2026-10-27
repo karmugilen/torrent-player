@@ -36,6 +36,20 @@ mod playback_resume;
 #[path = "server_settings_tests.rs"]
 mod settings_tests;
 
+fn new_record_id() -> String {
+    use rand::RngCore;
+    let mut raw = [0u8; 16];
+    if rand::rngs::OsRng.try_fill_bytes(&mut raw).is_err() {
+        return format!("torrent-{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    }
+    raw[6] = (raw[6] & 0x0f) | 0x40;
+    raw[8] = (raw[8] & 0x3f) | 0x80;
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(32);
+    for byte in raw { let _ = write!(hex, "{byte:02x}"); }
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+}
+
 pub struct TorrentRecord {
     pub torrent: wt_core::Torrent,
     pub(crate) playback_coordinator: Arc<crate::playback::PlaybackPriorityCoordinator>,
@@ -749,6 +763,13 @@ impl EngineServer {
                 );
             }
         }
+        if let Some(hash) = spec.info_hash {
+            if let Some(existing) = self.records_by_hash.read().get(&hash.to_hex()) {
+                return (200, serde_json::to_vec(&AddResponse {
+                    id: existing.read().id.clone(), info_hash: Some(hash.to_hex()),
+                }).unwrap());
+            }
+        }
         spec.trackers = crate::trackers::clean_supplied_trackers(&spec.trackers);
         let original_trackers = spec.trackers.clone();
         let (torrent, _) = match self.client.add_torrent_spec(spec) {
@@ -775,7 +796,7 @@ impl EngineServer {
         );
         torrent.set_max_established_conns(self.max_peers.load(Ordering::SeqCst));
         let info_hash = torrent.info_hash().to_hex();
-        let id = info_hash.clone();
+        let id = new_record_id();
         let info = torrent.info();
         let files: Vec<FileView> = torrent
             .files()
@@ -851,8 +872,18 @@ impl EngineServer {
             idle_drop_ready: false,
         }));
 
-        self.records.write().insert(id.clone(), rec.clone());
-        self.records_by_hash.write().insert(info_hash.clone(), rec.clone());
+        {
+            // Match remove's lock order and coalesce concurrent additions of one hash.
+            let mut records = self.records.write();
+            let mut by_hash = self.records_by_hash.write();
+            if let Some(existing) = by_hash.get(&info_hash) {
+                return (200, serde_json::to_vec(&AddResponse {
+                    id: existing.read().id.clone(), info_hash: Some(info_hash),
+                }).unwrap());
+            }
+            records.insert(id.clone(), rec.clone());
+            by_hash.insert(info_hash.clone(), rec.clone());
+        }
         self.supplement_trackers(&rec);
         self.watch_metadata(&torrent, &rec);
         self.start_metadata_sources(&torrent, metadata_sources);

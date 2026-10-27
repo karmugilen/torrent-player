@@ -220,7 +220,7 @@ mod tests {
                     .0,
                 200
             );
-            let rec = server.record_by_id(&hash).unwrap();
+            let rec = server.records_by_hash.read().get(&hash).unwrap().clone();
             let torrent = rec.read().torrent.clone();
             tokio::time::timeout(Duration::from_secs(3), async {
                 while torrent.info().is_none() {
@@ -258,9 +258,10 @@ mod tests {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nd")
             .await
             .unwrap();
+        let id = server.records_by_hash.read().get(&hash).unwrap().read().id.clone();
         assert_eq!(
             server
-                .request("POST", "/remove", &json!({"id": hash}).to_string())
+                .request("POST", "/remove", &json!({"id": id}).to_string())
                 .0,
             200
         );
@@ -281,7 +282,7 @@ mod tests {
             "/add",
             &json!({"torrentId": format!("magnet:?xt=urn:btih:{hash}")}).to_string(),
         );
-        let rec = server.record_by_id(hash).unwrap();
+        let rec = server.records_by_hash.read().get(hash).unwrap().clone();
         let torrent = rec.read().torrent.clone();
         assert!(!matches_magnet(
             &torrent,

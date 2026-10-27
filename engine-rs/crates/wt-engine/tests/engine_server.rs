@@ -404,3 +404,28 @@ fn test_select_requires_destination_descriptors_and_preserves_nil_response() {
         assert!(eng.server.records.read()[id].read().selected.is_empty());
     }
 }
+
+#[test]
+fn test_concurrent_adds_share_one_record_and_remove_readd_gets_new_identity() {
+    let eng = TestEngine::new();
+    let request = serde_json::json!({"prepare":true,"torrentId":"magnet:?xt=urn:btih:0123456789012345678901234567890123456789"}).to_string();
+    let ids = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8).map(|_| {
+            let (eng, request) = (&eng, &request);
+            scope.spawn(move || {
+                let (code, raw) = eng.dispatch("POST", "/add", request);
+                assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+                serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["id"].as_str().unwrap().to_owned()
+            })
+        }).collect();
+        workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>()
+    });
+    assert!(ids.iter().all(|id| id == &ids[0]));
+    assert_eq!(ids[0].len(), 36);
+    assert_eq!(&ids[0][14..15], "4", "record ID is not a v4 UUID");
+    assert_eq!(eng.server.records.read().len(), 1);
+    assert_eq!(eng.dispatch("POST", "/remove", &serde_json::json!({"id":ids[0]}).to_string()).0, 200);
+    let (code, raw) = eng.dispatch("POST", "/add", &request);
+    assert_eq!(code, 200);
+    assert_ne!(serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["id"], ids[0]);
+}

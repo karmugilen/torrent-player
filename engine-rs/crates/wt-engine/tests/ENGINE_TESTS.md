@@ -1,6 +1,8 @@
 # wt-engine integration test map
 
-Engine integration tests declared: 152 | Enabled: 113 | Waiting: 39 | Known core-blocked failures: 2
+Engine integration tests declared: 153 | Enabled: 115 | Waiting: 38 | Known core-blocked failures: 2
+
+Round 3 group 5: cold-magnet tracker restoration passes unchanged after Go UUID record identities and concurrent-add deduplication; waiting is now 38 overall. Tracker-status uses the same tiny.torrent fixture as Go, preserving every assertion.
 
 Round 3 group 4: five more tests enabled (39 waiting overall); debounced verified resume persistence, shutdown flush, RAM reuse, restored completion, useful body positions, explicit start hints, and generation-safe resume holds. Three new integration regressions and one stale-expiry unit test cover the previously missing Go assertions; library tests now 49.
 
@@ -63,7 +65,7 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestPlaybackHandleSurvivesDownloadCompletion` | `engine_live_preview::test_playback_handle_survives_download_completion` | pass |
 | `TestPlayingPreviewDoesNotDemandMissingPieces` | `engine_live_preview::test_playing_preview_does_not_demand_missing_pieces` | pass |
 | `TestPendingMagnetCanResumeBeforeStorageIsConfigured` | `engine_magnet_restore::test_pending_magnet_can_resume_before_storage_is_configured` | pass |
-| `TestColdRestoredPendingMagnetDiscoversTrackerPeerAndMetadata` | `engine_magnet_restore::test_cold_restored_pending_magnet_discovers_tracker_peer_and_metadata` | waiting: cold restored magnet metadata via local tracker |
+| `TestColdRestoredPendingMagnetDiscoversTrackerPeerAndMetadata` | `engine_magnet_restore::test_cold_restored_pending_magnet_discovers_tracker_peer_and_metadata` | pass |
 | `TestDirectPlaySavesEveryEpisodesMetadataOnce` | `engine_metadata_cache::test_direct_play_saves_every_episodes_metadata_once` | waiting: startup metadata saving across episodes |
 | `TestDirectPlayFetchesEveryEpisodesMetadataInBackground` | `engine_metadata_cache::test_direct_play_fetches_every_episodes_metadata_in_background` | waiting: background metadata fetch for every episode in swarm |
 | `TestValidatedSavedMetadataReplacesPartialRAMPiece` | `engine_metadata_cache::test_validated_saved_metadata_replaces_partial_ram_piece` | waiting: validated saved metadata replacing partial RAM piece |

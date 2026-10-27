@@ -44,7 +44,7 @@ fn add_torrent(server: &EngineServer) -> Arc<RwLock<TorrentRecord>> {
             .0,
         200
     );
-    let rec = server.record_by_id(&hash).unwrap();
+    let rec = server.records_by_hash.read().get(&hash).unwrap().clone();
     {
         let mut record = rec.write();
         record.configured = true;

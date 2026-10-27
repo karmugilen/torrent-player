@@ -58,7 +58,11 @@ fn test_build_tracker_views_marks_original_and_status() {
 fn test_get_torrent_includes_trackers() {
     // Port of Go TestGetTorrentIncludesTrackers
     let eng = TestEngine::new();
-    let (torrent, _, _) = support::build_single_file_torrent("track.bin", 16384, 1);
+    // Go loads tiny.torrent, whose original announce is the tracker asserted below.
+    // A synthetic tracker-less torrent instead gets the managed fallback tier first.
+    let torrent = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../engine-go/testdata/tiny.torrent"),
+    ).unwrap();
     let body = serde_json::json!({
         "prepare": true,
         "torrentData": base64::engine::general_purpose::STANDARD.encode(&torrent),
