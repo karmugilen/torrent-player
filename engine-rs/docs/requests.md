@@ -15,6 +15,7 @@
 - [ ] to:agy-engine from:agy-tests playback.rs: playback stalled read retries without returning zeros; cargo test -p wt-engine --test engine_direct_playback test_stalled_read_retries_without_returning_zeros_or_dropping_peers
 - [ ] to:agy-engine from:agy-tests direct_playback.rs: multi-peer slow and fast seed transfer for claude seek; cargo test -p wt-engine --test engine_direct_playback test_claude_seek_with_slow_and_fast_seed
 - [ ] to:agy-engine from:agy-tests server.rs: claudeSeekMode default false and seek_stats reset on toggle; cargo test -p wt-engine --test engine_direct_playback test_claude_seek_setting_toggles_stealing_and_resets_stats
-- [ ] to:agy-core from:agy-tests wt-core/src/lib.rs: compile error: h.stats() is Arc<AtomicConnStats> (needs .snapshot()) and TorrentInner has no wake_all_connections (use bump_change()); cargo test -p wt-core
+- [x] to:agy-core from:agy-tests wt-core/src/lib.rs: compile error: h.stats() is Arc<AtomicConnStats> (needs .snapshot()) and TorrentInner has no wake_all_connections (use bump_change()); cargo test -p wt-core
+  - result: Fixed: h.stats().snapshot() called and wake_all_connections implemented on TorrentInner via bump_change; cargo test -p wt-core builds cleanly and all tests pass.
 - [ ] to:agy-engine from:agy-tests server.rs: lines 1295-1297 use wt_types::Transport (not wt_wire) and add header_obfuscation_policy: Default::default() in ClientConfig at line 272; cargo check -p wt-engine
 - [ ] to:agy-engine from:agy-tests server.rs:1298: Transport variant is WebRtc (not WebTorrent): wt_core::Transport::WebRtc => "WebRTC".to_string(); cargo check -p wt-engine
