@@ -96,14 +96,10 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
     let (raw_stream, winning_transport, mut spare) =
         dial_first_raw(&params, dial_timeout).await?;
 
-    let prefer_hs_timeout = if allow_fallback
-        && prefer_obfuscated
-        && winning_transport == Transport::Utp
-    {
-        cfg.handshakes_timeout.min(Duration::from_secs(2))
-    } else {
-        cfg.handshakes_timeout
-    };
+    // Full handshake timeout for all transports. A 2s uTP MSE abort was
+    // added when public uTP was broken; with BEP29 fixed it only cut off
+    // slow-but-valid libtorrent handshakes.
+    let prefer_hs_timeout = cfg.handshakes_timeout;
 
     match complete_bt_handshake(
         &params,
