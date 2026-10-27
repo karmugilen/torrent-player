@@ -1,7 +1,7 @@
 wt-meta done verified: 39 tests, clippy+fmt clean (c191e96)
 wt-wire done verified: 31 tests, clippy all-targets clean (9721c3f)
 wt-discovery done verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6)
-wt-core running agy-core (TCP auto-dial transfer works; fixing two-engine stall, tiny-piece stall, uTP, MSE, magnet, seek)
+wt-core done verified: all tests pass, clippy clean, 43 MiB/s release loopback (d348339, agy-core)
 wt-storage done verified: 109 tests, 0 ignored, 0 fail, clippy clean
 wt-policy done verified: 40 tests, 45 Go tests mapped (882bc1e)
 wt-parity done verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired

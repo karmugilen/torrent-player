@@ -16,7 +16,7 @@ codex-2|wt-engine (server + playback)|server.rs on wt_core, PlaybackHost, two-en
 codex-3|wt-storage perf + wt-parity|storage bench done (eeb9bef); fixing Direct Play startup save under lock; parity harness repeat-order fixed|closed (reboot)
 codex-4|wt-core (Client, connections, ClientConfig)|dialer on agreed interface; adding tracker dial hook + handshake callback; integration tests written|closed (reboot)
 codex-5|wt-engine (types.rs + tests)|9 Go JSON goldens pass; engine tests 11 real passing / 132 placeholders / 0 failing|closed (reboot)
-agy-core|wt-core (all)|two-engine stall, tiny-piece stall, uTP + MSE + magnet + seek on the new path, 64 MiB throughput vs Go|running
+agy-core|wt-core (all) + wt-engine playback, preview, stream|wt-core done and verified (d348339: all tests pass, 43 MiB/s release); now the playback and preview engine features the tests need|running
 agy-engine|wt-engine src|3 server bugs, last critical API diff, config hooks, two engine-host processes transfer|running
 agy-tests|wt-engine tests|port the 132 placeholder engine tests from Go for real|running
 agy-perf|wt-storage, wt-parity, Android|Direct Play startup save off the lock, Rust APK build, Go-vs-Rust parity run|running

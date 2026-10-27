@@ -79,3 +79,7 @@
 -|Two-engine test: seeder restored 100%, leecher fetched metadata over the wire (magnet works), then stalled at 0% / 0 peers; routed to codex-1 + codex-4
 -|PC rebooted: codex terminals gone; their output compiled and was committed (0925be0); 5 codex dispatches closed
 -|New wave: 4 agy workers (agy-core, agy-engine, agy-tests, agy-perf) work on their own; they ask each other through docs/requests.md and commit only their own files
+-|agy-core done and verified (d348339): stalls fixed (connection wakes, pre-metadata HaveAll/Bitfield, duplicate dial race), MSE wired, all wt-core tests pass, clippy clean, 64 MiB release loopback 43 MiB/s
+-|Phone attached: agy-perf installed the Rust debug APK, engine starts on the device (2e72b78)
+-|Disk dropped to 29 GB: deleted the 5 unused codex build dirs (back to 36 GB)
+-|agy-core round 2: takes wt-engine preview/playback/stream files and their test requests from agy-engine's backlog

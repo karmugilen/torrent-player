@@ -1,6 +1,6 @@
 # Rust engine port progress
 
-## In plain words (updated 16:35)
+## In plain words (updated 17:20)
 
 **Where we are:** all the Rust code is written and it all compiles. Six of the
 8 parts are finished and tested. The last two, the torrent core (`wt-core`) and
@@ -15,13 +15,14 @@ runs off the storage lock, like Go.
 
 **What is left (4 of 13 milestones):**
 
-1. Two full engines downloading from each other through the control API. Each
-   side connects, but the download stays at 0 %. This is the main bug now.
+1. Two full engines downloading from each other through the control API. The
+   core bug behind the 0 % download is fixed, and the engine test is being re-run.
 2. Port the 128 remaining Go engine tests for real (14 pass)
-3. Speed/RAM/CPU comparison against Go: Rust must match or beat it. The one
-   speed number so far (2.4 MiB/s) came from an unoptimized debug build, so it
-   does not count; it is being re-measured in release.
-4. Build the Rust APK and test it on a phone (needs a phone attached by USB)
+3. Speed/RAM/CPU comparison against Go: Rust must match or beat it. In a release
+   build the Rust core downloads at 43 MiB/s on loopback, about 2.2x the Go
+   engine's 19.5. The full engine comparison is still to run.
+4. The final release (optimized) APK. A debug APK with the Rust engine is
+   already installed on your phone, and the engine starts on it.
 
 **Who is doing it:** 4 Antigravity agents, each on its own part, working on
 their own. The machine rebooted at 16:05, which closed the earlier Codex
@@ -29,7 +30,7 @@ agents. Their work was saved and committed before the new agents started.
 
 | Agent | Doing |
 |---|---|
-| agy-core | fixing the download stalls, uTP, encryption, magnet, seek, speed vs Go |
+| agy-core | core done; now the playback and preview features the tests need |
 | agy-engine | the control API server, the last API difference, two-engine download |
 | agy-tests | porting the 132 Go engine tests |
 | agy-perf | the Direct Play save fix, the Android APK, the final speed comparison vs Go |
@@ -42,35 +43,35 @@ counts; a crate is 100% only when its worker reports done and the
 coordinator has verified it.
 
 ```text
-OVERALL   [#############################.]  95%   crates complete 6/8, pending 2
+OVERALL   [##############################]  99%   crates complete 7/8, pending 1
 
 wt-meta       [##############################] 100%  done     grok-1
 wt-wire       [##############################] 100%  done     agy-1
 wt-discovery  [##############################] 100%  done     grok-2
-wt-core       [###########################...]  90%  running  agy-core
+wt-core       [##############################] 100%  done     agy-core
 wt-storage    [##############################] 100%  done     agy-3, grok-5, grok-7
 wt-policy     [##############################] 100%  done     grok-3
 wt-parity     [##############################] 100%  done     grok-1, codex-3
 wt-engine     [#############################.]  95%  running  agy-engine+tests
 ```
 
-Started 10:59 · elapsed 5.3 h · now 95%
+Started 10:59 · elapsed 6.2 h · now 99%
 
-ETA (rough, from the last 318 min at 17.9%/h):
+ETA (rough, from the last 58 min at 4.2%/h):
 
-- crates complete: ~16:33 (in 0.3 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~20:33 (in 4.3 h; the 4 h after the crates is a planning guess)
+- crates complete: ~17:25 (in 0.2 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~21:25 (in 4.2 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | agy-core | running | 13626 | 11583 | 121 | 212 | 1 | agy-core (TCP auto-dial transfer works; fixing two-engine stall, tiny-piece stall, uTP, MSE, magnet, seek) |
-| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 2642 | 65 | 110 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
+| wt-core | agy-core | done | 13626 | 11952 | 121 | 212 | 0 | verified: all tests pass, clippy clean, 43 MiB/s release loopback (d348339, agy-core) |
+| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 2642 | 65 | 111 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
-| wt-parity | grok-1, codex-3 | done | 0 | 3371 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
-| wt-engine | agy-engine+tests | running | 5609 | 5206 | 71 | 178 | 0 | agy-engine (server, API diff 29 match / 1 critical, two-engine transfer) + agy-tests (11 real engine tests pass, 132 to port) |
+| wt-parity | grok-1, codex-3 | done | 0 | 3395 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
+| wt-engine | agy-engine+tests | running | 5609 | 5266 | 71 | 179 | 0 | agy-engine (server, API diff 29 match / 1 critical, two-engine transfer) + agy-tests (11 real engine tests pass, 132 to port) |
 ## Milestones (the real finish line): 9/13
 
 ```text
@@ -84,12 +85,12 @@ MILESTONES [#####################.........] 9/13
 - [x] Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
 - [x] Transfer driven only by add_peers (automatic dialing) on the new connection path: TCP passes (uTP pending)
 - [x] Magnet (ut_metadata) transfer and reader seek on the new connection path (library tests: magnet 256 KiB verified, seek first 64 KiB in 76 ms)
-- [ ] Two engine-host processes transfer a torrent through the control API
+- [ ] Two engine-host processes transfer a torrent through the control API (core stall fixed in d348339; engine test in progress)
 - [x] Control API JSON: 0 CRITICAL (30 MATCH / 0 DIFF / 0 CRITICAL, codex-5 before the reboot; agy-engine re-verifying)
 - [ ] Engine integration tests: real ports passing (now 14 real passing, 1 waiting, 128 placeholders)
 - [x] Direct Play startup saves off the storage lock (bounded background queue, slow-save test passes, codex-3)
 - [ ] Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
-- [ ] Rust APK built with -Pwebtor.engine=rust and tested on a device
+- [ ] Rust APK built with -Pwebtor.engine=rust and tested on a device (debug APK installed on the phone, engine starts; release APK at the end)
 
 The crate bars above count code written; these milestones count things that work.
 
@@ -98,14 +99,14 @@ The crate bars above count code written; these milestones count things that work
 - [x] wt-meta (grok-1)
 - [x] wt-wire (agy-1)
 - [x] wt-discovery (grok-2)
+- [x] wt-core (agy-core)
 - [x] wt-storage (agy-3, grok-5, grok-7)
 - [x] wt-policy (grok-3)
 - [x] wt-parity (grok-1, codex-3)
 
 ## Pending
 
-- [ ] wt-core (agy-core): 90%, 11583 of ~10900 Rust lines, 212/121 tests
-- [ ] wt-engine (agy-engine+tests): 95%, 5206 of ~4487 Rust lines, 178/71 tests
+- [ ] wt-engine (agy-engine+tests): 95%, 5266 of ~4487 Rust lines, 179/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
 - [ ] Android: libengine.so (arm64) + APK build
@@ -114,7 +115,7 @@ The crate bars above count code written; these milestones count things that work
 
 | Worker | Crate | Work | State |
 |---|---|---|---|
-| agy-core | wt-core (all) | two-engine stall, tiny-piece stall, uTP + MSE + magnet + seek on the new path, 64 MiB throughput vs Go | running |
+| agy-core | wt-core (all) + wt-engine playback, preview, stream | wt-core done and verified (d348339: all tests pass, 43 MiB/s release); now the playback and preview engine features the tests need | running |
 | agy-engine | wt-engine src | 3 server bugs, last critical API diff, config hooks, two engine-host processes transfer | running |
 | agy-tests | wt-engine tests | port the 132 placeholder engine tests from Go for real | running |
 | agy-perf | wt-storage, wt-parity, Android | Direct Play startup save off the lock, Rust APK build, Go-vs-Rust parity run | running |
@@ -225,10 +226,21 @@ The crate bars above count code written; these milestones count things that work
 - Two-engine test: seeder restored 100%, leecher fetched metadata over the wire (magnet works), then stalled at 0% / 0 peers; routed to codex-1 + codex-4
 - PC rebooted: codex terminals gone; their output compiled and was committed (0925be0); 5 codex dispatches closed
 - New wave: 4 agy workers (agy-core, agy-engine, agy-tests, agy-perf) work on their own; they ask each other through docs/requests.md and commit only their own files
+- agy-core done and verified (d348339): stalls fixed (connection wakes, pre-metadata HaveAll/Bitfield, duplicate dial race), MSE wired, all wt-core tests pass, clippy clean, 64 MiB release loopback 43 MiB/s
+- Phone attached: agy-perf installed the Rust debug APK, engine starts on the device (2e72b78)
+- Disk dropped to 29 GB: deleted the 5 unused codex build dirs (back to 36 GB)
+- agy-core round 2: takes wt-engine preview/playback/stream files and their test requests from agy-engine's backlog
 
 ## Commits
 
 ```text
+02d6a27 engine-rs: agy-core takes wt-engine playback/preview
+bf91d52 wt-parity: fix proxy socket full-duplex shutdown and seeder seedRatio cap
+2936fc0 docs/requests.md: mark agy-tests item resolved
+d348339 wt-core: fix two-engine and tiny-piece stalls, wire MSE, achieve 43.86 MiB/s release throughput
+2e72b78 docs: record device acceptance on physical Android phone
+9c2fbeb wt-storage: add slow startup save reader test and update benchmark notes
+0a1d883 engine-rs: milestones 9/13, progress update
 6c4f8ab engine-rs: relay pre-reboot findings to the agy wave
 b97f6d7 engine-rs: progress report with plain summary and the agy wave
 db8d228 engine-rs: agy wave task specs
