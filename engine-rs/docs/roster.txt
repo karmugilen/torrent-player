@@ -1,6 +1,6 @@
 grok-1|wt-core (peer_conn)|wt-meta, wt-parity, webtor seek decisions (3c0d3fc) done; now the per-peer state machine|closed
 grok-2|wt-core (lint)|wt-discovery and wt-core sources (1a08cbc) done; now clippy-clean the finished wt-core modules|closed
-grok-3|wt-engine (playback, stream_http, previews, network)|integration tests (c841eac) + stream server/preview/network (9ccd54b) done; now playback.rs on wt_core::Reader + wt_policy|closed
+grok-3|wt-engine (playback, stream_http, previews, network)|integration test skeleton (c841eac, mostly placeholders) + stream server/preview/network (9ccd54b) done; now playback.rs on wt_core::Reader + wt_policy|closed
 grok-4|wt-engine (types.rs JSON)|API diff tool done (6969bd9: 11 match, 19 diff, 14 critical); now fixing JSON shapes in types.rs|closed
 grok-5|wt-core (end-to-end tests)|strategy/choking (ef844c8), metadata/pex/ratelimit (76e488f), Direct Play storage (5f688b0) done; now library e2e transfer tests|closed
 agy-1|wt-core (conn driver)|wt-wire done (9721c3f, 31 tests, uTP 569 MB/s loopback); now peer connection I/O driver + shared UDP socket|running

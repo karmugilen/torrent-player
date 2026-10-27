@@ -63,3 +63,5 @@
 -|User: add two Codex agents. codex-4 takes wt-core Client + connection manager from codex-1; codex-5 takes types.rs + engine tests from codex-2
 -|codex-1: wt-core lib tests 64 pass / 0 fail, clippy clean; implementing automatic dialing and completion restore
 -|Coordinator defined the Client <-> Torrent connection interface (attach_connection, wants_conns, take_dial_candidates, peers_changed) for codex-1 and codex-4
+-|First real transfer: e2e transfer_patterned_tcp_256kib passes (legacy peer loop, explicit dial)
+-|codex-5 finding: most of the 136 ignored engine tests are unimplemented!() placeholders, not ports (c841eac overstated); codex-5 now writing real ports in priority order

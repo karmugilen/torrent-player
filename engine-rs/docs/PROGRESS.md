@@ -21,17 +21,17 @@ Started 10:59 · elapsed 1.8 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 53 min at 10.9%/h):
+ETA (rough, from the last 53 min at 10.7%/h):
 
-- crates complete: ~14:33 (in 1.8 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~18:33 (in 5.8 h; the 4 h after the crates is a planning guess)
+- crates complete: ~14:35 (in 1.8 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~18:35 (in 5.8 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | codex-1+4 | running | 13626 | 11469 | 121 | 204 | 1 | codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections) |
+| wt-core | codex-1+4 | running | 13626 | 11486 | 121 | 204 | 1 | codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections) |
 | wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5011 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
 | wt-parity | grok-1, codex-3 | done | 0 | 3328 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
@@ -48,7 +48,7 @@ ETA (rough, from the last 53 min at 10.9%/h):
 
 ## Pending
 
-- [ ] wt-core (codex-1+4): 90%, 11469 of ~10900 Rust lines, 204/121 tests
+- [ ] wt-core (codex-1+4): 90%, 11486 of ~10900 Rust lines, 204/121 tests
 - [ ] wt-engine (codex-2+5): 95%, 4690 of ~4487 Rust lines, 176/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
@@ -60,7 +60,7 @@ ETA (rough, from the last 53 min at 10.9%/h):
 |---|---|---|---|
 | grok-1 | wt-core (peer_conn) | wt-meta, wt-parity, webtor seek decisions (3c0d3fc) done; now the per-peer state machine | closed |
 | grok-2 | wt-core (lint) | wt-discovery and wt-core sources (1a08cbc) done; now clippy-clean the finished wt-core modules | closed |
-| grok-3 | wt-engine (playback, stream_http, previews, network) | integration tests (c841eac) + stream server/preview/network (9ccd54b) done; now playback.rs on wt_core::Reader + wt_policy | closed |
+| grok-3 | wt-engine (playback, stream_http, previews, network) | integration test skeleton (c841eac, mostly placeholders) + stream server/preview/network (9ccd54b) done; now playback.rs on wt_core::Reader + wt_policy | closed |
 | grok-4 | wt-engine (types.rs JSON) | API diff tool done (6969bd9: 11 match, 19 diff, 14 critical); now fixing JSON shapes in types.rs | closed |
 | grok-5 | wt-core (end-to-end tests) | strategy/choking (ef844c8), metadata/pex/ratelimit (76e488f), Direct Play storage (5f688b0) done; now library e2e transfer tests | closed |
 | agy-1 | wt-core (conn driver) | wt-wire done (9721c3f, 31 tests, uTP 569 MB/s loopback); now peer connection I/O driver + shared UDP socket | running |
@@ -144,10 +144,14 @@ ETA (rough, from the last 53 min at 10.9%/h):
 - User: add two Codex agents. codex-4 takes wt-core Client + connection manager from codex-1; codex-5 takes types.rs + engine tests from codex-2
 - codex-1: wt-core lib tests 64 pass / 0 fail, clippy clean; implementing automatic dialing and completion restore
 - Coordinator defined the Client <-> Torrent connection interface (attach_connection, wants_conns, take_dial_candidates, peers_changed) for codex-1 and codex-4
+- First real transfer: e2e transfer_patterned_tcp_256kib passes (legacy peer loop, explicit dial)
+- codex-5 finding: most of the 136 ignored engine tests are unimplemented!() placeholders, not ports (c841eac overstated); codex-5 now writing real ports in priority order
 
 ## Commits
 
 ```text
+46ea93f engine-rs: codex checkpoint (first TCP transfer test passes)
+d8948c9 engine-rs: progress report shows current owners
 67cd0f1 engine-rs: progress update and codex checkpoint
 930cee0 engine-rs: codex-4 and codex-5 join
 fbd723b engine-rs: codex checkpoint (wt-core clippy clean, engine-host builds)
