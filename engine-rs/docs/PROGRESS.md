@@ -5,34 +5,34 @@ counts; a crate is 100% only when its worker reports done and the
 coordinator has verified it.
 
 ```text
-OVERALL   [############################..]  94%   crates complete 6/8, pending 2
+OVERALL   [#############################.]  95%   crates complete 6/8, pending 2
 
 wt-meta       [##############################] 100%  done     grok-1
 wt-wire       [##############################] 100%  done     agy-1
 wt-discovery  [##############################] 100%  done     grok-2
-wt-core       [##########################....]  88%  running  agy-2
+wt-core       [###########################...]  90%  running  agy-2
 wt-storage    [##############################] 100%  done     agy-3
 wt-policy     [##############################] 100%  done     grok-3
 wt-parity     [##############################] 100%  done     grok-1
 wt-engine     [#############################.]  95%  running  agy-4
 ```
 
-Started 10:59 · elapsed 1.3 h · now 94%
+Started 10:59 · elapsed 1.4 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 40 min at 37.3%/h):
+ETA (rough, from the last 46 min at 33.3%/h):
 
-- crates complete: ~12:30 (in 0.2 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~16:30 (in 4.2 h; the 4 h after the crates is a planning guess)
+- crates complete: ~12:39 (in 0.3 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~16:39 (in 4.3 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | agy-2 | running | 13626 | 10544 | 121 | 200 | 1 | agy-2 + grok-5 (strategy+choking API published, 28 tests) |
-| wt-storage | agy-3 | done | 4572 | 4520 | 65 | 109 | 0 | verified: 93 tests pass, 0 fail, clippy all-targets clean (b29e56c); grok-7 adding 7 accessors for 16 ignored tests |
+| wt-core | agy-2 | running | 13626 | 11719 | 121 | 200 | 1 | agy-2 + grok-5 (strategy+choking API published, 28 tests) |
+| wt-storage | agy-3 | done | 4572 | 5022 | 65 | 109 | 0 | verified: 93 tests pass, 0 fail, clippy all-targets clean (b29e56c); grok-7 adding 7 accessors for 16 ignored tests |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
 | wt-parity | grok-1 | done | 0 | 3334 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
 | wt-engine | agy-4 | running | 5609 | 4571 | 71 | 176 | 0 | agy-4 + grok-4 (JNI/host/build) + grok-3 (integration tests) |
@@ -48,7 +48,7 @@ ETA (rough, from the last 40 min at 37.3%/h):
 
 ## Pending
 
-- [ ] wt-core (agy-2): 88%, 10544 of ~10900 Rust lines, 200/121 tests
+- [ ] wt-core (agy-2): 90%, 11719 of ~10900 Rust lines, 200/121 tests
 - [ ] wt-engine (agy-4): 95%, 4571 of ~4487 Rust lines, 176/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
@@ -58,19 +58,19 @@ ETA (rough, from the last 40 min at 37.3%/h):
 
 | Worker | Crate | Work | State |
 |---|---|---|---|
-| grok-1 | wt-core (peer_conn) | wt-meta, wt-parity, webtor seek decisions (3c0d3fc) done; now the per-peer state machine | running |
-| grok-2 | wt-core (lint) | wt-discovery and wt-core sources (1a08cbc) done; now clippy-clean the finished wt-core modules | running |
+| grok-1 | wt-core (peer_conn) | wt-meta, wt-parity, webtor seek decisions (3c0d3fc) done; now the per-peer state machine | paused |
+| grok-2 | wt-core (lint) | wt-discovery and wt-core sources (1a08cbc) done; now clippy-clean the finished wt-core modules | paused |
 | grok-3 | wt-engine (playback, stream_http, previews, network) | integration tests (c841eac) + stream server/preview/network (9ccd54b) done; now playback.rs on wt_core::Reader + wt_policy | running |
-| grok-4 | wt-engine (types.rs JSON) | API diff tool done (6969bd9: 11 match, 19 diff, 14 critical); now fixing JSON shapes in types.rs | running |
-| grok-5 | wt-core (end-to-end tests) | strategy/choking (ef844c8), metadata/pex/ratelimit (76e488f), Direct Play storage (5f688b0) done; now library e2e transfer tests | running |
+| grok-4 | wt-engine (types.rs JSON) | API diff tool done (6969bd9: 11 match, 19 diff, 14 critical); now fixing JSON shapes in types.rs | paused |
+| grok-5 | wt-core (end-to-end tests) | strategy/choking (ef844c8), metadata/pex/ratelimit (76e488f), Direct Play storage (5f688b0) done; now library e2e transfer tests | paused |
 | agy-1 | wt-core (conn driver) | wt-wire done (9721c3f, 31 tests, uTP 569 MB/s loopback); now peer connection I/O driver + shared UDP socket | running |
-| agy-2 | wt-core | client, torrent, peer conns, reader, Webtor seek patches, arrival net | running |
-| agy-3 | wt-storage (benchmarks vs Go) | wt-storage done (b29e56c, 93 tests); now Go-vs-Rust storage benchmarks | running |
-| agy-4 | wt-engine (integration) | control API routes (e25edb6, WIP); now wiring EngineServer onto wt_core/wt_storage/wt_policy | running |
-| grok-6 | wt-core (client.rs) | hashing pool + web seed peer done (0dc46ba; SHA-1 2245 MiB/s release); now the Client | running |
-| grok-7 | wt-storage (accessors) | test suite done (9eb5a54); now the 7 missing accessors + switching on 16 ignored tests | running |
+| agy-2 | wt-core | client, torrent, peer conns, reader, Webtor seek patches, arrival net | paused |
+| agy-3 | wt-storage (benchmarks vs Go) | wt-storage done (b29e56c, 93 tests); now Go-vs-Rust storage benchmarks | paused |
+| agy-4 | wt-engine (integration) | control API routes (e25edb6, WIP); now wiring EngineServer onto wt_core/wt_storage/wt_policy | paused |
+| grok-6 | wt-core (client.rs) | hashing pool + web seed peer done (0dc46ba; SHA-1 2245 MiB/s release); now the Client | paused |
+| grok-7 | wt-storage (accessors) | test suite done (9eb5a54); now the 7 missing accessors + switching on 16 ignored tests | paused |
 | grok-8 | wt-core (reader) | Reader done (e6be3ec, 19 tests); released | done |
-| grok-9 | wt-core (torrent_impls.rs) | piece state + storage glue done (7a327e6, 13+22 tests); now PeerTorrent + ReaderHost impls for TorrentInner | running |
+| grok-9 | wt-core (torrent_impls.rs) | piece state + storage glue done (7a327e6, 13+22 tests); now PeerTorrent + ReaderHost impls for TorrentInner | paused |
 
 ## Coordinator log
 
@@ -131,10 +131,15 @@ ETA (rough, from the last 40 min at 37.3%/h):
 - grok-4 API diff tool done (6969bd9): 11 MATCH / 19 DIFF / 14 critical, sent to agy-4; grok-4 takes types.rs
 - grok-8 Reader done (e6be3ec), released; grok-9 took over its ReaderHost impl
 - TorrentInner field list from grok-9 sent to agy-2 (urgent)
+- 12:20 PAUSE for usage limits: all workers told to checkpoint, write HANDOFF notes and stop; WIP snapshot committed (2df03bb); resume guide in docs/RESUME.md
+- At pause: grok-4, grok-5, grok-6 confirmed paused; others finishing their current step; grok-2 at 9% of weekly limit
 
 ## Commits
 
 ```text
+2df03bb engine-rs: WIP snapshot at pause (12:2x) - in-progress wt-core wiring, handoff notes, resume guide
+07f3163 wt-engine: playback sessions on wt_core::Reader and wt_policy (grok-3)
+b1f35f8 wt-core: peer connection driver, listeners, shared UDP socket (agy-1)
 e6be3ec wt-core: blocking Reader with readahead priorities and responsive mode (grok-8)
 6969bd9 wt-parity: Go-vs-Rust control API contract checker (grok-4)
 1a08cbc wt-core: peer sources glue for trackers, DHT, WebTorrent (grok-2)

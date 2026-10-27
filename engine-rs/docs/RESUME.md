@@ -56,3 +56,13 @@ In progress when paused:
 - Build only with `CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/<worker>` and `CARGO_BUILD_JOBS=3`. Never build under /tmp (RAM-backed tmpfs, which caused SIGBUS crashes).
 - Keep at least 25 GB of disk free. The coordinator ran a governor (`/tmp/wt-specs/governor.sh`, copy in `docs/specs/`) that pauses builds below 10% free RAM.
 - Keep your crate compiling at every checkpoint. The coordinator commits; workers run no git write commands.
+
+## How to resume (after 18:00)
+
+1. Open the coordinator (Claude Code in /home/kar/funProjects/torrent-player) and ask it to resume run `run_861102160a1b`.
+   The active dispatches stay open across the pause. Their IDs are in `docs/specs/workers.txt`.
+2. The coordinator checks that every crate compiles, then sends each active dispatch:
+   "RESUME: read your HANDOFF note and continue your task."
+   Workers whose limit has reset continue in the same terminal.
+3. Restart the resource governor: `bash engine-rs/docs/specs/governor.sh` (run in the background).
+4. Delete `.wt-target-discovery/` in the worktree root once nothing uses it (stray build output, 2.7 GB).

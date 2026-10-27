@@ -55,3 +55,5 @@
 -|grok-4 API diff tool done (6969bd9): 11 MATCH / 19 DIFF / 14 critical, sent to agy-4; grok-4 takes types.rs
 -|grok-8 Reader done (e6be3ec), released; grok-9 took over its ReaderHost impl
 -|TorrentInner field list from grok-9 sent to agy-2 (urgent)
+-|12:20 PAUSE for usage limits: all workers told to checkpoint, write HANDOFF notes and stop; WIP snapshot committed (2df03bb); resume guide in docs/RESUME.md
+-|At pause: grok-4, grok-5, grok-6 confirmed paused; others finishing their current step; grok-2 at 9% of weekly limit
