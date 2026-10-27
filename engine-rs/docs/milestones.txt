@@ -1,0 +1,13 @@
+x|All 8 crates compile; wt-meta, wt-wire, wt-discovery, wt-policy, wt-storage done with tests passing
+x|wt-core module tests pass (71 across 13 binaries; 64 lib tests)
+x|First real data transfer between two Rust clients (TCP, explicit dial, legacy loop)
+x|Android arm64 libengine.so builds with all 9 JNI symbols, 16 KiB aligned
+x|Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
+ |Transfer driven only by add_peers (automatic dialing) over TCP and uTP
+ |Magnet (ut_metadata) transfer and reader seek on the new connection path
+ |Two engine-host processes transfer a torrent through the control API
+ |Control API JSON: 0 CRITICAL
+ |Engine integration tests: real ports passing (now 11 real, 132 placeholders)
+ |Direct Play startup saves off the storage lock (Go parity)
+ |Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
+ |Rust APK built with -Pwebtor.engine=rust and tested on a device

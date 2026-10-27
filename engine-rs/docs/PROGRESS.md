@@ -21,21 +21,42 @@ Started 10:59 · elapsed 1.9 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 60 min at 9.5%/h):
+ETA (rough, from the last 58 min at 8.9%/h):
 
-- crates complete: ~14:55 (in 2.0 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~18:55 (in 6.0 h; the 4 h after the crates is a planning guess)
+- crates complete: ~14:53 (in 2.0 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~18:53 (in 6.0 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | codex-1+4 | running | 13626 | 11300 | 121 | 207 | 1 | codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig) |
+| wt-core | codex-1+4 | running | 13626 | 11303 | 121 | 207 | 1 | codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig) |
 | wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5019 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
 | wt-parity | grok-1, codex-3 | done | 0 | 3354 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
 | wt-engine | codex-2+5 | running | 5609 | 5098 | 71 | 178 | 0 | codex-2 (server on wt_core, api-diff 29 match / 1 critical) + codex-5 (types.rs, 11 real engine tests, 132 placeholders) |
+## Milestones (the real finish line): 5/13
+
+```text
+MILESTONES [############..................] 5/13
+```
+
+- [x] All 8 crates compile; wt-meta, wt-wire, wt-discovery, wt-policy, wt-storage done with tests passing
+- [x] wt-core module tests pass (71 across 13 binaries; 64 lib tests)
+- [x] First real data transfer between two Rust clients (TCP, explicit dial, legacy loop)
+- [x] Android arm64 libengine.so builds with all 9 JNI symbols, 16 KiB aligned
+- [x] Control API JSON vs Go: 29 MATCH / 1 DIFF / 1 CRITICAL (was 11 / 19 / 14)
+- [ ] Transfer driven only by add_peers (automatic dialing) over TCP and uTP
+- [ ] Magnet (ut_metadata) transfer and reader seek on the new connection path
+- [ ] Two engine-host processes transfer a torrent through the control API
+- [ ] Control API JSON: 0 CRITICAL
+- [ ] Engine integration tests: real ports passing (now 11 real, 132 placeholders)
+- [ ] Direct Play startup saves off the storage lock (Go parity)
+- [ ] Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
+- [ ] Rust APK built with -Pwebtor.engine=rust and tested on a device
+
+The crate bars above count code written; these milestones count things that work.
 
 ## Complete
 
@@ -48,7 +69,7 @@ ETA (rough, from the last 60 min at 9.5%/h):
 
 ## Pending
 
-- [ ] wt-core (codex-1+4): 90%, 11300 of ~10900 Rust lines, 207/121 tests
+- [ ] wt-core (codex-1+4): 90%, 11303 of ~10900 Rust lines, 207/121 tests
 - [ ] wt-engine (codex-2+5): 95%, 5098 of ~4487 Rust lines, 178/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
@@ -160,6 +181,7 @@ ETA (rough, from the last 60 min at 9.5%/h):
 ## Commits
 
 ```text
+4ff7b0e engine-rs: progress report update
 f666237 engine-rs: codex checkpoint
 da98e2f wt-core: disambiguate PeerTorrent piece_length/num_pieces in torrent_impls (coordinator fix)
 bfa8dc6 engine-rs: codex checkpoint (parity harness repeat-order fix, 11 real engine tests)

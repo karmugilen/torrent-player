@@ -274,6 +274,17 @@ fn main() {
     for (c, go, rs, _, st, note) in &rows {
         md.push_str(&format!("| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n", c.name, c.owner, st, go.code_lines, rs.code_lines, go.tests, rs.tests, rs.stubs, note));
     }
+    let ms = fs::read_to_string(root.join("docs/milestones.txt")).unwrap_or_default();
+    if !ms.is_empty() {
+        let total = ms.lines().filter(|l| l.contains('|')).count();
+        let hit = ms.lines().filter(|l| l.starts_with('x')).count();
+        md.push_str(&format!("## Milestones (the real finish line): {hit}/{total}\n\n```text\nMILESTONES {} {}/{}\n```\n\n", bar(hit as f64 / total.max(1) as f64), hit, total));
+        for l in ms.lines().filter(|l| l.contains('|')) {
+            let (mark, text) = l.split_once('|').unwrap();
+            md.push_str(&format!("- [{}] {}\n", if mark.trim() == "x" { "x" } else { " " }, text));
+        }
+        md.push_str("\nThe crate bars above count code written; these milestones count things that work.\n");
+    }
     md.push_str("\n## Complete\n\n");
     let complete: Vec<_> = rows.iter().filter(|r| r.4 == "done").collect();
     if complete.is_empty() {
