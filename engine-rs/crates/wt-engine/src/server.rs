@@ -66,20 +66,45 @@ pub struct TorrentRecord {
 
 impl TorrentRecord {
     fn refresh(&mut self) {
-        let Some(info) = self.torrent.info() else { return; };
+        let Some(info) = self.torrent.info() else {
+            return;
+        };
         self.name = Some(info.name.clone());
         self.piece_length = info.piece_length;
         self.total_pieces = self.torrent.num_pieces() as usize;
-        self.last_piece_length = if self.total_pieces == 0 { 0 } else { info.piece((self.total_pieces - 1) as u32).length };
-        self.piece_verified = (0..self.total_pieces).map(|i| self.torrent.piece_complete(i as u32)).collect();
+        self.last_piece_length = if self.total_pieces == 0 {
+            0
+        } else {
+            info.piece((self.total_pieces - 1) as u32).length
+        };
+        self.piece_verified = (0..self.total_pieces)
+            .map(|i| self.torrent.piece_complete(i as u32))
+            .collect();
         self.verified_bytes = self.torrent.bytes_completed();
-        self.seeding = self.torrent.seeding();
-        self.files = self.torrent.files().into_iter().map(|file| {
-            let path = file.path(); let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            let verified_bytes = file.bytes_completed(); let length = file.length();
-            FileView { index: file.index(), file_type: crate::stream_http::content_type_for_name(&name).to_string(),
-                name, path, length, progress: if length > 0 { verified_bytes as f64 / length as f64 } else { 0.0 }, verified_bytes }
-        }).collect();
+        self.files = self
+            .torrent
+            .files()
+            .into_iter()
+            .map(|file| {
+                let path = file.path();
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let verified_bytes = file.bytes_completed();
+                let length = file.length();
+                FileView {
+                    index: file.index(),
+                    file_type: crate::stream_http::content_type_for_name(&name).to_string(),
+                    name,
+                    path,
+                    length,
+                    progress: if length > 0 {
+                        verified_bytes as f64 / length as f64
+                    } else {
+                        0.0
+                    },
+                    verified_bytes,
+                }
+            })
+            .collect();
     }
 }
 
@@ -152,32 +177,68 @@ impl EngineServer {
 
         let storage = Arc::new(wt_storage::DocumentStorageClient::new(&dir));
         let status_target = tracker_status.clone();
-        let callbacks = wt_core::Callbacks { status_updated: vec![Arc::new(move |event| {
-            let (hash, url, status, message) = match event {
-                wt_core::StatusEvent::TrackerConnected { info_hash, url } | wt_core::StatusEvent::TrackerAnnounceSuccessful { info_hash, url } => (info_hash, url, "working", ""),
-                wt_core::StatusEvent::TrackerDisconnected { info_hash, url, error } => (info_hash, url, "error", error.as_deref().unwrap_or("")),
-                wt_core::StatusEvent::TrackerAnnounceError { info_hash, url, error } => (info_hash, url, "error", error.as_str()),
-            };
-            status_target.set_status(&hash.to_hex(), url, status, message);
-        })], ..Default::default() };
+        let callbacks = wt_core::Callbacks {
+            status_updated: vec![Arc::new(move |event| {
+                let (hash, url, status, message) = match event {
+                    wt_core::StatusEvent::TrackerConnected { info_hash, url }
+                    | wt_core::StatusEvent::TrackerAnnounceSuccessful { info_hash, url } => {
+                        (info_hash, url, "working", "")
+                    }
+                    wt_core::StatusEvent::TrackerDisconnected {
+                        info_hash,
+                        url,
+                        error,
+                    } => (info_hash, url, "error", error.as_deref().unwrap_or("")),
+                    wt_core::StatusEvent::TrackerAnnounceError {
+                        info_hash,
+                        url,
+                        error,
+                    } => (info_hash, url, "error", error.as_str()),
+                };
+                status_target.set_status(&hash.to_hex(), url, status, message);
+            })],
+            ..Default::default()
+        };
         let config = wt_core::ClientConfig {
             callbacks,
-            default_storage: storage.clone(), seed: true, always_want_conns: true,
+            default_storage: storage.clone(),
+            seed: true,
+            always_want_conns: true,
             periodically_announce_torrents_to_dht: true,
-            piece_hashers_per_torrent: wt_storage::background_workers(), dial_rate: 30.0,
-            nominal_dial_timeout: Duration::from_secs(8), min_dial_timeout: Duration::from_secs(2),
-            handshakes_timeout: Duration::from_secs(5), established_conns_per_torrent: effective_peers,
-            half_open_conns_per_torrent: 24, total_half_open_conns: 48,
+            piece_hashers_per_torrent: wt_storage::background_workers(),
+            dial_rate: 30.0,
+            nominal_dial_timeout: Duration::from_secs(8),
+            min_dial_timeout: Duration::from_secs(2),
+            handshakes_timeout: Duration::from_secs(5),
+            established_conns_per_torrent: effective_peers,
+            half_open_conns_per_torrent: 24,
+            total_half_open_conns: 48,
             torrent_peers_high_water: 120.max(effective_peers * 4),
             torrent_peers_low_water: 40.max(effective_peers * 2),
             http_user_agent: format!("TorrentPlayer/{}", crate::version::app_version()),
-            extended_handshake_client_version: format!("Torrent Player {} (Go)", crate::version::app_version()),
-            ice_servers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302", "stun:stun3.l.google.com:19302", "stun:stun4.l.google.com:19302", "stun:global.stun.twilio.com:3478", "stun:stun.cloudflare.com:3478"].iter().map(|s| s.to_string()).collect(),
+            extended_handshake_client_version: format!(
+                "Torrent Player {} (Go)",
+                crate::version::app_version()
+            ),
+            ice_servers: [
+                "stun:stun.l.google.com:19302",
+                "stun:stun1.l.google.com:19302",
+                "stun:stun2.l.google.com:19302",
+                "stun:stun3.l.google.com:19302",
+                "stun:stun4.l.google.com:19302",
+                "stun:global.stun.twilio.com:3478",
+                "stun:stun.cloudflare.com:3478",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             ..Default::default()
         };
         let client = wt_core::Client::new(config).map_err(std::io::Error::other)?;
         let server = Arc::new(Self {
-            self_ref: OnceLock::new(), client, storage,
+            self_ref: OnceLock::new(),
+            client,
+            storage,
             download_dir: dir,
             max_peers: AtomicUsize::new(effective_peers),
             ctl_port,
@@ -256,7 +317,8 @@ impl EngineServer {
 
     pub async fn start_streaming(self: &Arc<Self>) -> std::io::Result<()> {
         let this = self.clone();
-        let resolver = Arc::new(move |id: &str, file_index: usize| this.open_playback(id, file_index).ok());
+        let resolver =
+            Arc::new(move |id: &str, file_index: usize| this.open_playback(id, file_index).ok());
 
         let server = start_stream_server(0, resolver).await?;
         self.stream_port
@@ -361,9 +423,16 @@ impl EngineServer {
     fn handle_add(&self, body: &str) -> (u16, Vec<u8>) {
         let mut value: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()),
+            Err(_) => {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":"invalid json"})).unwrap(),
+                )
+            }
         };
-        if let Some(obj) = value.as_object_mut() { obj.entry("torrentId").or_insert(json!("")); }
+        if let Some(obj) = value.as_object_mut() {
+            obj.entry("torrentId").or_insert(json!(""));
+        }
         let req: AddRequest = match serde_json::from_value(value) {
             Ok(r) => r,
             Err(_) => {
@@ -388,49 +457,103 @@ impl EngineServer {
         if let Some(ref bytes) = torrent_data_bytes {
             let mi = match wt_meta::parse_metainfo(bytes) {
                 Ok(mi) => mi,
-                Err(e) => return (400, serde_json::to_vec(&json!({"error": e.to_string()})).unwrap()),
+                Err(e) => {
+                    return (
+                        400,
+                        serde_json::to_vec(&json!({"error": e.to_string()})).unwrap(),
+                    )
+                }
             };
             spec.info_hash = Some(wt_meta::info_hash_v1(&mi.info_bytes));
             spec.info_bytes = Some(mi.info_bytes);
             spec.trackers = mi.announce_list;
-            if spec.trackers.is_empty() && !mi.announce.is_empty() { spec.trackers.push(vec![mi.announce]); }
+            if spec.trackers.is_empty() && !mi.announce.is_empty() {
+                spec.trackers.push(vec![mi.announce]);
+            }
             spec.web_seeds = mi.url_list;
             spec.dht_nodes = mi.nodes;
             spec.piece_layers = mi.piece_layers;
         } else if req.torrent_id.starts_with("magnet:") {
             let m = match wt_meta::parse_magnet(&req.torrent_id) {
                 Ok(m) => m,
-                Err(e) => return (400, serde_json::to_vec(&json!({"error": e.to_string()})).unwrap()),
+                Err(e) => {
+                    return (
+                        400,
+                        serde_json::to_vec(&json!({"error": e.to_string()})).unwrap(),
+                    )
+                }
             };
             spec.info_hash = m.info_hash;
             spec.info_hash_v2 = m.info_hash_v2;
             spec.display_name = m.display_name;
             spec.trackers = m.trackers.into_iter().map(|v| vec![v]).collect();
             spec.web_seeds = m.web_seeds;
-            peers = m.params.into_iter().filter_map(|(k,v)| if k == "x.pe" { v.parse().ok() } else { None }).collect();
+            peers = m
+                .params
+                .into_iter()
+                .filter_map(|(k, v)| if k == "x.pe" { v.parse().ok() } else { None })
+                .collect();
         } else {
             spec.info_hash = wt_core::InfoHash::from_hex(&req.torrent_id);
-            if spec.info_hash.is_none() { return (400, serde_json::to_vec(&json!({"error":"invalid torrent"})).unwrap()); }
+            if spec.info_hash.is_none() {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":"invalid torrent"})).unwrap(),
+                );
+            }
         }
         let original_trackers = spec.trackers.clone();
         let (torrent, _) = match self.client.add_torrent_spec(spec) {
             Ok(t) => t,
-            Err(e) => return (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap()),
+            Err(e) => {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":e.to_string()})).unwrap(),
+                )
+            }
         };
-        if !self.seeding_enabled.load(Ordering::SeqCst) { torrent.disallow_data_upload(); }
-        torrent.add_peers(peers.into_iter().map(|addr| wt_core::PeerInfo { id: None, addr, source: wt_core::PeerSource::Direct, supports_encryption: false, pex: Default::default(), trusted: false }).collect());
+        torrent.add_peers(
+            peers
+                .into_iter()
+                .map(|addr| wt_core::PeerInfo {
+                    id: None,
+                    addr,
+                    source: wt_core::PeerSource::Direct,
+                    supports_encryption: false,
+                    pex: Default::default(),
+                    trusted: false,
+                })
+                .collect(),
+        );
         let info_hash = torrent.info_hash().to_hex();
         let id = info_hash.clone();
         let info = torrent.info();
-        let files: Vec<FileView> = torrent.files().into_iter().map(|file| {
-            let path = file.path();
-            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            FileView { index: file.index(), name, path, length: file.length(), progress: 0.0,
-                verified_bytes: file.bytes_completed(), file_type: "application/octet-stream".into() }
-        }).collect();
+        let files: Vec<FileView> = torrent
+            .files()
+            .into_iter()
+            .map(|file| {
+                let path = file.path();
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                FileView {
+                    index: file.index(),
+                    name,
+                    path,
+                    length: file.length(),
+                    progress: 0.0,
+                    verified_bytes: file.bytes_completed(),
+                    file_type: "application/octet-stream".into(),
+                }
+            })
+            .collect();
         let total_pieces = torrent.num_pieces() as usize;
         let piece_length = info.as_ref().map_or(0, |i| i.piece_length);
-        let last_piece_length = info.as_ref().map_or(0, |i| if total_pieces == 0 { 0 } else { i.piece((total_pieces - 1) as u32).length });
+        let last_piece_length = info.as_ref().map_or(0, |i| {
+            if total_pieces == 0 {
+                0
+            } else {
+                i.piece((total_pieces - 1) as u32).length
+            }
+        });
         let rec = Arc::new(RwLock::new(TorrentRecord {
             torrent: torrent.clone(),
             playback_coordinator: Arc::new(crate::playback::PlaybackPriorityCoordinator::new()),
@@ -486,7 +609,11 @@ impl EngineServer {
     fn handle_get_torrent(&self, id: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
         let rec = match records.get(id) {
-            Some(r) => { let mut rec = r.write(); rec.refresh(); rec },
+            Some(r) => {
+                let mut rec = r.write();
+                rec.refresh();
+                rec
+            }
             None => {
                 return (
                     404,
@@ -498,19 +625,42 @@ impl EngineServer {
         let live_status = self.tracker_status.snapshot(&rec.info_hash);
         let trackers = build_tracker_views(&rec.original_trackers, &[], &live_status);
 
-        let selected_total: i64 = rec.files.iter().filter(|f| rec.selected.contains(&f.index)).map(|f| f.length).sum();
-        let selected_verified: i64 = rec.files.iter().filter(|f| rec.selected.contains(&f.index)).map(|f| f.verified_bytes).sum();
+        let selected_total: i64 = rec
+            .files
+            .iter()
+            .filter(|f| rec.selected.contains(&f.index))
+            .map(|f| f.length)
+            .sum();
+        let selected_verified: i64 = rec
+            .files
+            .iter()
+            .filter(|f| rec.selected.contains(&f.index))
+            .map(|f| f.verified_bytes)
+            .sum();
         let view = TorrentView {
-            seeding: rec.seeding,
+            seeding: rec.configured
+                && !rec.direct_play
+                && !rec.paused
+                && selected_total > 0
+                && selected_verified >= selected_total
+                && self.seeding_enabled.load(Ordering::SeqCst)
+                && self.seeding_allowed.load(Ordering::SeqCst),
             seed_ratio: 0.0,
             id: rec.id.clone(),
             info_hash: Some(rec.info_hash.clone()),
             name: rec.name.clone(),
             magnet_uri: rec.magnet_uri.clone(),
             ready: rec.torrent.info().is_some(),
-            done: !rec.direct_play && !rec.checking && selected_total > 0 && selected_verified >= selected_total,
+            done: !rec.direct_play
+                && !rec.checking
+                && selected_total > 0
+                && selected_verified >= selected_total,
             paused: rec.paused,
-            progress: if selected_total > 0 { selected_verified as f64 / selected_total as f64 } else { 0.0 },
+            progress: if selected_total > 0 {
+                selected_verified as f64 / selected_total as f64
+            } else {
+                0.0
+            },
             download_speed: 0,
             upload_speed: 0,
             num_peers: rec.torrent.stats().total_peers,
@@ -541,9 +691,16 @@ impl EngineServer {
     fn handle_play(&self, body: &str) -> (u16, Vec<u8>) {
         let mut value: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()),
+            Err(_) => {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":"invalid json"})).unwrap(),
+                )
+            }
         };
-        if let Some(obj) = value.as_object_mut() { obj.entry("id").or_insert(json!("")); }
+        if let Some(obj) = value.as_object_mut() {
+            obj.entry("id").or_insert(json!(""));
+        }
         let req: PlayRequest = match serde_json::from_value(value) {
             Ok(r) => r,
             Err(_) => {
@@ -556,7 +713,11 @@ impl EngineServer {
 
         let records = self.records.read();
         let rec = match records.get(&req.id) {
-            Some(r) => { let mut rec = r.write(); rec.refresh(); rec },
+            Some(r) => {
+                let mut rec = r.write();
+                rec.refresh();
+                rec
+            }
             None => {
                 return (
                     404,
@@ -613,9 +774,15 @@ impl EngineServer {
         };
         let records = self.records.read();
         if let Some(r) = records.get(id) {
-            let enabled = req.get("fileOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+            let enabled = req
+                .get("fileOnly")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             r.write().file_only = enabled;
-            (200, serde_json::to_vec(&json!({"fileOnly": enabled})).unwrap())
+            (
+                200,
+                serde_json::to_vec(&json!({"fileOnly": enabled})).unwrap(),
+            )
         } else {
             (
                 404,
@@ -668,15 +835,30 @@ impl EngineServer {
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
             let Some(storage) = self.storage.get_storage(&rec.info_hash) else {
-                return (400, serde_json::to_vec(&json!({"error":"metadata not ready"})).unwrap());
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":"metadata not ready"})).unwrap(),
+                );
             };
             let stream = req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM);
-            if let Err(e) = storage.attach_descriptors_mode(&req.descriptors, &req.selected, stream) {
-                return (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap());
+            if let Err(e) = storage.attach_descriptors_mode(&req.descriptors, &req.selected, stream)
+            {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":e.to_string()})).unwrap(),
+                );
             }
-            for piece in 0..rec.torrent.num_pieces() { rec.torrent.update_piece_completion(piece); }
+            for piece in 0..rec.torrent.num_pieces() {
+                rec.torrent.update_piece_completion(piece);
+            }
             rec.configured = true;
-            for file in rec.torrent.files() { if req.selected.contains(&file.index()) { file.download(); } else { file.set_priority(wt_core::PiecePriority::None); } }
+            for file in rec.torrent.files() {
+                if req.selected.contains(&file.index()) {
+                    file.download();
+                } else {
+                    file.set_priority(wt_core::PiecePriority::None);
+                }
+            }
             rec.selected = req.selected;
             if req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM) {
                 rec.direct_play = true;
@@ -684,11 +866,7 @@ impl EngineServer {
             self.notify_change();
             (
                 200,
-                serde_json::to_vec(&OkResponse {
-                    ok: true,
-                    id: None,
-                })
-                .unwrap(),
+                serde_json::to_vec(&OkResponse { ok: true, id: None }).unwrap(),
             )
         } else {
             (
@@ -711,7 +889,13 @@ impl EngineServer {
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
-            for file in rec.torrent.files() { if req.selected.contains(&file.index()) { file.download(); } else { file.set_priority(wt_core::PiecePriority::None); } }
+            for file in rec.torrent.files() {
+                if req.selected.contains(&file.index()) {
+                    file.download();
+                } else {
+                    file.set_priority(wt_core::PiecePriority::None);
+                }
+            }
             rec.selected = req.selected.clone();
             self.notify_change();
             (
@@ -744,15 +928,19 @@ impl EngineServer {
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
             rec.paused = pause;
-            if pause { rec.torrent.disallow_data_download(); rec.torrent.disallow_data_upload(); } else { rec.torrent.allow_data_download(); if self.seeding_enabled.load(Ordering::SeqCst) { rec.torrent.allow_data_upload(); } }
+            if pause {
+                rec.torrent.disallow_data_download();
+                rec.torrent.disallow_data_upload();
+            } else {
+                rec.torrent.allow_data_download();
+                if self.seeding_enabled.load(Ordering::SeqCst) {
+                    rec.torrent.allow_data_upload();
+                }
+            }
             self.notify_change();
             (
                 200,
-                serde_json::to_vec(&OkResponse {
-                    ok: true,
-                    id: None,
-                })
-                .unwrap(),
+                serde_json::to_vec(&OkResponse { ok: true, id: None }).unwrap(),
             )
         } else {
             (
@@ -776,7 +964,9 @@ impl EngineServer {
         let mut by_hash = self.records_by_hash.write();
         if let Some(rec) = records.remove(&req.id) {
             rec.read().torrent.drop_torrent();
-            if req.destroy_store.unwrap_or(false) { let _ = self.storage.remove_torrent(rec.read().torrent.info_hash()); }
+            if req.destroy_store.unwrap_or(false) {
+                let _ = self.storage.remove_torrent(rec.read().torrent.info_hash());
+            }
             by_hash.remove(&rec.read().info_hash);
             self.tracker_status.clear_status(&rec.read().info_hash);
             self.notify_change();
@@ -797,9 +987,19 @@ impl EngineServer {
     }
 
     fn handle_forget_peers(&self, body: &str) -> (u16, Vec<u8>) {
-        let req: serde_json::Value = match serde_json::from_str(body) { Ok(v) => v, Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()) };
+        let req: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":"invalid json"})).unwrap(),
+                )
+            }
+        };
         if let Some(hash) = req.get("infoHash").and_then(|v| v.as_str()) {
-            if let Some(r) = self.records_by_hash.read().get(hash) { r.read().torrent.forget_peers(); }
+            if let Some(r) = self.records_by_hash.read().get(hash) {
+                r.read().torrent.forget_peers();
+            }
         }
         (200, serde_json::to_vec(&json!({"ok":true})).unwrap())
     }
@@ -807,7 +1007,11 @@ impl EngineServer {
     fn handle_pieces(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
         let rec = match records.get(id) {
-            Some(r) => { let mut rec = r.write(); rec.refresh(); rec },
+            Some(r) => {
+                let mut rec = r.write();
+                rec.refresh();
+                rec
+            }
             None => {
                 return (
                     404,
@@ -880,12 +1084,38 @@ impl EngineServer {
 
     fn handle_preview_state(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
-        let Some(r) = records.get(id) else { return (404, serde_json::to_vec(&json!({"error":"torrent not found"})).unwrap()); };
+        let Some(r) = records.get(id) else {
+            return (
+                404,
+                serde_json::to_vec(&json!({"error":"torrent not found"})).unwrap(),
+            );
+        };
         let rec = r.read();
-        let index = url::form_urlencoded::parse(query.as_bytes()).find_map(|(k,v)| if k == "fileIndex" { v.parse::<usize>().ok() } else { None });
-        let Some(file) = index.and_then(|i| rec.torrent.files().get(i).cloned()) else { return (400, serde_json::to_vec(&json!({"error":"invalid file index"})).unwrap()); };
-        let pieces = crate::live_preview::pieces_overlapping_file((0..rec.torrent.num_pieces()).map(|p| (p, rec.torrent.piece_complete(p))), rec.piece_length, file.offset(), file.length());
-        let response = crate::live_preview::build_preview_state(crate::live_preview::PreviewStateInput { active: false, byte_offset: 0, completed_piece_indices: pieces });
+        let index = url::form_urlencoded::parse(query.as_bytes()).find_map(|(k, v)| {
+            if k == "fileIndex" {
+                v.parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        let Some(file) = index.and_then(|i| rec.torrent.files().get(i).cloned()) else {
+            return (
+                400,
+                serde_json::to_vec(&json!({"error":"invalid file index"})).unwrap(),
+            );
+        };
+        let pieces = crate::live_preview::pieces_overlapping_file(
+            (0..rec.torrent.num_pieces()).map(|p| (p, rec.torrent.piece_complete(p))),
+            rec.piece_length,
+            file.offset(),
+            file.length(),
+        );
+        let response =
+            crate::live_preview::build_preview_state(crate::live_preview::PreviewStateInput {
+                active: false,
+                byte_offset: 0,
+                completed_piece_indices: pieces,
+            });
         (200, serde_json::to_vec(&response).unwrap())
     }
 
@@ -925,16 +1155,26 @@ impl EngineServer {
         };
 
         if let Ok(mut mi) = rec.torrent.metainfo() {
-            mi.announce.clear(); mi.announce_list = rec.original_trackers.clone();
+            mi.announce.clear();
+            mi.announce_list = rec.original_trackers.clone();
             mi.comment = "dynamic metainfo from client".into();
             mi.created_by = "https://github.com/anacrolix/torrent".into();
-            mi.creation_date = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+            mi.creation_date = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
             if let Ok(data) = wt_meta::encode_metainfo(&mi) {
                 let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
-                return (200, serde_json::to_vec(&MetadataResponse { torrent_data: b64 }).unwrap());
+                return (
+                    200,
+                    serde_json::to_vec(&MetadataResponse { torrent_data: b64 }).unwrap(),
+                );
             }
         }
-        (404, serde_json::to_vec(&json!({"error":"metadata not available"})).unwrap())
+        (
+            404,
+            serde_json::to_vec(&json!({"error":"metadata not available"})).unwrap(),
+        )
     }
 
     fn handle_get_settings(&self) -> (u16, Vec<u8>) {
@@ -984,7 +1224,9 @@ impl EngineServer {
                 );
             }
             self.max_peers.store(peers, Ordering::SeqCst);
-            for t in self.client.torrents() { t.set_max_established_conns(peers); }
+            for t in self.client.torrents() {
+                t.set_max_established_conns(peers);
+            }
         }
 
         if let Some(cache_bytes) = req.ram_cache_bytes {
@@ -1054,9 +1296,18 @@ impl EngineServer {
         }
 
         for t in self.client.torrents() {
-            if self.seeding_enabled.load(Ordering::SeqCst) && self.seeding_allowed.load(Ordering::SeqCst) { t.allow_data_upload(); }
-            else { t.disallow_data_upload(); }
-            if self.payload_transfers_allowed.load(Ordering::SeqCst) { t.allow_data_download(); } else { t.disallow_data_download(); }
+            if self.seeding_enabled.load(Ordering::SeqCst)
+                && self.seeding_allowed.load(Ordering::SeqCst)
+            {
+                t.allow_data_upload();
+            } else {
+                t.disallow_data_upload();
+            }
+            if self.payload_transfers_allowed.load(Ordering::SeqCst) {
+                t.allow_data_download();
+            } else {
+                t.disallow_data_download();
+            }
         }
         self.notify_change();
         self.handle_get_settings()
@@ -1091,7 +1342,15 @@ impl EngineServer {
             } else {
                 "off".to_string()
             },
-            coverage: if enabled { Some(vec!["outgoing-tcp-peers".into(), "http-trackers".into(), "websocket-trackers".into()]) } else { None },
+            coverage: if enabled {
+                Some(vec![
+                    "outgoing-tcp-peers".into(),
+                    "http-trackers".into(),
+                    "websocket-trackers".into(),
+                ])
+            } else {
+                None
+            },
             error: None,
         };
         (200, serde_json::to_vec(&status).unwrap())
@@ -1123,9 +1382,21 @@ impl EngineServer {
                     bytes: 0,
                     reclaimable_bytes: 0,
                 },
-                CacheCategoryView { id: "resume".into(), bytes: 0, reclaimable_bytes: 0 },
-                CacheCategoryView { id: "peers".into(), bytes: 0, reclaimable_bytes: 0 },
-                CacheCategoryView { id: "dht".into(), bytes: 0, reclaimable_bytes: 0 },
+                CacheCategoryView {
+                    id: "resume".into(),
+                    bytes: 0,
+                    reclaimable_bytes: 0,
+                },
+                CacheCategoryView {
+                    id: "peers".into(),
+                    bytes: 0,
+                    reclaimable_bytes: 0,
+                },
+                CacheCategoryView {
+                    id: "dht".into(),
+                    bytes: 0,
+                    reclaimable_bytes: 0,
+                },
             ],
             memory_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
         };
@@ -1133,11 +1404,25 @@ impl EngineServer {
     }
 
     fn handle_clear_cache(&self, body: &str) -> (u16, Vec<u8>) {
-        let value: serde_json::Value = match serde_json::from_str(body) { Ok(v) => v, Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()) };
-        let categories: Vec<String> = value.get("categories").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error":"invalid json"})).unwrap(),
+                )
+            }
+        };
+        let categories: Vec<String> = value
+            .get("categories")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
         match wt_storage::clear_cache_categories(&self.download_dir, &categories) {
             Ok(()) => self.handle_get_cache(),
-            Err(e) => (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap()),
+            Err(e) => (
+                400,
+                serde_json::to_vec(&json!({"error":e.to_string()})).unwrap(),
+            ),
         }
     }
 
@@ -1150,9 +1435,19 @@ impl EngineServer {
     }
 
     pub fn open_playback(&self, id: &str, index: usize) -> std::io::Result<Arc<PlaybackReader>> {
-        let coordinator = self.records.read().get(id).map(|r| r.read().playback_coordinator.clone())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found"))?;
-        let host = self.self_ref.get().and_then(Weak::upgrade).ok_or_else(|| std::io::Error::other("engine closed"))?;
+        let coordinator = self
+            .records
+            .read()
+            .get(id)
+            .map(|r| r.read().playback_coordinator.clone())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found")
+            })?;
+        let host = self
+            .self_ref
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| std::io::Error::other("engine closed"))?;
         let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
         let (_, reader) = PlaybackReader::open_for_host(host, coordinator, id, index, 0, handle)?;
         self.playback_readers.lock().insert(handle, reader.clone());
@@ -1182,12 +1477,19 @@ impl EngineServer {
             ));
         }
 
-        let file = rec.torrent.files().get(index).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"))?;
+        let file =
+            rec.torrent.files().get(index).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")
+            })?;
         let length = file.length();
         let backend = Mutex::new(crate::playback_core::CoreReaderBackend::from_file(&file));
-        let reader = Arc::new(PreviewReader::new(index, length, Box::new(move |buf, offset| {
-            crate::playback::ReaderBackend::read_at(&mut *backend.lock(), buf, offset)
-        })));
+        let reader = Arc::new(PreviewReader::new(
+            index,
+            length,
+            Box::new(move |buf, offset| {
+                crate::playback::ReaderBackend::read_at(&mut *backend.lock(), buf, offset)
+            }),
+        ));
 
         *active = Some(reader.clone());
         let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
@@ -1198,36 +1500,112 @@ impl EngineServer {
 
 impl crate::playback::PlaybackHost for EngineServer {
     fn torrent_for_playback(&self, id: &str) -> Option<crate::playback::PlaybackTorrentSnapshot> {
-        let records = self.records.read(); let rec = records.get(id)?.read(); let info = rec.torrent.info()?; let len = info.piece_length;
-        if len <= 0 { return None; }
-        let files = rec.torrent.files().into_iter().map(|f| crate::playback::PlaybackFileInfo {
-            index: f.index(), name: f.path(), length: f.length(), torrent_offset: f.offset(),
-            begin_piece: (f.offset() / len) as u32, end_piece: ((f.offset() + f.length() + len - 1) / len) as u32,
-            verified: f.bytes_completed() == f.length(), }).collect();
-        Some(crate::playback::PlaybackTorrentSnapshot { configured: rec.configured, direct_play: rec.direct_play,
-            file_only: rec.file_only, selected: rec.selected.clone(), focused_file: rec.focused_file,
-            files, piece_length: len, open_reader_count: rec.playback_readers })
+        let records = self.records.read();
+        let rec = records.get(id)?.read();
+        let info = rec.torrent.info()?;
+        let len = info.piece_length;
+        if len <= 0 {
+            return None;
+        }
+        let files = rec
+            .torrent
+            .files()
+            .into_iter()
+            .map(|f| crate::playback::PlaybackFileInfo {
+                index: f.index(),
+                name: f.path(),
+                length: f.length(),
+                torrent_offset: f.offset(),
+                begin_piece: (f.offset() / len) as u32,
+                end_piece: ((f.offset() + f.length() + len - 1) / len) as u32,
+                verified: f.bytes_completed() == f.length(),
+            })
+            .collect();
+        Some(crate::playback::PlaybackTorrentSnapshot {
+            configured: rec.configured,
+            direct_play: rec.direct_play,
+            file_only: rec.file_only,
+            selected: rec.selected.clone(),
+            focused_file: rec.focused_file,
+            files,
+            piece_length: len,
+            open_reader_count: rec.playback_readers,
+        })
     }
-    fn is_shutting_down(&self) -> bool { self.shutting_down.load(Ordering::SeqCst) }
-    fn payload_allowed(&self) -> bool { self.payload_transfers_allowed.load(Ordering::SeqCst) }
-    fn ghost_pro(&self) -> bool { self.ghost_pro_mode.load(Ordering::SeqCst) }
-    fn open_file_reader(&self, id: &str, index: usize) -> std::io::Result<Box<dyn crate::playback::ReaderBackend>> {
-        let records = self.records.read(); let file = records.get(id).and_then(|r| r.read().torrent.files().get(index).cloned())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent or file not found"))?;
-        Ok(Box::new(crate::playback_core::CoreReaderBackend::from_file(&file)))
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+    fn payload_allowed(&self) -> bool {
+        self.payload_transfers_allowed.load(Ordering::SeqCst)
+    }
+    fn ghost_pro(&self) -> bool {
+        self.ghost_pro_mode.load(Ordering::SeqCst)
+    }
+    fn open_file_reader(
+        &self,
+        id: &str,
+        index: usize,
+    ) -> std::io::Result<Box<dyn crate::playback::ReaderBackend>> {
+        let records = self.records.read();
+        let file = records
+            .get(id)
+            .and_then(|r| r.read().torrent.files().get(index).cloned())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "torrent or file not found")
+            })?;
+        Ok(Box::new(
+            crate::playback_core::CoreReaderBackend::from_file(&file),
+        ))
     }
     fn apply_piece_priorities(&self, id: &str, demand: &HashMap<u32, wt_core::PiecePriority>) {
-        if let Some(r) = self.records.read().get(id) { let rec = r.read(); for (&piece, &priority) in demand { rec.torrent.set_piece_priority(piece, priority); } }
+        if let Some(r) = self.records.read().get(id) {
+            let rec = r.read();
+            for (&piece, &priority) in demand {
+                rec.torrent.set_piece_priority(piece, priority);
+            }
+        }
     }
     fn clear_piece_priorities(&self, id: &str, pieces: &[u32]) {
-        if let Some(r) = self.records.read().get(id) { let rec = r.read(); for &piece in pieces { rec.torrent.set_piece_priority(piece, wt_core::PiecePriority::None); } }
+        if let Some(r) = self.records.read().get(id) {
+            let rec = r.read();
+            for &piece in pieces {
+                rec.torrent
+                    .set_piece_priority(piece, wt_core::PiecePriority::None);
+            }
+        }
     }
-    fn set_request_focus(&self, id: &str, offset: i64) { if let Some(r) = self.records.read().get(id) { r.read().torrent.set_request_focus(offset); } }
-    fn set_playback_interest(&self, id: &str, begin: u32, end: u32) { if let Some(r) = self.records.read().get(id) { r.read().torrent.set_playback_interest(begin, end); } }
-    fn refocus_requests(&self, id: &str) { if let Some(r) = self.records.read().get(id) { r.read().torrent.refocus_requests(); } }
-    fn nudge_urgent(&self, id: &str) -> usize { self.records.read().get(id).map_or(0, |r| r.read().torrent.nudge_urgent_requests()) }
-    fn on_focus_changed(&self, id: &str, index: usize) { if let Some(r) = self.records.read().get(id) { r.write().focused_file = Some(index); } }
-    fn piece_complete(&self, id: &str, piece: u32) -> bool { self.records.read().get(id).is_some_and(|r| r.read().torrent.piece_complete(piece)) }
+    fn set_request_focus(&self, id: &str, offset: i64) {
+        if let Some(r) = self.records.read().get(id) {
+            r.read().torrent.set_request_focus(offset);
+        }
+    }
+    fn set_playback_interest(&self, id: &str, begin: u32, end: u32) {
+        if let Some(r) = self.records.read().get(id) {
+            r.read().torrent.set_playback_interest(begin, end);
+        }
+    }
+    fn refocus_requests(&self, id: &str) {
+        if let Some(r) = self.records.read().get(id) {
+            r.read().torrent.refocus_requests();
+        }
+    }
+    fn nudge_urgent(&self, id: &str) -> usize {
+        self.records
+            .read()
+            .get(id)
+            .map_or(0, |r| r.read().torrent.nudge_urgent_requests())
+    }
+    fn on_focus_changed(&self, id: &str, index: usize) {
+        if let Some(r) = self.records.read().get(id) {
+            r.write().focused_file = Some(index);
+        }
+    }
+    fn piece_complete(&self, id: &str, piece: u32) -> bool {
+        self.records
+            .read()
+            .get(id)
+            .is_some_and(|r| r.read().torrent.piece_complete(piece))
+    }
 }
 
 #[cfg(test)]

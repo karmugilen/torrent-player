@@ -268,18 +268,14 @@ impl Client {
         let mut cs = ConnStats::default();
         let torrents = self.inner.torrents.read();
         for t in torrents.values() {
-            let conns = t.conns.read();
+            let conns = t.conn_handles.read();
             for c in conns.values() {
-                cs.add(&c.inner.read().stats.snapshot());
+                cs.add(&c.stats().snapshot());
             }
         }
         ClientStats {
             conn_stats: cs,
-            active_half_open: self
-                .inner
-                .half_open
-                .current_total()
-                .max(self.inner.active_half_open.load(Ordering::Relaxed)),
+            active_half_open: self.inner.half_open.current_total(),
         }
     }
 
@@ -388,6 +384,7 @@ impl Torrent {
         let mut pieces = self.inner.pieces.write();
         if let Some(pe) = pieces.get_mut(piece as usize) {
             pe.priority = p;
+            pe.base_priority = p;
         }
         drop(pieces);
         self.inner.bump_change();
@@ -520,8 +517,9 @@ impl Torrent {
         self.inner.download_all_requested.store(true, Ordering::Relaxed);
         let mut pieces = self.inner.pieces.write();
         for p in pieces.iter_mut() {
-            if p.priority == PiecePriority::None {
-                p.priority = PiecePriority::Normal;
+            if p.base_priority == PiecePriority::None {
+                p.priority = p.priority.max(PiecePriority::Normal);
+                p.base_priority = PiecePriority::Normal;
             }
         }
         drop(pieces);
@@ -877,6 +875,7 @@ impl File {
         let mut pieces = self.torrent.pieces.write();
         for i in start_piece..end_piece.min(pieces.len()) {
             pieces[i].priority = p;
+            pieces[i].base_priority = p;
         }
         drop(pieces);
         self.torrent.bump_change();

@@ -19,7 +19,7 @@ use crate::picker::{
     piece_req_index_range, req_index_from_piece_and_offset, should_steal_urgent, ActiveRequest,
     HEDGES_PER_NUDGE, HOL_RESCUES_PER_NUDGE, HOL_WINDOW_BLOCKS, SLOW_PEER_BYTES_PER_SEC,
 };
-use crate::reader::{reader_piece_priorities, PieceRange, ReaderHost};
+use crate::reader::PieceRange;
 use crate::storage_adapter::verify_piece_hash;
 use crate::tuning::current_seek_tuning;
 use crate::wire::Message;
@@ -28,6 +28,7 @@ use crate::{CoreError, PieceState, Result};
 pub struct PieceEntry {
     pub index: PieceIndex,
     pub priority: PiecePriority,
+    pub base_priority: PiecePriority,
     pub complete: bool,
     pub checking: bool,
     pub partial: bool,
@@ -55,6 +56,7 @@ impl PieceEntry {
         Self {
             index,
             priority: PiecePriority::None,
+            base_priority: PiecePriority::None,
             complete: false,
             checking: false,
             partial: false,
@@ -305,7 +307,7 @@ impl TorrentInner {
         let total_len = info.total_length();
         for i in 0..num_pieces {
             let mut entry = PieceEntry::new(i as PieceIndex, piece_len, total_len);
-            if self.download_all_requested.load(Ordering::Relaxed) { entry.priority = PiecePriority::Normal; }
+            if self.download_all_requested.load(Ordering::Relaxed) { entry.priority = PiecePriority::Normal; entry.base_priority = PiecePriority::Normal; }
             piece_entries.push(entry);
         }
 
@@ -944,173 +946,3 @@ impl TorrentInner {
     }
 }
 
-impl ReaderHost for TorrentInner {
-    fn have(&self, offset: i64, len: i64, responsive: bool) -> i64 {
-        let info_guard = self.info.read();
-        let Some(info) = &*info_guard else {
-            return 0;
-        };
-        let piece_len = info.piece_length;
-        let total = info.total_length();
-        let mut off = offset;
-        let mut max = len;
-        let mut ret = 0i64;
-        let pieces = self.pieces.read();
-        let dirty = self.dirty_chunks.read();
-        while max > 0 {
-            if off < 0 || off >= total {
-                break;
-            }
-            let piece = (off / piece_len) as u32;
-            let in_piece = off % piece_len;
-            let chunk_start = (in_piece / BLOCK_SIZE as i64) * BLOCK_SIZE as i64;
-            let piece_end = ((piece as i64 + 1) * piece_len).min(total);
-            let piece_base = piece as i64 * piece_len;
-            let chunk_len = (piece_end - (piece_base + chunk_start)).min(BLOCK_SIZE as i64);
-            if chunk_len <= 0 {
-                break;
-            }
-            let complete = pieces.get(piece as usize).map(|p| p.complete).unwrap_or(false);
-            if !responsive && !complete {
-                break;
-            }
-            if !complete {
-                let req = req_index_from_piece_and_offset(piece, chunk_start as u32, piece_len);
-                if !dirty.contains(&req) {
-                    break;
-                }
-            }
-            let len1 = chunk_len - (in_piece - chunk_start);
-            if len1 <= 0 {
-                break;
-            }
-            max -= len1;
-            ret += len1;
-            off += len1;
-        }
-        if max < 0 {
-            ret += max;
-        }
-        ret
-    }
-
-    fn wait_change(&self, after: u64, timeout: Duration) -> u64 {
-        let deadline = std::time::Instant::now() + timeout;
-        let mut g = self.change_mutex.lock();
-        loop {
-            let cur = self.change_version.load(Ordering::SeqCst);
-            if cur > after || std::time::Instant::now() >= deadline {
-                return cur;
-            }
-            let wait = deadline.saturating_duration_since(std::time::Instant::now());
-            if wait.is_zero() {
-                return cur;
-            }
-            self.change_cond.wait_for(&mut g, wait);
-        }
-    }
-
-    fn change_version(&self) -> u64 {
-        self.change_version.load(Ordering::SeqCst)
-    }
-
-    fn set_reader_positions(&self, reader_id: u64, range: PieceRange) {
-        self.reader_ranges.write().insert(reader_id, range);
-        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
-        let (now, readahead) = reader_piece_priorities(&ranges);
-        let mut pieces = self.pieces.write();
-        for piece in pieces.iter_mut() {
-            if now.contains(&piece.index) {
-                piece.priority = PiecePriority::Now;
-            } else if readahead.contains(&piece.index) {
-                piece.priority = PiecePriority::High;
-            }
-        }
-        drop(pieces);
-        self.bump_change();
-        self.nudge_urgent_requests();
-    }
-
-    fn clear_reader(&self, reader_id: u64) {
-        self.reader_ranges.write().remove(&reader_id);
-        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
-        let (now, readahead) = reader_piece_priorities(&ranges);
-        let mut pieces = self.pieces.write();
-        for piece in pieces.iter_mut() {
-            if now.contains(&piece.index) {
-                piece.priority = PiecePriority::Now;
-            } else if readahead.contains(&piece.index) {
-                piece.priority = PiecePriority::High;
-            }
-        }
-        drop(pieces);
-        self.bump_change();
-    }
-
-    fn read_at(&self, buf: &mut [u8], torrent_offset: i64) -> std::io::Result<usize> {
-        let info_guard = self.info.read();
-        let Some(info) = &*info_guard else {
-            return Ok(0);
-        };
-        let storage_guard = self.storage.read();
-        let Some(storage) = &*storage_guard else {
-            return Ok(0);
-        };
-        if torrent_offset < 0 || torrent_offset >= info.total_length() || buf.is_empty() {
-            return Ok(0);
-        }
-
-        let piece_len = info.piece_length;
-        let mut total_read = 0;
-        let mut cur_offset = torrent_offset;
-
-        while total_read < buf.len() && cur_offset < info.total_length() {
-            let piece_idx = (cur_offset / piece_len) as u32;
-            let offset_in_piece = cur_offset % piece_len;
-            let piece_obj = info.piece(piece_idx);
-            let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece_idx));
-            let bytes_in_piece = (piece_obj.length - offset_in_piece) as usize;
-            let want = (buf.len() - total_read).min(bytes_in_piece);
-
-            match piece_storage.read_at(&mut buf[total_read..total_read + want], offset_in_piece) {
-                Ok(n) => {
-                    if n == 0 {
-                        break;
-                    }
-                    total_read += n;
-                    cur_offset += n as i64;
-                }
-                Err(e) => {
-                    return Err(std::io::Error::other(format!("storage read error: {e}")));
-                }
-            }
-        }
-
-        Ok(total_read)
-    }
-
-    fn piece_length(&self) -> Option<i64> {
-        self.info.read().as_ref().map(|i| i.piece_length)
-    }
-
-    fn torrent_length(&self) -> i64 {
-        self.info.read().as_ref().map(|i| i.total_length()).unwrap_or(0)
-    }
-
-    fn num_pieces(&self) -> u32 {
-        self.info.read().as_ref().map(|i| i.num_pieces()).unwrap_or(0)
-    }
-
-    fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
-    }
-
-    fn has_info(&self) -> bool {
-        self.info.read().is_some()
-    }
-
-    fn on_read_waiting(&self, torrent_offset: i64) {
-        self.request_focus.store(torrent_offset + 1, Ordering::Relaxed);
-        self.nudge_urgent_requests();
-    }
-}
