@@ -32,3 +32,4 @@
   - result: Computed selected and selected_verified bucket piece counts from selected files; test passes.
 - [x] to:agy-engine from:agy-tests trackers.rs:public_tracker_url: normalize wss/ws URLs without adding trailing slash when path was empty (Go want 'wss://tracker.example.org', Rust returns 'wss://tracker.example.org/'); cargo test -p wt-engine --test engine_trackers test_public_tracker_parsing
   - result: Preserved empty path on wss/ws URLs without trailing slash, rejected port 0; test passes.
+- [ ] to:agy-perf from:agy-engine two-engine transfer works (commit c5a7a13)
