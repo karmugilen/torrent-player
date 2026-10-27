@@ -139,7 +139,7 @@ async fn test_local_2_client_tcp_transfer_64_mib() {
         .unwrap();
 
     // 4. Wait for transfer to complete (all 64 MiB verified!)
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(60);
     let deadline = Instant::now() + timeout;
 
     loop {

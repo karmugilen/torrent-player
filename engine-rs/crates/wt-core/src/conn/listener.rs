@@ -1,16 +1,14 @@
 //! Incoming TCP and uTP listeners with MSE, InfoHash routing, and half-open tracking.
+//!
+//! LTEP / HaveNone / Unchoke are sent by `PeerConnHandler::start` (Go `sendInitialMessages`).
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bytes::BytesMut;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Notify};
 use wt_types::{InfoHash, PeerId, PeerSource, Transport};
-use wt_wire::ext::{ExtendedHandshake, EXTENSION_NAME_METADATA, EXTENSION_NAME_PEX};
 use wt_wire::handshake::{default_peer_extension_bytes, handshake_incoming, PeerExtensionBits};
 use wt_wire::message::Message;
 use wt_wire::mse::{handle_encryption, CryptoMethod};
@@ -25,7 +23,7 @@ use crate::{ClientConfig, CoreError, PeerStream, Result};
 pub struct AcceptedConn {
     pub stream: Box<dyn PeerStream>,
     pub handle: ConnHandle,
-    pub write_rx: mpsc::Receiver<Message>,
+    pub write_rx: mpsc::UnboundedReceiver<Message>,
     pub write_waker: Arc<Notify>,
     pub info_hash: InfoHash,
     pub peer_id: PeerId,
@@ -317,40 +315,8 @@ async fn handle_inbound_inner(
     let peer_ext_bits = peer_hs.extensions;
     let peer_id = peer_hs.peer_id;
 
-    // 3. Send LTEP extension handshake
-    if peer_ext_bits.supports_extended() {
-        let mut extensions_map = BTreeMap::new();
-        extensions_map.insert(EXTENSION_NAME_METADATA.to_string(), 1);
-        if !cfg.disable_pex {
-            extensions_map.insert(EXTENSION_NAME_PEX.to_string(), 2);
-        }
-
-        let ext_dict = ExtendedHandshake {
-            m: extensions_map,
-            v: Some(cfg.extended_handshake_client_version.clone()),
-            p: Some(cfg.listen_port),
-            yourip: Some(peer_addr.ip()),
-            ipv4: None,
-            ipv6: None,
-            reqq: Some(250),
-            metadata_size: None,
-            upload_only: Some(cfg.seed),
-            encryption: Some(is_encrypted),
-        };
-
-        let ext_msg = Message::Extended {
-            id: 0,
-            payload: ext_dict.encode(),
-        };
-
-        let mut out_bytes = BytesMut::new();
-        ext_msg.encode(&mut out_bytes);
-        let _ = stream.write_all(&out_bytes).await;
-        let _ = stream.flush().await;
-    }
-
-    // 4. Construct ConnHandle
-    let (write_tx, write_rx) = mpsc::channel(256);
+    // LTEP / HaveNone / Unchoke deferred to PeerConnHandler::start (Go sendInitialMessages).
+    let (write_tx, write_rx) = mpsc::unbounded_channel();
     let write_waker = Arc::new(Notify::new());
     let closed = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(AtomicConnStats::default());
@@ -363,6 +329,7 @@ async fn handle_inbound_inner(
         info_hash,
         Some(peer_id),
         PeerSource::Incoming,
+        peer_ext_bits.0,
         write_tx,
         write_waker.clone(),
         closed,

@@ -33,3 +33,4 @@ hex.workspace = true
 mainline = { version = "8", default-features = false, features = ["async"] }
 parking_lot.workspace = true
 wt-discovery.workspace = true
+wt-meta.workspace = true

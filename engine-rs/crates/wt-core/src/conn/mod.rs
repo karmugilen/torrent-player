@@ -70,7 +70,7 @@ pub mod handle;
 pub mod listener;
 pub mod shared_udp;
 
-pub use dialer::{dial_peer, DialOutcome, DialParams};
+pub use dialer::{dial_peer, DialOutcome, DialParams, OUTBOUND_MSG_QUEUE};
 pub use driver::{spawn_connection_driver, DEFAULT_KEEPALIVE_TIMEOUT, DEFAULT_READ_DEADLINE};
 pub use half_open::{GlobalHalfOpenGuard, HalfOpenTracker, TorrentHalfOpenGuard};
 pub use handle::{ConnHandle, ConnHandler};

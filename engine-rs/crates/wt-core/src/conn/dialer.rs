@@ -259,6 +259,13 @@ async fn dial_first_raw(
                                 pending = pending.saturating_sub(1);
                                 drain_remaining_dials(rx, pending);
                                 let (w_stream, w_t) = winner.take().unwrap();
+                                // Prefer uTP when both raw-connect within the grace
+                                // window so public swarms pick up libtorrent/qBittorrent
+                                // uTP peers (Go holds ~25% uTP on Ubuntu). TCP remains
+                                // the handshake spare.
+                                if w_t == Transport::Tcp && t2 == Transport::Utp {
+                                    return Ok((s2, t2, Some((w_stream, w_t))));
+                                }
                                 return Ok((w_stream, w_t, Some((s2, t2))));
                             }
                             Ok(Some((_t2, Err(e)))) => {

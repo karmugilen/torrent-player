@@ -15,16 +15,40 @@ use wt_core::ratelimit::{Limiter, DEFAULT_DOWNLOAD_BURST};
 use wt_core::{ClientConfig, Result};
 use wt_discovery::DatagramIo;
 use wt_types::{InfoHash, PeerId, PeerSource, Transport};
+use wt_wire::ext::{ExtendedHandshake, EXTENSION_NAME_METADATA, EXTENSION_NAME_PEX};
 use wt_wire::message::Message;
 use wt_wire::utp::UtpSocket;
 
+/// Simulate `PeerConnHandler::start` LTEP (dialer/listener no longer write it).
+fn send_test_ltep(handle: &ConnHandle, version: &str) {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert(EXTENSION_NAME_METADATA.to_string(), 1);
+    m.insert(EXTENSION_NAME_PEX.to_string(), 2);
+    let ext = ExtendedHandshake {
+        m,
+        v: Some(version.to_string()),
+        p: Some(0),
+        yourip: None,
+        ipv4: None,
+        ipv6: None,
+        reqq: Some(1024),
+        metadata_size: None,
+        upload_only: Some(false),
+        encryption: Some(false),
+    };
+    assert!(handle.send_message(Message::Extended {
+        id: 0,
+        payload: ext.encode(),
+    }));
+}
+
 struct ChannelHandler {
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::UnboundedSender<Message>,
 }
 
 impl ConnHandler for ChannelHandler {
     fn on_message(&mut self, _handle: &ConnHandle, msg: Message) -> Result<()> {
-        let _ = self.tx.try_send(msg);
+        let _ = self.tx.send(msg);
         Ok(())
     }
 
@@ -128,8 +152,8 @@ async fn test_tcp_dial_and_accept_roundtrip() {
     assert_eq!(client_outcome.peer_id, server_peer_id);
 
     // Spawn drivers on both sides and verify message transfer
-    let (s_msg_tx, mut s_msg_rx) = mpsc::channel(16);
-    let (c_msg_tx, mut c_msg_rx) = mpsc::channel(16);
+    let (s_msg_tx, mut s_msg_rx) = mpsc::unbounded_channel();
+    let (c_msg_tx, mut c_msg_rx) = mpsc::unbounded_channel();
 
     let (_s_r, _s_w) = spawn_connection_driver(
         server_conn.stream,
@@ -155,17 +179,33 @@ async fn test_tcp_dial_and_accept_roundtrip() {
         Duration::from_secs(60),
     );
 
-    // Verify server receives ExtendedHandshake as first message
+    // PeerConnHandler::start owns LTEP; exercise that path via handles.
+    send_test_ltep(&client_outcome.handle, "WebtorCoreTest/1.0");
+    send_test_ltep(&server_conn.handle, "WebtorCoreTest/1.0");
+
     let s_ext = tokio::time::timeout(Duration::from_secs(2), s_msg_rx.recv())
         .await
         .expect("server rx timeout")
         .expect("server msg");
     if let Message::Extended { id, payload } = s_ext {
         assert_eq!(id, 0);
-        let ext = wt_wire::ext::ExtendedHandshake::decode(&payload).expect("decode ext");
+        let ext = ExtendedHandshake::decode(&payload).expect("decode ext");
         assert_eq!(ext.v.as_deref(), Some("WebtorCoreTest/1.0"));
+        assert_eq!(ext.reqq, Some(1024));
     } else {
         panic!("expected ExtendedHandshake, got {s_ext:?}");
+    }
+
+    let c_ext = tokio::time::timeout(Duration::from_secs(2), c_msg_rx.recv())
+        .await
+        .expect("client rx timeout")
+        .expect("client msg");
+    if let Message::Extended { id, payload } = c_ext {
+        assert_eq!(id, 0);
+        let ext = ExtendedHandshake::decode(&payload).expect("decode ext");
+        assert_eq!(ext.v.as_deref(), Some("WebtorCoreTest/1.0"));
+    } else {
+        panic!("expected ExtendedHandshake, got {c_ext:?}");
     }
 
     // Client sends Interested, server sends Unchoke
@@ -177,19 +217,6 @@ async fn test_tcp_dial_and_accept_roundtrip() {
         .expect("server rx timeout")
         .expect("server msg");
     assert_eq!(s_received, Message::Interested);
-
-    // Client receives ExtendedHandshake as first message
-    let c_ext = tokio::time::timeout(Duration::from_secs(2), c_msg_rx.recv())
-        .await
-        .expect("client rx timeout")
-        .expect("client msg");
-    if let Message::Extended { id, payload } = c_ext {
-        assert_eq!(id, 0);
-        let ext = wt_wire::ext::ExtendedHandshake::decode(&payload).expect("decode ext");
-        assert_eq!(ext.v.as_deref(), Some("WebtorCoreTest/1.0"));
-    } else {
-        panic!("expected ExtendedHandshake, got {c_ext:?}");
-    }
 
     let c_received = tokio::time::timeout(Duration::from_secs(2), c_msg_rx.recv())
         .await
@@ -318,7 +345,7 @@ async fn test_utp_dial_and_accept_roundtrip() {
     assert_eq!(client_outcome.peer_id, server_peer_id);
 
     // Verify roundtrip message over uTP
-    let (s_msg_tx, mut s_msg_rx) = mpsc::channel(16);
+    let (s_msg_tx, mut s_msg_rx) = mpsc::unbounded_channel();
     let (_s_r, _s_w) = spawn_connection_driver(
         server_conn.stream,
         ChannelHandler { tx: s_msg_tx },
@@ -331,7 +358,7 @@ async fn test_utp_dial_and_accept_roundtrip() {
         Duration::from_secs(60),
     );
 
-    let (c_msg_tx, mut c_msg_rx) = mpsc::channel(16);
+    let (c_msg_tx, mut c_msg_rx) = mpsc::unbounded_channel();
     let (_c_r, _c_w) = spawn_connection_driver(
         client_outcome.stream,
         ChannelHandler { tx: c_msg_tx },
@@ -344,27 +371,28 @@ async fn test_utp_dial_and_accept_roundtrip() {
         Duration::from_secs(60),
     );
 
-    // Verify client receives ExtendedHandshake first
+    send_test_ltep(&client_outcome.handle, "WebtorCoreTest/1.0");
+    send_test_ltep(&server_conn.handle, "WebtorCoreTest/1.0");
+
     let c_ext = tokio::time::timeout(Duration::from_secs(3), c_msg_rx.recv())
         .await
         .expect("client rx timeout")
         .expect("client msg");
     if let Message::Extended { id, payload } = c_ext {
         assert_eq!(id, 0);
-        let ext = wt_wire::ext::ExtendedHandshake::decode(&payload).expect("decode ext");
+        let ext = ExtendedHandshake::decode(&payload).expect("decode ext");
         assert_eq!(ext.v.as_deref(), Some("WebtorCoreTest/1.0"));
     } else {
         panic!("expected ExtendedHandshake, got {c_ext:?}");
     }
 
-    // Verify server receives ExtendedHandshake first
     let s_ext = tokio::time::timeout(Duration::from_secs(3), s_msg_rx.recv())
         .await
         .expect("server rx timeout")
         .expect("server msg");
     if let Message::Extended { id, payload } = s_ext {
         assert_eq!(id, 0);
-        let ext = wt_wire::ext::ExtendedHandshake::decode(&payload).expect("decode ext");
+        let ext = ExtendedHandshake::decode(&payload).expect("decode ext");
         assert_eq!(ext.v.as_deref(), Some("WebtorCoreTest/1.0"));
     } else {
         panic!("expected ExtendedHandshake, got {s_ext:?}");
@@ -427,7 +455,7 @@ async fn test_half_open_limits_enforced() {
 async fn test_rate_limiter_caps_throughput_within_10_percent() {
     let (pipe_a, pipe_b) = tokio::io::duplex(256 * 1024);
 
-    let (write_tx_a, write_rx_a) = mpsc::channel(256);
+    let (write_tx_a, write_rx_a) = mpsc::unbounded_channel();
     let write_waker_a = Arc::new(Notify::new());
     let handle_a = ConnHandle::new(
         "127.0.0.1:1000".parse().unwrap(),
@@ -437,13 +465,14 @@ async fn test_rate_limiter_caps_throughput_within_10_percent() {
         InfoHash([0; 20]),
         None,
         PeerSource::Direct,
+        [0u8; 8],
         write_tx_a,
         write_waker_a.clone(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(wt_core::stats::AtomicConnStats::default()),
     );
 
-    let (write_tx_b, write_rx_b) = mpsc::channel(256);
+    let (write_tx_b, write_rx_b) = mpsc::unbounded_channel();
     let write_waker_b = Arc::new(Notify::new());
     let handle_b = ConnHandle::new(
         "127.0.0.1:2000".parse().unwrap(),
@@ -453,6 +482,7 @@ async fn test_rate_limiter_caps_throughput_within_10_percent() {
         InfoHash([0; 20]),
         None,
         PeerSource::Incoming,
+        [0u8; 8],
         write_tx_b,
         write_waker_b.clone(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -488,7 +518,7 @@ async fn test_rate_limiter_caps_throughput_within_10_percent() {
     let (_r_a, _w_a) = spawn_connection_driver(
         pipe_a,
         ChannelHandler {
-            tx: mpsc::channel(1).0,
+            tx: mpsc::unbounded_channel().0,
         },
         handle_a.clone(),
         write_rx_a,
@@ -545,7 +575,7 @@ async fn test_rate_limiter_caps_throughput_within_10_percent() {
 async fn test_conn_handle_64mib_transfer_throughput() {
     let (pipe_a, pipe_b) = tokio::io::duplex(1024 * 1024);
 
-    let (write_tx_a, write_rx_a) = mpsc::channel(1024);
+    let (write_tx_a, write_rx_a) = mpsc::unbounded_channel();
     let write_waker_a = Arc::new(Notify::new());
     let handle_a = ConnHandle::new(
         "127.0.0.1:3000".parse().unwrap(),
@@ -555,13 +585,14 @@ async fn test_conn_handle_64mib_transfer_throughput() {
         InfoHash([0; 20]),
         None,
         PeerSource::Direct,
+        [0u8; 8],
         write_tx_a,
         write_waker_a.clone(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(wt_core::stats::AtomicConnStats::default()),
     );
 
-    let (write_tx_b, write_rx_b) = mpsc::channel(1024);
+    let (write_tx_b, write_rx_b) = mpsc::unbounded_channel();
     let write_waker_b = Arc::new(Notify::new());
     let handle_b = ConnHandle::new(
         "127.0.0.1:4000".parse().unwrap(),
@@ -571,6 +602,7 @@ async fn test_conn_handle_64mib_transfer_throughput() {
         InfoHash([0; 20]),
         None,
         PeerSource::Incoming,
+        [0u8; 8],
         write_tx_b,
         write_waker_b.clone(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -602,7 +634,7 @@ async fn test_conn_handle_64mib_transfer_throughput() {
     let (_r_a, _w_a) = spawn_connection_driver(
         pipe_a,
         ChannelHandler {
-            tx: mpsc::channel(1).0,
+            tx: mpsc::unbounded_channel().0,
         },
         handle_a.clone(),
         write_rx_a,
@@ -719,7 +751,7 @@ async fn request_wake_is_coalesced_and_does_not_extend_read_deadline() {
         }
     }
     let (stream, _peer) = tokio::io::duplex(1024);
-    let (tx, rx) = mpsc::channel(8);
+    let (tx, rx) = mpsc::unbounded_channel();
     let waker = Arc::new(Notify::new());
     let handle = ConnHandle::new(
         "127.0.0.1:1".parse().unwrap(),
@@ -729,6 +761,7 @@ async fn request_wake_is_coalesced_and_does_not_extend_read_deadline() {
         InfoHash([0; 20]),
         None,
         PeerSource::Direct,
+        [0u8; 8],
         tx,
         waker.clone(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),

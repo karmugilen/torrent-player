@@ -19,6 +19,7 @@ use wt_core::strategy::{
 use wt_core::tuning::SeekTuning;
 use wt_core::{PiecePriority, RequestIndex, Result};
 use wt_types::{InfoHash, PeerSource, Transport};
+use wt_wire::handshake::default_peer_extension_bytes;
 use wt_wire::ext::{
     ExtendedHandshake, MetadataMsg, MetadataMsgType, PexMsg, EXTENSION_NAME_METADATA,
     EXTENSION_NAME_PEX,
@@ -317,8 +318,8 @@ impl PeerTorrent for FakeTorrent {
     fn on_chunk_received(&self, _peer: PeerKey, _req: RequestIndex, _len: usize) {}
 }
 
-fn make_handle(addr: SocketAddr) -> (ConnHandle, mpsc::Receiver<Message>) {
-    let (tx, rx) = mpsc::channel(64);
+fn make_handle(addr: SocketAddr) -> (ConnHandle, mpsc::UnboundedReceiver<Message>) {
+    let (tx, rx) = mpsc::unbounded_channel();
     let waker = Arc::new(Notify::new());
     let closed = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(wt_core::stats::AtomicConnStats::default());
@@ -330,6 +331,7 @@ fn make_handle(addr: SocketAddr) -> (ConnHandle, mpsc::Receiver<Message>) {
         InfoHash([7u8; 20]),
         None,
         PeerSource::Direct,
+        default_peer_extension_bytes().0,
         tx,
         waker,
         closed,
@@ -338,12 +340,44 @@ fn make_handle(addr: SocketAddr) -> (ConnHandle, mpsc::Receiver<Message>) {
     (handle, rx)
 }
 
-fn drain(rx: &mut mpsc::Receiver<Message>) -> Vec<Message> {
+fn drain(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<Message> {
     let mut out = Vec::new();
     while let Ok(m) = rx.try_recv() {
         out.push(m);
     }
     out
+}
+
+#[test]
+fn start_sends_ltep_havenone_and_unchoke() {
+    let tor = FakeTorrent::new();
+    let addr: SocketAddr = "127.0.0.1:3999".parse().unwrap();
+    let (handle, mut rx) = make_handle(addr);
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.start(&handle);
+    let msgs = drain(&mut rx);
+    let ext = msgs.iter().find_map(|m| match m {
+        Message::Extended { id: 0, payload } => {
+            Some(ExtendedHandshake::decode(payload).expect("ltep"))
+        }
+        _ => None,
+    });
+    let ext = ext.expect("expected LTEP handshake");
+    assert_eq!(ext.reqq, Some(1024));
+    assert!(ext.m.contains_key(EXTENSION_NAME_METADATA));
+    assert!(ext.m.contains_key(EXTENSION_NAME_PEX));
+    assert!(
+        msgs.iter().any(|m| matches!(m, Message::HaveNone)),
+        "expected HaveNone when Fast+no pieces, got {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| matches!(m, Message::Unchoke)),
+        "expected Unchoke, got {msgs:?}"
+    );
+    assert!(
+        msgs.iter().all(|m| !matches!(m, Message::Bitfield(_))),
+        "should not send empty Bitfield when HaveNone applies: {msgs:?}"
+    );
 }
 
 #[test]

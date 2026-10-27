@@ -28,7 +28,7 @@ pub fn spawn_connection_driver<H, S>(
     stream: S,
     mut handler: H,
     handle: ConnHandle,
-    mut write_rx: mpsc::Receiver<Message>,
+    mut write_rx: mpsc::UnboundedReceiver<Message>,
     write_waker: Arc<Notify>,
     download_limiter: Option<Limiter>,
     upload_limiter: Option<Limiter>,
@@ -90,7 +90,11 @@ async fn run_reader_loop<H>(
         let interval = handler
             .wake_interval()
             .map(|d| d.max(Duration::from_millis(1)));
+        // Prefer reading peer messages over wake timers. With a large pipeline the
+        // outstanding-aware wake fires every 100ms; without `biased`, select can
+        // starve Piece reads and stall the transfer for tens of seconds.
         let msg = tokio::select! {
+            biased;
             result = reader.read_msg() => result,
             _ = handle.read_waker().notified() => {
                 if !handle.is_closed() { handler.on_wake(handle); }
@@ -162,7 +166,7 @@ async fn run_reader_loop<H>(
 async fn run_writer_loop(
     mut write_half: WriteHalf<impl PeerStream>,
     handle: &ConnHandle,
-    write_rx: &mut mpsc::Receiver<Message>,
+    write_rx: &mut mpsc::UnboundedReceiver<Message>,
     write_waker: Arc<Notify>,
     upload_limiter: Option<&Limiter>,
     keepalive_timeout: Duration,

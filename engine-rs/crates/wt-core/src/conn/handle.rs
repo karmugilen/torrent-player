@@ -42,11 +42,13 @@ pub struct ConnHandleInner {
     pub info_hash: InfoHash,
     pub peer_id: Option<PeerId>,
     pub source: PeerSource,
+    /// Peer's reserved handshake bits (LTEP / Fast / DHT).
+    pub peer_extension_bits: [u8; 8],
     pub connected_at: Instant,
     pub closed: Arc<AtomicBool>,
     pub close_reason: RwLock<Option<String>>,
     pub stats: Arc<AtomicConnStats>,
-    pub write_tx: mpsc::Sender<Message>,
+    pub write_tx: mpsc::UnboundedSender<Message>,
     pub write_waker: Arc<Notify>,
     pub read_waker: Notify,
 }
@@ -62,7 +64,8 @@ impl ConnHandle {
         info_hash: InfoHash,
         peer_id: Option<PeerId>,
         source: PeerSource,
-        write_tx: mpsc::Sender<Message>,
+        peer_extension_bits: [u8; 8],
+        write_tx: mpsc::UnboundedSender<Message>,
         write_waker: Arc<Notify>,
         closed: Arc<AtomicBool>,
         stats: Arc<AtomicConnStats>,
@@ -76,6 +79,7 @@ impl ConnHandle {
                 info_hash,
                 peer_id,
                 source,
+                peer_extension_bits,
                 connected_at: Instant::now(),
                 closed,
                 close_reason: RwLock::new(None),
@@ -88,13 +92,14 @@ impl ConnHandle {
     }
 
     /// Queue a message to be written to the peer (non-blocking).
-    /// Returns `true` if queued, `false` if the buffer/queue is full or closed.
+    /// Returns `true` if queued, `false` if the connection is closed.
+    /// Unbounded so Piece replies are never try_send-dropped under a full pipeline.
     pub fn send_message(&self, msg: Message) -> bool {
         if self.is_closed() {
             return false;
         }
-        match self.inner.write_tx.try_send(msg) {
-            Ok(_) => {
+        match self.inner.write_tx.send(msg) {
+            Ok(()) => {
                 self.inner.write_waker.notify_waiters();
                 true
             }
@@ -102,18 +107,13 @@ impl ConnHandle {
         }
     }
 
-    /// Queue a message with async backpressure when the outbound queue is full.
+    /// Queue a message (unbounded writer; fails only when closed).
     pub async fn send_message_async(&self, msg: Message) -> Result<()> {
-        if self.is_closed() {
-            return Err(CoreError::Closed);
+        if self.send_message(msg) {
+            Ok(())
+        } else {
+            Err(CoreError::Closed)
         }
-        self.inner
-            .write_tx
-            .send(msg)
-            .await
-            .map_err(|_| CoreError::Closed)?;
-        self.inner.write_waker.notify_waiters();
-        Ok(())
     }
 
     /// Explicitly wake the connection writer to flush queued messages.
@@ -169,6 +169,16 @@ impl ConnHandle {
     /// Whether Message Stream Encryption (MSE) is active.
     pub fn is_encrypted(&self) -> bool {
         self.inner.encrypted
+    }
+
+    /// Discovery / dial source for this connection.
+    pub fn source(&self) -> PeerSource {
+        self.inner.source
+    }
+
+    /// Peer's reserved BitTorrent handshake extension bits.
+    pub fn peer_extension_bits(&self) -> [u8; 8] {
+        self.inner.peer_extension_bits
     }
 
     /// InfoHash associated with this peer session.

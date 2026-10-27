@@ -605,6 +605,8 @@ impl Torrent {
             .data_upload_disallowed
             .store(false, Ordering::Relaxed);
         self.inner.bump_change();
+        // Wake peer handlers so on_wake can send Unchoke promptly.
+        self.inner.wake_all_connections();
     }
 
     pub fn disallow_data_upload(&self) {
@@ -612,6 +614,8 @@ impl Torrent {
             .data_upload_disallowed
             .store(true, Ordering::Relaxed);
         self.inner.bump_change();
+        // Wake peer handlers so on_wake can send Choke promptly.
+        self.inner.wake_all_connections();
     }
 
     pub fn bump_change(&self) {
