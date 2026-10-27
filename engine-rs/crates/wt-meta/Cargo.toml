@@ -7,7 +7,11 @@ publish.workspace = true
 
 [dependencies]
 wt-types.workspace = true
-thiserror.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 hex.workspace = true
+data-encoding = "2"
+
+[dev-dependencies]
+quickcheck = "1"
+quickcheck_macros = "1"
