@@ -13,6 +13,7 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use wt_discovery::webtorrent::Transport;
 
 async fn new_api() -> webrtc::api::API {
+    wt_discovery::ensure_rustls_provider();
     let mut media = MediaEngine::default();
     media.register_default_codecs().unwrap();
     let mut registry = Registry::new();

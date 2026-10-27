@@ -1,17 +1,17 @@
 //! BEP 5 mainline DHT.
 //!
-//! Wraps the pure-Rust `mainline` crate for dedicated-socket mode, and exposes
-//! [`DhtPacketIo`] so `wt-wire`'s uTP can demux a shared UDP socket (DHT
-//! payloads are bencoded and start with `d`).
+//! Wraps the pure-Rust `mainline` crate for dedicated-socket mode, and accepts
+//! [`DatagramIo`] / [`DhtPacketIo`] so core can share `wt-wire`'s uTP UDP socket
+//! (DHT payloads are bencoded and typically start with `d`).
 
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use wt_types::InfoHash;
+
+use crate::datagram::{DatagramIo, StandaloneDatagram};
 
 /// Anacrolix / Go default bootstrap host:ports.
 pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &[
@@ -25,20 +25,8 @@ pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &[
     "router.bittorrent.cloud:42069",
 ];
 
-/// Future returned by [`DhtPacketIo`] send/recv helpers.
-pub type IoFut<'a, T> = Pin<Box<dyn Future<Output = std::io::Result<T>> + Send + 'a>>;
-
-/// Shared UDP IO so DHT and uTP can coexist on one socket.
-///
-/// Packet demux tip: BitTorrent DHT (BEP 5) messages are bencoded dicts and
-/// typically begin with `d` (0x64). uTP packets use a different header.
-pub trait DhtPacketIo: Send + Sync + 'static {
-    fn send_to<'a>(&'a self, buf: &'a [u8], addr: SocketAddr) -> IoFut<'a, usize>;
-
-    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> IoFut<'a, (usize, SocketAddr)>;
-
-    fn local_addr(&self) -> std::io::Result<SocketAddr>;
-}
+/// Shared UDP IO so DHT and uTP can coexist (alias of [`DatagramIo`]).
+pub use crate::datagram::{DatagramIo as DhtPacketIo, IoFut};
 
 /// Good DHT contact for persistence (engine saves/restores these).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -119,6 +107,8 @@ pub struct DhtNode {
     id: [u8; 20],
     local: Mutex<Option<SocketAddr>>,
     periodic: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Shared datagram IO when coexisting with uTP; `None` in dedicated mode.
+    shared_io: Option<Arc<dyn DatagramIo>>,
 }
 
 impl DhtNode {
@@ -163,16 +153,60 @@ impl DhtNode {
             id,
             local: Mutex::new(Some(local)),
             periodic: Mutex::new(Vec::new()),
+            shared_io: None,
         })
     }
 
-    /// Construct against a shared packet IO (stub until wt-wire demux lands).
+    /// Construct against shared datagram IO (core wraps wt-wire non-uTP demux).
     ///
-    /// Currently falls back to a dedicated socket; the `io` handle is retained
-    /// for future demux integration. Ask coordinator / see PORT_NOTES.
-    pub async fn with_packet_io(io: Arc<dyn DhtPacketIo>, cfg: DhtConfig) -> Result<Self> {
-        let _ = io;
-        Self::new(cfg).await
+    /// Full KRPC iterative routing still uses a dedicated `mainline` socket
+    /// (that crate owns its bind). The `io` handle is retained for demuxed
+    /// non-uTP send/recv (tests + future in-crate KRPC over the shared socket).
+    pub async fn with_packet_io(io: Arc<dyn DatagramIo>, cfg: DhtConfig) -> Result<Self> {
+        Self::with_datagram_io(io, cfg).await
+    }
+
+    /// Same as [`Self::with_packet_io`].
+    pub async fn with_datagram_io(io: Arc<dyn DatagramIo>, cfg: DhtConfig) -> Result<Self> {
+        let local = io.local_addr().ok();
+        let mut node = Self::new(cfg).await?;
+        if let Some(addr) = local {
+            *node.local.lock() = Some(addr);
+        }
+        node.shared_io = Some(io);
+        Ok(node)
+    }
+
+    /// Shared datagram IO if constructed via [`Self::with_datagram_io`].
+    pub fn shared_io(&self) -> Option<Arc<dyn DatagramIo>> {
+        self.shared_io.clone()
+    }
+
+    /// Send a raw datagram on the shared IO (errors if dedicated-only).
+    pub async fn shared_send_to(&self, buf: &[u8], addr: SocketAddr) -> std::io::Result<usize> {
+        match &self.shared_io {
+            Some(io) => io.send_to(buf, addr).await,
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no shared datagram io",
+            )),
+        }
+    }
+
+    /// Receive a raw datagram from the shared IO (errors if dedicated-only).
+    pub async fn shared_recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        match &self.shared_io {
+            Some(io) => io.recv_from(buf).await,
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no shared datagram io",
+            )),
+        }
+    }
+
+    /// Bind a standalone datagram socket implementing [`DatagramIo`].
+    pub async fn standalone_datagram(bind: &str) -> std::io::Result<StandaloneDatagram> {
+        StandaloneDatagram::bind(bind).await
     }
 
     pub fn id(&self) -> [u8; 20] {
@@ -320,6 +354,27 @@ mod tests {
     fn krpc_magic() {
         assert!(looks_like_krpc(b"d1:ad2:id20:"));
         assert!(!looks_like_krpc(&[0x01, 0x00]));
+    }
+
+    #[tokio::test]
+    async fn shared_datagram_io_send_recv() {
+        let a = Arc::new(StandaloneDatagram::bind("127.0.0.1:0").await.unwrap());
+        let b = Arc::new(StandaloneDatagram::bind("127.0.0.1:0").await.unwrap());
+        let cfg = DhtConfig {
+            bootstrap: Vec::new(),
+            ..Default::default()
+        };
+        // with_datagram_io still boots a dedicated mainline node; shared IO is retained.
+        let node = DhtNode::with_datagram_io(a.clone() as Arc<dyn DatagramIo>, cfg)
+            .await
+            .expect("dht");
+        assert!(node.shared_io().is_some());
+        let dest = b.local_addr().unwrap();
+        node.shared_send_to(b"d1:y1:qe", dest).await.unwrap();
+        let mut buf = [0u8; 64];
+        let (n, _) = b.recv_from(&mut buf).await.unwrap();
+        assert!(looks_like_krpc(&buf[..n]));
+        node.close();
     }
 
     #[tokio::test]

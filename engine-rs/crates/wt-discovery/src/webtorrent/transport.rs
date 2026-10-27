@@ -152,6 +152,7 @@ pub struct Transport {
 
 impl Transport {
     async fn new_api() -> Result<webrtc::api::API, WebTorrentError> {
+        crate::ensure_rustls_provider();
         let mut media = MediaEngine::default();
         media
             .register_default_codecs()

@@ -3,7 +3,6 @@
 //! Ports `engine-go/patches/torrent/tracker/` and `client-tracker-announcer.go`.
 
 mod announcer;
-mod bencode_lite;
 mod client;
 mod http;
 mod udp;

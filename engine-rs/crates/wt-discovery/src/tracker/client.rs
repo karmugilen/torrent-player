@@ -10,6 +10,7 @@ use url::Url;
 use super::http::{HttpClient, HttpClientOpts};
 use super::udp::{UdpClient, UdpClientOpts, DEFAULT_TRACKER_ANNOUNCE_TIMEOUT};
 use super::{AnnounceOpt, AnnounceRequest, AnnounceResponse, Result, ScrapeResponse, TrackerError};
+use crate::datagram::DatagramIo;
 
 type DialFut = Pin<Box<dyn Future<Output = std::io::Result<tokio::net::TcpStream>> + Send>>;
 type ListenFut = Pin<Box<dyn Future<Output = std::io::Result<UdpSocket>> + Send>>;
@@ -17,8 +18,8 @@ type ListenFut = Pin<Box<dyn Future<Output = std::io::Result<UdpSocket>> + Send>
 /// Custom TCP dialer hook so the engine can route / track sockets.
 ///
 /// Signature mirrors Go `DialContext(ctx, network, addr) (Conn, error)` but
-/// returns a connected `TcpStream`. Currently stored for HTTP clients; full
-/// reqwest connector wiring is tracked in PORT_NOTES.
+/// returns a connected `TcpStream`. Wired through HTTP(S) tracker clients
+/// (and WebSocket trackers via `webtorrent::TrackerClientConfig::dialer`).
 pub type DialerHook = Arc<dyn Fn(String, String) -> DialFut + Send + Sync>;
 
 /// Custom UDP bind hook (Go `ListenPacket`).
@@ -29,6 +30,10 @@ pub struct ClientOpts {
     pub http: HttpClientOpts,
     pub udp_network: String,
     pub listen_packet: Option<ListenPacketHook>,
+    /// Shared UDP IO for UDP trackers (wt-wire non-uTP demux).
+    pub datagram: Option<Arc<dyn DatagramIo>>,
+    /// Top-level dialer; copied into `http.dialer` when that field is empty.
+    pub dialer: Option<DialerHook>,
 }
 
 /// Tracker client for a single announce URL.
@@ -45,6 +50,9 @@ impl Client {
                 let mut http_opts = opts.http;
                 if http_opts.timeout.is_none() {
                     http_opts.timeout = Some(DEFAULT_TRACKER_ANNOUNCE_TIMEOUT);
+                }
+                if http_opts.dialer.is_none() {
+                    http_opts.dialer = opts.dialer;
                 }
                 Ok(Self::Http(HttpClient::new(url, http_opts)?))
             }
@@ -79,6 +87,7 @@ impl Client {
                     UdpClientOpts {
                         network,
                         listen_packet: opts.listen_packet,
+                        datagram: opts.datagram,
                         timeout: Some(DEFAULT_TRACKER_ANNOUNCE_TIMEOUT),
                     },
                 )

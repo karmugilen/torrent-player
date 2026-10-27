@@ -37,6 +37,7 @@ mainline = { version = "8", default-features = false, features = ["async"] }
 crc32c = "0.6"
 tokio-util = { version = "0.7", features = ["io", "codec"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "0.26"
 
 [dev-dependencies]

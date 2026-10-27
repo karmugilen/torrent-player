@@ -1,4 +1,7 @@
 //! UDP tracker client (BEP 15) with BEP 41 URL path options and Go-matching timeouts.
+//!
+//! IO goes through [`DatagramIo`]: standalone `UdpSocket` by default, or a
+//! shared socket supplied by core (wt-wire non-uTP demux).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,6 +16,7 @@ use super::{
     AnnounceOpt, AnnounceRequest, AnnounceResponse, Peer, Result, ScrapeItem, ScrapeResponse,
     TrackerError,
 };
+use crate::datagram::{DatagramIo, StandaloneDatagram};
 use crate::tracker::client::ListenPacketHook;
 
 /// Default announce timeout used by Go `DefaultTrackerAnnounceTimeout`.
@@ -41,6 +45,8 @@ pub struct UdpClientOpts {
     /// Override network: "udp", "udp4", "udp6".
     pub network: String,
     pub listen_packet: Option<ListenPacketHook>,
+    /// Shared datagram IO (takes precedence over [`Self::listen_packet`]).
+    pub datagram: Option<Arc<dyn DatagramIo>>,
     pub timeout: Option<Duration>,
 }
 
@@ -54,7 +60,7 @@ pub struct UdpClient {
     host: String,
     /// Request URI path+query for BEP 41 (e.g. `/announce?pass=x`).
     request_uri: String,
-    sock: Arc<UdpSocket>,
+    io: Arc<dyn DatagramIo>,
     remote: Mutex<Option<SocketAddr>>,
     state: Mutex<ConnState>,
     overall_timeout: Duration,
@@ -62,10 +68,13 @@ pub struct UdpClient {
 
 impl UdpClient {
     pub async fn new(host: &str, request_uri: &str, opts: UdpClientOpts) -> Result<Self> {
-        let sock = if let Some(hook) = &opts.listen_packet {
-            hook("udp", "0.0.0.0:0")
+        let io: Arc<dyn DatagramIo> = if let Some(d) = opts.datagram {
+            d
+        } else if let Some(hook) = &opts.listen_packet {
+            let sock = hook("udp", "0.0.0.0:0")
                 .await
-                .map_err(|e| TrackerError::Other(e.to_string()))?
+                .map_err(|e| TrackerError::Other(e.to_string()))?;
+            Arc::new(StandaloneDatagram::new(Arc::new(sock)))
         } else {
             let network = if opts.network.is_empty() {
                 "udp"
@@ -77,12 +86,13 @@ impl UdpClient {
                 "udp6" => "[::]:0",
                 _ => "0.0.0.0:0",
             };
-            UdpSocket::bind(bind).await.map_err(TrackerError::Io)?
+            let sock = UdpSocket::bind(bind).await.map_err(TrackerError::Io)?;
+            Arc::new(StandaloneDatagram::new(Arc::new(sock)))
         };
         Ok(Self {
             host: host.to_string(),
             request_uri: request_uri.to_string(),
-            sock: Arc::new(sock),
+            io,
             remote: Mutex::new(None),
             state: Mutex::new(ConnState {
                 conn_id: 0,
@@ -152,14 +162,14 @@ impl UdpClient {
             if Instant::now() >= deadline {
                 return Err(TrackerError::Timeout);
             }
-            self.sock
+            self.io
                 .send_to(packet, addr)
                 .await
                 .map_err(TrackerError::Io)?;
 
             let wait = udp_timeout(attempt).min(deadline.saturating_duration_since(Instant::now()));
             let mut buf = [0u8; 2048];
-            match timeout(wait, self.sock.recv_from(&mut buf)).await {
+            match timeout(wait, self.io.recv_from(&mut buf)).await {
                 Ok(Ok((n, from))) => {
                     if from != addr {
                         continue;

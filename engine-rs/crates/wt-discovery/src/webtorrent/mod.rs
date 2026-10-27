@@ -22,11 +22,14 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message, Connector};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{
+    client_async_tls_with_config, connect_async_tls_with_config, tungstenite::Message, Connector,
+};
 use wt_types::InfoHash;
 
 use crate::status::{StatusCallback, TrackerStatusEvent};
-use crate::tracker::AnnounceEvent;
+use crate::tracker::{AnnounceEvent, DialerHook};
 
 const PING_INTERVAL: Duration = Duration::from_secs(60);
 const RECONNECT_DELAY: Duration = Duration::from_secs(60);
@@ -67,6 +70,8 @@ pub struct TrackerClientConfig {
     pub status: Option<StatusCallback>,
     pub max_outstanding_offers: usize,
     pub ws_headers: Vec<(String, String)>,
+    /// Custom TCP dialer (Go `trackerSockets.DialContext` for WS trackers).
+    pub dialer: Option<DialerHook>,
 }
 
 impl Default for TrackerClientConfig {
@@ -79,6 +84,7 @@ impl Default for TrackerClientConfig {
             status: None,
             max_outstanding_offers: DEFAULT_MAX_OUTSTANDING_OFFERS,
             ws_headers: Vec::new(),
+            dialer: None,
         }
     }
 }
@@ -251,13 +257,20 @@ impl TrackerClient {
     }
 
     async fn do_websocket(self: &Arc<Self>) -> Result<()> {
-        let url = self.inner.lock().cfg.url.clone();
+        let (url, dialer) = {
+            let g = self.inner.lock();
+            (g.cfg.url.clone(), g.cfg.dialer.clone())
+        };
         self.inner.lock().stats.dials += 1;
 
-        let connector = Connector::Rustls(Arc::new(rustls_client_config()));
-        let (ws, _) = connect_async_tls_with_config(&url, None, false, Some(connector))
-            .await
-            .map_err(|e| WebTorrentError::Ws(e.to_string()))?;
+        let (ws, _) = if let Some(dialer) = dialer {
+            connect_ws_with_dialer(&url, dialer).await?
+        } else {
+            let connector = Connector::Rustls(Arc::new(rustls_client_config()));
+            connect_async_tls_with_config(&url, None, false, Some(connector))
+                .await
+                .map_err(|e| WebTorrentError::Ws(e.to_string()))?
+        };
         let (mut sink, mut stream) = ws.split();
 
         // Re-arm outbox receiver if previous connection took it.
@@ -468,9 +481,40 @@ fn random_offer_id() -> String {
 }
 
 fn rustls_client_config() -> rustls::ClientConfig {
+    crate::ensure_rustls_provider();
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth()
+}
+
+async fn connect_ws_with_dialer(
+    url: &str,
+    dialer: DialerHook,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    let parsed = url::Url::parse(url).map_err(|e| WebTorrentError::Ws(e.to_string()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| WebTorrentError::Ws("ws url missing host".into()))?;
+    let secure = parsed.scheme() == "wss";
+    let port = parsed.port().unwrap_or(if secure { 443 } else { 80 });
+    let addr = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let tcp = dialer("tcp".into(), addr)
+        .await
+        .map_err(|e| WebTorrentError::Ws(e.to_string()))?;
+    let request = url
+        .into_client_request()
+        .map_err(|e| WebTorrentError::Ws(e.to_string()))?;
+    let connector = Connector::Rustls(Arc::new(rustls_client_config()));
+    client_async_tls_with_config(request, tcp, None, Some(connector))
+        .await
+        .map_err(|e| WebTorrentError::Ws(e.to_string()))
 }
