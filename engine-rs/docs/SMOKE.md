@@ -174,22 +174,21 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 - Tracker peers marked trusted; announce slots nudged when `want_peers` and next_at >2 min
 - `peer_closed` re-queues outgoing peers (5 s); ut_metadata timeout retry; PEX add/drop/genmsg
 - **Retention:** ignore malformed ut_metadata (`missing msg_type`) and soft-discard PEX Cooldown/TooFrequent instead of closing the peerconn — was dropping ~40 dial_ok down to ~4 live peers
-- **Dial race:** prefer TCP when it lands within 150ms of a uTP win; fast-fail preferred MSE (2s) only when uTP won; other-transport plaintext-then-MSE fallback after same-transport Go fallback
+- **Dial race:** prefer **uTP** when both TCP+uTP raw-connect within 200ms grace (TCP kept as handshake spare); fast-fail preferred MSE (2s) only when uTP won; other-transport plaintext-then-MSE fallback after same-transport Go fallback
 - **Dial order:** among eligible peers, never-failed before retries, then trusted, then source rank — stops burning half-open on firewalled tracker contacts while DHT waits
 - **Half-open:** dial path raises torrent/global half-open to at least 48/96 (engine config may still say 24/48) so timeout-heavy Ubuntu can keep more dials in flight
+- **uTP BEP 29 (wt-wire):** fixed swapped send/recv connection_ids; SYN-ACK `ack_nr = seq-1` (libtorrent ignores DATA with `ack_nr > seq-1`); wall-clock timestamps; ACK every DATA; retransmit while blocked on read. Public qBittorrent HS ok; `WT_FORCE_UTP` now holds 15–16 uTP peers (was 0 dial_ok)
 
-### Numbers (latest same-machine runs after retention fix)
+### Numbers (latest same-machine runs after uTP BEP29 fix)
 
 | Label | meta s | peers min→max | speed peak MiB/s | notes |
 |-------|--------|---------------|------------------|-------|
-| go-ubuntu-r14 | 3.0 | 9→38 | **6.08** | TCP 26 + **uTP 9**; 31/35 peers downloaded>0; 226 MiB |
-| go-ubuntu-r13 | 4.5 | 13→42 | 5.69 | app settings |
-| rust-ubuntu-r22 | 2.5 | **11→27** | 1.22 | best Rust peer count |
-| rust-ubuntu-r33 | 5.0 | 6→18 | 1.23 | TCP 18, **uTP 0**; 11/18 downloaded>0; 27 MiB |
-| rust-ubuntu-r32 | 4.0 | 7→17 | 1.15 | TCP 16, uTP 0; 6/16 active; 31 MiB |
+| go-ubuntu-r16 | 4.0 | 11→41 | **5.59** | TCP 30 + **uTP 11**; 38/41 downloaded>0; 228 MiB |
+| go-ubuntu-r15 | 3.5 | 13→31 | 6.42 | TCP 23 + uTP 8; 29/31 active; 263 MiB |
+| rust-ubuntu-r38 | 5.5 | **10→33** | 0.75 | TCP 26 + **uTP 7**; 13/33 active; 15 MiB — **peer count ≈ Go** |
+| rust-ubuntu-r39 | 12.0 | 13→25 | 1.22 | TCP 20 + uTP 4; 13/24 active; 26 MiB |
+| rust-ubuntu-forceutp-r2 | 5.0 | 6→16 | 0.08 | **uTP 16**; 7/16 active; 0.5 MiB — was 0 dial_ok |
 | rust-sintel-r5 | 2.5 | **14→32** | **12.44** | TCP-only; 19/27 active; 142 MiB |
-| rust-sintel-r4 | 3.5 | 6→38 | 23.66 | Sintel beats Go on speed |
-| rust-ubuntu-utp1 | — | — | — | **WT_FORCE_UTP=1: 0 dial_ok** (1285 timeout, 200 mse) |
 
-**Status:** Ubuntu peers improved ~4→**17–27** via retention, fail-count dial order, half-open ≥48/96, transport fallback. Same-day Go **38–42** peers / **5–6** MiB/s. Root gap now clear: **Rust establishes 0 uTP peerconns** while Go holds ~25% uTP; force-uTP dials never complete handshake (timeouts/MSE). Per-peer: Go ~31/35 downloading vs Rust ~6–11/18; total bytes ~7× lower. Sintel OK. Not full Ubuntu acceptance yet.
+**Status:** uTP unblocked. Ubuntu peers now **24–33** with **4–7 uTP** (was 0 uTP / ~17 TCP). Same-day Go **31–41** peers / **5–6** MiB/s with ~90% downloading. Remaining gap is **per-peer throughput** (Rust ~13/33 active, ~1 MiB/s, tens of MiB total vs Go hundreds of MiB). Sintel already healthy. Not full Ubuntu speed acceptance yet.
 
