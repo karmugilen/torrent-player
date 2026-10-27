@@ -29,6 +29,7 @@ pub mod strategy;
 pub mod torrent;
 pub mod torrent_impls;
 pub mod tuning;
+mod webseed_download;
 pub mod webseed_peer;
 pub mod webtor;
 pub mod wire;
@@ -451,11 +452,38 @@ impl Torrent {
         let piece_obj = info.piece(piece);
         let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece));
         let comp = piece_storage.completion();
-        if comp.ok {
+        let complete = comp.ok && comp.complete;
+        let evicted = {
             let mut pieces = self.inner.pieces.write();
             if let Some(p) = pieces.get_mut(piece as usize) {
-                p.complete = comp.complete;
+                let evicted = p.complete && !complete;
+                p.complete = complete;
                 p.ok = comp.ok;
+                if evicted {
+                    p.partial = false;
+                    p.checking = false;
+                    p.chunks_received.clear();
+                }
+                evicted
+            } else {
+                false
+            }
+        };
+        // Completion and dirty/request bitmaps must agree after bounded storage
+        // discards a piece, otherwise the scheduler never requests it again.
+        if let Some(book) = self.inner.book.write().as_mut() {
+            book.set_complete_cached(piece, comp.ok, complete);
+            if evicted {
+                let (begin, end) = crate::picker::piece_req_index_range(
+                    piece,
+                    info.piece_length,
+                    info.total_length(),
+                );
+                let mut dirty = self.inner.dirty_chunks.write();
+                for req in begin..end {
+                    dirty.remove(&req);
+                    book.mark_chunk_pending(req);
+                }
             }
         }
         self.inner.bump_change();
@@ -483,66 +511,59 @@ impl Torrent {
     }
 
     pub fn stats(&self) -> TorrentStats {
-        let mut cs = ConnStats::default();
-        let snapshots = self.inner.peer_snapshots.read();
+        let mut cs = self.inner.webseed_stats.snapshot();
         let handles = self.inner.conn_handles.read();
-        let mut active = 0;
-        let mut seeders = 0;
-        if !snapshots.is_empty() || !handles.is_empty() {
+        let snapshots = self.inner.peer_snapshots.read();
+        let dialing = self.inner.dialing_peers.lock();
+        let pending = self
+            .inner
+            .known_peers
+            .read()
+            .iter()
+            .filter(|peer| !handles.contains_key(&peer.addr) && !dialing.contains(&peer.addr))
+            .map(|peer| peer.addr)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let half_open = dialing.len();
+        drop(dialing);
+        let (total, seeders) = if !handles.is_empty() || !snapshots.is_empty() {
             for h in handles.values() {
                 cs.add(&h.stats().snapshot());
             }
-            for snap in snapshots.values() {
-                if !snap.peer_choking {
-                    active += 1;
-                }
-                if snap.peer_completion >= 1.0 {
-                    seeders += 1;
-                }
+            (
+                handles.len(),
+                snapshots
+                    .values()
+                    .filter(|s| s.peer_completion >= 1.0)
+                    .count(),
+            )
+        } else {
+            let conns = self.inner.conns.read();
+            for c in conns.values() {
+                cs.add(&c.inner.read().stats.snapshot());
             }
-            let pieces_complete = self
+            (
+                conns.len(),
+                conns
+                    .values()
+                    .filter(|c| c.inner.read().peer_sent_have_all)
+                    .count(),
+            )
+        };
+        TorrentStats {
+            conn_stats: cs,
+            total_peers: total,
+            pending_peers: pending,
+            active_peers: total,
+            connected_seeders: seeders,
+            half_open_peers: half_open,
+            pieces_complete: self
                 .inner
                 .pieces
                 .read()
                 .iter()
                 .filter(|p| p.complete)
-                .count();
-            return TorrentStats {
-                conn_stats: cs,
-                total_peers: handles.len(),
-                pending_peers: 0,
-                active_peers: active,
-                connected_seeders: seeders,
-                half_open_peers: 0,
-                pieces_complete,
-            };
-        }
-        let conns = self.inner.conns.read();
-        for c in conns.values() {
-            let inner = c.inner.read();
-            cs.add(&inner.stats.snapshot());
-            if !inner.peer_choking {
-                active += 1;
-            }
-            if inner.peer_sent_have_all {
-                seeders += 1;
-            }
-        }
-        let pieces_complete = self
-            .inner
-            .pieces
-            .read()
-            .iter()
-            .filter(|p| p.complete)
-            .count();
-        TorrentStats {
-            conn_stats: cs,
-            total_peers: conns.len(),
-            pending_peers: 0,
-            active_peers: active,
-            connected_seeders: seeders,
-            half_open_peers: 0,
-            pieces_complete,
+                .count(),
         }
     }
 
@@ -593,12 +614,32 @@ impl Torrent {
         self.inner.bump_change();
     }
 
+    pub fn bump_change(&self) {
+        self.inner.bump_change();
+    }
+
     pub fn add_peers(&self, peers: Vec<PeerInfo>) -> usize {
         self.inner.add_peers(peers)
     }
 
     pub fn add_trackers(&self, tiers: Vec<Vec<String>>) {
-        self.inner.trackers.write().extend(tiers);
+        let mut trackers = self.inner.trackers.write();
+        let mut seen: std::collections::HashSet<String> =
+            trackers.iter().flatten().cloned().collect();
+        let added: Vec<Vec<String>> = tiers
+            .into_iter()
+            .map(|tier| {
+                tier.into_iter()
+                    .filter(|url| seen.insert(url.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|tier| !tier.is_empty())
+            .collect();
+        trackers.extend(added.clone());
+        drop(trackers);
+        if let Some(client) = self.inner.client.read().upgrade() {
+            client.add_trackers(&self.inner, added);
+        }
     }
 
     pub fn add_web_seeds(&self, urls: Vec<String>) {
@@ -954,6 +995,19 @@ impl File {
             }
         }
         completed
+    }
+
+    pub fn priority(&self) -> PiecePriority {
+        let Some(info) = self.torrent.info.read().clone() else {
+            return PiecePriority::None;
+        };
+        let start_piece = (self.offset / info.piece_length) as usize;
+        let pieces = self.torrent.pieces.read();
+        if start_piece < pieces.len() {
+            pieces[start_piece].priority
+        } else {
+            PiecePriority::None
+        }
     }
 
     pub fn set_priority(&self, p: PiecePriority) {

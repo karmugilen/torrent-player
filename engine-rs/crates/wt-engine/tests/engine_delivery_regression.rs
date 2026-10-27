@@ -5,7 +5,6 @@
 mod support;
 use support::TestEngine;
 
-#[ignore = "needs: preview read from verified storage tail"]
 #[test]
 fn test_delivery_preview_can_reuse_verified_tail() {
     // Port of Go `TestDeliveryPreviewCanReuseVerifiedTail`.
@@ -19,7 +18,6 @@ fn test_delivery_preview_can_reuse_verified_tail() {
     p.close();
 }
 
-#[ignore = "needs: persist/load resume window"]
 #[test]
 fn test_delivery_warm_cache_preserves_explicit_play_from_start() {
     // Port of Go `TestDeliveryWarmCachePreservesExplicitPlayFromStart`.

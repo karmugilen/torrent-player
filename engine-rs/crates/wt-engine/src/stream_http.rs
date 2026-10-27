@@ -16,8 +16,6 @@ use std::sync::Arc;
 // AtomicBool used by BytesStreamReader.
 
 use bytes::Bytes;
-use futures::channel::mpsc;
-use futures::SinkExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::Frame;
@@ -31,6 +29,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use parking_lot::Mutex;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use wt_policy::is_video_file_name;
 
 /// Default readahead used when opening a stream (Go playback constants).
@@ -41,6 +40,9 @@ pub trait StreamReader: Send + Sync {
     fn length(&self) -> i64;
     fn display_name(&self) -> &str;
     fn read_at(&self, buf: &mut [u8], offset: i64) -> io::Result<usize>;
+    fn read_some(&self, buf: &mut [u8], offset: i64) -> io::Result<usize> {
+        self.read_at(buf, offset)
+    }
     fn close(&self);
     fn is_closed(&self) -> bool {
         false
@@ -226,7 +228,11 @@ async fn handle_stream_request(
             .unwrap());
     };
 
-    let reader = match source.open(id, file_index) {
+    let id = id.to_owned();
+    let opened = tokio::task::spawn_blocking(move || source.open(&id, file_index))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
+    let reader = match opened {
         Ok(r) => r,
         Err(e) => {
             let status = match e.kind() {
@@ -269,8 +275,10 @@ async fn handle_stream_request(
 
     let content_length = if file_length == 0 { 0 } else { end - start + 1 };
 
-    let (mut tx, rx) = mpsc::channel::<Result<Frame<Bytes>, io::Error>>(4);
-    let body_stream = StreamBody::new(rx);
+    let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, io::Error>>(4);
+    let body_stream = StreamBody::new(futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|frame| (frame, rx))
+    }));
 
     if req.method() != Method::HEAD && content_length > 0 {
         let reader_clone = reader.clone();
@@ -282,9 +290,9 @@ async fn handle_stream_request(
                 }
                 let want = ((end - off + 1) as usize).min(STREAM_CHUNK_BYTES);
                 let reader_ref = reader_clone.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let pending_read = tokio::task::spawn_blocking(move || {
                     let mut buf = vec![0u8; want];
-                    match reader_ref.read_at(&mut buf, off) {
+                    match reader_ref.read_some(&mut buf, off) {
                         Ok(n) if n > 0 => {
                             buf.truncate(n);
                             Ok(Some(buf))
@@ -292,8 +300,11 @@ async fn handle_stream_request(
                         Ok(_) => Ok(None),
                         Err(e) => Err(e),
                     }
-                })
-                .await;
+                });
+                let result = tokio::select! {
+                    result = pending_read => result,
+                    _ = tx.closed() => { reader_clone.close(); break; }
+                };
                 match result {
                     Ok(Ok(Some(buf))) => {
                         let n = buf.len() as i64;

@@ -196,6 +196,10 @@ impl Reader {
         r
     }
 
+    pub fn id(&self) -> u64 {
+        self.reader_id
+    }
+
     pub fn set_readahead(&mut self, bytes: i64) {
         self.readahead = bytes.max(0);
         self.readahead_fn = None;
@@ -323,7 +327,8 @@ impl Reader {
             let wait = deadline
                 .map(|dl| dl.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::from_secs(60));
-            self.host.wait_change(after, wait);
+            self.host
+                .wait_change(after, wait.min(Duration::from_millis(50)));
         }
 
         // Mark reading and refresh piece priorities (Go sets reading before readAt).
@@ -399,7 +404,8 @@ impl Reader {
             self.host.on_read_waiting(torrent_off);
             let after = self.host.change_version();
             let wait = remaining(deadline).unwrap_or(Duration::from_secs(60));
-            self.host.wait_change(after, wait);
+            self.host
+                .wait_change(after, wait.min(Duration::from_millis(50)));
         }
     }
 }

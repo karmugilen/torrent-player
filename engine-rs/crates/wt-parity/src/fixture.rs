@@ -40,6 +40,13 @@ pub struct Scale {
 impl Scale {
     pub fn from_env() -> Self {
         match std::env::var("WT_PARITY_SCALE").as_deref() {
+            // Keeps fixtures plus one active leecher below the worker's
+            // 256 MiB disk budget, while seeks exceed the 16 MiB RAM cache.
+            Ok("bounded") => Self {
+                video_bytes: 64 << 20,
+                seek_bytes: 32 << 20,
+                piece_length: 256 << 10,
+            },
             Ok("small") => Self {
                 video_bytes: 8 << 20,
                 seek_bytes: 4 << 20,

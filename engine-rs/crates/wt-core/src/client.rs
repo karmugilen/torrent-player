@@ -337,6 +337,16 @@ impl ClientInner {
         }
     }
 
+    pub(crate) fn add_trackers(&self, torrent: &TorrentInner, tiers: Vec<Vec<String>>) {
+        if tiers.is_empty() {
+            return;
+        }
+        if let Some(sources) = self.sources.read().clone() {
+            let _entered = self.tokio_handle.enter();
+            let _ = sources.add_trackers(&Self::torrent_keys_for(torrent), tiers);
+        }
+    }
+
     fn register_sources(
         &self,
         torrent: &Arc<TorrentInner>,
@@ -504,6 +514,11 @@ impl ClientInner {
         if self.config.dial_for_peer_conns {
             self.start_dialer(&torrent_inner);
         }
+        let task = self.tokio_handle.spawn(crate::webseed_download::run(
+            Arc::downgrade(self),
+            Arc::downgrade(&torrent_inner),
+        ));
+        self.tasks.lock().push(task);
 
         Ok((torrent_inner, true))
     }
@@ -582,6 +597,7 @@ impl ClientInner {
 
     pub fn add_dht_nodes(&self, nodes: &[String]) {
         if let Some(sources) = self.sources.read().clone() {
+            let _entered = self.tokio_handle.enter();
             sources.add_dht_nodes(nodes);
         }
     }

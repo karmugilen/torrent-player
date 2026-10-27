@@ -1,4 +1,7 @@
-agy-perf agy-perf task_92e59884d177 ctx_26135701fbdb term_c3f6808a-0cb7-4a17-9cfa-270fc5703f48
-agy-core agy-core task_8ea97594178c ctx_78708422be6a term_da3dfbfe-b2e9-4865-a6f3-5a6acb98fb55
-agy-engine agy-engine task_478c67daf4cb ctx_d82eae300628 term_c7695e54-0992-40ac-84c6-c4cd9f525d67
-agy-tests agy-tests task_720c70509bc8 ctx_6158621ded6d term_5caf6957-fbb1-4dca-bcdc-18f415506c43
+codex-server codex-server task_1fcb05d61cb1 ctx_e1beb0025371 term_751c811d-cd04-468b-8e3e-b609165e291f
+codex-tests codex-tests task_b117bc4c16f7 ctx_752c3f535038 term_03bb669d-99d0-4613-8350-80c76986f483
+codex-smoke codex-smoke task_ab4cd49eb030 ctx_23e7b42e2aee term_1cbb8fad-f51b-4631-b06b-a4a081edac36
+codex-engine codex-engine task_347fc8a90888 ctx_d98ceebd200a term_07fd987c-e65b-4da0-ad88-3cbe7bcb943b
+codex-play codex-play task_fbc123c1dcb3 ctx_b88d121cc8ed term_ee659b32-36a2-45bb-921e-6d104fc3620d
+codex-tests2 codex-tests2 task_1a036985767f ctx_4fdf2ca9ac56 term_777454c2-80be-44d1-a72d-256580cd3807
+codex-perf codex-perf task_7d1f2002222d ctx_c537e256eeba term_a7b4a0c2-9e8f-4263-814a-03737521604d

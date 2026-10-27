@@ -11,6 +11,9 @@ use engine::tracker_status::{
 };
 use std::collections::HashMap;
 use support::TestEngine;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use tracing_subscriber::prelude::*;
+use engine::tracker_status::TrackerStatusLayer;
 
 #[test]
 fn test_build_tracker_views_marks_original_and_status() {
@@ -93,54 +96,52 @@ fn test_get_torrent_includes_trackers() {
     assert_eq!(tr0["original"], true);
 }
 
-#[ignore = "needs: slog / tracing integration for announce status updates"]
 #[test]
 fn test_announce_slog_updates_tracker_status() {
-    // Port of Go TestAnnounceSlogUpdatesTrackerStatus
-    let mgr = TrackerStatusManager::new();
-    mgr.set_status(
-        "abcdef",
-        "udp://tracker.example.org:1337/announce",
-        TRACKER_STATUS_WORKING,
-        "4 peers",
-    );
-    let snap = mgr.snapshot("abcdef");
-    assert_eq!(
-        snap["udp://tracker.example.org:1337/announce"].status,
-        TRACKER_STATUS_WORKING
-    );
+    let manager = Arc::new(TrackerStatusManager::new());
+    let subscriber = tracing_subscriber::registry().with(TrackerStatusLayer::new(manager.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::debug_span!("torrent", info_hash = "0102030405060708090a0b0c0d0e0f1011121314", url = "udp://tracker.example.org:1337/announce");
+        let _entered = span.enter();
+        tracing::debug!(peers = 4u64, "announced");
+        let status = &manager.snapshot("0102030405060708090a0b0c0d0e0f1011121314")["udp://tracker.example.org:1337/announce"];
+        assert_eq!(status.status, TRACKER_STATUS_WORKING);
+        assert_eq!(status.message, "4 peers");
+        tracing::error!(err = "context canceled", "announced");
+        let status = &manager.snapshot("0102030405060708090a0b0c0d0e0f1011121314")["udp://tracker.example.org:1337/announce"];
+        assert_eq!(status.status, TRACKER_STATUS_ERROR);
+        assert!(!status.message.is_empty());
+    });
 }
 
-#[ignore = "needs: slog / tracing context and groups retention"]
 #[test]
 fn test_announce_slog_logger_context_and_groups_are_retained() {
-    // Port of Go TestAnnounceSlogLoggerContextAndGroupsAreRetained
-    let mgr = TrackerStatusManager::new();
-    mgr.set_status(
-        "01",
-        "udp://one.example.org:1337/announce",
-        TRACKER_STATUS_WORKING,
-        "2 peers",
-    );
-    mgr.set_status(
-        "02",
-        "udp://two.example.org:1337/announce",
-        TRACKER_STATUS_ERROR,
-        "tracker unavailable",
-    );
-
-    let first = mgr.snapshot("01");
-    assert_eq!(
-        first["udp://one.example.org:1337/announce"].status,
-        TRACKER_STATUS_WORKING
-    );
-    let second = mgr.snapshot("02");
-    assert_eq!(
-        second["udp://two.example.org:1337/announce"].status,
-        TRACKER_STATUS_ERROR
-    );
+    let manager = Arc::new(TrackerStatusManager::new());
+    let subscriber = tracing_subscriber::registry().with(TrackerStatusLayer::new(manager.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        let first = tracing::debug_span!("torrent", info_hash = "01", url = "udp://one.example.org:1337/announce");
+        {
+            let _first = first.enter();
+            let group = tracing::debug_span!("announce", name = "one");
+            let _group = group.enter();
+            tracing::debug!(peers = 2u64, "announced");
+        }
+        let second = tracing::debug_span!("torrent", info_hash = "02", url = "udp://two.example.org:1337/announce");
+        {
+            let _second = second.enter();
+            let group = tracing::debug_span!("announce", name = "two");
+            let _group = group.enter();
+            tracing::debug!(peers = 0u64, err = "tracker unavailable", "announced");
+        }
+    });
+    let first = manager.snapshot("01");
+    assert_eq!(first["udp://one.example.org:1337/announce"].status, TRACKER_STATUS_WORKING);
+    assert_eq!(first["udp://one.example.org:1337/announce"].message, "2 peers");
+    let second = manager.snapshot("02");
+    assert_eq!(second["udp://two.example.org:1337/announce"].status, TRACKER_STATUS_ERROR);
+    assert_eq!(second["udp://two.example.org:1337/announce"].message, "tracker unavailable");
     assert!(!first.contains_key("udp://two.example.org:1337/announce"));
-    assert!(mgr.snapshot("").is_empty());
+    assert!(manager.snapshot("").is_empty());
 }
 
 #[test]
@@ -182,41 +183,58 @@ fn test_tracker_status_normalizes_identity_and_url() {
     );
 }
 
-#[ignore = "needs: downstream handler attribute forwarding"]
 #[test]
 fn test_tracker_status_forwards_bound_attributes_to_downstream_handler() {
-    // Port of Go TestTrackerStatusForwardsBoundAttributesToDownstreamHandler
-    let mgr = TrackerStatusManager::new();
-    mgr.set_status(
-        "07",
-        "udp://tracker.example.org:1337/announce",
-        TRACKER_STATUS_WORKING,
-        "",
-    );
-    let snap = mgr.snapshot("07");
-    assert!(snap.contains_key("udp://tracker.example.org:1337/announce"));
+    #[derive(Clone)]
+    struct Downstream(Arc<std::sync::Mutex<Vec<String>>>);
+    struct Visitor<'a>(&'a mut Vec<String>);
+    impl tracing::field::Visit for Visitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={value:?}", field.name()));
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Downstream {
+        fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, _id: &tracing::span::Id, _context: tracing_subscriber::layer::Context<'_, S>) {
+            let mut output = self.0.lock().unwrap();
+            output.push(attrs.metadata().name().into());
+            attrs.record(&mut Visitor(&mut output));
+        }
+        fn on_event(&self, event: &tracing::Event<'_>, _context: tracing_subscriber::layer::Context<'_, S>) {
+            event.record(&mut Visitor(&mut self.0.lock().unwrap()));
+        }
+    }
+    let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let manager = Arc::new(TrackerStatusManager::new());
+    let subscriber = tracing_subscriber::registry().with(TrackerStatusLayer::new(manager)).with(Downstream(output.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::debug_span!("torrent", info_hash = "07", url = "udp://tracker.example.org:1337/announce");
+        let _span = span.enter();
+        let group = tracing::debug_span!("announce");
+        let _group = group.enter();
+        tracing::debug!(peers = 0u64, err = "", "announced");
+    });
+    let line = output.lock().unwrap().join(" ");
+    for want in ["info_hash=", "url=", "udp://tracker.example.org:1337/announce", "announce", "peers=0", "err="] {
+        assert!(line.contains(want), "downstream missing {want:?}: {line}");
+    }
+
 }
 
-#[ignore = "needs: onStatusUpdated connection event wiring"]
 #[test]
 fn test_status_updated_connection_error_uses_error_when_identity_is_present() {
-    // Port of Go TestStatusUpdatedConnectionErrorUsesErrorWhenIdentityIsPresent
-    let mgr = TrackerStatusManager::new();
-    mgr.set_status(
-        "abcdef",
-        "wss://tracker.example.org",
-        TRACKER_STATUS_ERROR,
-        "connection failed",
-    );
-    let got = mgr.snapshot("abcdef");
-    assert_eq!(
-        got["wss://tracker.example.org"].status,
-        TRACKER_STATUS_ERROR
-    );
-    assert_eq!(
-        got["wss://tracker.example.org"].message,
-        "connection failed"
-    );
+    let manager = TrackerStatusManager::new();
+    manager.connection_status("abcdef", "wss://tracker.example.org", Some("connection failed"));
+    let got = manager.snapshot("abcdef");
+    assert_eq!(got["wss://tracker.example.org"].status, TRACKER_STATUS_ERROR);
+    assert_eq!(got["wss://tracker.example.org"].message, "connection failed");
+    manager.connection_status("abcdef", "wss://tracker-clean.example.org", None);
+    let got = manager.snapshot("abcdef");
+    assert_eq!(got["wss://tracker-clean.example.org"].status, TRACKER_STATUS_WORKING);
+    assert_eq!(got["wss://tracker-clean.example.org"].message, "", "connection cannot claim peers");
+    manager.connection_status("abcdef", "wss://tracker.example.org", Some("connection failed"));
+    let got = manager.snapshot("abcdef");
+    assert_eq!(got["wss://tracker.example.org"].status, TRACKER_STATUS_ERROR);
+    assert_eq!(got["wss://tracker.example.org"].message, "connection failed");
 }
 
 #[test]
@@ -271,34 +289,17 @@ fn test_build_tracker_views_attached_supplement_appears_once() {
     );
 }
 
-#[ignore = "needs: onStatusUpdated callback wiring"]
 #[test]
 fn test_status_updated_callback() {
-    // Port of Go TestStatusUpdatedCallback
-    let mgr = TrackerStatusManager::new();
-    mgr.set_status(
-        "abcdef",
-        "wss://tracker.example.org",
-        TRACKER_STATUS_WORKING,
-        "",
-    );
-    assert_eq!(
-        mgr.snapshot("abcdef")["wss://tracker.example.org"].status,
-        TRACKER_STATUS_WORKING
-    );
-
-    mgr.set_status(
-        "abcdef",
-        "wss://tracker.example.org",
-        TRACKER_STATUS_ERROR,
-        "boom",
-    );
-    assert_eq!(
-        mgr.snapshot("abcdef")["wss://tracker.example.org"].status,
-        TRACKER_STATUS_ERROR
-    );
-    assert_eq!(
-        mgr.snapshot("abcdef")["wss://tracker.example.org"].message,
-        "boom"
-    );
+    let manager = TrackerStatusManager::new();
+    let changes = Arc::new(AtomicUsize::new(0));
+    let counter = changes.clone();
+    manager.on_change(Arc::new(move || { counter.fetch_add(1, Ordering::SeqCst); }));
+    manager.announce("abcdef", "wss://tracker.example.org", Ok(0));
+    assert_eq!(manager.snapshot("abcdef")["wss://tracker.example.org"].status, TRACKER_STATUS_WORKING);
+    manager.announce("abcdef", "wss://tracker.example.org", Err("boom"));
+    let snapshot = manager.snapshot("abcdef");
+    assert_eq!(snapshot["wss://tracker.example.org"].status, TRACKER_STATUS_ERROR);
+    assert_eq!(snapshot["wss://tracker.example.org"].message, "boom");
+    assert_eq!(changes.load(Ordering::SeqCst), 2, "status updates must notify");
 }

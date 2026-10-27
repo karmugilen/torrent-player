@@ -185,10 +185,7 @@ fn test_piece_telemetry_reports_selected_pieces() {
     let result: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let id = result["id"].as_str().unwrap();
 
-    let tmp = tempfile::tempdir_in(
-        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-    )
-    .expect("tempdir");
+    let tmp = crate::support::engine::temp_dir();
     let f1 = std::fs::File::create(tmp.path().join("f1.dat")).expect("create");
     let f2 = std::fs::File::create(tmp.path().join("f2.dat")).expect("create");
     #[cfg(unix)]
@@ -219,57 +216,18 @@ fn test_piece_telemetry_reports_selected_pieces() {
 #[test]
 fn test_accumulate_bucket_piece_selected_mixed_counts() {
     // Port of Go TestAccumulateBucketPieceSelectedMixedCounts
-    let mut b = engine::types::PieceBucket {
-        start: 0,
-        end: 6,
-        total: 6,
-        selected: 0,
-        verified: 0,
-        receiving: 0,
-        selected_verified: 0,
-        selected_receiving: 0,
-    };
+    // Exercise the production aggregator with Go's six input cases, including
+    // complete+receiving precedence, rather than copying its logic into a test.
+    let runs = [1, 1, 2, 2, 3, 0].map(|flags| wt_storage::PieceRun { length: 1, flags });
+    let ranges = [wt_storage::PieceRange { start: 0, end: 1 }, wt_storage::PieceRange { start: 2, end: 3 }, wt_storage::PieceRange { start: 4, end: 6 }];
+    let buckets = wt_storage::aggregate_piece_buckets(&runs, &ranges, 6, 1).unwrap();
+    let bucket = buckets[0];
+    assert_eq!(bucket.selected, 4);
+    assert_eq!(bucket.verified, 3);
+    assert_eq!(bucket.receiving, 2);
+    assert_eq!(bucket.selected_verified, 2);
+    assert_eq!(bucket.selected_receiving, 1);
 
-    fn accumulate(
-        b: &mut engine::types::PieceBucket,
-        selected: bool,
-        complete: bool,
-        receiving: bool,
-    ) {
-        if selected {
-            b.selected += 1;
-        }
-        if complete {
-            b.verified += 1;
-            if selected {
-                b.selected_verified += 1;
-            }
-        } else if receiving {
-            b.receiving += 1;
-            if selected {
-                b.selected_receiving += 1;
-            }
-        }
-    }
-
-    // Selected verified.
-    accumulate(&mut b, true, true, false);
-    // Excluded verified must inflate Verified only.
-    accumulate(&mut b, false, true, false);
-    // Selected receiving (Partial/Checking/Hashing path).
-    accumulate(&mut b, true, false, true);
-    // Excluded receiving must inflate Receiving only.
-    accumulate(&mut b, false, false, true);
-    // Complete wins over receiving when both flags are set.
-    accumulate(&mut b, true, true, true);
-    // Missing selected piece.
-    accumulate(&mut b, true, false, false);
-
-    assert_eq!(b.selected, 4, "Selected=4");
-    assert_eq!(b.verified, 3, "Verified=3");
-    assert_eq!(b.receiving, 2, "Receiving=2");
-    assert_eq!(b.selected_verified, 2, "SelectedVerified=2");
-    assert_eq!(b.selected_receiving, 1, "SelectedReceiving=1");
 }
 
 #[ignore = "needs: piece telemetry selected verified ignores excluded"]
@@ -290,10 +248,7 @@ fn test_piece_telemetry_selected_verified_ignores_excluded() {
     let result: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let id = result["id"].as_str().unwrap();
 
-    let tmp = tempfile::tempdir_in(
-        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-    )
-    .expect("tempdir");
+    let tmp = crate::support::engine::temp_dir();
     let f1 = std::fs::File::create(tmp.path().join("wanted.dat")).expect("create");
     let f2 = std::fs::File::create(tmp.path().join("unwanted.dat")).expect("create");
     #[cfg(unix)]
@@ -341,10 +296,7 @@ fn test_piece_telemetry_shared_boundary_counts_as_selected() {
     let result: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let id = result["id"].as_str().unwrap();
 
-    let tmp = tempfile::tempdir_in(
-        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-    )
-    .expect("tempdir");
+    let tmp = crate::support::engine::temp_dir();
     let f1 = std::fs::File::create(tmp.path().join("a.dat")).expect("create");
     let f2 = std::fs::File::create(tmp.path().join("b.dat")).expect("create");
     #[cfg(unix)]
@@ -375,7 +327,6 @@ fn test_piece_telemetry_shared_boundary_counts_as_selected() {
     assert_eq!(buckets[0]["selectedVerified"], 1);
 }
 
-#[ignore = "needs: piece telemetry inclusive ranges and maxBuckets"]
 #[test]
 fn test_piece_telemetry_inclusive_ranges_and_max_buckets() {
     // Port of Go TestPieceTelemetryInclusiveRangesAndMaxBuckets
@@ -391,9 +342,24 @@ fn test_piece_telemetry_inclusive_ranges_and_max_buckets() {
     let result: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let id = result["id"].as_str().unwrap();
 
-    let (code, pbody) = eng.dispatch("GET", &format!("/pieces/{id}?maxBuckets=8"), "");
-    assert_eq!(code, 200, "pieces: {}", String::from_utf8_lossy(&pbody));
-    let resp: serde_json::Value = serde_json::from_slice(&pbody).unwrap();
-    let buckets = resp["buckets"].as_array().expect("buckets array");
-    assert!(buckets.len() <= 8);
+    let record = eng.server.records.read()[id].clone();
+    record.write().configured = true;
+    record.write().selected = vec![0];
+    let (code, pbody) = eng.dispatch("GET", &format!("/pieces/{id}?maxBuckets=4"), "");
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&pbody));
+    let telemetry: engine::types::PieceTelemetryResponse = serde_json::from_slice(&pbody).unwrap();
+    assert_eq!(telemetry.total_pieces, 10);
+    assert_eq!(telemetry.max_buckets, 4);
+    assert_eq!(telemetry.buckets.len(), 4);
+    let mut covered = 0;
+    for (index, bucket) in telemetry.buckets.iter().enumerate() {
+        assert!(bucket.end >= bucket.start, "bucket {index}: {bucket:?}");
+        assert_eq!(bucket.total, bucket.end - bucket.start + 1, "inclusive total");
+        covered += bucket.total;
+        // Unsigned Rust fields reject negative selected counts at deserialization.
+        assert!(bucket.selected_verified + bucket.selected_receiving <= bucket.selected);
+    }
+    assert_eq!(covered, telemetry.total_pieces);
+    assert_eq!(telemetry.buckets[0].start, 0);
+    assert_eq!(telemetry.buckets.last().unwrap().end, telemetry.total_pieces - 1);
 }

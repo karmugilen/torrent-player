@@ -171,11 +171,35 @@ fn test_peer_exploration_protects_the_only_known_seed() {
     );
 }
 
-#[ignore = "needs: real idle connection release in EngineServer"]
 #[test]
 fn test_peer_exploration_releases_one_real_idle_connection() {
-    // Port of Go `TestPeerExplorationReleasesOneRealIdleConnection`.
-    let eng = TestEngine::new();
-    let s = eng.post_settings(r#"{"peerExploration":true,"maxPeers":2}"#);
-    assert!(s.peer_exploration);
+    use std::sync::atomic::Ordering;
+    let (eng, id) = support::policy::peer();
+    let (first, _) = support::policy::peer();
+    let (second, _) = support::policy::peer();
+    let torrent = eng.server.records.read()[&id].read().torrent.clone();
+    eng.server.max_peers.store(2, Ordering::SeqCst);
+    torrent.set_max_established_conns(2);
+    support::policy::connect(&eng, &id, &first);
+    support::policy::connect(&eng, &id, &second);
+    support::policy::wait_connections(&eng, &id, 2);
+    let identities = || torrent.inner.conn_handles.read().values().map(|h| std::sync::Arc::as_ptr(&h.stats()) as usize).collect::<std::collections::HashSet<_>>();
+    let original = identities();
+    assert_eq!(original.len(), 2);
+    torrent.add_peers(vec![support::policy::candidate("127.0.0.1:1")]);
+    assert!(torrent.stats().pending_peers > 0, "requires pending alternative");
+    let start = Instant::now() + Duration::from_secs(1000);
+    eng.server.peer_exploration_tick(start);
+    eng.server.peer_exploration_tick(start + Duration::from_secs(90));
+    assert_eq!(identities(), original, "disabled exploration replaced connection");
+    assert!(eng.post_settings(r#"{"peerExploration":true}"#).peer_exploration);
+    eng.server.peer_exploration_tick(start);
+    eng.server.peer_exploration_tick(start + Duration::from_secs(90));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let retained = identities().intersection(&original).count();
+        if retained == 1 { break; }
+        assert!(Instant::now() < deadline, "must release exactly one original connection, retained {retained}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }

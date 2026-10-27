@@ -114,6 +114,7 @@ pub struct TorrentInner {
     pub peer_notify: tokio::sync::Notify,
     pub trackers: RwLock<Vec<Vec<String>>>,
     pub web_seeds: RwLock<Vec<String>>,
+    pub webseed_stats: crate::stats::AtomicConnStats,
 
     pub request_focus: AtomicI64, // 0 = none, offset + 1
     pub interest_begin: AtomicI64,
@@ -184,6 +185,7 @@ impl TorrentInner {
             peer_notify: tokio::sync::Notify::new(),
             trackers: RwLock::new(Vec::new()),
             web_seeds: RwLock::new(Vec::new()),
+            webseed_stats: crate::stats::AtomicConnStats::default(),
             request_focus: AtomicI64::new(0),
             interest_begin: AtomicI64::new(0),
             interest_end: AtomicI64::new(0),
@@ -272,7 +274,7 @@ impl TorrentInner {
         Ok(handler)
     }
 
-    fn start_hashing(self: &Arc<Self>) {
+    pub(crate) fn start_hashing(self: &Arc<Self>) {
         let mut slot = self.hasher.lock();
         if slot.is_some() {
             return;

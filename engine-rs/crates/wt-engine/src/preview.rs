@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -84,6 +85,16 @@ pub fn admit_preview_range(
     Ok(new_pieces)
 }
 
+struct PreviewAdmission {
+    piece_length: i64,
+    file_offset: i64,
+    storage: Arc<wt_storage::DocumentTorrentStorage>,
+    server: std::sync::Weak<crate::server::EngineServer>,
+    torrent_id: String,
+    coordinator: Arc<crate::playback::PlaybackPriorityCoordinator>,
+    cached_only: bool,
+}
+
 pub struct PreviewReader {
     pub file_index: usize,
     pub length: i64,
@@ -94,6 +105,8 @@ pub struct PreviewReader {
     /// Pieces admitted for network fetch this session.
     admitted: Mutex<HashMap<u32, bool>>,
     admitted_bytes: AtomicI64,
+    close_hooks: Mutex<Vec<Box<dyn FnOnce() + Send + Sync>>>,
+    admission: Mutex<Option<PreviewAdmission>>,
 }
 
 impl PreviewReader {
@@ -116,6 +129,18 @@ impl PreviewReader {
             inner_read: Mutex::new(Some(read_fn)),
             admitted: Mutex::new(HashMap::new()),
             admitted_bytes: AtomicI64::new(0),
+            close_hooks: Mutex::new(Vec::new()),
+            admission: Mutex::new(None),
+        }
+    }
+
+    pub fn add_close_hook(&self, f: impl FnOnce() + Send + Sync + 'static) {
+        let mut hooks = self.close_hooks.lock();
+        if self.closed.load(Ordering::SeqCst) {
+            drop(hooks);
+            f();
+        } else {
+            hooks.push(Box::new(f));
         }
     }
 
@@ -153,6 +178,50 @@ impl PreviewReader {
 
         let max_read = (self.length - offset) as usize;
         let want = buf.len().min(max_read);
+
+        if let Some(admission) = self.admission.lock().as_ref() {
+            if !admission.cached_only {
+                let allowed = admission
+                    .server
+                    .upgrade()
+                    .is_some_and(|s| s.payload_transfers_allowed.load(Ordering::SeqCst));
+                self.admit_range(
+                    admission.piece_length,
+                    admission.file_offset,
+                    offset,
+                    want as i64,
+                    |p| admission.storage.piece_complete(p as usize),
+                    allowed,
+                )?;
+                let demand = self
+                    .admitted
+                    .lock()
+                    .keys()
+                    .filter(|&&p| !admission.storage.piece_complete(p as usize))
+                    .map(|&p| (p, wt_types::PiecePriority::High))
+                    .collect();
+                admission.coordinator.set_preview_demand(demand);
+                if let Some(server) = admission.server.upgrade() {
+                    let effective = admission.coordinator.effective();
+                    crate::playback::PlaybackHost::set_playback_storage_demand(
+                        server.as_ref(),
+                        &admission.torrent_id,
+                        &effective,
+                    );
+                    crate::playback::PlaybackHost::apply_piece_priorities(
+                        server.as_ref(),
+                        &admission.torrent_id,
+                        &effective,
+                    );
+                }
+            }
+            let lock = self.inner_read.lock();
+            return lock
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("preview closed"))?(
+                &mut buf[..want], offset
+            );
+        }
 
         // Soft remaining-budget gate (matches Go errPreviewBudget on overshoot).
         let mut curr_budget = self.budget_remaining.load(Ordering::SeqCst);
@@ -222,6 +291,10 @@ impl PreviewReader {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        let hooks = std::mem::take(&mut *self.close_hooks.lock());
+        for hook in hooks {
+            hook();
+        }
         let mut lock = self.inner_read.lock();
         *lock = None;
         self.admitted.lock().clear();
@@ -230,6 +303,191 @@ impl PreviewReader {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
+}
+
+pub fn open_preview(
+    server: &crate::server::EngineServer,
+    id: &str,
+    index: usize,
+) -> std::io::Result<Arc<PreviewReader>> {
+    let mut active = server.preview_active.lock();
+    if active.as_ref().is_some_and(|reader| reader.is_closed()) {
+        *active = None;
+    }
+    if active.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "preview already active",
+        ));
+    }
+
+    let records = server.records.read();
+    let rec_arc = records
+        .get(id)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found"))?
+        .clone();
+    drop(records);
+    let mut rec = rec_arc.write();
+    rec.refresh();
+
+    if rec.paused || rec.error.is_some() {
+        return Err(std::io::Error::other("torrent unavailable for preview"));
+    }
+    if rec.torrent.info().is_none() {
+        return Err(std::io::Error::other("metadata not ready"));
+    }
+    if index >= rec.files.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid file index",
+        ));
+    }
+
+    let file = rec
+        .torrent
+        .files()
+        .get(index)
+        .cloned()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"))?;
+    let length = file.length();
+    let storage = server
+        .storage
+        .get_storage(&rec.info_hash)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "storage unavailable"))?;
+
+    let is_temp;
+    if !rec.configured {
+        storage
+            .attach_preview_temp(index)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        is_temp = true;
+        if server.payload_transfers_allowed.load(Ordering::SeqCst) {
+            rec.torrent.allow_data_download();
+        }
+    } else {
+        is_temp = false;
+        let selected = rec.selected.contains(&index);
+        let file_verified = file.bytes_completed() >= file.length();
+        if !selected && !file_verified {
+            return Err(std::io::Error::other("file is not selected for preview"));
+        }
+    }
+
+    let mut reader_inner = file.new_reader();
+    reader_inner.set_readahead(0);
+    let cancel_token = wt_core::CancelToken(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    reader_inner.set_cancel(cancel_token.clone());
+    let backend = Arc::new(Mutex::new(reader_inner));
+    let storage_clone = storage.clone();
+    let server_weak = server.self_ref.get().cloned().unwrap_or_default();
+    let file_offset = file.offset();
+    let backend_read = backend.clone();
+
+    let cached_only = rec.direct_play && rec.playback_readers > 0;
+    let read_fn: PreviewReadFn = Box::new(move |buf, offset| {
+        let abs = file_offset + offset;
+        let want = buf.len();
+        // Check if verified storage tail / cached pieces can fulfill the read without network:
+        let (got, ok) = storage_clone.read_verified_preview(buf, abs);
+        if ok && got == want || cached_only && got > 0 {
+            return Ok(got);
+        }
+        if cached_only {
+            return Err(std::io::Error::other("preview range is not cached yet"));
+        }
+        // Unverified bytes require payload transfers to be allowed:
+        if let Some(srv) = server_weak.upgrade() {
+            if !srv.payload_transfers_allowed.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("payload transfers are paused"));
+            }
+        }
+        let mut be = backend_read.lock();
+        use std::io::{Read, Seek, SeekFrom};
+        be.seek(SeekFrom::Start(offset.max(0) as u64))?;
+        let mut n = 0;
+        while n < buf.len() {
+            let got = be.read(&mut buf[n..])?;
+            if got == 0 {
+                break;
+            }
+            n += got;
+        }
+        Ok(n)
+    });
+
+    let reader = Arc::new(PreviewReader::new(index, length, read_fn));
+    *reader.admission.lock() = Some(PreviewAdmission {
+        piece_length: rec.torrent.info().unwrap().piece_length,
+        file_offset,
+        storage: storage.clone(),
+        server: server.self_ref.get().cloned().unwrap_or_default(),
+        torrent_id: id.to_owned(),
+        coordinator: rec.playback_coordinator.clone(),
+        cached_only,
+    });
+    let coordinator_hook = rec.playback_coordinator.clone();
+    let id_hook = id.to_owned();
+    let reader_weak = Arc::downgrade(&reader);
+    let server_weak_hook = server.self_ref.get().cloned().unwrap_or_default();
+    let rec_weak = Arc::downgrade(&rec_arc);
+    let storage_hook = storage.clone();
+    let torrent_hook = rec.torrent.clone();
+    let handle = server.next_reader_id.fetch_add(1, Ordering::SeqCst);
+
+    let cancel_hook = cancel_token;
+
+    reader.add_close_hook(move || {
+        cancel_hook.cancel();
+        torrent_hook.bump_change();
+        coordinator_hook.set_preview_demand(HashMap::new());
+        if let Some(srv) = server_weak_hook.upgrade() {
+            let effective = coordinator_hook.effective();
+            crate::playback::PlaybackHost::set_playback_storage_demand(
+                srv.as_ref(),
+                &id_hook,
+                &effective,
+            );
+            crate::playback::PlaybackHost::apply_piece_priorities(
+                srv.as_ref(),
+                &id_hook,
+                &effective,
+            );
+            let mut act = srv.preview_active.lock();
+            if let Some(r) = reader_weak.upgrade() {
+                if act.as_ref().is_some_and(|curr| Arc::ptr_eq(curr, &r)) {
+                    *act = None;
+                }
+            } else {
+                *act = None;
+            }
+            srv.preview_readers.lock().remove(&handle);
+        }
+        if is_temp {
+            storage_hook.release_preview_temp();
+            for piece in 0..torrent_hook.num_pieces() {
+                torrent_hook.update_piece_completion(piece);
+            }
+            if let Some(rec_arc) = rec_weak.upgrade() {
+                let rec_r = rec_arc.read();
+                if !rec_r.configured && !rec_r.direct_play {
+                    rec_r.torrent.disallow_data_download();
+                }
+            }
+        }
+    });
+
+    *active = Some(reader.clone());
+    server.preview_readers.lock().insert(handle, reader.clone());
+
+    let weak_exp = Arc::downgrade(&reader);
+    std::thread::spawn(move || {
+        std::thread::sleep(PREVIEW_SESSION_TIMEOUT);
+        if let Some(r) = weak_exp.upgrade() {
+            r.close();
+        }
+    });
+
+    Ok(reader)
 }
 
 #[cfg(test)]

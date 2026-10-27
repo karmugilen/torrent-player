@@ -1,0 +1,16 @@
+{
+  "started_utc": "2026-10-27T12:55:13Z",
+  "calls": [
+    {
+      "command": [
+        "adb",
+        "devices"
+      ],
+      "returncode": 0,
+      "stdout": "List of devices attached\n\n",
+      "stderr": ""
+    }
+  ],
+  "devices": [],
+  "status": "unverified: need exactly one authorized attached device"
+}

@@ -8,10 +8,7 @@ use support::TestEngine;
 #[test]
 fn test_offline_peer_countries() {
     // Port of Go `TestOfflinePeerCountries`.
-    let tmp = tempfile::tempdir_in(
-        std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-    )
-    .expect("tempdir");
+    let tmp = crate::support::engine::temp_dir();
     let download_dir = tmp.path().to_path_buf();
     let mmdb_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../android/app/src/main/assets/geoip-country-2026-10.mmdb");
@@ -38,15 +35,18 @@ fn test_offline_peer_countries() {
         let country = server.geoip.lookup_country(address).unwrap_or_default();
         assert_eq!(country, "", "invented country for {address}");
     }
+    server.close();
 }
 
 use base64::Engine as _;
 use engine::types::ConnectionsResponse;
 
 fn connection_snapshot(eng: &TestEngine, id: &str) -> ConnectionsResponse {
-    let (code, resp): (u16, ConnectionsResponse) =
-        support::json_get(eng, &format!("/connections/{id}"));
-    assert_eq!(code, 200, "connections status {code}");
+    let (code, raw) = eng.dispatch("GET", &format!("/connections/{id}"), "");
+    assert_eq!(code, 200, "connections: {}", String::from_utf8_lossy(&raw));
+    let json: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert!(json["peers"].is_array(), "empty peer list must be an array");
+    let resp: ConnectionsResponse = serde_json::from_value(json).unwrap();
     resp
 }
 
@@ -88,7 +88,6 @@ fn test_connections_exclude_candidates_and_unknown_torrent() {
     eng.close();
 }
 
-#[ignore = "needs: live peer connections reporting in handle_connections"]
 #[test]
 fn test_connections_reports_real_tcp_peer_and_clears_on_pause() {
     // Port of Go `TestConnectionsReportsRealTCPPeerAndClearsOnPause`.
@@ -105,10 +104,7 @@ fn test_connections_reports_real_tcp_peer_and_clears_on_pause() {
         let response: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         let id = response["id"].as_str().unwrap().to_owned();
 
-        let tmp = tempfile::tempdir_in(
-            std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-        )
-        .expect("tempdir");
+        let tmp = crate::support::engine::temp_dir();
         let file_path = tmp.path().join(format!("{name}.dat"));
         let f = std::fs::File::create(&file_path).expect("create");
         #[cfg(unix)]
@@ -138,19 +134,8 @@ fn test_connections_reports_real_tcp_peer_and_clears_on_pause() {
         .get(&remote_id)
         .unwrap()
         .clone();
-    let local_rec = eng.server.records.read().get(&id).unwrap().clone();
 
-    let addrs = remote_eng.server.client.listen_addrs();
-    for addr in addrs {
-        local_rec.read().torrent.add_peers(vec![wt_types::PeerInfo {
-            id: None,
-            addr,
-            source: wt_types::PeerSource::Tracker,
-            supports_encryption: false,
-            pex: wt_types::PexFlags::default(),
-            trusted: false,
-        }]);
-    }
+    support::policy::connect(&eng, &id, &remote_eng);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {

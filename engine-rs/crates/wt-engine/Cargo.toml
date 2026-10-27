@@ -29,6 +29,8 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 log = "0.4"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"

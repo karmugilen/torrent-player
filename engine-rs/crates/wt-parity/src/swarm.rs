@@ -87,7 +87,7 @@ pub fn start_swarm(
         let _ = client.request(
             "POST",
             "/settings",
-            Some(br#"{"seedingEnabled":true,"seedingAllowed":true,"maxPeers":64,"seedRatioMilli":100000,"seedTimeMinutes":10000}"#),
+            Some(br#"{"seedingEnabled":true,"seedingAllowed":true,"maxPeers":64,"seedRatioMilli":10000,"seedTimeMinutes":1440}"#),
         );
 
         // Wait until seeding / done (checkpoint restore).

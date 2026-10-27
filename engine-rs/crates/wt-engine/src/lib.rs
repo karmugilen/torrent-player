@@ -3,6 +3,9 @@
 //! Pure Rust port of `engine-go`. See `engine-rs/docs/PORT_MAP.md` for crate scope.
 
 pub mod connections;
+pub mod ghost;
+pub mod telemetry;
+pub mod peer_exploration;
 pub mod ctl_http;
 pub mod jni;
 pub mod live_preview;

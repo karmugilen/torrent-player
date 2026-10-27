@@ -49,6 +49,7 @@ pub trait ReaderBackend: Send {
     fn set_responsive(&mut self, on: bool);
     fn cancel(&mut self);
     fn close(&mut self);
+    fn set_cancel(&mut self, _cancel: wt_core::CancelToken) {}
 }
 
 /// One file in a torrent, as needed to open playback.
@@ -102,6 +103,11 @@ pub trait PlaybackHost: Send + Sync {
     fn nudge_urgent(&self, id: &str) -> usize;
     fn on_focus_changed(&self, id: &str, file_index: usize);
     fn piece_complete(&self, id: &str, piece: u32) -> bool;
+    fn playback_cache_budget(&self, _id: &str) -> Option<i64> {
+        None
+    }
+    fn refresh_playback_completion(&self, _id: &str, _pieces: &[u32]) {}
+    fn set_playback_storage_demand(&self, _id: &str, _demand: &HashMap<u32, PiecePriority>) {}
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -270,11 +276,15 @@ impl PlaybackPriorityCoordinator {
     }
 
     pub fn set_hints(&self, demand: HashMap<u32, PiecePriority>) {
-        self.inner.lock().hints = demand;
+        let mut inner = self.inner.lock();
+        inner.hints = demand;
+        Self::apply_locked(&mut inner);
     }
 
     pub fn set_preview_demand(&self, demand: HashMap<u32, PiecePriority>) {
-        self.inner.lock().preview_demand = demand;
+        let mut inner = self.inner.lock();
+        inner.preview_demand = demand;
+        Self::apply_locked(&mut inner);
     }
 
     pub fn set_resume_demand(&self, demand: HashMap<u32, PiecePriority>) {
@@ -398,6 +408,9 @@ pub struct PlaybackReader {
     simple_reader: Mutex<Option<ReadAtFn>>,
     /// Full orchestration path.
     session: Mutex<Option<PlaybackSession>>,
+    read_cancel: Mutex<Option<wt_core::CancelToken>>,
+    read_generation: AtomicU64,
+    published_window: Mutex<Option<PlaybackWindow>>,
 }
 
 impl PlaybackReader {
@@ -425,6 +438,9 @@ impl PlaybackReader {
             closed: AtomicBool::new(false),
             simple_reader: Mutex::new(Some(read_fn)),
             session: Mutex::new(None),
+            read_cancel: Mutex::new(None),
+            read_generation: AtomicU64::new(0),
+            published_window: Mutex::new(None),
         }
     }
 
@@ -445,7 +461,10 @@ impl PlaybackReader {
             display_name: session.file_name.clone(),
             closed: AtomicBool::new(false),
             simple_reader: Mutex::new(None),
+            published_window: Mutex::new(Some(session.window)),
             session: Mutex::new(Some(session)),
+            read_cancel: Mutex::new(None),
+            read_generation: AtomicU64::new(0),
         })
     }
 
@@ -465,60 +484,126 @@ impl PlaybackReader {
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: i64) -> io::Result<usize> {
+        self.read(buf, offset, false)
+    }
+
+    pub fn read_some(&self, buf: &mut [u8], offset: i64) -> io::Result<usize> {
+        self.read(buf, offset, true)
+    }
+
+    fn read(&self, buf: &mut [u8], offset: i64, partial: bool) -> io::Result<usize> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "playback reader closed",
             ));
         }
-        if offset < 0 || offset >= self.length || buf.is_empty() {
+        if offset < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid playback offset",
+            ));
+        }
+        if offset >= self.length || buf.is_empty() {
             return Ok(0);
         }
-        let max_len = (self.length - offset) as usize;
-        let want = buf.len().min(max_len);
-
-        if let Some(ref mut sess) = *self.session.lock() {
-            let n = sess.read_at(&mut buf[..want], offset)?;
-            self.current_offset
-                .store(offset + n as i64, Ordering::SeqCst);
-            return Ok(n);
+        let want = buf.len().min((self.length - offset) as usize);
+        // Cancellation precedes the I/O lock, as in Go readIO/waitCancel. A
+        // newer seek can unwind the old blocking read without racing its cursor.
+        let (generation, cancel) = {
+            let mut active = self.read_cancel.lock();
+            if let Some(old) = active.take() {
+                old.cancel();
+            }
+            let cancel = wt_core::CancelToken::default();
+            let generation = self.read_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            *active = Some(cancel.clone());
+            (generation, cancel)
+        };
+        let mut session = self.session.lock();
+        if self.closed.load(Ordering::SeqCst)
+            || generation != self.read_generation.load(Ordering::SeqCst)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "playback closed or superseded",
+            ));
         }
-
-        self.current_offset
-            .store(offset + want as i64, Ordering::SeqCst);
-        let lock = self.simple_reader.lock();
-        if let Some(ref r) = *lock {
-            r(&mut buf[..want], offset)
+        let result = if let Some(sess) = session.as_mut() {
+            sess.backend.set_cancel(cancel);
+            if sess.cursor != offset {
+                sess.focus_pending = true;
+            }
+            sess.update_window(offset);
+            *self.published_window.lock() = Some(sess.window);
+            let result = sess.read(&mut buf[..want], offset, partial);
+            *self.published_window.lock() = Some(sess.window);
+            result
+        } else if let Some(reader) = self.simple_reader.lock().as_ref() {
+            reader(&mut buf[..want], offset)
         } else {
             Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "playback reader closed",
             ))
+        };
+        if let Ok(n) = result {
+            self.current_offset
+                .store(offset + n as i64, Ordering::SeqCst);
+        }
+        result
+    }
+
+    pub fn apply_offset(&self, offset: i64) {
+        if let Some(session) = self.session.lock().as_mut() {
+            session.focus_pending = true;
+            session.update_window(offset);
+            *self.published_window.lock() = Some(session.window);
         }
     }
 
-    /// Short read (HTTP Seek first-byte path). Same as [`Self::read_at`] for
-    /// the simple backend; the session path may return early when partial.
-    pub fn read_some(&self, buf: &mut [u8], offset: i64) -> io::Result<usize> {
-        if let Some(ref mut sess) = *self.session.lock() {
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "playback reader closed",
-                ));
-            }
-            let n = sess.read_some(buf, offset)?;
-            self.current_offset
-                .store(offset + n as i64, Ordering::SeqCst);
-            return Ok(n);
+    pub fn finish_focus(&self) {
+        if let Some(session) = self.session.lock().as_mut() {
+            session.focus_pending = false;
+            session.update_window(session.last_offset);
+            *self.published_window.lock() = Some(session.window);
         }
-        self.read_at(buf, offset)
+    }
+
+    pub fn set_play_boost(&self, boost: bool) {
+        if let Some(session) = self.session.lock().as_mut() {
+            session.boost = boost;
+            session
+                .coordinator
+                .set_play_boost(session.file_index, boost);
+            session.update_window(session.last_offset);
+            *self.published_window.lock() = Some(session.window);
+        }
+    }
+
+    pub fn park_idle(&self) {
+        if let Some(mut guard) = self.session.try_lock() {
+            if let Some(session) = guard.as_mut() {
+                session.backend.set_readahead(0);
+                let effective = session.coordinator.remove(session.session_id);
+                if let Some(host) = &session.host {
+                    host.set_playback_storage_demand(&session.torrent_id, &effective);
+                    host.apply_piece_priorities(&session.torrent_id, &effective);
+                }
+                session.window = PlaybackWindow::default();
+                *self.published_window.lock() = Some(session.window);
+            }
+        }
     }
 
     pub fn close(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        if let Some(cancel) = self.read_cancel.lock().take() {
+            cancel.cancel();
+        }
+        self.read_generation.fetch_add(1, Ordering::SeqCst);
         if let Some(mut sess) = self.session.lock().take() {
             sess.close();
         }
@@ -530,7 +615,13 @@ impl PlaybackReader {
     }
 
     pub fn window_snapshot(&self) -> Option<PlaybackWindow> {
-        self.session.lock().as_ref().map(|s| s.window)
+        if self.closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        if let Some(session) = self.session.try_lock() {
+            return session.as_ref().map(|s| s.window);
+        }
+        *self.published_window.lock()
     }
 }
 
@@ -543,6 +634,9 @@ impl StreamReader for PlaybackReader {
     }
     fn read_at(&self, buf: &mut [u8], offset: i64) -> io::Result<usize> {
         PlaybackReader::read_at(self, buf, offset)
+    }
+    fn read_some(&self, buf: &mut [u8], offset: i64) -> io::Result<usize> {
+        PlaybackReader::read_some(self, buf, offset)
     }
     fn close(&self) {
         PlaybackReader::close(self);
@@ -586,6 +680,8 @@ pub struct PlaybackSession {
     host: Option<Arc<dyn PlaybackHost>>,
     backend: Box<dyn ReaderBackend>,
     closed: bool,
+    focus_pending: bool,
+    cursor: i64,
     head_read: bool,
     tail_read: bool,
 }
@@ -640,7 +736,9 @@ impl PlaybackSession {
         if snap.direct_play && !boost {
             // Keep default forward; durable startup spans use DIRECT_* below when
             // storage marks refresh — host can set boost flags later.
-            let _ = (DIRECT_STARTUP_HEAD, DIRECT_STARTUP_TAIL);
+            forward = 4 << 20;
+            head_bytes = DIRECT_STARTUP_HEAD;
+            tail_bytes = DIRECT_STARTUP_TAIL;
         }
 
         let mut backend = host.open_file_reader(id, file_index)?;
@@ -710,6 +808,8 @@ impl PlaybackSession {
             host: Some(host),
             backend,
             closed: false,
+            focus_pending: true,
+            cursor: -1,
             head_read: false,
             tail_read: false,
         };
@@ -789,6 +889,8 @@ impl PlaybackSession {
             host: None,
             backend,
             closed: false,
+            focus_pending: true,
+            cursor: -1,
             head_read: false,
             tail_read: false,
         };
@@ -826,9 +928,15 @@ impl PlaybackSession {
             return Ok(0);
         }
         let want = buf.len().min((self.length - offset) as usize);
+        if self.cursor != offset {
+            self.focus_pending = true;
+        }
         self.update_window(offset);
         let mut n = 0;
         while n < want {
+            if n > 0 && self.direct_play {
+                self.update_window(offset + n as i64);
+            }
             let got = self.backend.read_at(&mut buf[n..want], offset + n as i64)?;
             if got == 0 {
                 break;
@@ -837,6 +945,11 @@ impl PlaybackSession {
             if _partial {
                 break;
             }
+        }
+        if n > 0 {
+            self.cursor = offset + n as i64;
+            self.focus_pending = false;
+            self.update_window(offset);
         }
         if !self.open_phase {
             self.coordinator.set_playing(self.session_id);
@@ -930,58 +1043,149 @@ impl PlaybackSession {
             return;
         }
 
-        let forward = if let Some(ref mut adaptive) = self.adaptive {
+        let mut forward = if let Some(ref mut adaptive) = self.adaptive {
             adaptive
                 .observe(0.0, self.forward_bytes)
                 .max(PLAYBACK_URGENT_BYTES)
         } else {
             self.forward_bytes
         };
-
+        let ghost = self.host.as_ref().is_some_and(|h| h.ghost_pro());
+        let mut urgent_bytes = PLAYBACK_URGENT_BYTES;
+        let mut lookahead_bytes = 0;
+        if ghost {
+            forward = forward.max(64 << 20).max(6 * self.piece_length);
+            if self.boost {
+                forward = forward.max(96 << 20);
+            }
+            lookahead_bytes = (32 << 20).max(4 * self.piece_length);
+            if !self.open_phase && !self.focus_pending {
+                urgent_bytes = urgent_bytes.max(16 << 20).max(2 * self.piece_length);
+            }
+        }
+        let budget = self
+            .host
+            .as_ref()
+            .and_then(|h| h.playback_cache_budget(&self.torrent_id));
+        let readers = {
+            let inner = self.coordinator.inner.lock();
+            (inner.owners.len() + usize::from(!inner.owners.contains_key(&self.session_id))).max(1)
+                as i64
+        };
         let layout = FileLayout {
             torrent_offset: self.torrent_offset,
             length: self.length,
             begin_piece: self.begin_piece,
             end_piece: self.end_piece,
         };
-        let urgent_end = (offset + PLAYBACK_URGENT_BYTES).min(self.length);
-        let readahead_end = (offset + forward).min(self.length);
-        let urgent = span_from_file(&layout, self.piece_length, offset, urgent_end);
-        let readahead = span_from_file(&layout, self.piece_length, urgent_end, readahead_end);
-
+        let mut urgent = span_from_file(
+            &layout,
+            self.piece_length,
+            offset,
+            (offset + urgent_bytes).min(self.length),
+        );
+        let mut readahead = span_from_file(
+            &layout,
+            self.piece_length,
+            (offset + urgent_bytes).min(self.length),
+            (offset + forward).min(self.length),
+        );
+        let mut lookahead = span_from_file(
+            &layout,
+            self.piece_length,
+            (offset + forward).min(self.length),
+            (offset + forward + lookahead_bytes).min(self.length),
+        );
+        let mut reader_ra = forward;
+        if let Some(budget) = budget.filter(|&n| n >= self.piece_length) {
+            let reserve = (budget / 20).max(self.piece_length);
+            let reserve = if reserve >= budget { 0 } else { reserve };
+            let allowance = ((budget - reserve) / readers / self.piece_length).max(1) as u32;
+            let allowance = allowance.min((budget / self.piece_length / readers).max(1) as u32);
+            let (ahead, forward_pieces, urgent_pieces) = if ghost && allowance >= 3 {
+                let ahead = (allowance / 4).max(1);
+                let forward = allowance - ahead;
+                (allowance, forward, (forward / 4).max(1).min(forward - 1))
+            } else {
+                let forward = ((forward.max(self.piece_length) + self.piece_length - 1)
+                    / self.piece_length) as u32;
+                let forward = forward.min(allowance).max(1);
+                let tip = ((urgent_bytes + self.piece_length - 1) / self.piece_length) as u32;
+                (forward, forward, tip.min(forward).max(1))
+            };
+            let play = ((self.torrent_offset + offset) / self.piece_length) as u32;
+            let end = (play + ahead).min(self.end_piece);
+            urgent = PieceSpan {
+                begin: play,
+                end: (play + urgent_pieces).min(end),
+            };
+            readahead = PieceSpan {
+                begin: urgent.end,
+                end: (play + forward_pieces).min(end),
+            };
+            lookahead = PieceSpan {
+                begin: readahead.end,
+                end,
+            };
+            reader_ra = forward_pieces as i64 * self.piece_length;
+        }
+        if self.open_phase {
+            urgent = span_from_file(
+                &layout,
+                self.piece_length,
+                offset,
+                (offset + PLAYBACK_URGENT_BYTES).min(self.length),
+            );
+            readahead = PieceSpan::default();
+            lookahead = PieceSpan::default();
+            reader_ra = PLAYBACK_URGENT_BYTES;
+        }
         let window = PlaybackWindow {
             urgent,
             readahead,
-            lookahead: PieceSpan::default(),
+            lookahead,
             open_phase: self.open_phase,
             head_boost: self.head_boost_active && self.open_phase,
             tail_boost: self.tail_boost_active && self.open_phase,
         };
-
-        let mut demand: HashMap<u32, PiecePriority> = HashMap::new();
-        raise_span(&mut demand, urgent, PiecePriority::Now);
-        raise_span(&mut demand, readahead, PiecePriority::Readahead);
+        let mut demand = HashMap::new();
+        raise_span(&mut demand, urgent, PiecePriority::Next);
+        raise_span(&mut demand, readahead, PiecePriority::Next);
+        raise_span(&mut demand, lookahead, PiecePriority::Next);
+        let tip_pieces =
+            ((PLAYBACK_URGENT_BYTES + self.piece_length - 1) / self.piece_length) as u32;
+        raise_span(
+            &mut demand,
+            PieceSpan {
+                begin: urgent.begin,
+                end: urgent.end.min(urgent.begin + tip_pieces + 1),
+            },
+            PiecePriority::Now,
+        );
         if window.head_boost {
             raise_span(&mut demand, self.head_span, PiecePriority::Now);
         }
         if window.tail_boost {
             raise_span(&mut demand, self.tail_span, PiecePriority::Now);
         }
-
-        // Reader readahead follows the urgent tip size while scrubbing uses
-        // the full forward window immediately (Go applyResponsiveLocked).
-        let reader_ra = if self.scrubbing || self.open_phase {
-            forward
-        } else {
-            PLAYBACK_URGENT_BYTES
-        };
         self.backend.set_readahead(reader_ra);
-        self.backend
-            .set_responsive(self.scrubbing || self.open_phase);
-
+        self.backend.set_responsive(false);
+        if let Some(host) = &self.host {
+            let entering: Vec<u32> = demand
+                .keys()
+                .copied()
+                .filter(|&p| {
+                    !self.window.urgent.contains(p)
+                        && !self.window.readahead.contains(p)
+                        && !self.window.lookahead.contains(p)
+                })
+                .collect();
+            host.refresh_playback_completion(&self.torrent_id, &entering);
+        }
         self.window = window;
         let effective = self.coordinator.update(self.session_id, demand, window);
         if let Some(host) = &self.host {
+            host.set_playback_storage_demand(&self.torrent_id, &effective);
             host.apply_piece_priorities(&self.torrent_id, &effective);
         }
     }
@@ -995,6 +1199,7 @@ impl PlaybackSession {
         self.backend.close();
         let effective = self.coordinator.remove(self.session_id);
         if let Some(host) = &self.host {
+            host.set_playback_storage_demand(&self.torrent_id, &effective);
             host.apply_piece_priorities(&self.torrent_id, &effective);
         }
     }
@@ -1029,6 +1234,21 @@ pub async fn start_stream_server(
     resolver: PlaybackResolver,
 ) -> io::Result<Arc<StreamServer>> {
     stream_http::start_stream_server(port, Arc::new(ResolverSource(resolver))).await
+}
+
+pub type FalliblePlaybackResolver =
+    Arc<dyn Fn(&str, usize) -> io::Result<Arc<PlaybackReader>> + Send + Sync>;
+struct FallibleResolverSource(FalliblePlaybackResolver);
+impl StreamSource for FallibleResolverSource {
+    fn open(&self, id: &str, index: usize) -> io::Result<Arc<dyn StreamReader>> {
+        (self.0)(id, index).map(|reader| reader as Arc<dyn StreamReader>)
+    }
+}
+pub async fn start_stream_server_fallible(
+    port: u16,
+    resolver: FalliblePlaybackResolver,
+) -> io::Result<Arc<StreamServer>> {
+    stream_http::start_stream_server(port, Arc::new(FallibleResolverSource(resolver))).await
 }
 
 pub use crate::stream_http::StreamServer;

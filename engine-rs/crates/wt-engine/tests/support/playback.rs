@@ -21,6 +21,13 @@ pub fn large_playback_fixture_mode(
     let added: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let id = added["id"].as_str().unwrap().to_owned();
 
+    let destination = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(eng.download_dir.join("playback.dat"))
+        .expect("create");
     let configure_req = if direct {
         serde_json::json!({
             "id": id,
@@ -30,12 +37,7 @@ pub fn large_playback_fixture_mode(
             "selected": [0],
         })
     } else {
-        let tmp = tempfile::tempdir_in(
-            std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-        )
-        .expect("tempdir");
-        let file_path = tmp.path().join("movie.dat");
-        let f = std::fs::File::create(&file_path).expect("create");
+        let f = &destination;
         #[cfg(unix)]
         let fd = {
             use std::os::unix::io::AsRawFd;
@@ -64,6 +66,11 @@ pub fn playback_fixture_mode(direct: bool) -> (TestEngine, String, Vec<u8>) {
         piece_length,
         &[("readme.txt", 5), ("clip.mp4", (data.len() - 5) as i64)],
     );
+    // The Go fixture hashes its MP4 payload, rather than the generic builder motif.
+    let (mut metadata, mut info) = wt_meta::parse_torrent(&torrent).unwrap();
+    info.pieces = payload_hashes(&data, piece_length as usize);
+    metadata.info_bytes = wt_meta::encode_info(&info).unwrap();
+    let torrent = wt_meta::encode_metainfo(&metadata).unwrap();
     let encoded = base64::engine::general_purpose::STANDARD.encode(&torrent);
     let (code, raw) = eng.dispatch(
         "POST",
@@ -74,6 +81,13 @@ pub fn playback_fixture_mode(direct: bool) -> (TestEngine, String, Vec<u8>) {
     let added: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let id = added["id"].as_str().unwrap().to_owned();
 
+    let destination = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(eng.download_dir.join("playback.dat"))
+        .expect("create");
     let configure_req = if direct {
         serde_json::json!({
             "id": id,
@@ -83,12 +97,7 @@ pub fn playback_fixture_mode(direct: bool) -> (TestEngine, String, Vec<u8>) {
             "selected": [1],
         })
     } else {
-        let tmp = tempfile::tempdir_in(
-            std::env::var("TMPDIR").unwrap_or_else(|_| "/home/kar/.cache/wt-tmp/agy-tests".into()),
-        )
-        .expect("tempdir");
-        let file_path = tmp.path().join("clip.dat");
-        let f = std::fs::File::create(&file_path).expect("create");
+        let f = &destination;
         #[cfg(unix)]
         let fd = {
             use std::os::unix::io::AsRawFd;
@@ -120,8 +129,11 @@ pub fn write_verified_piece(eng: &TestEngine, id: &str, data: &[u8], index: usiz
 
     if let Some(st) = eng.server.storage.get_storage(&info_hash) {
         let doc_piece = st.piece_at(index);
-        let _ = doc_piece.write_at(piece_bytes, 0);
-        let _ = doc_piece.mark_complete();
+        assert_eq!(
+            doc_piece.write_at(piece_bytes, 0).unwrap(),
+            piece_bytes.len()
+        );
+        doc_piece.mark_complete().unwrap();
         st.set_piece_complete(index, true);
     }
     let rec = record.read();
@@ -137,10 +149,22 @@ pub fn recovery_metadata(repeats: Option<usize>) -> (Vec<u8>, String) {
         data.extend_from_slice(motif);
     }
     let piece_length = 16 * 1024i64;
-    let piece_count = data.len().div_ceil(piece_length as usize);
-    let (torrent, _, _) =
-        support::build_single_file_torrent("resume.bin", piece_length, piece_count);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&torrent);
+    let info = wt_types::Info {
+        name: "resume.bin".into(),
+        piece_length,
+        pieces: payload_hashes(&data, piece_length as usize),
+        files: vec![wt_types::FileInfo {
+            length: data.len() as i64,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let metadata = wt_types::MetaInfo {
+        info_bytes: wt_meta::encode_info(&info).unwrap(),
+        ..Default::default()
+    };
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(wt_meta::encode_metainfo(&metadata).unwrap());
     (data, encoded)
 }
 
@@ -180,4 +204,11 @@ pub fn metadata_episodes(
     st.attach_descriptors_mode(&[None; 5], &[0, 1, 2, 3, 4], true)
         .expect("attach");
     (st, info, payload)
+}
+
+fn payload_hashes(data: &[u8], piece_length: usize) -> Vec<u8> {
+    use sha1::{Digest, Sha1};
+    data.chunks(piece_length)
+        .flat_map(|piece| Sha1::digest(piece).to_vec())
+        .collect()
 }

@@ -275,9 +275,25 @@ async fn test_two_engine_host_transfer() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Wait for metadata exchange and configure storage when ready
+    // Immediate configure call right after add, before metadata arrives (matches Android app behavior):
+    let c_resp = http
+        .post(format!("http://127.0.0.1:{leecher_port}/configure"))
+        .json(&json!({
+            "id": info_hash,
+            "selected": [0],
+            "descriptors": [null],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        c_resp.status(),
+        200,
+        "immediate /configure before metadata must succeed"
+    );
+
+    // Wait for transfer to reach 100% verified bytes
     let start = Instant::now();
-    let mut configured = false;
     let mut final_torrent_json: Option<Value> = None;
 
     while start.elapsed() < Duration::from_secs(45) {
@@ -290,25 +306,6 @@ async fn test_two_engine_host_transfer() {
             .unwrap();
         if resp.status().is_success() {
             let t: Value = resp.json().await.unwrap();
-            if !configured {
-                if let Some(files) = t["files"].as_array() {
-                    if !files.is_empty() {
-                        let c_resp = http
-                            .post(format!("http://127.0.0.1:{leecher_port}/configure"))
-                            .json(&json!({
-                                "id": info_hash,
-                                "selected": [0],
-                                "descriptors": [null],
-                            }))
-                            .send()
-                            .await
-                            .unwrap();
-                        assert_eq!(c_resp.status(), 200);
-                        configured = true;
-                    }
-                }
-            }
-
             if t["verifiedBytes"].as_i64() == Some(total_len) {
                 final_torrent_json = Some(t);
                 break;
@@ -317,7 +314,6 @@ async fn test_two_engine_host_transfer() {
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    assert!(configured, "leecher never received metadata to configure");
     let torrent_json =
         final_torrent_json.expect("leecher did not reach 100% verified bytes in time");
 

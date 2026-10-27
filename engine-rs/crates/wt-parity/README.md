@@ -21,33 +21,33 @@ CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
 
 ```bash
 cd engine-go
-go build -tags=nosqlite,noboltdb -o /tmp/engine-go-host .
+go build -tags=nosqlite,noboltdb -o /home/kar/.cache/wt-tmp/engine-go-host .
 
 cd ../engine-rs
-CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
+WT_PARITY_SCALE=bounded CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
   cargo run -p wt-parity --release -- \
-  run --engine /tmp/engine-go-host --label go --scenario all \
-  --repeats 3 --seeders 4 \
+  run --engine /home/kar/.cache/wt-tmp/engine-go-host --label go --scenario all \
+  --repeats 5 --seeders 4 \
   --work /home/kar/.cache/wt-tmp/wt-parity \
-  --out crates/wt-parity/results/go-all.json
+  --out crates/wt-parity/results/go-all-new.json
 ```
 
-Numbers are summarized in [`BASELINE.md`](BASELINE.md). Full samples live in
-`results/go-all.json`.
+Replace `results/go-all.json` only after the new run exits successfully and all
+scenarios have five samples. Numbers are summarized in [`BASELINE.md`](BASELINE.md).
 
-## Rust host (when ready)
+## Rust host
 
-`engine-host` in `wt-engine` is still a stub (`engine not wired yet`). When the
-control API is wired:
+`engine-host` in `wt-engine` serves the control API and transfers between hosts.
+Use the same scale, repeats and seeder count for both engines:
 
 ```bash
 CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-engine CARGO_BUILD_JOBS=3 \
   cargo build -p wt-engine --release --bin engine-host
 
-CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
+WT_PARITY_SCALE=bounded CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/wt-parity CARGO_BUILD_JOBS=3 \
   cargo run -p wt-parity --release -- \
   run --engine /home/kar/.cache/wt-targets/wt-engine/release/engine-host \
-  --label rust --scenario all \
+  --label rust --scenario all --repeats 5 --seeders 4 \
   --work /home/kar/.cache/wt-tmp/wt-parity \
   --out crates/wt-parity/results/rust-all.json
 
@@ -96,7 +96,12 @@ are shut down and data dirs under `api-diff` are removed afterward.
 | `control_latency` | `/stats` and `/torrent/<id>` latency under load (ms) |
 | `all` | Runs every scenario above |
 
+`WT_PARITY_SCALE=bounded` uses 64 MiB video and 32 MiB seeks, preserving seeks
+beyond the 16 MiB cache while keeping fixtures and one leecher below 256 MiB.
 Faster iteration: `WT_PARITY_SCALE=small` or `tiny` (smaller fixtures).
+Samples preserve repeat order: report repeat 0 separately from repeats 1–4.
+Each repeat has a fresh leecher, but the seeders and host filesystem cache are
+shared; repeat 0 does not imply a dropped OS page cache.
 
 ## Local swarm (no internet)
 

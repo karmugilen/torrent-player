@@ -128,12 +128,24 @@ async fn handle_control(
             ));
         }
     };
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
     let is_shutdown = method == Method::POST.as_str()
         && (path == "/shutdown" || path == "shutdown" || path.ends_with("/shutdown"));
 
-    let (status, resp) = engine.request(&method, &path, body.as_ref());
+    // Control handlers may wait for magnet metadata or perform storage IO.
+    // Keep runtime workers available to actually acquire that metadata.
+    let worker = engine.clone();
+    let (status, resp) =
+        match tokio::task::spawn_blocking(move || worker.request(&method, &path, &body)).await {
+            Ok(response) => response,
+            Err(_) => {
+                return Ok(json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    br#"{"error":"control request failed"}"#,
+                ))
+            }
+        };
     let response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header(hyper::header::CONTENT_TYPE, "application/json")
