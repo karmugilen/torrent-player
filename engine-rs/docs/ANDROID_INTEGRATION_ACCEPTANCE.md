@@ -6,14 +6,15 @@
 - testDebugUnitTest (go default): SUCCESS
 - Rust APK contains lib/arm64-v8a/libengine.so (unzip -l)
 - Go APK contains lib/arm64-v8a/libengine.so
+- Physical device install & launch: SUCCESS (`00121649A004784` device attached, installed via `adb install -r`, launched `webtor.app/.MainActivity`, confirmed `webtor-engine: engine::jni: Engine ready: JNI control, streamPort=...` and `native engine ready` in logcat)
 
 ## libengine.so sizes (arm64-v8a)
 | Engine | Bytes |
 |---|---|
 | Go | 22170160 |
-| Rust | 2194912 |
+| Rust | 12255872 |
 
-Rust is smaller by 19975248 bytes.
+Rust is smaller by 9914288 bytes (45% smaller).
 
 ## Host binary
 - engine-host wired: EngineServer::new -> start_streaming -> ctl_http::serve
