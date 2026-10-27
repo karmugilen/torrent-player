@@ -47,7 +47,8 @@ upstream crates and never edit them; ask the coordinator for API changes.
   (no C/C++ libraries besides libc/Android system libs; `ring` is acceptable).
   It must cross-compile to `aarch64-linux-android` with NDK 26.1.
 - Build with your own target dir so builds do not block each other:
-  `CARGO_TARGET_DIR=/tmp/wt-target-<crate> cargo test -p <crate>`.
+  `CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/<crate> CARGO_BUILD_JOBS=3 cargo test -p <crate>`.
+  Never build under /tmp: it is a RAM-backed tmpfs and full builds crash with SIGBUS.
   If `Cargo.lock` changes under you, just rerun cargo.
 - Do **not** run any git command that writes (commit, add, stash, checkout,
   reset, restore, rebase, merge). The coordinator commits.
