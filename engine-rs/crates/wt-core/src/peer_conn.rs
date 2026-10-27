@@ -390,7 +390,9 @@ impl PeerConn {
                 peer_extension_bits: [0u8; 8],
                 max_requests: DEFAULT_PEER_MAX_REQUESTS,
                 // Ramp like HEAD (16); Go starts at 0 but our WholeQueue+wake path needs a floor.
-                peak_requests: 16,
+                // Start closer to a full pipeline so public seeds are not
+                // warmed up with only a handful of blocks (Ubuntu gap vs Go).
+                peak_requests: 64,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),
@@ -660,7 +662,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 peer_extension_bits: handle.peer_extension_bits(),
                 max_requests: DEFAULT_PEER_MAX_REQUESTS,
                 // Ramp like HEAD (16); Go starts at 0 but our WholeQueue+wake path needs a floor.
-                peak_requests: 16,
+                // Start closer to a full pipeline so public seeds are not
+                // warmed up with only a handful of blocks (Ubuntu gap vs Go).
+                peak_requests: 64,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),

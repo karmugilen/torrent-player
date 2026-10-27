@@ -137,17 +137,22 @@ pub fn compute_playback_pipeline_limit(
     has_focus: bool,
 ) -> usize {
     let tuning = current_seek_tuning();
+    // Floor keeps slow-start peers from collapsing to 2–3 outstanding
+    // blocks (BDP with low rate × default 200ms RTT), which locked Ubuntu
+    // ISO transfers well below Go on the same seeds.
+    const PLAYBACK_PIPELINE_FLOOR: usize = 32;
     if tuning.pipeline_rtt > 0.0 {
         if rtt.is_zero() || download_rate <= 0.0 || !has_focus {
             return 0;
         }
         let bdp = download_rate * rtt.as_secs_f64() * tuning.pipeline_rtt / (BLOCK_SIZE as f64);
         let n = bdp as usize + (tuning.min_pipeline.max(2) as usize);
-        return n;
+        return n.max(PLAYBACK_PIPELINE_FLOOR);
     }
     if tuning.pipeline_seconds <= 0.0 || !has_focus {
         return 0;
     }
     let n = (download_rate * tuning.pipeline_seconds / (BLOCK_SIZE as f64)) as usize + 1;
     n.max(tuning.min_pipeline.max(1) as usize)
+        .max(PLAYBACK_PIPELINE_FLOOR)
 }
