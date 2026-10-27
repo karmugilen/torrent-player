@@ -66,7 +66,7 @@ pub struct TorrentRecord {
 }
 
 impl TorrentRecord {
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         let Some(info) = self.torrent.info() else {
             return;
         };
@@ -110,7 +110,7 @@ impl TorrentRecord {
 }
 
 pub struct EngineServer {
-    self_ref: OnceLock<Weak<EngineServer>>,
+    pub(crate) self_ref: OnceLock<Weak<EngineServer>>,
     pub client: wt_core::Client,
     pub storage: Arc<wt_storage::DocumentStorageClient>,
     pub download_dir: PathBuf,
@@ -150,6 +150,7 @@ pub struct EngineServer {
     pub download_rate_limit: AtomicI64,
     pub upload_rate_limit: AtomicI64,
     pub preview_active: Mutex<Option<Arc<PreviewReader>>>,
+    pub preview_active_id: Mutex<Option<String>>,
     pub preview_readers: Mutex<HashMap<i64, Arc<PreviewReader>>>,
     pub playback_readers: Mutex<HashMap<i64, Arc<PlaybackReader>>>,
     pub next_reader_id: AtomicI64,
@@ -368,6 +369,7 @@ impl EngineServer {
             download_rate_limit: AtomicI64::new(0),
             upload_rate_limit: AtomicI64::new(0),
             preview_active: Mutex::new(None),
+            preview_active_id: Mutex::new(None),
             preview_readers: Mutex::new(HashMap::new()),
             playback_readers: Mutex::new(HashMap::new()),
             next_reader_id: AtomicI64::new(1),
@@ -375,6 +377,66 @@ impl EngineServer {
         });
         let _ = server.self_ref.set(Arc::downgrade(&server));
         Ok(server)
+    }
+
+    pub fn close_preview_for(&self, id: &str) {
+        let mut active_id = self.preview_active_id.lock();
+        if active_id.as_deref() == Some(id) {
+            *active_id = None;
+            let p = self.preview_active.lock().take();
+            if let Some(reader) = p {
+                reader.close();
+            }
+        }
+    }
+
+    pub fn status_fingerprint(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let records = self.records.read();
+        let mut sorted_keys: Vec<_> = records.keys().cloned().collect();
+        sorted_keys.sort();
+        let down_speed = self.download_speed.load(Ordering::Relaxed);
+        let up_speed = self.upload_speed.load(Ordering::Relaxed);
+        let mut hasher = Sha256::new();
+        let header = format!("{down_speed}/{up_speed};");
+        hasher.update(header.as_bytes());
+        for id in sorted_keys {
+            if let Some(rec_lock) = records.get(&id) {
+                let rec = rec_lock.read();
+                let stats = rec.torrent.stats();
+                let err = rec.error.as_deref().unwrap_or("");
+                let line = format!(
+                    "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{};",
+                    rec.id,
+                    0,
+                    rec.paused,
+                    rec.checking,
+                    rec.configured,
+                    rec.checked_pieces,
+                    rec.check_total,
+                    rec.selected.len(),
+                    stats.active_peers,
+                    stats.pieces_complete,
+                    rec.verified_bytes,
+                    stats.conn_stats.bytes_read_data,
+                    stats.conn_stats.bytes_written_data,
+                    rec.downloaded,
+                    rec.uploaded,
+                    err
+                );
+                hasher.update(line.as_bytes());
+                if rec.direct_play {
+                    let idle = format!("idle:{}:{};", rec.resting, rec.idle_drop_ready);
+                    hasher.update(idle.as_bytes());
+                }
+                if let Some(np) = &rec.next_preload {
+                    let next = format!("next:{}:{}:{};", np.file_index, np.active, np.ready);
+                    hasher.update(next.as_bytes());
+                }
+            }
+        }
+        let out = hasher.finalize();
+        out.into()
     }
 
     fn apply_seed_policy(&self, rec: &mut TorrentRecord) {
@@ -514,6 +576,7 @@ impl EngineServer {
         if let Some(p) = preview.take() {
             p.close();
         }
+        *self.preview_active_id.lock() = None;
         self.notify_change();
     }
 
@@ -1015,6 +1078,7 @@ impl EngineServer {
         };
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
+            self.close_preview_for(&req.id);
             let mut rec = r.write();
             let Some(storage) = self.storage.get_storage(&rec.info_hash) else {
                 return (
@@ -1098,6 +1162,9 @@ impl EngineServer {
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
             rec.paused = pause;
+            if pause {
+                self.close_preview_for(&req.id);
+            }
             self.apply_transfer_state(&mut rec);
             self.notify_change();
             (
@@ -1122,6 +1189,7 @@ impl EngineServer {
                 )
             }
         };
+        self.close_preview_for(&req.id);
         let mut records = self.records.write();
         let mut by_hash = self.records_by_hash.write();
         if let Some(rec) = records.remove(&req.id) {
@@ -1483,14 +1551,24 @@ impl EngineServer {
             self.client.inner.dial_limiter.set_limit(clamped as f64);
         }
 
-        if let Some(ghost) = req.ghost_mode {
-            self.ghost_mode.store(ghost, Ordering::SeqCst);
-        }
         if let Some(pro) = req.ghost_pro_mode {
             self.ghost_pro_mode.store(pro, Ordering::SeqCst);
+            if pro {
+                self.ghost_mode.store(false, Ordering::SeqCst);
+                self.peer_exploration.store(false, Ordering::SeqCst);
+            }
+        }
+        if let Some(ghost) = req.ghost_mode {
+            self.ghost_mode.store(ghost, Ordering::SeqCst);
+            if ghost {
+                self.ghost_pro_mode.store(false, Ordering::SeqCst);
+            }
         }
         if let Some(exp) = req.peer_exploration {
             self.peer_exploration.store(exp, Ordering::SeqCst);
+            if exp {
+                self.ghost_pro_mode.store(false, Ordering::SeqCst);
+            }
         }
         if let Some(seek) = req.claude_seek_mode {
             let prev = self.claude_seek_mode.swap(seek, Ordering::SeqCst);
@@ -1698,48 +1776,8 @@ impl EngineServer {
     }
 
     pub fn open_preview(&self, id: &str, index: usize) -> std::io::Result<Arc<PreviewReader>> {
-        let mut active = self.preview_active.lock();
-        if active.as_ref().is_some_and(|reader| reader.is_closed()) {
-            *active = None;
-        }
-        if active.is_some() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "preview already active",
-            ));
-        }
-
-        let records = self.records.read();
-        let mut rec = records
-            .get(id)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "torrent not found"))?
-            .write();
-        rec.refresh();
-
-        if index >= rec.files.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid file index",
-            ));
-        }
-
-        let file =
-            rec.torrent.files().get(index).cloned().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")
-            })?;
-        let length = file.length();
-        let backend = Mutex::new(crate::playback_core::CoreReaderBackend::from_file(&file));
-        let reader = Arc::new(PreviewReader::new(
-            index,
-            length,
-            Box::new(move |buf, offset| {
-                crate::playback::ReaderBackend::read_at(&mut *backend.lock(), buf, offset)
-            }),
-        ));
-
-        *active = Some(reader.clone());
-        let handle = self.next_reader_id.fetch_add(1, Ordering::SeqCst);
-        self.preview_readers.lock().insert(handle, reader.clone());
+        let reader = crate::preview::open_preview(self, id, index)?;
+        *self.preview_active_id.lock() = Some(id.to_string());
         Ok(reader)
     }
 }

@@ -20,6 +20,7 @@ bytes.workspace = true
 futures.workspace = true
 rand.workspace = true
 libc.workspace = true
+sha2.workspace = true
 jni = { version = "0.21", features = ["invocation"] }
 maxminddb = "0.24"
 base64 = "0.22"

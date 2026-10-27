@@ -186,4 +186,12 @@ Owned by `agy-tests` (`tests/engine_*.rs`, `tests/support/`, `tests/ENGINE_TESTS
 - Code quality: `cargo clippy --tests -p wt-engine -- -D warnings` and `cargo fmt` clean.
 - Cross-worker requests: all waiting tests are cataloged in `engine-rs/docs/requests.md` addressed to `agy-engine` or `agy-core`.
 
+## Round 2 Feature Delivery (agy-engine)
+
+- **`status_fingerprint`**: Implemented `status_fingerprint(&self) -> [u8; 32]` on `EngineServer` calculating SHA-256 fingerprint over speeds and per-torrent status (id, paused, checking, configured, selected, peers, piece completion, stats, direct play idle status, next preload).
+- **Preview Demand Release**: Wired target-aware `close_preview_for(&self, id: &str)` into `POST /pause`, `POST /configure`, and `POST /remove`. Pausing an unrelated torrent preserves active preview; pausing the active preview's torrent closes the reader and releases temporary piece demand.
+- **`TorrentRecord::refresh` and `EngineServer::self_ref`**: Made `pub(crate)` to satisfy cross-module preview demands without violating encapsulation.
+- **Parity & Tests**: 34 needs-ignored tests verified passing with `--ignored`; `cargo test -p wt-engine` passing 51/51; `engine_two_host` passing; `wt-parity api-diff` verified 30 MATCH / 0 DIFF / 0 CRITICAL.
+
+
 
