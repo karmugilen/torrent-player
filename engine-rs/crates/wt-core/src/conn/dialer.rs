@@ -446,14 +446,27 @@ async fn dial_raw_owned(
             if disable_utp {
                 return Err(CoreError::Other("uTP transport disabled".to_string()));
             }
-            let (sock, _temp_sock) = if let Some(s) = utp_socket {
-                ((*s).clone(), None)
-            } else {
+            // Prefer a dedicated ephemeral uTP socket for outgoing dials.
+            // Sharing the listener socket with accept/DHT demux yielded 0
+            // public-swarm uTP peerconns (Go holds ~25% uTP on Ubuntu);
+            // force-uTP on the shared socket never completed handshake.
+            // Keep the listener socket as fallback when ephemeral bind fails.
+            let (sock, _keep_alive) = {
                 let bind_addr: SocketAddr = "0.0.0.0:0"
                     .parse()
                     .map_err(|e| CoreError::Other(format!("invalid addr: {e}")))?;
-                let s = Arc::new(UtpSocket::bind(bind_addr).await.map_err(CoreError::Io)?);
-                (s.clone(), Some(s))
+                match UtpSocket::bind(bind_addr).await {
+                    Ok(s) => {
+                        let s = Arc::new(s);
+                        (s.clone(), Some(s))
+                    }
+                    Err(_) => {
+                        let s = utp_socket.ok_or_else(|| {
+                            CoreError::Other("no uTP socket for outgoing dial".into())
+                        })?;
+                        ((*s).clone(), None)
+                    }
+                }
             };
 
             let utp = wt_wire::transport::dial_utp(&sock, remote_addr, dial_timeout)

@@ -32,7 +32,11 @@ try:
         if st.get('ready') or time.monotonic() - t0 > 90: break
         time.sleep(0.5)
     meta = time.monotonic() - t0
-    files = st['files']; v = max(files, key=lambda f: f['length']); idx = v['index']
+    files = st.get('files') or []
+    if not files:
+        print(json.dumps({'label': LABEL, 'metadata_s': round(meta, 1), 'error': 'empty files', 'torrent': st}))
+        raise SystemExit(2)
+    v = max(files, key=lambda f: f['length']); idx = v['index']
     call('POST', '/configure', {'id': tid, 'descriptors': [None]*len(files), 'selected': [idx], 'storageMode': 'stream', 'streamCacheBytes': 64 << 20})
     call('POST', '/focus', {'id': tid, 'fileIndex': idx})
     code, play = call('POST', '/play', {'id': tid, 'fileIndex': idx, 'offset': 0}); url = play['streamUrl']
