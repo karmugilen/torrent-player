@@ -297,6 +297,11 @@ pub struct Completion {
 /// Implemented by `wt-storage`; consumed by `wt-core`.
 pub trait ClientStorage: Send + Sync {
     fn open_torrent(&self, info: &Info, info_hash: InfoHash) -> StorageResult<Arc<dyn TorrentStorage>>;
+    /// Forget a torrent's storage state (the engine's /remove). Storages
+    /// without per-torrent state can keep the default.
+    fn remove_torrent(&self, _info_hash: InfoHash) -> StorageResult<()> {
+        Ok(())
+    }
 }
 
 /// Per-torrent storage (anacrolix `storage.TorrentImpl`).
