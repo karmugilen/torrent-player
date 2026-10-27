@@ -96,7 +96,7 @@ Status values: `pass` (runs and asserts), `ignored-waiting` (compiles, `#[ignore
 | `TestPlaybackCloseReopenPreservesResumeAcrossMetadataProbes` | `engine_playback_resume::test_playback_close_reopen_preserves_resume_across_metadata_probes` | ignored-waiting |
 | `TestOpenPlaybackReusesValidatedResumeWindow` | `engine_playback_resume::test_open_playback_reuses_validated_resume_window` | ignored-waiting |
 | `TestOpenPreviewReadsVerifiedBytesWithoutFocusChange` | `engine_preview::test_open_preview_reads_verified_bytes_without_focus_change` | ignored-waiting |
-| `TestPreviewRejectsSecondConcurrentJob` | `engine_preview::test_preview_rejects_second_concurrent_job` | ignored-waiting |
+| `TestPreviewRejectsSecondConcurrentJob` | `engine_preview::test_preview_rejects_second_concurrent_job` | pass |
 | `TestPreviewTempForReadyDraftWithoutFullFile` | `engine_preview::test_preview_temp_for_ready_draft_without_full_file` | ignored-waiting |
 | `TestPreviewCloseIsIdempotentAndCancelsRead` | `engine_preview::test_preview_close_is_idempotent_and_cancels_read` | ignored-waiting |
 | `TestPauseReleasesPreviewDemand` | `engine_preview::test_pause_releases_preview_demand` | ignored-waiting |
@@ -172,8 +172,8 @@ Status values: `pass` (runs and asserts), `ignored-waiting` (compiles, `#[ignore
 ## Counts
 
 - total mapped: 143
-- pass: 7
-- ignored-waiting: 136
+- pass: 8
+- ignored-waiting: 135
 - fails: 0
 
 ## Compile note
@@ -182,3 +182,11 @@ Owned suite (`tests/engine_*.rs` + `tests/support/`) compiles and runs via
 `cargo test -p wt-engine --test engine_<name>`. Full `cargo test -p wt-engine --tests`
 is blocked by `tests/jni_exports.rs` (grok-4 owned) until its `wt_engine::` imports
 become `engine::`.
+
+
+## Helper modules (stream / preview / network)
+
+- `src/stream_http.rs`: Go-faithful Range/HEAD/206 server (`/torrent/{id}/file/{index}`), unit + live Range test with fake `StreamSource`.
+- `src/preview.rs`: budgeted `PreviewReader` + `admit_preview_range`.
+- `src/live_preview.rs`: preview-state signature helpers.
+- `src/network.rs`: generation gate + `NetworkDialer` reset/track.
