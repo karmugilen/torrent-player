@@ -31,10 +31,7 @@ fn serialize_go_float<S: serde::Serializer>(value: &f64, serializer: S) -> Resul
     if !value.is_finite() {
         return Err(serde::ser::Error::custom("unsupported non-finite float"));
     }
-    if value.fract() == 0.0
-        && *value >= i64::MIN as f64
-        && *value < i64::MAX as f64
-    {
+    if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 {
         serializer.serialize_i64(*value as i64)
     } else {
         serializer.serialize_f64(*value)

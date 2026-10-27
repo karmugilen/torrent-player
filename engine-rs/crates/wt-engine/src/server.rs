@@ -493,6 +493,8 @@ impl EngineServer {
         let live_status = self.tracker_status.snapshot(&rec.info_hash);
         let trackers = build_tracker_views(&rec.original_trackers, &[], &live_status);
 
+        let selected_total: i64 = rec.files.iter().filter(|f| rec.selected.contains(&f.index)).map(|f| f.length).sum();
+        let selected_verified: i64 = rec.files.iter().filter(|f| rec.selected.contains(&f.index)).map(|f| f.verified_bytes).sum();
         let view = TorrentView {
             seeding: rec.seeding,
             seed_ratio: 0.0,
@@ -501,22 +503,15 @@ impl EngineServer {
             name: rec.name.clone(),
             magnet_uri: rec.magnet_uri.clone(),
             ready: rec.torrent.info().is_some(),
-            done: rec.verified_bytes >= rec.files.iter().map(|f| f.length).sum::<i64>(),
+            done: !rec.direct_play && !rec.checking && selected_total > 0 && selected_verified >= selected_total,
             paused: rec.paused,
-            progress: {
-                let total: i64 = rec.files.iter().map(|f| f.length).sum();
-                if total > 0 {
-                    (rec.verified_bytes as f64 / total as f64).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                }
-            },
+            progress: if selected_total > 0 { selected_verified as f64 / selected_total as f64 } else { 0.0 },
             download_speed: 0,
             upload_speed: 0,
             num_peers: rec.torrent.stats().total_peers,
-            length: rec.files.iter().map(|f| f.length).sum(),
-            downloaded: rec.downloaded,
-            verified_bytes: rec.verified_bytes,
+            length: selected_total,
+            downloaded: selected_verified,
+            verified_bytes: selected_verified,
             uploaded: rec.uploaded,
             files: rec.files.clone(),
             trackers,
@@ -539,7 +534,12 @@ impl EngineServer {
     }
 
     fn handle_play(&self, body: &str) -> (u16, Vec<u8>) {
-        let req: PlayRequest = match serde_json::from_str(body) {
+        let mut value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()),
+        };
+        if let Some(obj) = value.as_object_mut() { obj.entry("id").or_insert(json!("")); }
+        let req: PlayRequest = match serde_json::from_value(value) {
             Ok(r) => r,
             Err(_) => {
                 return (
@@ -608,15 +608,9 @@ impl EngineServer {
         };
         let records = self.records.read();
         if let Some(r) = records.get(id) {
-            r.write().file_only = true;
-            (
-                200,
-                serde_json::to_vec(&OkResponse {
-                    ok: true,
-                    id: Some(id.to_string()),
-                })
-                .unwrap(),
-            )
+            let enabled = req.get("fileOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+            r.write().file_only = enabled;
+            (200, serde_json::to_vec(&json!({"fileOnly": enabled})).unwrap())
         } else {
             (
                 404,
@@ -687,7 +681,7 @@ impl EngineServer {
                 200,
                 serde_json::to_vec(&OkResponse {
                     ok: true,
-                    id: Some(req.id),
+                    id: None,
                 })
                 .unwrap(),
             )
@@ -751,7 +745,7 @@ impl EngineServer {
                 200,
                 serde_json::to_vec(&OkResponse {
                     ok: true,
-                    id: Some(req.id),
+                    id: None,
                 })
                 .unwrap(),
             )
@@ -798,23 +792,11 @@ impl EngineServer {
     }
 
     fn handle_forget_peers(&self, body: &str) -> (u16, Vec<u8>) {
-        let req: IdRequest = match serde_json::from_str(body) {
-            Ok(r) => r,
-            Err(_) => {
-                return (
-                    400,
-                    serde_json::to_vec(&json!({"error": "invalid json"})).unwrap(),
-                )
-            }
-        };
-        (
-            200,
-            serde_json::to_vec(&OkResponse {
-                ok: true,
-                id: Some(req.id),
-            })
-            .unwrap(),
-        )
+        let req: serde_json::Value = match serde_json::from_str(body) { Ok(v) => v, Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()) };
+        if let Some(hash) = req.get("infoHash").and_then(|v| v.as_str()) {
+            if let Some(r) = self.records_by_hash.read().get(hash) { r.read().torrent.forget_peers(); }
+        }
+        (200, serde_json::to_vec(&json!({"ok":true})).unwrap())
     }
 
     fn handle_pieces(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
@@ -891,20 +873,15 @@ impl EngineServer {
         (200, serde_json::to_vec(&resp).unwrap())
     }
 
-    fn handle_preview_state(&self, id: &str, _query: &str) -> (u16, Vec<u8>) {
+    fn handle_preview_state(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
-        if !records.contains_key(id) {
-            return (
-                404,
-                serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap(),
-            );
-        }
-        let resp = PreviewStateResponse {
-            active: false,
-            byte_offset: 0,
-            signature: "0".to_string(),
-        };
-        (200, serde_json::to_vec(&resp).unwrap())
+        let Some(r) = records.get(id) else { return (404, serde_json::to_vec(&json!({"error":"torrent not found"})).unwrap()); };
+        let rec = r.read();
+        let index = url::form_urlencoded::parse(query.as_bytes()).find_map(|(k,v)| if k == "fileIndex" { v.parse::<usize>().ok() } else { None });
+        let Some(file) = index.and_then(|i| rec.torrent.files().get(i).cloned()) else { return (400, serde_json::to_vec(&json!({"error":"invalid file index"})).unwrap()); };
+        let pieces = crate::live_preview::pieces_overlapping_file((0..rec.torrent.num_pieces()).map(|p| (p, rec.torrent.piece_complete(p))), rec.piece_length, file.offset(), file.length());
+        let response = crate::live_preview::build_preview_state(crate::live_preview::PreviewStateInput { active: false, byte_offset: 0, completed_piece_indices: pieces });
+        (200, serde_json::to_vec(&response).unwrap())
     }
 
     fn handle_connections(&self, id: &str) -> (u16, Vec<u8>) {
@@ -942,18 +919,17 @@ impl EngineServer {
             }
         };
 
-        if let Some(ref data) = rec.torrent_bytes {
-            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
-            (
-                200,
-                serde_json::to_vec(&MetadataResponse { torrent_data: b64 }).unwrap(),
-            )
-        } else {
-            (
-                404,
-                serde_json::to_vec(&json!({"error": "metadata not available"})).unwrap(),
-            )
+        if let Ok(mut mi) = rec.torrent.metainfo() {
+            mi.announce.clear(); mi.announce_list = rec.original_trackers.clone();
+            mi.comment = "dynamic metainfo from client".into();
+            mi.created_by = "https://github.com/anacrolix/torrent".into();
+            mi.creation_date = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+            if let Ok(data) = wt_meta::encode_metainfo(&mi) {
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+                return (200, serde_json::to_vec(&MetadataResponse { torrent_data: b64 }).unwrap());
+            }
         }
+        (404, serde_json::to_vec(&json!({"error":"metadata not available"})).unwrap())
     }
 
     fn handle_get_settings(&self) -> (u16, Vec<u8>) {

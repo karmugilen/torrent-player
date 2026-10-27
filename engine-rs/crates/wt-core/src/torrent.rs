@@ -88,6 +88,8 @@ pub struct TorrentInner {
     pub pieces: RwLock<Vec<PieceEntry>>,
     pub book: RwLock<Option<crate::piece_state::PieceBook>>,
     pub metadata: RwLock<crate::metadata::MetadataExchange>,
+    pub hasher: Mutex<Option<crate::hashing::PieceHasherPool>>,
+    pub hash_seq: AtomicU64,
     pub dht_nodes: RwLock<Vec<SocketAddr>>,
     pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
     pub dirty_chunks: RwLock<HashSet<RequestIndex>>,
@@ -148,6 +150,8 @@ impl TorrentInner {
             pieces: RwLock::new(Vec::new()),
             book: RwLock::new(None),
             metadata: RwLock::new(crate::metadata::MetadataExchange::new(Some(info_hash), info_hash_v2)),
+            hasher: Mutex::new(None),
+            hash_seq: AtomicU64::new(0),
             dht_nodes: RwLock::new(Vec::new()),
             peer_pieces: RwLock::new(HashMap::new()),
             dirty_chunks: RwLock::new(HashSet::new()),
@@ -216,10 +220,57 @@ impl TorrentInner {
         }
         handles.insert(info.remote, handle.clone());
         drop(handles);
+        self.start_hashing();
         let mut handler = crate::peer_conn::PeerConnHandler::new(Arc::clone(self), &handle);
         handler.start(&handle);
         self.bump_change();
         Ok(handler)
+    }
+
+    fn start_hashing(self: &Arc<Self>) {
+        let mut slot = self.hasher.lock();
+        if slot.is_some() { return; }
+        let workers = self.client.read().upgrade().map_or(2, |client| client.config.piece_hashers_per_torrent);
+        let (pool, rx) = crate::hashing::PieceHasherPool::with_workers(workers);
+        let torrent = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            while let Ok(result) = rx.recv() {
+                let Some(torrent) = torrent.upgrade() else { break; };
+                torrent.apply_hash_result(result);
+            }
+        });
+        *slot = Some(pool);
+    }
+
+    fn apply_hash_result(&self, result: crate::hashing::HashResult) {
+        let Some(info) = self.info.read().clone() else { return; };
+        let Some(storage) = self.storage.read().clone() else { return; };
+        let piece = result.piece_index;
+        if piece >= info.num_pieces() { return; }
+        let ps = storage.piece(info.piece(piece), info.piece_hash_v1(piece));
+        let valid = result.correct && !result.cancelled && result.error.is_none() && ps.mark_complete().is_ok();
+        if !valid { let _ = ps.mark_not_complete(); }
+        {
+            let mut pieces = self.pieces.write();
+            if let Some(entry) = pieces.get_mut(piece as usize) {
+                entry.checking = false;
+                entry.complete = valid;
+                entry.ok = true;
+                if !valid { entry.partial = false; entry.chunks_received.clear(); }
+            }
+        }
+        if let Some(book) = self.book.write().as_mut() {
+            book.set_complete_cached(piece, true, valid);
+            if !valid {
+                let (begin, end) = piece_req_index_range(piece, info.piece_length, info.total_length());
+                let mut dirty = self.dirty_chunks.write();
+                for req in begin..end { dirty.remove(&req); book.mark_chunk_pending(req); }
+            }
+        }
+        if valid {
+            for handle in self.conn_handles.read().values() { handle.send_message(wt_wire::message::Message::Have { index: piece }); }
+        }
+        self.bump_change();
     }
 
     pub(crate) fn wants_conns(&self) -> usize {

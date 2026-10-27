@@ -125,7 +125,9 @@ fn run_rust_download_read_seq(base_dir: &Path) -> Duration {
 
     let mut writer = &dest;
     let data = vec![0xAA; 1024 * 1024];
-    for _ in 0..256 { writer.write_all(&data).expect("prefill"); }
+    for _ in 0..256 {
+        writer.write_all(&data).expect("prefill");
+    }
     let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
@@ -208,7 +210,9 @@ fn run_rust_download_read_random(base_dir: &Path) -> Duration {
 
     let mut writer = &dest;
     let data = vec![0xAA; 1024 * 1024];
-    for _ in 0..256 { writer.write_all(&data).expect("prefill"); }
+    for _ in 0..256 {
+        writer.write_all(&data).expect("prefill");
+    }
     let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
@@ -253,7 +257,9 @@ fn run_rust_direct_play_seq(base_dir: &Path) -> Duration {
         }
         piece.mark_complete().expect("mark complete");
         for c in 0..BENCH_CHUNKS_PER_PIECE {
-            piece.read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64).expect("read chunk");
+            piece
+                .read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64)
+                .expect("read chunk");
         }
     }
     let elapsed = start.elapsed();
@@ -290,7 +296,9 @@ fn run_rust_direct_play_random_seeks(base_dir: &Path) -> Duration {
             }
             piece.mark_complete().expect("mark complete");
             for c in 0..BENCH_CHUNKS_PER_PIECE {
-                piece.read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64).expect("read chunk");
+                piece
+                    .read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64)
+                    .expect("read chunk");
             }
         }
     }

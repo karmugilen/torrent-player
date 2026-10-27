@@ -67,3 +67,4 @@
 -|codex-5 finding: most of the 136 ignored engine tests are unimplemented!() placeholders, not ports (c841eac overstated); codex-5 now writing real ports in priority order
 -|codex-3 storage bench: checkpoint save 11.3 s Rust vs 1.36 s Go (2,000 saves); codex-3 fixing checkpoint.rs
 -|api-diff: 21 MATCH / 9 DIFF / 4 CRITICAL (was 11/19/14); left: torrent length, /metadata, preview-state validation, /play missing-id status
+-|Storage bench part 1: Rust peak RSS 67.5 MiB vs Go 157.8; Rust wins restore/aggregation/seeks; checkpoint save, random read, DP sequential below target but timing noisy (5 agents share disk); codex-3 counting I/O calls per op

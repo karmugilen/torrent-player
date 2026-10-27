@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 use wt_types::{InfoHash, PeerId, PeerSource, Transport};
 use wt_wire::ext::{ExtendedHandshake, EXTENSION_NAME_METADATA, EXTENSION_NAME_PEX};
 use wt_wire::handshake::{default_peer_extension_bytes, handshake_incoming, PeerExtensionBits};
@@ -44,12 +44,14 @@ pub struct PeerListener {
     utp_socket: Option<Arc<UtpSocket>>,
     listen_port: u16,
     closed: Arc<AtomicBool>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl PeerListener {
     /// Bind TCP and/or uTP listeners based on `ClientConfig`.
     pub async fn bind(cfg: &ClientConfig) -> Result<Self> {
         let closed = Arc::new(AtomicBool::new(false));
+        let (shutdown, _) = watch::channel(false);
         let mut tcp_listeners = Vec::new();
         let mut utp_socket = None;
         let mut bound_port = cfg.listen_port;
@@ -94,6 +96,7 @@ impl PeerListener {
             utp_socket,
             listen_port: bound_port,
             closed,
+            shutdown,
         })
     }
 
@@ -110,6 +113,7 @@ impl PeerListener {
     /// Close all listeners.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.shutdown.send_replace(true);
     }
 
     /// Spawns the accept loop, sending accepted connections into `accepted_tx`.
@@ -133,9 +137,14 @@ impl PeerListener {
             let c_lk = lookup.clone();
             let c_tx = accepted_tx.clone();
             let c_cl = closed.clone();
+            let mut shutdown = self.shutdown.subscribe();
             tokio::spawn(async move {
                 while !c_cl.load(Ordering::Relaxed) {
-                    let (stream, peer_addr) = match tcp.accept().await {
+                    let accepted = tokio::select! {
+                        _ = shutdown.changed() => break,
+                        accepted = tcp.accept() => accepted,
+                    };
+                    let (stream, peer_addr) = match accepted {
                         Ok(res) => res,
                         Err(_) => break,
                     };
@@ -180,9 +189,14 @@ impl PeerListener {
             let u_lk = lookup;
             let u_tx = accepted_tx;
             let u_cl = closed;
+            let mut shutdown = self.shutdown.subscribe();
             tokio::spawn(async move {
                 while !u_cl.load(Ordering::Relaxed) {
-                    let stream = match utp.accept().await {
+                    let accepted = tokio::select! {
+                        _ = shutdown.changed() => break,
+                        accepted = utp.accept() => accepted,
+                    };
+                    let stream = match accepted {
                         Ok(s) => s,
                         Err(_) => break,
                     };

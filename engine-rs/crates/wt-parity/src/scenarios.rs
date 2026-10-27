@@ -139,12 +139,27 @@ pub fn run(opts: RunOpts) -> Result<RunReport, String> {
                 let mut cpu_b = Vec::new();
                 for i in 0..opts.repeats {
                     let (a, b, c, d) = scenario_resources(&opts, &swarm, &video, i)?;
-                    rss_a.push(a); cpu_a.push(b); rss_b.push(c); cpu_b.push(d);
+                    rss_a.push(a);
+                    cpu_a.push(b);
+                    rss_b.push(c);
+                    cpu_b.push(d);
                 }
-                metrics.insert("download_peak_rss_mib".into(), MetricSeries::from_samples("MiB", rss_a, false));
-                metrics.insert("download_cpu_seconds".into(), MetricSeries::from_samples("s", cpu_a, false));
-                metrics.insert("direct_play_peak_rss_mib".into(), MetricSeries::from_samples("MiB", rss_b, false));
-                metrics.insert("direct_play_cpu_seconds".into(), MetricSeries::from_samples("s", cpu_b, false));
+                metrics.insert(
+                    "download_peak_rss_mib".into(),
+                    MetricSeries::from_samples("MiB", rss_a, false),
+                );
+                metrics.insert(
+                    "download_cpu_seconds".into(),
+                    MetricSeries::from_samples("s", cpu_a, false),
+                );
+                metrics.insert(
+                    "direct_play_peak_rss_mib".into(),
+                    MetricSeries::from_samples("MiB", rss_b, false),
+                );
+                metrics.insert(
+                    "direct_play_cpu_seconds".into(),
+                    MetricSeries::from_samples("s", cpu_b, false),
+                );
             }
             "control_latency" => {
                 let (stats_ms, torrent_ms) = scenario_control_latency(&opts, &swarm, &video)?;

@@ -233,9 +233,25 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn queue_piece_hash(&self, piece: PieceIndex) {
-        // TODO: PieceHasherPool field — mark checking for UI/state until then.
-        if let Some(p) = self.pieces.write().get_mut(piece as usize) {
+        let Some(info) = self.info.read().clone() else { return; };
+        let Some(storage) = self.storage.read().clone() else { return; };
+        let Some(hash) = info.piece_hash_v1(piece) else { return; };
+        let priority = {
+            let mut pieces = self.pieces.write();
+            let Some(p) = pieces.get_mut(piece as usize) else { return; };
+            if p.checking || p.complete { return; }
             p.checking = true;
+            p.priority
+        };
+        let piece_obj = info.piece(piece);
+        let job = crate::hashing::HashJob {
+            piece_index: piece, priority, storage: storage.piece(piece_obj, Some(hash)),
+            expected: crate::hashing::ExpectedHash::V1(hash), piece_length: info.piece_length,
+            data_length: piece_obj.length, v1_zero_pad: 0, smartban: None,
+            seq: self.hash_seq.fetch_add(1, Ordering::Relaxed),
+        };
+        if !self.hasher.lock().as_ref().is_some_and(|pool| pool.queue(job).is_ok()) {
+            if let Some(p) = self.pieces.write().get_mut(piece as usize) { p.checking = false; }
         }
         TorrentInner::bump_change(self);
     }
