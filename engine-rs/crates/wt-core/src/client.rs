@@ -641,7 +641,9 @@ impl ClientInner {
                             .is_ok();
                         tor.dial_finished(peer.addr, ok);
                     });
-                    client.tasks.lock().push(task);
+                    let mut tasks = client.tasks.lock();
+                    tasks.retain(|t| !t.is_finished());
+                    tasks.push(task);
                 }
                 tokio::select! {
                     _ = torrent.peers_changed().notified() => {},

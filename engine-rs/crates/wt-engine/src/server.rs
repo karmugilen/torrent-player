@@ -359,7 +359,12 @@ impl EngineServer {
     }
 
     fn handle_add(&self, body: &str) -> (u16, Vec<u8>) {
-        let req: AddRequest = match serde_json::from_str(body) {
+        let mut value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => return (400, serde_json::to_vec(&json!({"error":"invalid json"})).unwrap()),
+        };
+        if let Some(obj) = value.as_object_mut() { obj.entry("torrentId").or_insert(json!("")); }
+        let req: AddRequest = match serde_json::from_value(value) {
             Ok(r) => r,
             Err(_) => {
                 return (

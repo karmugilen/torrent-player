@@ -31,10 +31,11 @@ pub struct MetricSeries {
 impl MetricSeries {
     pub fn from_samples(unit: &str, mut samples: Vec<f64>, higher_is_better: bool) -> Self {
         samples.retain(|v| v.is_finite());
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = quantile(&samples, 0.5);
-        let p90 = quantile(&samples, 0.9);
-        let max = samples.last().copied().unwrap_or(0.0);
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = quantile(&sorted, 0.5);
+        let p90 = quantile(&sorted, 0.9);
+        let max = sorted.last().copied().unwrap_or(0.0);
         Self {
             unit: unit.to_string(),
             samples,
@@ -73,4 +74,15 @@ pub struct CompareReport {
     pub noise_tolerance: f64,
     pub rows: Vec<CompareRow>,
     pub pass: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn samples_preserve_repeat_order() {
+        let s = MetricSeries::from_samples("ms", vec![10.0, 2.0, 4.0], false);
+        assert_eq!(s.samples, vec![10.0, 2.0, 4.0]);
+        assert_eq!(s.median, 4.0);
+    }
 }

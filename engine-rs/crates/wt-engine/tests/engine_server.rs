@@ -17,7 +17,7 @@ fn test_status_reports_connections_not_discovered_candidates() {
 fn test_add_magnet_before_metadata_returns_record() {
     let eng = TestEngine::new();
     let hash = "0123456789012345678901234567890123456789";
-    let body = format!(r#"{{"torrentId":"{hash}","prepare":true}}"#);
+    let body = format!(r#"{{"torrentId":"magnet:?xt=urn:btih:{hash}","prepare":true}}"#);
     let (code, raw) = eng.dispatch("POST", "/add", &body);
     assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
     let added: serde_json::Value = serde_json::from_slice(&raw).unwrap();

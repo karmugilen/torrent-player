@@ -620,6 +620,11 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     }
 
     pub fn start(&mut self, handle: &ConnHandle) {
+        let mut ext = ExtendedHandshake::default();
+        ext.m.insert(EXTENSION_NAME_METADATA.to_string(), self.our_ext_metadata);
+        ext.m.insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
+        ext.metadata_size = self.torrent.metadata_size();
+        self.send(handle, Message::Extended { id: EXT_HANDSHAKE_ID, payload: ext.encode() });
         let count = self.torrent.num_pieces();
         if count > 0 {
             let mut bits = vec![0u8; (count as usize).div_ceil(8)];
@@ -1111,7 +1116,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let n = self.torrent.num_pieces();
         for (i, has) in bits.into_iter().enumerate() {
             let idx = i as u32;
-            if idx >= n {
+            if n > 0 && idx >= n {
                 break;
             }
             if has && self.state.peer_pieces.insert(idx) {
@@ -1282,6 +1287,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                         let done = self.torrent.on_metadata_data(msg.piece, total, data)?;
                         if done {
                             self.state.need_request_update = true;
+                            self.update_requests(handle);
                         }
                     }
                 }

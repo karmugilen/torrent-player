@@ -162,7 +162,16 @@ pub fn run(opts: RunOpts) -> Result<RunReport, String> {
                 );
             }
             "control_latency" => {
-                let (stats_ms, torrent_ms) = scenario_control_latency(&opts, &swarm, &video)?;
+                let mut stats_ms = Vec::new();
+                let mut torrent_ms = Vec::new();
+                for i in 0..opts.repeats {
+                    let (mut stats, mut torrent) =
+                        scenario_control_latency(&opts, &swarm, &video, i)?;
+                    stats.sort_by(f64::total_cmp);
+                    torrent.sort_by(f64::total_cmp);
+                    stats_ms.push(crate::report::quantile(&stats, 0.5));
+                    torrent_ms.push(crate::report::quantile(&torrent, 0.5));
+                }
                 metrics.insert(
                     "control_stats_latency_ms".into(),
                     MetricSeries::from_samples("ms", stats_ms, false),
@@ -595,8 +604,9 @@ fn scenario_control_latency(
     opts: &RunOpts,
     swarm: &Swarm,
     fixture: &Fixture,
+    i: u32,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let leech = spawn_leech(opts, "ctl", 0)?;
+    let leech = spawn_leech(opts, "ctl", i)?;
     let peers = swarm.peer_addrs();
     let id = add_and_configure_download(&leech, fixture, &peers)?;
     // Under load: while download progresses, hammer APIs.

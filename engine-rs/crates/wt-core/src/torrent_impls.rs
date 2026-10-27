@@ -116,7 +116,10 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn is_seeding(&self) -> bool {
-        self.seeding.load(Ordering::Relaxed)
+        self.seeding.load(Ordering::Relaxed) || {
+            let pieces = self.pieces.read();
+            !pieces.is_empty() && pieces.iter().all(|p| p.complete)
+        }
     }
 
     fn closed(&self) -> bool {
@@ -498,7 +501,7 @@ impl PeerTorrent for TorrentInner {
     fn choke_config(&self) -> ChokeConfig {
         ChokeConfig {
             data_upload_disallowed: self.data_upload_disallowed.load(Ordering::Relaxed),
-            seeding: self.seeding.load(Ordering::Relaxed),
+            seeding: self.is_seeding(),
             ..ChokeConfig::default()
         }
     }

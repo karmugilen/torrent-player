@@ -517,6 +517,7 @@ impl Torrent {
     }
 
     pub fn download_all(&self) {
+        self.inner.download_all_requested.store(true, Ordering::Relaxed);
         let mut pieces = self.inner.pieces.write();
         for p in pieces.iter_mut() {
             if p.priority == PiecePriority::None {

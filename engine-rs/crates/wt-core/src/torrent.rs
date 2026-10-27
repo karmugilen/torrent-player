@@ -113,6 +113,7 @@ pub struct TorrentInner {
     pub interest_end: AtomicI64,
 
     pub data_download_disallowed: AtomicBool,
+    pub download_all_requested: AtomicBool,
     pub data_upload_disallowed: AtomicBool,
     pub max_established_conns: AtomicUsize,
     pub seeding: AtomicBool,
@@ -172,6 +173,7 @@ impl TorrentInner {
             interest_begin: AtomicI64::new(0),
             interest_end: AtomicI64::new(0),
             data_download_disallowed: AtomicBool::new(false),
+            download_all_requested: AtomicBool::new(false),
             data_upload_disallowed: AtomicBool::new(false),
             max_established_conns: AtomicUsize::new(100),
             seeding: AtomicBool::new(false),
@@ -302,7 +304,9 @@ impl TorrentInner {
         let piece_len = info.piece_length;
         let total_len = info.total_length();
         for i in 0..num_pieces {
-            piece_entries.push(PieceEntry::new(i as PieceIndex, piece_len, total_len));
+            let mut entry = PieceEntry::new(i as PieceIndex, piece_len, total_len);
+            if self.download_all_requested.load(Ordering::Relaxed) { entry.priority = PiecePriority::Normal; }
+            piece_entries.push(entry);
         }
 
         // Open storage

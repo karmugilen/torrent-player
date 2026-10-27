@@ -68,3 +68,5 @@
 -|codex-3 storage bench: checkpoint save 11.3 s Rust vs 1.36 s Go (2,000 saves); codex-3 fixing checkpoint.rs
 -|api-diff: 21 MATCH / 9 DIFF / 4 CRITICAL (was 11/19/14); left: torrent length, /metadata, preview-state validation, /play missing-id status
 -|Storage bench part 1: Rust peak RSS 67.5 MiB vs Go 157.8; Rust wins restore/aggregation/seeks; checkpoint save, random read, DP sequential below target but timing noisy (5 agents share disk); codex-3 counting I/O calls per op
+-|codex-5: 9 Go-generated JSON golden tests pass; engine suite baseline 9 real passing / 134 placeholders; engine_control ported for real
+-|api-diff 29 MATCH / 1 DIFF / 1 CRITICAL (metadata bytes). Coordinator defined connection wake interface (on_wake, wake_interval, ConnHandle::wake) for codex-1/codex-4
