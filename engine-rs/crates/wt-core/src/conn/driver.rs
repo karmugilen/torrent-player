@@ -84,24 +84,37 @@ async fn run_reader_loop<H>(
 {
     let mut reader = FramedReader::new(read_half);
     let stats = handle.stats();
+    let mut deadline = tokio::time::Instant::now() + read_deadline;
 
     while !handle.is_closed() {
-        let read_fut = tokio::time::timeout(read_deadline, reader.read_msg());
-        let msg = match read_fut.await {
-            Ok(Ok(Some(msg))) => msg,
-            Ok(Ok(None)) => {
-                handle.close("connection closed by peer (EOF)");
-                break;
+        let interval = handler.wake_interval().map(|d| d.max(Duration::from_millis(1)));
+        let msg = tokio::select! {
+            result = reader.read_msg() => result,
+            _ = handle.read_waker().notified() => {
+                if !handle.is_closed() { handler.on_wake(handle); }
+                continue;
             }
-            Ok(Err(err)) => {
-                handle.close(format!("frame decode error: {err}"));
-                break;
+            _ = async { match interval { Some(d) => tokio::time::sleep(d).await, None => std::future::pending().await } } => {
+                handler.on_wake(handle);
+                continue;
             }
-            Err(_) => {
+            _ = tokio::time::sleep_until(deadline) => {
                 handle.close("read deadline exceeded (keepalive timeout)");
                 break;
             }
         };
+        let msg = match msg {
+            Ok(Some(msg)) => msg,
+            Ok(None) => {
+                handle.close("connection closed by peer (EOF)");
+                break;
+            }
+            Err(err) => {
+                handle.close(format!("frame decode error: {err}"));
+                break;
+            }
+        };
+        deadline = tokio::time::Instant::now() + read_deadline;
 
         match msg {
             Message::Piece {

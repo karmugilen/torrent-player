@@ -71,3 +71,7 @@
 -|codex-5: 9 Go-generated JSON golden tests pass; engine suite baseline 9 real passing / 134 placeholders; engine_control ported for real
 -|api-diff 29 MATCH / 1 DIFF / 1 CRITICAL (metadata bytes). Coordinator defined connection wake interface (on_wake, wake_interval, ConnHandle::wake) for codex-1/codex-4
 -|codex-3 fixed parity harness bug that destroyed repeat order (cold-run detection); codex-5 engine tests: 11 real passing, 132 placeholders, 0 failing
+-|Coordinator fixed E0034 ambiguous trait methods in torrent_impls.rs that blocked codex-2 and codex-5
+-|api-diff 29/1/1: only /metadata torrentData left (codex-2)
+-|codex-3 perf bug: Direct Play startup-piece save does hash+write+fsync under the global storage lock (Go queues it to a background drain); approved fix in storage.rs
+-|ClientConfig + Callbacks moved to codex-4 (tracker dial hook, completed_handshake callback); coordinator stops editing codex-1 files on request

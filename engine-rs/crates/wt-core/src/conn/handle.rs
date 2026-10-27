@@ -20,6 +20,10 @@ pub trait ConnHandler: Send + 'static {
 
     /// Invoked when the connection closes, with an optional error description.
     fn on_closed(&mut self, handle: &ConnHandle, reason: &str);
+
+    fn on_wake(&mut self, _handle: &ConnHandle) {}
+
+    fn wake_interval(&self) -> Option<std::time::Duration> { None }
 }
 
 /// A cheaply cloneable handle to an active peer connection.
@@ -42,6 +46,7 @@ pub struct ConnHandleInner {
     pub stats: Arc<AtomicConnStats>,
     pub write_tx: mpsc::Sender<Message>,
     pub write_waker: Arc<Notify>,
+    pub read_waker: Notify,
 }
 
 impl ConnHandle {
@@ -75,6 +80,7 @@ impl ConnHandle {
                 stats,
                 write_tx,
                 write_waker,
+                read_waker: Notify::new(),
             }),
         }
     }
@@ -113,6 +119,15 @@ impl ConnHandle {
         self.inner.write_waker.notify_waiters();
     }
 
+    /// Coalesce request-update notifications until the reader handles them.
+    pub fn wake(&self) {
+        self.inner.read_waker.notify_one();
+    }
+
+    pub(crate) fn read_waker(&self) -> &Notify {
+        &self.inner.read_waker
+    }
+
     /// Close the connection with a reason.
     pub fn close(&self, reason: impl Into<String>) {
         let r = reason.into();
@@ -120,6 +135,7 @@ impl ConnHandle {
         if !was_closed {
             *self.inner.close_reason.write() = Some(r);
             self.inner.write_waker.notify_waiters();
+            self.wake();
         }
     }
 
