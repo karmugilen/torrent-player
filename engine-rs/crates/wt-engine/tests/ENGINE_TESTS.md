@@ -1,6 +1,8 @@
 # wt-engine integration test map
 
-Engine integration tests declared: 153 | Enabled: 115 | Waiting: 38 | Known core-blocked failures: 2
+Engine integration tests declared: 153 | Enabled: 115 | Waiting: 38 | Known core-blocked failures: 1
+
+Final validation: filtered broad suite 170 passed, 36 ignored, 4 filtered (two active swarm names and their ignored duplicates); API 30/0/0; engine-only all-target clippy clean. The active Claude slow/fast-seed test now passes, but Direct Play fails byte integrity at the 25 MiB seek; full per-test waiting reasons are in [ROUND3_WAITING.md](ROUND3_WAITING.md).
 
 Round 3 group 5: cold-magnet tracker restoration passes unchanged after Go UUID record identities and concurrent-add deduplication; waiting is now 38 overall. Tracker-status uses the same tiny.torrent fixture as Go, preserving every assertion.
 
