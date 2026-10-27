@@ -13,6 +13,6 @@ grok-8|wt-core (reader)|Reader done (e6be3ec, 19 tests); released|done
 grok-9|wt-core (torrent_impls.rs)|piece state + storage glue done (7a327e6, 13+22 tests); now PeerTorrent + ReaderHost impls for TorrentInner|closed
 codex-1|wt-core (torrent side)|torrent.rs, torrent_impls.rs, peer_conn/reader/metadata/hashing wiring, e2e tests; clippy clean|running
 codex-2|wt-engine (server + playback)|server.rs on wt_core, PlaybackHost, two-engine transfer; engine-host builds|running
-codex-3|wt-storage benches + wt-parity|storage benchmarks vs Go, then full Go-vs-Rust parity run|running
-codex-4|wt-core (Client + connections)|client.rs, connection manager (dialing, incoming, limits), sources on shared UDP|running
-codex-5|wt-engine (types.rs + tests)|JSON byte-compat with Go, un-ignoring the 136 engine integration tests|running
+codex-3|wt-storage perf + wt-parity|storage bench done (eeb9bef); fixing Direct Play startup save under lock; parity harness repeat-order fixed|running
+codex-4|wt-core (Client, connections, ClientConfig)|dialer on agreed interface; adding tracker dial hook + handshake callback; integration tests written|running
+codex-5|wt-engine (types.rs + tests)|9 Go JSON goldens pass; engine tests 11 real passing / 132 placeholders / 0 failing|running

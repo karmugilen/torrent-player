@@ -1,8 +1,8 @@
 wt-meta done verified: 39 tests, clippy+fmt clean (c191e96)
 wt-wire done verified: 31 tests, clippy all-targets clean (9721c3f)
 wt-discovery done verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6)
-wt-core running codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections)
+wt-core running codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig)
 wt-storage done verified: 109 tests, 0 ignored, 0 fail, clippy clean
 wt-policy done verified: 40 tests, 45 Go tests mapped (882bc1e)
 wt-parity done verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired
-wt-engine running codex-2 (server on wt_core, engine-host builds) + codex-5 (types.rs, engine tests)
+wt-engine running codex-2 (server on wt_core, api-diff 29 match / 1 critical) + codex-5 (types.rs, 11 real engine tests, 132 placeholders)

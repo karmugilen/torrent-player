@@ -17,25 +17,25 @@ wt-parity     [##############################] 100%  done     grok-1, codex-3
 wt-engine     [#############################.]  95%  running  codex-2+5
 ```
 
-Started 10:59 · elapsed 1.8 h · now 95%
+Started 10:59 · elapsed 1.9 h · now 95%
 
 Critical path: wt-engine
 
-ETA (rough, from the last 53 min at 10.7%/h):
+ETA (rough, from the last 60 min at 9.5%/h):
 
-- crates complete: ~14:35 (in 1.8 h)
-- whole port incl. integration, benchmarks vs Go, Android APK: ~18:35 (in 5.8 h; the 4 h after the crates is a planning guess)
+- crates complete: ~14:55 (in 2.0 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~18:55 (in 6.0 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
 | wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
 | wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | codex-1+4 | running | 13626 | 11486 | 121 | 204 | 1 | codex-1 (torrent side, 64 lib tests pass) + codex-4 (Client, connections) |
-| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5011 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
+| wt-core | codex-1+4 | running | 13626 | 11300 | 121 | 207 | 1 | codex-1 (torrent side: 71 module tests pass, connection close cleanup done) + codex-4 (Client dialer, ClientConfig) |
+| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 5019 | 65 | 109 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
-| wt-parity | grok-1, codex-3 | done | 0 | 3328 | 0 | 0 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
-| wt-engine | codex-2+5 | running | 5609 | 4690 | 71 | 176 | 0 | codex-2 (server on wt_core, engine-host builds) + codex-5 (types.rs, engine tests) |
+| wt-parity | grok-1, codex-3 | done | 0 | 3354 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
+| wt-engine | codex-2+5 | running | 5609 | 5098 | 71 | 178 | 0 | codex-2 (server on wt_core, api-diff 29 match / 1 critical) + codex-5 (types.rs, 11 real engine tests, 132 placeholders) |
 
 ## Complete
 
@@ -48,8 +48,8 @@ ETA (rough, from the last 53 min at 10.7%/h):
 
 ## Pending
 
-- [ ] wt-core (codex-1+4): 90%, 11486 of ~10900 Rust lines, 204/121 tests
-- [ ] wt-engine (codex-2+5): 95%, 4690 of ~4487 Rust lines, 176/71 tests
+- [ ] wt-core (codex-1+4): 90%, 11300 of ~10900 Rust lines, 207/121 tests
+- [ ] wt-engine (codex-2+5): 95%, 5098 of ~4487 Rust lines, 178/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
 - [ ] Android: libengine.so (arm64) + APK build
@@ -73,9 +73,9 @@ ETA (rough, from the last 53 min at 10.7%/h):
 | grok-9 | wt-core (torrent_impls.rs) | piece state + storage glue done (7a327e6, 13+22 tests); now PeerTorrent + ReaderHost impls for TorrentInner | closed |
 | codex-1 | wt-core (torrent side) | torrent.rs, torrent_impls.rs, peer_conn/reader/metadata/hashing wiring, e2e tests; clippy clean | running |
 | codex-2 | wt-engine (server + playback) | server.rs on wt_core, PlaybackHost, two-engine transfer; engine-host builds | running |
-| codex-3 | wt-storage benches + wt-parity | storage benchmarks vs Go, then full Go-vs-Rust parity run | running |
-| codex-4 | wt-core (Client + connections) | client.rs, connection manager (dialing, incoming, limits), sources on shared UDP | running |
-| codex-5 | wt-engine (types.rs + tests) | JSON byte-compat with Go, un-ignoring the 136 engine integration tests | running |
+| codex-3 | wt-storage perf + wt-parity | storage bench done (eeb9bef); fixing Direct Play startup save under lock; parity harness repeat-order fixed | running |
+| codex-4 | wt-core (Client, connections, ClientConfig) | dialer on agreed interface; adding tracker dial hook + handshake callback; integration tests written | running |
+| codex-5 | wt-engine (types.rs + tests) | 9 Go JSON goldens pass; engine tests 11 real passing / 132 placeholders / 0 failing | running |
 
 ## Coordinator log
 
@@ -146,10 +146,30 @@ ETA (rough, from the last 53 min at 10.7%/h):
 - Coordinator defined the Client <-> Torrent connection interface (attach_connection, wants_conns, take_dial_candidates, peers_changed) for codex-1 and codex-4
 - First real transfer: e2e transfer_patterned_tcp_256kib passes (legacy peer loop, explicit dial)
 - codex-5 finding: most of the 136 ignored engine tests are unimplemented!() placeholders, not ports (c841eac overstated); codex-5 now writing real ports in priority order
+- codex-3 storage bench: checkpoint save 11.3 s Rust vs 1.36 s Go (2,000 saves); codex-3 fixing checkpoint.rs
+- api-diff: 21 MATCH / 9 DIFF / 4 CRITICAL (was 11/19/14); left: torrent length, /metadata, preview-state validation, /play missing-id status
+- Storage bench part 1: Rust peak RSS 67.5 MiB vs Go 157.8; Rust wins restore/aggregation/seeks; checkpoint save, random read, DP sequential below target but timing noisy (5 agents share disk); codex-3 counting I/O calls per op
+- codex-5: 9 Go-generated JSON golden tests pass; engine suite baseline 9 real passing / 134 placeholders; engine_control ported for real
+- api-diff 29 MATCH / 1 DIFF / 1 CRITICAL (metadata bytes). Coordinator defined connection wake interface (on_wake, wake_interval, ConnHandle::wake) for codex-1/codex-4
+- codex-3 fixed parity harness bug that destroyed repeat order (cold-run detection); codex-5 engine tests: 11 real passing, 132 placeholders, 0 failing
+- Coordinator fixed E0034 ambiguous trait methods in torrent_impls.rs that blocked codex-2 and codex-5
+- api-diff 29/1/1: only /metadata torrentData left (codex-2)
+- codex-3 perf bug: Direct Play startup-piece save does hash+write+fsync under the global storage lock (Go queues it to a background drain); approved fix in storage.rs
+- ClientConfig + Callbacks moved to codex-4 (tracker dial hook, completed_handshake callback); coordinator stops editing codex-1 files on request
 
 ## Commits
 
 ```text
+f666237 engine-rs: codex checkpoint
+da98e2f wt-core: disambiguate PeerTorrent piece_length/num_pieces in torrent_impls (coordinator fix)
+bfa8dc6 engine-rs: codex checkpoint (parity harness repeat-order fix, 11 real engine tests)
+2450675 engine-rs: codex checkpoint (api-diff 29/1/1, wake interface)
+d9f1b2e engine-rs: codex checkpoint (Go JSON golden tests, client integration tests)
+eeb9bef wt-storage: Go-vs-Rust storage benchmarks, first results (codex-3)
+a46d44e engine-rs: codex checkpoint (api-diff 21/9/4)
+5aa96bf engine-rs: codex checkpoint (Client dialer on agreed interface)
+be3d493 engine-rs: codex checkpoint
+b419707 engine-rs: record engine test placeholder finding
 46ea93f engine-rs: codex checkpoint (first TCP transfer test passes)
 d8948c9 engine-rs: progress report shows current owners
 67cd0f1 engine-rs: progress update and codex checkpoint
