@@ -316,6 +316,7 @@ impl ClientInner {
         // Discovery (trackers always; DHT/WebTorrent per config).
         let mut src_cfg = SourcesConfig::from_client_config(&self.config);
         src_cfg.peer_id = self.peer_id;
+        src_cfg.dialer = self.config.tracker_dialer.clone();
         src_cfg.listen_port = *self.listen_port.read();
         src_cfg.status_callbacks = self.config.callbacks.status_updated.clone();
         if let Some(utp) = utp_for_sources {

@@ -71,6 +71,8 @@ pub struct ClientConfig {
     pub torrent_peers_high_water: usize,
     pub torrent_peers_low_water: usize,
     pub http_user_agent: String,
+    /// Dial hook shared by HTTP, HTTPS and WebSocket trackers.
+    pub tracker_dialer: Option<wt_discovery::tracker::DialerHook>,
     pub extended_handshake_client_version: String,
     pub ice_servers: Vec<String>,
     pub default_storage: Arc<dyn ClientStorage>,
@@ -104,6 +106,7 @@ impl Default for ClientConfig {
             torrent_peers_high_water: 200,
             torrent_peers_low_water: 50,
             http_user_agent: "Webtor/2.0".to_string(),
+            tracker_dialer: None,
             extended_handshake_client_version: "Webtor 2.0".to_string(),
             ice_servers: Vec::new(),
             default_storage: Arc::new(MemoryClientStorage::new()),

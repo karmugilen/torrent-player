@@ -1,8 +1,8 @@
 //! Scenarios (a)–(f).
 
 use crate::client::{
-    stream_range, AddRequest, ConfigureRequest, PlayRequest, PlayResponse, StatsResponse,
-    TorrentView,
+    stream_range, stream_range_timed, AddRequest, ConfigureRequest, PlayRequest, PlayResponse,
+    StatsResponse, TorrentView,
 };
 use crate::engine::{free_port, spawn_engine, EngineProcess};
 use crate::fixture::{
@@ -337,15 +337,14 @@ fn scenario_direct_play(
         .unwrap_or_else(|| format!("/torrent/{}/file/{}", play.id, play.file_index));
 
     // Time to first byte: Range first 64 KiB.
-    let t0 = Instant::now();
-    let first = stream_range(
+    let (first, ttfb) = stream_range_timed(
         stream_port,
         &path,
         0,
         Some(64 * 1024 - 1),
         Duration::from_secs(120),
     )?;
-    let ttfb_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let ttfb_ms = ttfb.as_secs_f64() * 1000.0;
     if first.len() < 1024 {
         return Err(format!("ttfb short read {}", first.len()));
     }
@@ -451,14 +450,12 @@ fn scenario_cold_seek(
         let within = rng.gen_range(0..piece_len.saturating_sub(read_len).max(1));
         let off = piece * piece_len + within;
         let end = off + read_len - 1;
-        let t0 = Instant::now();
-        match stream_range(stream_port, &path, off, Some(end), Duration::from_secs(15)) {
-            Ok(buf) if buf.len() as u64 >= read_len / 2 => {
-                samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        match stream_range_timed(stream_port, &path, off, Some(end), Duration::from_secs(15)) {
+            Ok((buf, elapsed)) if buf.len() as u64 >= read_len / 2 => {
+                samples_ms.push(elapsed.as_secs_f64() * 1000.0);
             }
-            Ok(buf) => {
-                eprintln!("  seek short read {} at off={off}", buf.len());
-                samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            Ok((buf, _)) => {
+                return Err(format!("seek short read {} at off={off}", buf.len()));
             }
             Err(e) => {
                 eprintln!("  seek err at off={off}: {e}");

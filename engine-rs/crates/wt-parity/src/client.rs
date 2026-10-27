@@ -4,7 +4,7 @@ use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
 where
@@ -132,6 +132,18 @@ pub fn stream_range(
     end_inclusive: Option<u64>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    stream_range_timed(stream_port, path, start, end_inclusive, timeout).map(|(body, _)| body)
+}
+
+/// Returns the body and time until the first response body byte arrives.
+pub fn stream_range_timed(
+    stream_port: u16,
+    path: &str,
+    start: u64,
+    end_inclusive: Option<u64>,
+    timeout: Duration,
+) -> Result<(Vec<u8>, Duration), String> {
+    let started = Instant::now();
     let addr = format!("127.0.0.1:{stream_port}");
     let mut stream = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
     stream.set_read_timeout(Some(timeout)).ok();
@@ -152,6 +164,19 @@ pub fn stream_range(
         .write_all(req.as_bytes())
         .map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    let first_byte = loop {
+        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("stream ended before response body".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(sep) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            if buf.len() > sep + 4 {
+                break started.elapsed();
+            }
+        }
+    };
     stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     let resp = parse_http_response(&buf)?;
     if resp.status != 200 && resp.status != 206 {
@@ -161,7 +186,7 @@ pub fn stream_range(
             String::from_utf8_lossy(&resp.body)
         ));
     }
-    Ok(resp.body)
+    Ok((resp.body, first_byte))
 }
 
 // ---- wire types (subset of engine-go/types.go) ----

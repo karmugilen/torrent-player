@@ -19,3 +19,27 @@ The checkpoint and aggregation operations are not data transfers; ops/s are mean
 **Investigation and fix plan:** The 38-fold change in Rust sequential write and 12-fold change in Go checkpoint time show that run order and concurrent disk activity dominate these results. Both `writePieceCheckpoint` and `write_piece_checkpoint` call fsync on each save; the Rust checkpoint samples take 11.3–46.1 s for 2,000 saves versus Go 1.36–16.57 s, so do not remove durability to chase this result. Repeat on an idle host with alternated implementations and syscall tracing of fsync latency; inspect coalescing at the storage layer if the gap persists. For random reads compare `documentPiece.ReadAt` with `DocumentPiece::read_at` using CPU profiles, and for Direct Play profile cache write/read and lock costs; retain a measured change only if it improves repeated paired runs without changing semantics. `perf` is not installed on this host; no CPU profile is claimed. The read/write comparison has further limitations: Go includes `Close` in its read timing while Rust does not, and the cache state and completion/write-back scheduling are uncontrolled. Consequently the listed failures are investigation items, not proof of a regression.
 
 Reproduce: copy `engine-go` to `/home/kar/.cache/wt-tmp/go-storage-bench` with its patched torrent dependencies, copy `benches/go_storage_bench_test.go` to that directory as `storage_bench_test.go`, and run `GOTMPDIR=/home/kar/.cache/wt-tmp/perf go test -tags=nosqlite,noboltdb -run '^TestRunBenchmarks$' -count=1 -v`. Run Rust from `engine-rs` with `CARGO_TARGET_DIR=/home/kar/.cache/wt-targets/codex-3 CARGO_BUILD_JOBS=3 cargo bench -p wt-storage --bench storage_bench`. Run only one benchmark at a time; both delete their data fixtures under `/home/kar/.cache/wt-tmp/perf` on successful completion.
+
+## Five-run follow-up and code-path I/O audit
+
+Three additional Go/Rust pairs were run in that order, bringing each implementation to five samples. Medians and minima below are MiB/s for transfers; checkpoint and aggregation values are total milliseconds for 2,000 or 5,000 operations, so lower is better there. The first two pairs are the samples above. These are still shared-disk results: Go sequential write ranged down to 7.89 MiB/s, so they do not establish an isolated implementation cost.
+
+| Case | Go median / min | Rust median / min | Advantage ratio, medians |
+|---|---:|---:|---:|
+| sequential write | 512.13 / 7.89 | 120.58 / 57.57 | 0.24 |
+| sequential read | 11394.34 / 212.21 | 10866.70 / 5894.13 | 0.95 |
+| random write | 615.62 / 220.12 | 506.64 / 82.85 | 0.82 |
+| random read | 9623.47 / 5037.05 | 9566.83 / 7635.82 | 0.99 |
+| Direct Play sequential | 4210.28 / 3379.92 | 3887.68 / 3226.82 | 0.92 |
+| Direct Play seeks | 4834.13 / 4429.69 | 5348.38 / 4303.67 | 1.11 |
+| checkpoint save, ms | 16567.79 / 1363.92 | 20826.15 / 9724.60 | 0.80 |
+| checkpoint restore, ms | 6.74 / 6.57 | 3.30 / 3.10 | 2.04 |
+| aggregation, ms | 30.02 / 26.98 | 13.45 / 13.03 | 2.23 |
+
+Static audit of normal successful paths, not measured syscall counts:
+
+- Checkpoint save: both low-level functions always rewrite the file, even when unchanged. Each creates the parent if needed, opens/truncates a temp file, writes the complete checkpoint, issues one file fsync, closes and renames; neither fsyncs the directory. Rust batches serialization in one write whereas Go issues separate writes for header, fields, path and bitfield. Rust uses a separate bitfield allocation; neither performs a destination read or metadata check. Higher-level dirty-state scheduling can skip a save. Shared fsync latency is a plausible contributor to the timing gap, but has not been independently measured.
+- Download random read of an uncached 16 KiB block wholly inside one file: both take the storage lock, locate the overlapping file and issue one positional read in the normal full-read case, without open, write, sync or rename. Partial reads and interruptions may require retries. The benchmark's prefilled file is hot in the OS cache.
+- Direct Play cached 16 KiB read or write: both take a storage lock and copy in memory; neither needs a file read/write for the block itself. Startup-piece completion is different: Go clones and queues the piece to a background drain, which hashes and performs open, two writes (digest and payload), fsync and rename outside the lock; Rust's `save_startup_piece_locked` performs hash, open, two writes, fsync and rename synchronously while holding the storage lock. This is a concrete latency risk; port Go's bounded background queue and close/eviction coordination before comparing under idle load. Startup plans determine how many such saves occur; the benchmark does not currently count them.
+
+These call counts are from source inspection, not a counting wrapper; runtime confirmation and quiet-host repeated measurements remain outstanding. No speculative storage implementation change was made.
