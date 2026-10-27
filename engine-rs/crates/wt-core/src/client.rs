@@ -763,6 +763,28 @@ impl ClientInner {
                                 tor.dial_finished(peer.addr, true); // clear backoff
                                 return;
                             }
+                            // Temporary dial-failure taxonomy for peers_compare
+                            // (stderr → engine-host log). Remove once Ubuntu
+                            // peer-count matches Go.
+                            let kind = if msg.contains("MSE") {
+                                "mse"
+                            } else if msg.contains("BitTorrent handshake") {
+                                "bt_hs"
+                            } else if msg.contains("all initial dials failed") {
+                                "dial_tcp_utp"
+                            } else if msg.contains("fallback redial") || msg.contains("handshake failed") {
+                                "hs_fallback"
+                            } else if msg.contains("timeout") || msg.contains("timed out") {
+                                "timeout"
+                            } else {
+                                "other"
+                            };
+                            eprintln!(
+                                "dial_fail kind={kind} src={:?} addr={} err={}",
+                                peer.source,
+                                peer.addr,
+                                msg.chars().take(160).collect::<String>()
+                            );
                         }
                         // Apply backoff / fail-count first, then re-queue so
                         // take_dial_candidates honors the new backoff window.
@@ -777,6 +799,10 @@ impl ClientInner {
                                 tor.add_peers(vec![peer.clone()]);
                             }
                         } else {
+                            eprintln!(
+                                "dial_ok src={:?} addr={}",
+                                peer.source, peer.addr
+                            );
                             tor.dial_finished(peer.addr, true);
                         }
                     });

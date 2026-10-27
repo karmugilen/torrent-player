@@ -207,9 +207,9 @@ pub trait PeerTorrent: Send + Sync {
     }
     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()>;
     /// Record a live conn for outbound PEX (Go `pex.Add`).
-    fn pex_note_connected(&self, addr: SocketAddr, encrypted: bool, utp: bool) {}
+    fn pex_note_connected(&self, _addr: SocketAddr, _encrypted: bool, _utp: bool) {}
     /// Record a disconnect for outbound PEX (Go `pex.Drop`).
-    fn pex_note_closed(&self, addr: SocketAddr, encrypted: bool, utp: bool) {}
+    fn pex_note_closed(&self, _addr: SocketAddr, _encrypted: bool, _utp: bool) {}
     /// Build next ut_pex payload; updates `cursor`.
     fn pex_genmsg(
         &self,
@@ -749,25 +749,54 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.torrent.peer_key(self.state.remote_addr)
     }
 
-    /// Go `sendInitialMessages`.
+    /// Go `sendInitialMessages`: LTEP handshake, HaveNone/HaveAll/bitfield, optional Port, Unchoke.
     pub fn start(&mut self, handle: &ConnHandle) {
-        let mut ext = ExtendedHandshake::default();
-        ext.m
-            .insert(EXTENSION_NAME_METADATA.to_string(), self.our_ext_metadata);
-        ext.m
-            .insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
-        ext.metadata_size = self.torrent.metadata_size();
-        self.send(
-            handle,
-            Message::Extended {
-                id: EXT_HANDSHAKE_ID,
-                payload: ext.encode(),
-            },
-        );
+        let peer_bits = PeerExtensionBits(self.state.peer_extension_bits);
+        if peer_bits.supports_extended() {
+            let mut ext = ExtendedHandshake::default();
+            ext.m
+                .insert(EXTENSION_NAME_METADATA.to_string(), self.our_ext_metadata);
+            if !self.torrent.pex_disabled() {
+                ext.m
+                    .insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
+            }
+            ext.v = Some(self.torrent.extended_handshake_client_version());
+            ext.p = Some(self.torrent.listen_port());
+            ext.yourip = Some(handle.remote_addr().ip());
+            ext.reqq = Some(self.torrent.local_reqq());
+            ext.metadata_size = self.torrent.metadata_size();
+            ext.upload_only = Some(self.torrent.is_seeding());
+            ext.encryption = Some(self.torrent.prefers_encryption() || handle.is_encrypted());
+            self.send(
+                handle,
+                Message::Extended {
+                    id: EXT_HANDSHAKE_ID,
+                    payload: ext.encode(),
+                },
+            );
+        }
+
         let count = self.torrent.num_pieces();
-        if count > 0 {
+        let have_all = count > 0 && (0..count).all(|i| self.torrent.piece_complete(i));
+        let have_any = (0..count).any(|i| self.torrent.piece_complete(i));
+        if peer_bits.supports_fast() {
+            if have_all {
+                self.send(handle, Message::HaveAll);
+            } else if !have_any {
+                self.send(handle, Message::HaveNone);
+            } else if count > 0 {
+                self.send_bitfield(handle, count);
+            }
+        } else if count > 0 {
             self.send_bitfield(handle, count);
         }
+
+        if peer_bits.supports_dht() {
+            if let Some(port) = self.torrent.dht_port() {
+                self.send(handle, Message::Port(port));
+            }
+        }
+
         if !self.torrent.data_upload_disallowed() {
             self.state.am_choking = false;
             self.send(handle, Message::Unchoke);
@@ -830,6 +859,48 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
     fn send(&self, handle: &ConnHandle, msg: Message) {
         let _ = handle.send_message(msg);
+    }
+
+    /// Drop outstanding requests that have waited too long so the pipeline can refill.
+    fn expire_stale_requests(&mut self, handle: &ConnHandle) {
+        let now = Instant::now();
+        let rtt = self.state.rtt.estimate.max(Duration::from_millis(200));
+        let limit = (rtt * 8).max(Duration::from_secs(4));
+        let stale: Vec<_> = self
+            .state
+            .outstanding_requests
+            .iter()
+            .copied()
+            .filter(|r| {
+                self.torrent
+                    .request_when(*r)
+                    .map(|t| now.saturating_duration_since(t) > limit)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        let plen = self.torrent.piece_length();
+        let total = self.torrent.total_length();
+        for req in stale {
+            let coord = block_coord_from_req_index(req, plen, total);
+            self.send(
+                handle,
+                Message::Cancel {
+                    index: coord.piece,
+                    begin: coord.offset,
+                    length: coord.length.max(1),
+                },
+            );
+            self.state.outstanding_requests.remove(&req);
+            self.state.cancelled_requests.insert(req);
+            self.torrent.clear_chunk_requested(req);
+            if self.torrent.requesting_peer(req) == Some(self.key()) {
+                self.torrent.clear_assignment(req);
+            }
+        }
+        self.state.need_request_update = true;
     }
 
     /// Recompute and apply desired requests (Go `updateRequests`).
@@ -1426,7 +1497,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return Ok(());
         }
         if Some(id) == self.state.peer_ext_ut_metadata || id == self.our_ext_metadata {
-            let msg = MetadataMsg::decode(payload).map_err(|e| CoreError::Other(e.to_string()))?;
+            // Malformed / non-metadata payloads on this id are common; do not
+            // kill the connection (was "missing msg_type" mass disconnect).
+            let msg = match MetadataMsg::decode(payload) {
+                Ok(m) => m,
+                Err(_) => return Ok(()),
+            };
             match msg.msg_type {
                 MetadataMsgType::Request => {
                     if let Some((total, data)) = self.torrent.metadata_piece(msg.piece) {
@@ -1513,8 +1589,12 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         if !self.torrent.has_metadata() {
             return Some(Duration::from_secs(1));
         }
-        // Always tick while we have in-flight requests so a stalled pipeline can
-        // be refilled (download_all uses Normal priority, not only Next).
+        // Reconcile Choke/Unchoke when seed policy flips data_upload_disallowed.
+        let should_choke = self.torrent.data_upload_disallowed();
+        if self.state.am_choking != should_choke {
+            return Some(Duration::from_millis(50));
+        }
+        // Refill stalled Normal-priority pipelines (download_all) and keep PEX alive.
         if !self.state.outstanding_requests.is_empty() || self.state.need_request_update {
             return Some(Duration::from_millis(100));
         }

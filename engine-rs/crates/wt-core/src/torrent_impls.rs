@@ -215,6 +215,16 @@ impl PeerTorrent for TorrentInner {
         let old = self.conn_handles.write().remove(&addr);
         self.conns.write().remove(&addr);
         if let Some(handle) = old {
+            let reason = handle
+                .close_reason()
+                .unwrap_or_else(|| "unspecified".into());
+            eprintln!(
+                "peer_closed addr={} out={} src={:?} reason={}",
+                addr,
+                handle.is_outgoing(),
+                handle.source(),
+                reason.chars().take(120).collect::<String>()
+            );
             if handle.is_outgoing() {
                 // PopMax removed this addr on dial; re-queue so we redial after
                 // backoff (local swarm + public churn). Failed dials for
@@ -703,11 +713,13 @@ impl PeerTorrent for TorrentInner {
     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()> {
         let mut last = self.pex_last_recv.lock();
         let mut prior = last.get(&from).copied();
-        let peers = self
-            .pex
-            .lock()
-            .ingest(msg, Instant::now(), &mut prior)
-            .map_err(|e| CoreError::Other(format!("PEX: {e:?}")))?;
+        let peers = match self.pex.lock().ingest(msg, Instant::now(), &mut prior) {
+            Ok(peers) => peers,
+            // Go/anacrolix: torrent-wide PEX rest is a soft discard. Closing the
+            // whole peerconn here was dropping ~most established Ubuntu peers.
+            Err(crate::pex::PexIngestError::Cooldown) => return Ok(()),
+            Err(e) => return Err(CoreError::Other(format!("PEX: {e:?}"))),
+        };
         if let Some(time) = prior {
             last.insert(from, time);
         }
