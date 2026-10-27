@@ -90,14 +90,12 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
 
     let dial_timeout = cfg.nominal_dial_timeout.max(cfg.min_dial_timeout);
 
-    // Go dialPool: race transports, keep the first successful dialer for fallback.
-    // Prefer TCP when it lands within a short window of a uTP win — uTP often
-    // connects first then fails MSE while TCP+plaintext would work.
-    let (raw_stream, winning_transport) = dial_first_raw(&params, dial_timeout).await?;
+    // Race transports; keep a late second success for handshake fallback so we
+    // do not drop a live uTP/TCP socket only to redial it (Go has 9/35 uTP on
+    // Ubuntu; Rust was sticking at 0 uTP after draining the race loser).
+    let (raw_stream, winning_transport, mut spare) =
+        dial_first_raw(&params, dial_timeout).await?;
 
-    // Fast-fail preferred MSE only when uTP won the race (common MSE EOF).
-    // TCP winners keep the full handshake timeout — a blanket 2s abort cut
-    // dial_ok 22→14 by killing slow-but-alive MSE on TCP.
     let prefer_hs_timeout = if allow_fallback
         && prefer_obfuscated
         && winning_transport == Transport::Utp
@@ -123,9 +121,37 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
                 transport = ?winning_transport,
                 obfuscated = prefer_obfuscated,
                 error = %first_err,
-                "preferred header obfuscation failed; redialing same transport with fallback"
+                "preferred header obfuscation failed; trying spare/fallback"
             );
             let full_hs = cfg.handshakes_timeout;
+            // 0) Spare race loser (already connected): try opposite obfuscation
+            // on the live socket, then redial that transport with preferred.
+            if let Some((spare_stream, spare_transport)) = spare.take() {
+                if let Ok(outcome) = complete_bt_handshake(
+                    &params,
+                    spare_stream,
+                    spare_transport,
+                    !prefer_obfuscated,
+                    full_hs,
+                )
+                .await
+                {
+                    return Ok(outcome);
+                }
+                if let Ok((raw, t)) = dial_raw_one(&params, spare_transport, dial_timeout).await {
+                    if let Ok(outcome) = complete_bt_handshake(
+                        &params,
+                        raw,
+                        t,
+                        prefer_obfuscated,
+                        full_hs,
+                    )
+                    .await
+                    {
+                        return Ok(outcome);
+                    }
+                }
+            }
             // 1) Same transport, opposite obfuscation (Go).
             if let Ok((raw2, transport2)) =
                 dial_raw_one(&params, winning_transport, dial_timeout).await
@@ -142,9 +168,7 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
                     return Ok(outcome);
                 }
             }
-            // 2) Other transports: plaintext first (cheap), then preferred
-            // obfuscation. Fast 2s MSE on the initial attempt already freed
-            // half-open; these redials recover uTP-won/TCP-needed peers.
+            // 2) Other transports: plaintext then preferred.
             for transport in candidate_transports(&params) {
                 if transport == winning_transport {
                     continue;
@@ -169,12 +193,16 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
 }
 
 /// Go `dialPool`: start all candidate dialers, return the first success.
-/// When uTP wins first, wait briefly for TCP — public peers often speak
-/// MSE/plaintext more reliably over TCP.
+/// Also returns a late second success (if any) so handshake fallback can use
+/// the already-open socket instead of immediately draining it.
 async fn dial_first_raw(
     params: &DialParams<'_>,
     dial_timeout: Duration,
-) -> Result<(Box<dyn PeerStream>, Transport)> {
+) -> Result<(
+    Box<dyn PeerStream>,
+    Transport,
+    Option<(Box<dyn PeerStream>, Transport)>,
+)> {
     let candidates = candidate_transports(params);
     if candidates.is_empty() {
         return Err(CoreError::Other("no dial transports enabled".into()));
@@ -182,7 +210,7 @@ async fn dial_first_raw(
     if candidates.len() == 1 {
         let t = candidates[0];
         let stream = dial_raw(params, t, dial_timeout).await?;
-        return Ok((stream, t));
+        return Ok((stream, t, None));
     }
 
     let n = candidates.len();
@@ -212,53 +240,44 @@ async fn dial_first_raw(
 
     let mut last_err = None;
     let mut pending = n;
+    let mut winner: Option<(Box<dyn PeerStream>, Transport)> = None;
     while pending > 0 {
         let Some((transport, result)) = rx.recv().await else {
             break;
         };
         pending -= 1;
         match result {
-            Ok(stream) if transport == Transport::Tcp => {
-                drain_remaining_dials(rx, pending);
-                return Ok((stream, transport));
-            }
             Ok(stream) => {
-                // uTP connected first. Give TCP ~150ms to land; prefer it.
-                let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
-                loop {
-                    if pending == 0 {
-                        return Ok((stream, transport));
-                    }
-                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if left.is_zero() {
-                        drain_remaining_dials(rx, pending);
-                        return Ok((stream, transport));
-                    }
-                    match tokio::time::timeout(left, rx.recv()).await {
-                        Ok(Some((t2, Ok(s2)))) if t2 == Transport::Tcp => {
-                            pending -= 1;
-                            drop(stream);
-                            drain_remaining_dials(rx, pending);
-                            return Ok((s2, t2));
-                        }
-                        Ok(Some((_t2, Ok(other)))) => {
-                            pending -= 1;
-                            drop(other);
-                        }
-                        Ok(Some((_t2, Err(e)))) => {
-                            pending -= 1;
-                            let _ = e; // TCP/uTP race loser; keep uTP winner
-                        }
-                        Ok(None) => return Ok((stream, transport)),
-                        Err(_) => {
-                            drain_remaining_dials(rx, pending);
-                            return Ok((stream, transport));
+                if winner.is_none() {
+                    winner = Some((stream, transport));
+                    // Wait briefly for the other transport so we can keep it
+                    // as a handshake spare instead of draining.
+                    if pending > 0 {
+                        let wait = Duration::from_millis(200);
+                        match tokio::time::timeout(wait, rx.recv()).await {
+                            Ok(Some((t2, Ok(s2)))) => {
+                                pending = pending.saturating_sub(1);
+                                drain_remaining_dials(rx, pending);
+                                let (w_stream, w_t) = winner.take().unwrap();
+                                return Ok((w_stream, w_t, Some((s2, t2))));
+                            }
+                            Ok(Some((_t2, Err(e)))) => {
+                                pending = pending.saturating_sub(1);
+                                let _ = e;
+                            }
+                            Ok(None) | Err(_) => {}
                         }
                     }
+                    drain_remaining_dials(rx, pending);
+                    let (w_stream, w_t) = winner.take().unwrap();
+                    return Ok((w_stream, w_t, None));
                 }
             }
             Err(e) => last_err = Some(e),
         }
+    }
+    if let Some((stream, transport)) = winner {
+        return Ok((stream, transport, None));
     }
     Err(last_err.unwrap_or_else(|| CoreError::Other("all initial dials failed".into())))
 }

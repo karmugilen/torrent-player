@@ -803,9 +803,15 @@ impl ClientInner {
                                 tor.add_peers(vec![peer.clone()]);
                             }
                         } else {
+                            let transport = tor
+                                .conn_handles
+                                .read()
+                                .get(&peer.addr)
+                                .map(|h| format!("{:?}", h.transport()))
+                                .unwrap_or_else(|| "?".into());
                             eprintln!(
-                                "dial_ok src={:?} addr={}",
-                                peer.source, peer.addr
+                                "dial_ok src={:?} transport={} addr={}",
+                                peer.source, transport, peer.addr
                             );
                             tor.dial_finished(peer.addr, true);
                         }
@@ -972,6 +978,10 @@ impl ClientInner {
         // Match start_dialer's raised half-open so acquire limits agree.
         cfg.half_open_conns_per_torrent = cfg.half_open_conns_per_torrent.max(48);
         cfg.total_half_open_conns = cfg.total_half_open_conns.max(96);
+        // Diagnostic: WT_FORCE_UTP=1 dials uTP only (Ubuntu Go holds ~25% uTP).
+        if std::env::var_os("WT_FORCE_UTP").is_some() {
+            cfg.disable_tcp = true;
+        }
         let half_open_limit = cfg.half_open_conns_per_torrent.max(1);
         // Go `reducedDialTimeout(pendingPeers)` — shorter timeouts when the dial
         // pool is large so we cycle candidates faster under half-open limits.

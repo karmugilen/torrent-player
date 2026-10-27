@@ -21,7 +21,11 @@ try:
         try: call('GET', '/stats', timeout=1); break
         except Exception: time.sleep(0.1)
     # Match Android LibrarySession defaults used by smoke.py --profile app.
-    call('POST', '/settings', {'maxPeers': 55, 'dialRatePerSec': 30, 'peerExploration': True})
+    call('POST', '/settings', {
+        'maxPeers': 55, 'dialRatePerSec': 30, 'peerExploration': True,
+        'claudeSeekMode': True, 'hedgeRequests': True, 'slowPeerYield': True,
+        'dropChokers': True,
+    })
     t0 = time.monotonic(); code, add = call('POST', '/add', {'torrentId': MAGNET, 'prepare': True}); tid = add['id']
     while True:
         code, st = call('GET', f'/torrent/{tid}')
@@ -45,6 +49,18 @@ try:
     trk = [(t['url'].split('/')[2][:28], t.get('status'), t.get('peers', t.get('numPeers'))) for t in st.get('trackers', [])]
     code, conns = call('GET', f'/connections/{tid}') if True else (0, None)
     print(json.dumps({'label': LABEL, 'metadata_s': round(meta, 1), 'peers_speed_every_5s': samples, 'trackers': trk}))
-    if isinstance(conns, dict): print('conns', json.dumps(conns)[:600])
+    if isinstance(conns, dict):
+        peers = conns.get('peers') or []
+        from collections import Counter
+        transports = Counter(p.get('transport') for p in peers)
+        active = sum(1 for p in peers if (p.get('downloaded') or 0) > 0)
+        total_down = sum(p.get('downloaded') or 0 for p in peers)
+        print(json.dumps({
+            'conn_summary': {
+                'n': len(peers), 'transports': dict(transports),
+                'downloaded_gt0': active, 'total_downloaded': total_down,
+            }
+        }))
+        print('conns', json.dumps(conns)[:600])
 finally:
     stop = True; p.terminate(); p.wait(5); shutil.rmtree(work + '/data', ignore_errors=True)

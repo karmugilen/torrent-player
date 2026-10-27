@@ -180,16 +180,15 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 
 ### Numbers (latest same-machine runs after retention fix)
 
-| Label | meta s | peers min→max | speed peak MiB/s |
-|-------|--------|---------------|------------------|
-| go-ubuntu-r10 | 4.5 | 11→44 | 2.02 |
-| rust-ubuntu-r22 | 2.5 | **11→27** | 1.22 |
-| rust-ubuntu-r19 | 5.0 | 5→22 | 1.03 |
-| rust-ubuntu-r20 | 11.5 | 11→19 | 1.29 |
-| rust-sintel-r4 | 3.5 | **6→38** | **23.66** |
-| go-ubuntu-r9 | 5.0 | 8→30 | 5.94 |
-| go-ubuntu (earlier ×3) | 6.5 / 5.5 / 9.6 | 10→42 / 7→44 / 10→45 | 6.77 / 4.09 / 7.44 |
-| rust-sintel (earlier ×3) | 2.0 / 2.5 / 3.0 | 1→13 / 1→8 / 1→8 | **22.92 / 26.89 / 14.70** |
+| Label | meta s | peers min→max | speed peak MiB/s | notes |
+|-------|--------|---------------|------------------|-------|
+| go-ubuntu-r14 | 3.0 | 9→38 | **6.08** | TCP 26 + **uTP 9**; 31/35 peers downloaded>0; 226 MiB |
+| go-ubuntu-r13 | 4.5 | 13→42 | 5.69 | app settings |
+| rust-ubuntu-r22 | 2.5 | **11→27** | 1.22 | best Rust peer count |
+| rust-ubuntu-r33 | 5.0 | 6→18 | 1.23 | TCP 18, **uTP 0**; 11/18 downloaded>0; 27 MiB |
+| rust-ubuntu-r32 | 4.0 | 7→17 | 1.15 | TCP 16, uTP 0; 6/16 active; 31 MiB |
+| rust-sintel-r4 | 3.5 | **6→38** | **23.66** | Sintel beats Go on speed |
+| rust-ubuntu-utp1 | — | — | — | **WT_FORCE_UTP=1: 0 dial_ok** (1285 timeout, 200 mse) |
 
-**Status:** Ubuntu peers now **19–27 held** (r19–r22; was ~4–8) after retention, TCP-prefer race, fail-count dial order, and half-open ≥48/96. Same-day Go **44** peers / **2.0** MiB/s — still short on count and speed (~1.2). Sintel **38** peers / **23.7** MiB/s. Many Ubuntu peers still `downloaded=0`. No ut_holepunch. Not full Ubuntu acceptance yet.
+**Status:** Ubuntu peers improved ~4→**17–27** via retention, fail-count dial order, half-open ≥48/96, transport fallback. Same-day Go **38–42** peers / **5–6** MiB/s. Root gap now clear: **Rust establishes 0 uTP peerconns** while Go holds ~25% uTP; force-uTP dials never complete handshake (timeouts/MSE). Per-peer: Go ~31/35 downloading vs Rust ~6–11/18; total bytes ~7× lower. Sintel OK. Not full Ubuntu acceptance yet.
 
