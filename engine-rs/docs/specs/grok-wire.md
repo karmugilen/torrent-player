@@ -1,0 +1,9 @@
+# Task (grok-wire): connected peers must send data at Go's rate
+You are grok-wire. You OWN engine-rs/crates/wt-core/src/peer_conn.rs, src/conn/ (driver, handle, dialer, listener), src/torrent_impls.rs, src/strategy/, src/choking/, src/reader/, and engine-rs/crates/wt-wire/.
+Question to answer: why do real peers connect to Rust but deliver 0 bytes (or very little), while Go downloads 10-11 MiB/s from the same swarm? Check against anacrolix (peerconn.go, peer.go, requesting.go, torrent.go, webtor patches):
+1. Handshake and extensions: reserved bits (extension protocol, fast extension, DHT port), the LTEP handshake contents (m dict, v, reqq, yourip, metadata_size, p), and whether we send a bitfield/have_none correctly when we have nothing.
+2. Interest and requests: do we send `interested` as soon as the peer has pieces we want (after metadata too, and after a have/bitfield/have_all arrives)? Do we send requests right after unchoke? How many requests are in flight per peer (Go uses the peer's reqq, default 250; check the pipeline / max-requests settings)? Do we handle allowed_fast and reject correctly, and do we re-request after a choke?
+3. Keepalive and timeouts: do we drop peers that are slow to unchoke? Go waits.
+4. MSE: Go's header obfuscation policy (server.go) prefers plaintext with encrypted fallback, or the reverse. Many clients require encryption: check that both directions work against real clients.
+5. Choking/upload: real clients use tit-for-tat. We must unchoke and upload to peers like Go does, or they choke us.
+Find each cause with traces of real swarm connections (the zz_ diagnostic test), fix it, and measure after each fix. grok-swarm works on discovery, dialing and metadata (client.rs, sources/, metadata/, pex/, wt-discovery). Coordinate through requests.md.
