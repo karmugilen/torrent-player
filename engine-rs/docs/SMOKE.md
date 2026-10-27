@@ -183,12 +183,13 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 
 | Label | meta s | peers min→max | speed peak MiB/s | notes |
 |-------|--------|---------------|------------------|-------|
-| go-ubuntu-r16 | 4.0 | 11→41 | **5.59** | TCP 30 + **uTP 11**; 38/41 downloaded>0; 228 MiB |
-| go-ubuntu-r15 | 3.5 | 13→31 | 6.42 | TCP 23 + uTP 8; 29/31 active; 263 MiB |
-| rust-ubuntu-r38 | 5.5 | **10→33** | 0.75 | TCP 26 + **uTP 7**; 13/33 active; 15 MiB — **peer count ≈ Go** |
-| rust-ubuntu-r39 | 12.0 | 13→25 | 1.22 | TCP 20 + uTP 4; 13/24 active; 26 MiB |
-| rust-ubuntu-forceutp-r2 | 5.0 | 6→16 | 0.08 | **uTP 16**; 7/16 active; 0.5 MiB — was 0 dial_ok |
-| rust-sintel-r5 | 2.5 | **14→32** | **12.44** | TCP-only; 19/27 active; 142 MiB |
+| go-ubuntu-r17 | 11.0 | 10→37 | **7.15** | TCP 30 + uTP 5; **34/35** downloaded>0; 297 MiB |
+| go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
+| rust-ubuntu-r41 | 4.0 | 8→18 | **1.58** | TCP 15 + uTP 3; 7/18 active; 22 MiB; SlowPeerYield fix |
+| rust-ubuntu-r38 | 5.5 | **10→33** | 0.75 | TCP 26 + **uTP 7**; 13/33 active; 15 MiB — peer count peak |
+| rust-ubuntu-forceutp-r2 | 5.0 | 6→16 | 0.08 | **uTP 16**; was 0 dial_ok before BEP29 |
+| rust-sintel-r6 | 2.5 | 13→24 | **10.53** | TCP 20 + uTP 3; 17/23 active; 164 MiB |
+| rust-sintel-r5 | 2.5 | **14→32** | 12.44 | prior TCP-only |
 
-**Status:** uTP unblocked. Ubuntu peers now **24–33** with **4–7 uTP** (was 0 uTP / ~17 TCP). Same-day Go **31–41** peers / **5–6** MiB/s with ~90% downloading. Remaining gap is **per-peer throughput** (Rust ~13/33 active, ~1 MiB/s, tens of MiB total vs Go hundreds of MiB). Sintel already healthy. Not full Ubuntu speed acceptance yet.
+**Status:** uTP unblocked (BEP29). Ubuntu peer counts reach **18–33** with live uTP. Same-day Go **35–41** peers / **5–7** MiB/s / ~95% downloading / ~300 MiB. Rust speed **~1–1.6 MiB/s**, ~40% peers active, tens of MiB — SlowPeerYield no longer starves new Now requests; still chasing per-peer TCP throughput. Sintel healthy with uTP. Not full Ubuntu speed acceptance yet.
 
