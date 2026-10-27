@@ -82,10 +82,12 @@ pub fn start_swarm(
         client.post_ok("/configure", &cfg)?;
         // Host defaults seedingEnabled=false; completed torrents won't upload
         // until it is turned on (see engine-go/seeding.go applySeedPolicy).
+        // Set high seedRatioMilli and seedTimeMinutes so seeders do not disallow
+        // upload across multi-repeat benchmark runs.
         let _ = client.request(
             "POST",
             "/settings",
-            Some(br#"{"seedingEnabled":true,"seedingAllowed":true,"maxPeers":64}"#),
+            Some(br#"{"seedingEnabled":true,"seedingAllowed":true,"maxPeers":64,"seedRatioMilli":100000,"seedTimeMinutes":10000}"#),
         );
 
         // Wait until seeding / done (checkpoint restore).

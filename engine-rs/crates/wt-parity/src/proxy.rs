@@ -81,21 +81,27 @@ fn handle_conn(
     upstream: &str,
     delay: Duration,
     bytes_per_sec: u64,
-    stop: Arc<AtomicBool>,
+    global_stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let server = TcpStream::connect(upstream).map_err(|e| format!("dial {upstream}: {e}"))?;
     client.set_nodelay(true).ok();
     server.set_nodelay(true).ok();
 
+    let conn_stop = Arc::new(AtomicBool::new(false));
+
     let mut client_rd = client.try_clone().map_err(|e| e.to_string())?;
-    let mut client_wr = client;
+    let mut client_wr = client.try_clone().map_err(|e| e.to_string())?;
     let mut server_rd = server.try_clone().map_err(|e| e.to_string())?;
     let mut server_wr = server;
 
-    let stop1 = Arc::clone(&stop);
+    let cs1 = Arc::clone(&conn_stop);
+    let gs1 = Arc::clone(&global_stop);
+    let s_rd_clone = server_rd.try_clone().ok();
+    let c_rd_clone = client_rd.try_clone().ok();
+
     let t1 = thread::spawn(move || {
         let mut buf = [0u8; 32 * 1024];
-        while !stop1.load(Ordering::SeqCst) {
+        while !cs1.load(Ordering::SeqCst) && !gs1.load(Ordering::SeqCst) {
             match client_rd.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -106,15 +112,20 @@ fn handle_conn(
                 Err(_) => break,
             }
         }
-        let _ = server_wr.shutdown(std::net::Shutdown::Write);
+        cs1.store(true, Ordering::SeqCst);
+        let _ = server_wr.shutdown(std::net::Shutdown::Both);
+        if let Some(s) = s_rd_clone {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
     });
 
-    // Delayed + rate-limited path: server → client (inbound to leech).
-    let stop2 = stop;
+    let cs2 = Arc::clone(&conn_stop);
+    let gs2 = global_stop;
+
     let t2 = thread::spawn(move || {
         let mut buf = [0u8; 32 * 1024];
         let mut bucket = RateBucket::new(bytes_per_sec);
-        while !stop2.load(Ordering::SeqCst) {
+        while !cs2.load(Ordering::SeqCst) && !gs2.load(Ordering::SeqCst) {
             match server_rd.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -129,7 +140,11 @@ fn handle_conn(
                 Err(_) => break,
             }
         }
-        let _ = client_wr.shutdown(std::net::Shutdown::Write);
+        cs2.store(true, Ordering::SeqCst);
+        let _ = client_wr.shutdown(std::net::Shutdown::Both);
+        if let Some(c) = c_rd_clone {
+            let _ = c.shutdown(std::net::Shutdown::Both);
+        }
     });
 
     let _ = t1.join();

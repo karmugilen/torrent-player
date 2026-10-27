@@ -168,7 +168,18 @@ pub fn stream_range_timed(
     let first_byte = loop {
         let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("stream ended before response body".into());
+            if let Ok(resp) = parse_http_response(&buf) {
+                return Err(format!(
+                    "stream ended before response body: HTTP {} {}",
+                    resp.status,
+                    String::from_utf8_lossy(&resp.body)
+                ));
+            }
+            return Err(format!(
+                "stream ended before response body (read {} bytes: {:?})",
+                buf.len(),
+                String::from_utf8_lossy(&buf)
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
         if let Some(sep) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
