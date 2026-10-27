@@ -6,10 +6,23 @@ plugins {
 
 val repoRoot = rootProject.projectDir.parentFile
 
-// What the engine build reads: tests, docs and stray binaries do not rebuild it.
+// -Pwebtor.engine=go|rust selects the native engine (default go until Rust parity).
+val engineKind = providers.gradleProperty("webtor.engine").getOrElse("go")
+require(engineKind == "go" || engineKind == "rust") {
+    "Unsupported -Pwebtor.engine=$engineKind (expected go or rust)"
+}
+val useRustEngine = engineKind == "rust"
+
+// What the Go engine build reads: tests, docs and stray binaries do not rebuild it.
 val engineSources = fileTree(repoRoot.resolve("engine-go")) {
     include("**/*.go", "**/go.mod", "**/go.sum", "**/*.c", "**/*.h", "build.sh")
     exclude("**/*_test.go", "**/testdata/**")
+}
+
+// Rust engine inputs: sources + manifests + build script (not target/ or tests/).
+val rustEngineSources = fileTree(repoRoot.resolve("engine-rs")) {
+    include("**/*.rs", "**/Cargo.toml", "Cargo.toml", "Cargo.lock", "build-android.sh")
+    exclude("**/target/**", "**/tests/**")
 }
 
 val buildGoEngine by tasks.registering(Exec::class) {
@@ -18,6 +31,15 @@ val buildGoEngine by tasks.registering(Exec::class) {
     workingDir(repoRoot)
     commandLine("bash", repoRoot.resolve("engine-go/build.sh").absolutePath)
     inputs.files(engineSources)
+    outputs.file(file("src/main/jniLibs/arm64-v8a/libengine.so"))
+}
+
+val buildRustEngine by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Compile Rust torrent engine into libengine.so for arm64-v8a"
+    workingDir(repoRoot)
+    commandLine("bash", repoRoot.resolve("engine-rs/build-android.sh").absolutePath)
+    inputs.files(rustEngineSources)
     outputs.file(file("src/main/jniLibs/arm64-v8a/libengine.so"))
 }
 
@@ -34,9 +56,24 @@ val buildGoEngineEmulator by tasks.registering(Exec::class) {
     outputs.file(file("src/main/jniLibs/x86_64/libengine.so"))
 }
 
+val buildRustEngineEmulator by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Compile Rust torrent engine into libengine.so for the x86_64 emulator"
+    workingDir(repoRoot)
+    environment("ENGINE_ABI", "x86_64")
+    commandLine("bash", repoRoot.resolve("engine-rs/build-android.sh").absolutePath)
+    inputs.files(rustEngineSources)
+    outputs.file(file("src/main/jniLibs/x86_64/libengine.so"))
+}
+
 tasks.named("preBuild") {
-    dependsOn(buildGoEngine)
-    if (emulatorAbi) dependsOn(buildGoEngineEmulator)
+    if (useRustEngine) {
+        dependsOn(buildRustEngine)
+        if (emulatorAbi) dependsOn(buildRustEngineEmulator)
+    } else {
+        dependsOn(buildGoEngine)
+        if (emulatorAbi) dependsOn(buildGoEngineEmulator)
+    }
 }
 
 android {
@@ -121,8 +158,24 @@ android {
     }
 }
 
+// Stamp versionName + SDK/NDK paths. Inlined (not a helper) so configuration
+// cache can serialize these Exec tasks.
 buildGoEngine.configure {
-    // build.sh stamps the engine with versionName.
+    inputs.property("versionName", android.defaultConfig.versionName)
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+}
+buildGoEngineEmulator.configure {
+    inputs.property("versionName", android.defaultConfig.versionName)
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+}
+buildRustEngine.configure {
+    inputs.property("versionName", android.defaultConfig.versionName)
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+}
+buildRustEngineEmulator.configure {
     inputs.property("versionName", android.defaultConfig.versionName)
     environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
     environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)

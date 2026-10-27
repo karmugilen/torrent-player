@@ -35,13 +35,17 @@ CXX="$TOOLCHAIN/bin/$CLANG_TRIPLE-clang++"
 AR="$TOOLCHAIN/bin/llvm-ar"
 STRIP_BIN="$TOOLCHAIN/bin/llvm-strip"
 OUT="$ROOT/android/app/src/main/jniLibs/$ABI"
+CACHE_ROOT="${WT_CARGO_CACHE_ROOT:-/home/kar/.cache/wt-targets}"
+# Never use /tmp (RAM-backed tmpfs); keep Android builds on disk.
+TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE_ROOT/android-$ABI}"
+LOCK_FILE="$CACHE_ROOT/android-release.lock"
 
 if [ ! -x "$CC" ]; then
     echo "NDK clang not found at $CC" >&2
     exit 1
 fi
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$TARGET_DIR" "$CACHE_ROOT"
 
 VERSION="$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' "$ROOT/android/app/build.gradle.kts" | head -1)"
 if [ -z "$VERSION" ]; then
@@ -49,6 +53,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 echo "Building Rust engine for Android $ABI (version=$VERSION)..."
+echo "CARGO_TARGET_DIR=$TARGET_DIR CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-3}"
 
 # Ensure the Android Rust target is installed.
 rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true
@@ -64,16 +69,22 @@ export "${CARGO_TARGET_PREFIX}_LINKER=$CC"
 export "CC_${RUST_TARGET//-/_}=$CC"
 export "CXX_${RUST_TARGET//-/_}=$CXX"
 export "AR_${RUST_TARGET//-/_}=$AR"
-export "CFLAGS_${RUST_TARGET//-/_}=-D__ANDROID_API__=26"
+# Do not pass -D__ANDROID_API__=… here: the NDK *-android26-clang triple already
+# defines it, and aws-lc-sys builds with -Werror/-Wmacro-redefined.
 export CC="$CC"
 export CXX="$CXX"
 export AR="$AR"
-
-TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/wt-target-engine-android}"
 export CARGO_TARGET_DIR="$TARGET_DIR"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
+
+PREV_SIZE=""
+if [ -f "$OUT/libengine.so" ]; then
+    PREV_SIZE="$(stat -c%s "$OUT/libengine.so")"
+fi
 
 cd "$ENGINE_RS"
-cargo build --release -p wt-engine --lib --target "$RUST_TARGET"
+# One Android release build at a time across ABIs/workers.
+flock "$LOCK_FILE" cargo build --release -p wt-engine --lib --target "$RUST_TARGET"
 
 SRC_SO="$TARGET_DIR/$RUST_TARGET/release/libengine.so"
 if [ ! -f "$SRC_SO" ]; then
@@ -88,3 +99,24 @@ fi
 
 SIZE="$(stat -c%s "$OUT/libengine.so")"
 echo "Successfully built $OUT/libengine.so ($SIZE bytes)"
+
+# Compare with the previous .so at this path (often the Go engine) when present.
+if [ -n "$PREV_SIZE" ]; then
+    if [ "$SIZE" -lt "$PREV_SIZE" ]; then
+        DELTA=$((PREV_SIZE - SIZE))
+        echo "Size vs previous libengine.so: Rust $SIZE < previous $PREV_SIZE (Rust smaller by $DELTA bytes)"
+    elif [ "$SIZE" -gt "$PREV_SIZE" ]; then
+        DELTA=$((SIZE - PREV_SIZE))
+        echo "Size vs previous libengine.so: Rust $SIZE > previous $PREV_SIZE (Rust larger by $DELTA bytes)"
+    else
+        echo "Size vs previous libengine.so: equal ($SIZE bytes)"
+    fi
+else
+    echo "No previous libengine.so at $OUT to compare (Go build not present)"
+fi
+
+# Keep the per-ABI target dir under the shared 4 GB budget when possible.
+TARGET_BYTES="$(du -sb "$TARGET_DIR" 2>/dev/null | awk '{print $1}')"
+if [ -n "${TARGET_BYTES:-}" ] && [ "$TARGET_BYTES" -gt $((4 * 1024 * 1024 * 1024)) ]; then
+    echo "warning: $TARGET_DIR is larger than 4 GiB ($TARGET_BYTES bytes); consider cargo clean there" >&2
+fi

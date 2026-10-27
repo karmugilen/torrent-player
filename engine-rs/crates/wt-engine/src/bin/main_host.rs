@@ -1,13 +1,16 @@
 //! Desktop/host control binary — port of `engine-go/main_host.go`.
 //!
 //! Flags match Go (`-port`, `-path`, `-max-peers`) and also accept the GNU
-//! long form (`--port`, `--path`, `--max-peers`). Until agy-4 exposes a sync
-//! host entrypoint from `lib.rs`, this binary parses flags, waits for
-//! SIGINT/SIGTERM, and prints "engine not wired yet" so the crate compiles.
+//! long form (`--port`, `--path`, `--max-peers`). Starts `EngineServer`, the
+//! media stream listener, and a localhost control HTTP server
+//! ([`engine::ctl_http`]), then waits for SIGINT/SIGTERM or `POST /shutdown`.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use engine::ctl_http;
+use engine::server::EngineServer;
 
 const DEFAULT_PORT: u16 = 18080;
 const DEFAULT_PATH: &str = "/tmp/webtorrent";
@@ -95,7 +98,6 @@ fn install_stop_flag() -> Arc<AtomicBool> {
     let flag_int = flag.clone();
     let flag_term = flag.clone();
 
-    // tokio signal handlers on a background runtime thread.
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -123,26 +125,64 @@ fn install_stop_flag() -> Arc<AtomicBool> {
 
 fn run_engine(args: HostArgs) -> i32 {
     let stop = install_stop_flag();
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("engine-host")
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("failed to create tokio runtime: {err}");
+            return 1;
+        }
+    };
 
-    if let Some(code) = try_run_wired_engine(&args, &stop) {
-        return code;
-    }
+    rt.block_on(async move {
+        let server = match EngineServer::new(args.port, &args.path, args.max_peers) {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("{err}");
+                return 1;
+            }
+        };
 
-    eprintln!(
-        "engine not wired yet (port={}, path={}, max_peers={})",
-        args.port, args.path, args.max_peers
-    );
-    while !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    0
-}
+        if let Err(err) = server.start_streaming().await {
+            eprintln!("{err}");
+            server.close();
+            return 1;
+        }
 
-/// Hook for agy-4's `EngineServer`. Returns `None` while unwired.
-fn try_run_wired_engine(_args: &HostArgs, _stop: &AtomicBool) -> Option<i32> {
-    // When lib.rs exports `wt_engine::start_host_server` (or similar), call it
-    // here and return Some(exit_code). Until then the stub path runs.
-    None
+        let ctl = match ctl_http::serve(server.clone(), args.port).await {
+            Ok(ctl) => ctl,
+            Err(err) => {
+                eprintln!("control server: {err}");
+                server.close();
+                return 1;
+            }
+        };
+
+        let done_rx = ctl.take_done();
+        match done_rx {
+            Some(mut done_rx) => loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::select! {
+                    _ = &mut done_rx => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                }
+            },
+            None => {
+                while !stop.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+
+        ctl.stop();
+        server.close();
+        0
+    })
 }
 
 fn main() -> ExitCode {
