@@ -1,0 +1,64 @@
+63 tests whose Rust body is under 40% of the Go body (Go >= 12 lines)
+test_local_peer_download_produces_playable_media                            engine_playback.rs               go= 91 rs=  3 ignored
+test_peer_exploration_releases_one_real_idle_connection                     engine_peer_exploration.rs       go= 75 rs=  3 ignored
+test_http_disconnect_cancels_missing_range_and_another_request_still_works  engine_playback.rs               go= 71 rs=  3 ignored
+test_http_playback_writes_a_seek_log_line                                   engine_playback.rs               go= 64 rs=  3 ignored
+test_tracker_fetch_is_async_and_cancelled_on_close                          engine_trackers.rs               go= 37 rs=  2 ignored
+test_seek_resume_comparison                                                 engine_seek_http.rs              go=128 rs=  7 RUNS
+test_completed_and_streaming_http_ranges                                    engine_playback.rs               go= 49 rs=  3 ignored
+test_seek_http_comparison                                                   engine_seek_http.rs              go=102 rs=  7 RUNS
+test_playback_gated_open_phase_dual_now_and_moov_probe                      engine_playback.rs               go= 59 rs=  5 ignored
+test_tracker_cache_conditional_refresh_and_failure                          engine_trackers.rs               go= 66 rs=  7 ignored
+test_playback_seek_yields_startup_hints_to_target                           engine_playback.rs               go= 47 rs=  5 ignored
+test_tracker_discovered_peer_survives_refresh                               engine_trackers.rs               go= 77 rs=  9 ignored
+test_reads_waking_resting_direct_play_do_not_deadlock_with_record_lock      engine_preview_priority.rs       go= 48 rs=  6 ignored
+test_cold_restored_pending_magnet_discovers_tracker_peer_and_metadata       engine_magnet_restore.rs         go= 90 rs= 12 ignored
+test_playback_boost_startup_window                                          engine_playback.rs               go= 52 rs=  7 ignored
+test_playback_rejects_unselected_files_and_unverified_completion            engine_playback.rs               go= 21 rs=  3 ignored
+test_cache_shrink_preserves_dirty_download_bytes                            engine_settings.rs               go= 39 rs=  6 ignored
+test_http_read_hands_over_the_first_block_at_once                           engine_instant_seek.rs           go= 30 rs=  5 ignored
+test_preview_temp_for_ready_draft_without_full_file                         engine_preview.rs                go= 30 rs=  5 ignored
+test_direct_play_saves_every_episodes_metadata_once                         engine_metadata_cache.rs         go= 77 rs= 13 ignored
+test_ghost_pro_mutual_exclusivity_with_ghost_mode_and_peer_exploration      engine_ghost_pro.rs              go= 52 rs=  9 RUNS
+test_playback_window_follows_seek_and_demotes_old_now                       engine_playback.rs               go= 45 rs=  8 ignored
+test_tracker_supplement_public_private_and_magnet                           engine_trackers.rs               go= 49 rs=  9 ignored
+test_direct_play_fetches_every_episodes_metadata_in_background              engine_metadata_cache.rs         go= 42 rs=  8 ignored
+test_ghost_mode_setting_restores_latest_base_and_preserves_other_experiments engine_ghost_mode.rs             go= 47 rs=  9 RUNS
+test_former_playhead_parks_once_it_is_no_longer_playing                     engine_idle_buffer.rs            go= 39 rs=  8 ignored
+test_status_fingerprint_wakes_on_verification_and_rates                     engine_telemetry.rs              go= 14 rs=  3 ignored
+test_network_change_ignores_stale_and_duplicate_generations                 engine_network.rs                go= 32 rs=  7 ignored
+test_playback_close_reopen_preserves_resume_across_metadata_probes          engine_playback_resume.rs        go=106 rs= 24 ignored
+test_preview_wakes_resting_direct_play                                      engine_preview_priority.rs       go= 44 rs= 10 ignored
+test_managed_trackers_do_not_accumulate_across_restore                      engine_trackers.rs               go= 57 rs= 13 ignored
+test_unverified_reads_skip_the_start_and_end_of_the_file                    engine_playback.rs               go= 13 rs=  3 ignored
+test_saved_metadata_commit_drops_partial_ram                                engine_metadata_cache.rs         go= 55 rs= 13 ignored
+test_blocked_read_at_an_earlier_spot_stops_and_stays_stopped                engine_playback_active.rs        go= 58 rs= 14 ignored
+test_direct_play_cancels_wait_on_seek_and_close                             engine_direct_playback.rs        go= 53 rs= 13 RUNS
+test_playback_waits_for_verification_then_supports_seeking                  engine_playback.rs               go= 53 rs= 13 ignored
+test_direct_play_preloads_next_episode_near_the_end                         engine_next_preload.rs           go=109 rs= 28 ignored
+test_only_the_latest_seek_position_is_fetched                               engine_playback_active.rs        go= 58 rs= 15 ignored
+test_playback_debounce_timer_quiet_expiration                               engine_playback.rs               go= 19 rs=  5 ignored
+test_ghost_pro_playback_telemetry_moves_clears_and_toggles                  engine_ghost_pro.rs              go= 53 rs= 14 ignored
+test_piece_telemetry_inclusive_ranges_and_max_buckets                       engine_server.rs                 go= 60 rs= 16 ignored
+test_small_ram_setting_keeps_four_direct_play_pieces                        engine_settings.rs               go= 26 rs=  7 ignored
+test_saved_metadata_commit_clears_evicted_flag                              engine_metadata_cache.rs         go= 48 rs= 13 ignored
+test_playback_handles_share_priority_ownership                              engine_playback.rs               go= 36 rs= 10 ignored
+test_torrent_status_done_uses_verified_not_only_live_progress               engine_playback.rs               go= 35 rs= 10 ignored
+test_playback_open_phase_exit_on_body_read                                  engine_playback.rs               go= 17 rs=  5 ignored
+test_direct_play_large_pieces_stay_inside_the_cache                         engine_ghost_pro.rs              go= 27 rs=  8 ignored
+test_playback_no_seek_hotspots_retained                                     engine_playback.rs               go= 20 rs=  6 ignored
+test_pieces_reports_playback_tiers_playhead_and_detail                      engine_playback_grid.rs          go= 46 rs= 14 ignored
+test_playing_reader_keeps_window_and_peers_while_idle                       engine_idle_buffer.rs            go= 55 rs= 17 ignored
+test_playback_close_cancels_blocked_read                                    engine_playback.rs               go= 16 rs=  5 ignored
+test_claude_seek_with_slow_and_fast_seed                                    engine_direct_playback.rs        go= 57 rs= 18 ignored
+test_ghost_mode_sampler_honors_pause_and_payload_gate                       engine_ghost_mode.rs             go= 19 rs=  6 ignored
+test_ghost_pro_can_toggle_while_sampler_runs                                engine_ghost_pro.rs              go= 22 rs=  7 ignored
+test_resume_window_saves_once_seeking_settles_and_reopens_from_ram          engine_instant_seek.rs           go= 28 rs=  9 ignored
+test_seek_range_opens_the_window_at_the_range                               engine_playback_grid.rs          go= 15 rs=  5 ignored
+test_status_fingerprint_ignores_playback_priority_churn                     engine_telemetry.rs              go= 15 rs=  5 ignored
+test_playback_reads_verified_bytes_without_waiting                          engine_playback.rs               go= 32 rs= 11 ignored
+test_playback_scrub_has_immediate_full_readahead                            engine_playback.rs               go= 25 rs=  9 ignored
+test_ghost_mode_can_toggle_while_sampler_runs                               engine_ghost_mode.rs             go= 22 rs=  8 ignored
+test_tracker_refresh_is_bounded_for_existing_torrents                       engine_trackers.rs               go= 24 rs=  9 ignored
+test_validated_saved_metadata_replaces_partial_ram_piece                    engine_metadata_cache.rs         go= 47 rs= 18 ignored
+test_idle_reader_parks_and_resumes_the_same_descriptor                      engine_direct_playback.rs        go= 39 rs= 15 RUNS
