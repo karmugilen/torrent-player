@@ -10,8 +10,8 @@ use wt_storage::direct_storage::{
     prune_startup_caches, register_startup_cache, unregister_startup_cache,
 };
 use wt_storage::{
-    DocumentTorrentStorage, FileInfo, Info, PieceStorage, StorageError, TorrentStorage,
-    DIRECT_STARTUP_BUDGET, DIRECT_STARTUP_TOTAL_BUDGET,
+    DocumentTorrentStorage, FileInfo, Info, StorageError, TorrentStorage, DIRECT_STARTUP_BUDGET,
+    DIRECT_STARTUP_TOTAL_BUDGET,
 };
 use wt_types::InfoHash;
 

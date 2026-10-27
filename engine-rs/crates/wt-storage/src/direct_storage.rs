@@ -349,7 +349,7 @@ pub fn planned_startup_pieces(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FileInfo, Info, InfoHash, PieceStorage, StorageError, TorrentStorage};
+    use crate::{FileInfo, Info, InfoHash, StorageError, TorrentStorage};
     use sha1::{Digest, Sha1};
     use std::fs::{self, OpenOptions};
     use std::path::PathBuf;
@@ -479,6 +479,7 @@ mod tests {
             fs::create_dir_all(&dir).unwrap();
             let f = OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .open(dir.join("0.piece"))
                 .unwrap();

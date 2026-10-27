@@ -506,6 +506,7 @@ fn test_aggregate_piece_buckets() {
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn test_aggregate_piece_buckets_rejects_invalid_input() {
     let valid = [PieceRun {
         length: 4,

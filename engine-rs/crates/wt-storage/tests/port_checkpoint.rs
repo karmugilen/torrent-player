@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use wt_storage::{
     checkpoint_path, delete_piece_checkpoint, file_stable, identities_match, read_piece_checkpoint,
-    write_piece_checkpoint, DocumentTorrentStorage, FileIdentity, PieceCheckpoint, PieceStorage,
-    TorrentStorage, CHECKPOINT_MAGIC, CHECKPOINT_VERSION, MAX_CHECKPOINT_PIECES,
+    write_piece_checkpoint, DocumentTorrentStorage, FileIdentity, PieceCheckpoint, TorrentStorage,
+    CHECKPOINT_MAGIC, CHECKPOINT_VERSION, MAX_CHECKPOINT_PIECES,
 };
 use wt_types::InfoHash;
 

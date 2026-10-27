@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use wt_storage::{
     delete_engine_owned_storage, engine_owned_part_path, DocumentStorageClient,
-    DocumentTorrentStorage, FileDescriptor, PieceStorage, TorrentStorage,
+    DocumentTorrentStorage, FileDescriptor, TorrentStorage,
 };
 use wt_types::{ClientStorage, InfoHash};
 

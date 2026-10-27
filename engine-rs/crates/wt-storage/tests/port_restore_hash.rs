@@ -86,12 +86,8 @@ fn test_restore_verify_self_hash_uses_zero_hash_for_holes() {
 
     let p = st.piece_at(0);
     let sum = p.self_hash().expect("self_hash");
-    let (all, supported) = st.piece_extent_all_holes(piece_of(&info, 0));
-    if supported && all {
-        assert_eq!(sum, zero_piece_hash(info.piece_length));
-    } else {
-        assert_eq!(sum, zero_piece_hash(info.piece_length));
-    }
+    let (_all, _supported) = st.piece_extent_all_holes(piece_of(&info, 0));
+    assert_eq!(sum, zero_piece_hash(info.piece_length));
     let _ = TorrentStorage::close(&*st);
 }
 

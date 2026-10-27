@@ -12,9 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use sha1::{Digest, Sha1};
-use wt_storage::{
-    check_saved_data, DocumentTorrentStorage, PieceStorage, TorrentStorage, VerificationProgress,
-};
+use wt_storage::{check_saved_data, DocumentTorrentStorage, TorrentStorage, VerificationProgress};
 
 use support::{fds_from_files, info_hash_bytes, open_rw, single_file_info, test_temp_dir};
 
