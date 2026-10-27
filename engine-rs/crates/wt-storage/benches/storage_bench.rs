@@ -2,6 +2,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,7 +123,9 @@ fn run_rust_download_read_seq(base_dir: &Path) -> Duration {
         .open(&dest_path)
         .expect("open dest");
 
-    dest.set_len(BENCH_TORRENT_BYTES as u64).expect("truncate");
+    let mut writer = &dest;
+    let data = vec![0xAA; 1024 * 1024];
+    for _ in 0..256 { writer.write_all(&data).expect("prefill"); }
     let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
@@ -203,7 +206,9 @@ fn run_rust_download_read_random(base_dir: &Path) -> Duration {
         .open(&dest_path)
         .expect("open dest");
 
-    dest.set_len(BENCH_TORRENT_BYTES as u64).expect("truncate");
+    let mut writer = &dest;
+    let data = vec![0xAA; 1024 * 1024];
+    for _ in 0..256 { writer.write_all(&data).expect("prefill"); }
     let fd = dest.as_raw_fd();
     st.attach_descriptors(&[Some(fd)], &[0]).expect("attach");
 
@@ -246,14 +251,9 @@ fn run_rust_direct_play_seq(base_dir: &Path) -> Duration {
                 .write_at(&chunk, (c * BENCH_CHUNK_SIZE) as i64)
                 .expect("write chunk");
         }
-        let _ = piece.mark_complete();
+        piece.mark_complete().expect("mark complete");
         for c in 0..BENCH_CHUNKS_PER_PIECE {
-            if piece
-                .read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64)
-                .is_err()
-            {
-                break;
-            }
+            piece.read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64).expect("read chunk");
         }
     }
     let elapsed = start.elapsed();
@@ -288,14 +288,9 @@ fn run_rust_direct_play_random_seeks(base_dir: &Path) -> Duration {
                     .write_at(&chunk, (c * BENCH_CHUNK_SIZE) as i64)
                     .expect("write chunk");
             }
-            let _ = piece.mark_complete();
+            piece.mark_complete().expect("mark complete");
             for c in 0..BENCH_CHUNKS_PER_PIECE {
-                if piece
-                    .read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64)
-                    .is_err()
-                {
-                    break;
-                }
+                piece.read_at(&mut read_buf, (c * BENCH_CHUNK_SIZE) as i64).expect("read chunk");
             }
         }
     }
@@ -401,8 +396,9 @@ fn run_rust_piece_aggregation(iters: usize) -> Duration {
     start.elapsed()
 }
 
-fn main() {
-    let fixture_dir = PathBuf::from("/home/kar/.cache/wt-tmp/storage-bench/rust");
+#[test]
+fn storage_benchmark() {
+    let fixture_dir = PathBuf::from("/home/kar/.cache/wt-tmp/perf/storage-rust");
     let _ = fs::remove_dir_all(&fixture_dir);
     fs::create_dir_all(&fixture_dir).expect("create fixture dir");
 

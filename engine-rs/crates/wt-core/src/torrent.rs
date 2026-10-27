@@ -76,6 +76,9 @@ pub struct TorrentInner {
     pub default_storage: Arc<dyn ClientStorage>,
 
     pub pieces: RwLock<Vec<PieceEntry>>,
+    pub book: RwLock<Option<crate::piece_state::PieceBook>>,
+    pub dht_nodes: RwLock<Vec<SocketAddr>>,
+    pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
     pub dirty_chunks: RwLock<HashSet<RequestIndex>>,
     pub request_state: RwLock<HashMap<RequestIndex, ActiveRequest>>,
     pub hedges: RwLock<HashMap<RequestIndex, SocketAddr>>,
@@ -125,6 +128,9 @@ impl TorrentInner {
             storage: RwLock::new(None),
             default_storage,
             pieces: RwLock::new(Vec::new()),
+            book: RwLock::new(None),
+            dht_nodes: RwLock::new(Vec::new()),
+            peer_pieces: RwLock::new(HashMap::new()),
             dirty_chunks: RwLock::new(HashSet::new()),
             request_state: RwLock::new(HashMap::new()),
             hedges: RwLock::new(HashMap::new()),
@@ -171,6 +177,7 @@ impl TorrentInner {
         let storage = self.default_storage.open_torrent(&info, self.info_hash)?;
         *self.storage.write() = Some(storage);
         *self.pieces.write() = piece_entries;
+        crate::torrent_impls::init_book_and_glue(self, &info);
         *self.info.write() = Some(info);
         self.bump_change();
         Ok(())
@@ -933,10 +940,7 @@ impl ReaderHost for TorrentInner {
                     cur_offset += n as i64;
                 }
                 Err(e) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("storage read error: {e}"),
-                    ));
+                    return Err(std::io::Error::other(format!("storage read error: {e}")));
                 }
             }
         }

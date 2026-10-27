@@ -27,6 +27,7 @@ use crate::trackers::TrackerPool;
 use crate::types::*;
 
 pub struct TorrentRecord {
+    pub torrent: wt_core::Torrent,
     pub id: String,
     pub info_hash: String,
     pub name: Option<String>,
@@ -63,6 +64,8 @@ pub struct TorrentRecord {
 }
 
 pub struct EngineServer {
+    pub client: wt_core::Client,
+    pub storage: Arc<wt_storage::DocumentStorageClient>,
     pub download_dir: PathBuf,
     pub max_peers: AtomicUsize,
     pub ctl_port: u16,
@@ -126,7 +129,24 @@ impl EngineServer {
             max_peers.min(500)
         };
 
+        let storage = Arc::new(wt_storage::DocumentStorageClient::new(&dir));
+        let config = wt_core::ClientConfig {
+            default_storage: storage.clone(), seed: true, always_want_conns: true,
+            periodically_announce_torrents_to_dht: true,
+            piece_hashers_per_torrent: wt_storage::background_workers(), dial_rate: 30.0,
+            nominal_dial_timeout: Duration::from_secs(8), min_dial_timeout: Duration::from_secs(2),
+            handshakes_timeout: Duration::from_secs(5), established_conns_per_torrent: effective_peers,
+            half_open_conns_per_torrent: 24, total_half_open_conns: 48,
+            torrent_peers_high_water: 120.max(effective_peers * 4),
+            torrent_peers_low_water: 40.max(effective_peers * 2),
+            http_user_agent: format!("TorrentPlayer/{}", crate::version::app_version()),
+            extended_handshake_client_version: format!("Torrent Player {} (Go)", crate::version::app_version()),
+            ice_servers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302", "stun:stun3.l.google.com:19302", "stun:stun4.l.google.com:19302", "stun:global.stun.twilio.com:3478", "stun:stun.cloudflare.com:3478"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let client = wt_core::Client::new(config).map_err(std::io::Error::other)?;
         Ok(Arc::new(Self {
+            client, storage,
             download_dir: dir,
             max_peers: AtomicUsize::new(effective_peers),
             ctl_port,
@@ -144,17 +164,17 @@ impl EngineServer {
             payload_transfers_allowed: AtomicBool::new(true),
             shutting_down: AtomicBool::new(false),
             ghost_mode: AtomicBool::new(false),
-            ghost_pro_mode: AtomicBool::new(true),
-            dial_rate_per_sec: AtomicUsize::new(50),
+            ghost_pro_mode: AtomicBool::new(false),
+            dial_rate_per_sec: AtomicUsize::new(30),
             peer_exploration: AtomicBool::new(false),
             claude_seek_mode: AtomicBool::new(true),
             hedge_requests: AtomicBool::new(true),
             slow_peer_yield: AtomicBool::new(true),
             drop_chokers: AtomicBool::new(true),
             learned_arrival: AtomicBool::new(true),
-            idle_drop_minutes: AtomicI64::new(15),
+            idle_drop_minutes: AtomicI64::new(0),
             ram_cache_bytes: AtomicI64::new(64 * 1024 * 1024),
-            seeding_enabled: AtomicBool::new(true),
+            seeding_enabled: AtomicBool::new(false),
             seeding_allowed: AtomicBool::new(true),
             seed_ratio_milli: AtomicI64::new(1000),
             seed_time_minutes: AtomicI64::new(60),
@@ -237,6 +257,7 @@ impl EngineServer {
 
     pub fn close(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        self.client.close();
         if let Some(server) = self.stream_server.lock().take() {
             server.close();
         }
@@ -321,7 +342,7 @@ impl EngineServer {
             stream_port: self.stream_port.load(Ordering::SeqCst) as u16,
             path: self.download_dir.to_string_lossy().to_string(),
             payload_transfers_allowed: self.payload_transfers_allowed.load(Ordering::SeqCst),
-            listen_port: 0,
+            listen_port: self.client.local_port(),
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }
@@ -346,18 +367,58 @@ impl EngineServer {
             }
         }
 
-        // Generate id from infohash or random
-        let info_hash = if !req.torrent_id.is_empty() {
-            req.torrent_id.to_ascii_lowercase()
+        let mut spec = wt_core::TorrentSpec::default();
+        let mut peers = Vec::new();
+        if let Some(ref bytes) = torrent_data_bytes {
+            let mi = match wt_meta::parse_metainfo(bytes) {
+                Ok(mi) => mi,
+                Err(e) => return (400, serde_json::to_vec(&json!({"error": e.to_string()})).unwrap()),
+            };
+            spec.info_hash = Some(wt_meta::info_hash_v1(&mi.info_bytes));
+            spec.info_bytes = Some(mi.info_bytes);
+            spec.trackers = mi.announce_list;
+            if spec.trackers.is_empty() && !mi.announce.is_empty() { spec.trackers.push(vec![mi.announce]); }
+            spec.web_seeds = mi.url_list;
+            spec.dht_nodes = mi.nodes;
+            spec.piece_layers = mi.piece_layers;
+        } else if req.torrent_id.starts_with("magnet:") {
+            let m = match wt_meta::parse_magnet(&req.torrent_id) {
+                Ok(m) => m,
+                Err(e) => return (400, serde_json::to_vec(&json!({"error": e.to_string()})).unwrap()),
+            };
+            spec.info_hash = m.info_hash;
+            spec.info_hash_v2 = m.info_hash_v2;
+            spec.display_name = m.display_name;
+            spec.trackers = m.trackers.into_iter().map(|v| vec![v]).collect();
+            spec.web_seeds = m.web_seeds;
+            peers = m.params.into_iter().filter_map(|(k,v)| if k == "x.pe" { v.parse().ok() } else { None }).collect();
         } else {
-            format!("{:040x}", rand::random::<u128>())
+            spec.info_hash = wt_core::InfoHash::from_hex(&req.torrent_id);
+            if spec.info_hash.is_none() { return (400, serde_json::to_vec(&json!({"error":"invalid torrent"})).unwrap()); }
+        }
+        let original_trackers = spec.trackers.clone();
+        let (torrent, _) = match self.client.add_torrent_spec(spec) {
+            Ok(t) => t,
+            Err(e) => return (400, serde_json::to_vec(&json!({"error":e.to_string()})).unwrap()),
         };
+        torrent.add_peers(peers.into_iter().map(|addr| wt_core::PeerInfo { id: None, addr, source: wt_core::PeerSource::Direct, supports_encryption: false, pex: Default::default(), trusted: false }).collect());
+        let info_hash = torrent.info_hash().to_hex();
         let id = info_hash.clone();
-
+        let info = torrent.info();
+        let files: Vec<FileView> = torrent.files().into_iter().map(|file| {
+            let path = file.path();
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            FileView { index: file.index(), name, path, length: file.length(), progress: 0.0,
+                verified_bytes: file.bytes_completed(), file_type: "application/octet-stream".into() }
+        }).collect();
+        let total_pieces = torrent.num_pieces() as usize;
+        let piece_length = info.as_ref().map_or(0, |i| i.piece_length);
+        let last_piece_length = info.as_ref().map_or(0, |i| if total_pieces == 0 { 0 } else { i.piece((total_pieces - 1) as u32).length });
         let rec = Arc::new(RwLock::new(TorrentRecord {
+            torrent: torrent.clone(),
             id: id.clone(),
             info_hash: info_hash.clone(),
-            name: Some("test_torrent".to_string()),
+            name: info.as_ref().map(|i| i.name.clone()),
             magnet_uri: Some(format!("magnet:?xt=urn:btih:{info_hash}")),
             prepared: req.prepare,
             configured: false,
@@ -371,29 +432,19 @@ impl EngineServer {
             checking: false,
             checked_pieces: 0,
             check_total: 10,
-            files: vec![FileView {
-                index: 0,
-                name: "file.mp4".to_string(),
-                path: "file.mp4".to_string(),
-                length: 1024 * 1024,
-                progress: 0.0,
-                verified_bytes: 0,
-                file_type: "video/mp4".to_string(),
-            }],
-            original_trackers: vec![vec![
-                "udp://tracker.opentrackr.org:1337/announce".to_string()
-            ]],
+            files,
+            original_trackers,
             supplemental_trackers: 0,
             seeding: false,
             seed_base: self.seeding.get_account(&info_hash),
             torrent_bytes: torrent_data_bytes,
-            total_pieces: 10,
-            piece_length: 16384,
-            last_piece_length: 16384,
+            total_pieces,
+            piece_length,
+            last_piece_length,
             downloaded: 0,
             uploaded: 0,
             verified_bytes: 0,
-            piece_verified: vec![false; 10],
+            piece_verified: vec![false; total_pieces],
             next_preload: None,
             playback_readers: 0,
             resting: false,
@@ -605,6 +656,7 @@ impl EngineServer {
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
             rec.configured = true;
+            for file in rec.torrent.files() { if req.selected.contains(&file.index()) { file.download(); } else { file.set_priority(wt_core::PiecePriority::None); } }
             rec.selected = req.selected;
             if req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM) {
                 rec.direct_play = true;
@@ -639,6 +691,7 @@ impl EngineServer {
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
             let mut rec = r.write();
+            for file in rec.torrent.files() { if req.selected.contains(&file.index()) { file.download(); } else { file.set_priority(wt_core::PiecePriority::None); } }
             rec.selected = req.selected.clone();
             self.notify_change();
             (
@@ -669,7 +722,9 @@ impl EngineServer {
         };
         let records = self.records.read();
         if let Some(r) = records.get(&req.id) {
-            r.write().paused = pause;
+            let mut rec = r.write();
+            rec.paused = pause;
+            if pause { rec.torrent.disallow_data_download(); rec.torrent.disallow_data_upload(); } else { rec.torrent.allow_data_download(); if self.seeding_enabled.load(Ordering::SeqCst) { rec.torrent.allow_data_upload(); } }
             self.notify_change();
             (
                 200,
@@ -700,6 +755,8 @@ impl EngineServer {
         let mut records = self.records.write();
         let mut by_hash = self.records_by_hash.write();
         if let Some(rec) = records.remove(&req.id) {
+            rec.read().torrent.drop_torrent();
+            if req.destroy_store.unwrap_or(false) { let _ = self.storage.remove_torrent(rec.read().torrent.info_hash()); }
             by_hash.remove(&rec.read().info_hash);
             self.tracker_status.clear_status(&rec.read().info_hash);
             self.notify_change();

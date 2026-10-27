@@ -573,7 +573,7 @@ impl ClientInner {
         }
 
         if let Some(sources) = self.sources.write().take() {
-            let _ = self.block_on(async move { sources.close().await });
+            self.block_on(async move { sources.close().await });
         }
 
         let torrents: Vec<_> = {

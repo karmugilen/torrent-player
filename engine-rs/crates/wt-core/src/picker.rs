@@ -66,7 +66,7 @@ pub fn piece_req_index_range(
     let chunks_in_this_piece = if piece_len == 0 {
         0
     } else {
-        (piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE
+        piece_len.div_ceil(BLOCK_SIZE)
     };
     let end_req = start_req + chunks_in_this_piece;
     (start_req, end_req)

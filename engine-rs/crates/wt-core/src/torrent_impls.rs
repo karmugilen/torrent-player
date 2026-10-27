@@ -145,16 +145,22 @@ impl PeerTorrent for TorrentInner {
 
     fn mark_chunk_dirty(&self, req: RequestIndex) {
         self.dirty_chunks.write().insert(req);
+        if let Some(book) = self.book.write().as_mut() {
+            book.mark_chunk_dirty(req);
+        }
         TorrentInner::bump_change(self);
     }
 
     fn clear_chunk_requested(&self, req: RequestIndex) {
-        // Outstanding membership is `request_state` until PieceBook lands.
-        let _ = req;
+        if let Some(book) = self.book.write().as_mut() {
+            book.clear_chunk_requested(req);
+        }
     }
 
     fn mark_chunk_requested(&self, req: RequestIndex) {
-        let _ = req;
+        if let Some(book) = self.book.write().as_mut() {
+            book.mark_chunk_requested(req);
+        }
     }
 
     fn piece_all_dirty(&self, piece: PieceIndex) -> bool {
@@ -170,8 +176,13 @@ impl PeerTorrent for TorrentInner {
         (0..p.chunks_total as u32).all(|c| dirty.contains(&(begin + c)))
     }
 
-    fn note_availability(&self, _piece: PieceIndex, _delta: i32) {
-        // Relative availability lives on PieceBook once the field exists.
+    fn note_availability(&self, piece: PieceIndex, delta: i32) {
+        if let Some(book) = self.book.write().as_mut() {
+            for _ in 0..delta.unsigned_abs() {
+                if delta > 0 { book.increment_relative_availability(piece); }
+                else { book.decrement_relative_availability(piece); }
+            }
+        }
     }
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()> {
@@ -359,6 +370,9 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn peer_has_piece(&self, peer: PeerKey, piece: PieceIndex) -> bool {
+        if self.peer_pieces.read().get(&peer).is_some_and(|pieces| pieces.contains(&piece)) {
+            return true;
+        }
         let Some(addr) = addr_for_key(self, peer) else {
             return false;
         };
@@ -419,17 +433,19 @@ impl PeerTorrent for TorrentInner {
         Ok(())
     }
 
-    fn add_dht_node(&self, _addr: SocketAddr) {
-        // TODO: dht_nodes field + sources wiring
+    fn add_dht_node(&self, addr: SocketAddr) {
+        let mut nodes = self.dht_nodes.write();
+        if !nodes.contains(&addr) { nodes.push(addr); }
     }
 
     fn on_peer_listen_port(&self, _peer_addr: SocketAddr, _port: u16) {}
 
     fn choke_config(&self) -> ChokeConfig {
-        let mut cfg = ChokeConfig::default();
-        cfg.data_upload_disallowed = self.data_upload_disallowed.load(Ordering::Relaxed);
-        cfg.seeding = self.seeding.load(Ordering::Relaxed);
-        cfg
+        ChokeConfig {
+            data_upload_disallowed: self.data_upload_disallowed.load(Ordering::Relaxed),
+            seeding: self.seeding.load(Ordering::Relaxed),
+            ..ChokeConfig::default()
+        }
     }
 
     fn bump_change(&self) {
@@ -463,12 +479,21 @@ impl PeerTorrent for TorrentInner {
 }
 
 /// Placeholder until `book`/`glue` fields exist — call from `set_info` later.
-pub fn init_book_and_glue(_t: &TorrentInner, _info: &wt_types::Info) {
-    // TODO(agy-2 fields): PieceBook::new + StorageGlue::new
+pub fn init_book_and_glue(t: &TorrentInner, info: &wt_types::Info) {
+    let mut book = t.book.write();
+    if book.is_none() {
+        *book = Some(crate::piece_state::PieceBook::new(info.num_pieces(), info.piece_length, info.total_length(), BLOCK_SIZE));
+    }
 }
 
 /// Placeholder for Have/Bitfield → availability once `peer_pieces`/`book` exist.
-pub fn note_peer_piece(_t: &TorrentInner, _peer: PeerKey, _piece: PieceIndex, _has: bool) {}
+pub fn note_peer_piece(t: &TorrentInner, peer: PeerKey, piece: PieceIndex, has: bool) {
+    let mut peers = t.peer_pieces.write();
+    let pieces = peers.entry(peer).or_default();
+    let changed = if has { pieces.insert(piece) } else { pieces.remove(&piece) };
+    drop(peers);
+    if changed { t.note_availability(piece, if has { 1 } else { -1 }); }
+}
 
 impl TorrentInner {
     pub fn as_reader_host(self: &Arc<Self>) -> Arc<dyn crate::reader::ReaderHost> {
