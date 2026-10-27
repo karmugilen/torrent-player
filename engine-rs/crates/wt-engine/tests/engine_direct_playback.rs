@@ -55,7 +55,6 @@ fn test_direct_play_local_peer_seeks_beyond_ram_budget() {
     p.close();
 }
 
-#[ignore = "needs: PlaybackReader park_idle and in_flight tracking"]
 #[test]
 fn test_idle_reader_parks_and_resumes_the_same_descriptor() {
     // Port of Go `TestIdleReaderParksAndResumesTheSameDescriptor`.
@@ -122,7 +121,6 @@ fn test_stalled_read_retries_without_returning_zeros_or_dropping_peers() {
     }
 }
 
-#[ignore = "needs: cancellable wait on direct play read and cancel on seek/close"]
 #[test]
 fn test_direct_play_cancels_wait_on_seek_and_close() {
     // Port of Go `TestDirectPlayCancelsWaitOnSeekAndClose`.

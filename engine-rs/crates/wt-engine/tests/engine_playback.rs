@@ -171,7 +171,6 @@ fn test_file_piece_range_and_overlap_helpers() {
     assert!(!ranges_overlap(0, 3, 3, 5), "disjoint expected");
 }
 
-#[ignore = "needs: playback close cancels blocked read"]
 #[test]
 fn test_playback_close_cancels_blocked_read() {
     // Port of Go TestPlaybackCloseCancelsBlockedRead
@@ -200,7 +199,6 @@ fn test_http_disconnect_cancels_missing_range_and_another_request_still_works() 
     assert_eq!(code, 200, "play: {}", String::from_utf8_lossy(&body));
 }
 
-#[ignore = "needs: torrent status Done requires verified bytes completion"]
 #[test]
 fn test_torrent_status_done_uses_verified_not_only_live_progress() {
     // Port of Go TestTorrentStatusDoneUsesVerifiedNotOnlyLiveProgress
@@ -217,7 +215,6 @@ fn test_torrent_status_done_uses_verified_not_only_live_progress() {
     assert!(status["verifiedBytes"].as_i64().unwrap_or(0) > 0);
 }
 
-#[ignore = "needs: playback rejects unselected files and unverified completion"]
 #[test]
 fn test_playback_rejects_unselected_files_and_unverified_completion() {
     // Port of Go TestPlaybackRejectsUnselectedFilesAndUnverifiedCompletion

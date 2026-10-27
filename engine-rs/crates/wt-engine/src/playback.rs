@@ -108,6 +108,7 @@ pub trait PlaybackHost: Send + Sync {
     }
     fn refresh_playback_completion(&self, _id: &str, _pieces: &[u32]) {}
     fn set_playback_storage_demand(&self, _id: &str, _demand: &HashMap<u32, PiecePriority>) {}
+    fn playback_readers_changed(&self, _id: &str) {}
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -576,6 +577,16 @@ impl PlaybackReader {
         }
     }
 
+    pub fn refresh_window(&self) {
+        if self.is_closed() { return; }
+        if let Some(mut guard) = self.session.try_lock() {
+            if let Some(session) = guard.as_mut() {
+                session.update_window(session.last_offset);
+                *self.published_window.lock() = Some(session.window);
+            }
+        }
+    }
+
     pub fn set_play_boost(&self, boost: bool) {
         if let Some(session) = self.session.lock().as_mut() {
             session.boost = boost;
@@ -610,10 +621,16 @@ impl PlaybackReader {
             cancel.cancel();
         }
         self.read_generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(mut sess) = self.session.lock().take() {
-            sess.close();
-        }
+        let host = {
+            let mut guard = self.session.lock();
+            guard.take().and_then(|mut sess| {
+                let host = sess.host.clone();
+                sess.close();
+                host
+            })
+        };
         *self.simple_reader.lock() = None;
+        if let Some(host) = host { host.playback_readers_changed(&self.id); }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -1167,7 +1184,8 @@ impl PlaybackSession {
             &mut demand,
             PieceSpan {
                 begin: urgent.begin,
-                end: urgent.end.min(urgent.begin + tip_pieces + 1),
+                end: urgent.end.min(urgent.begin + tip_pieces +
+                    wt_policy::constants::URGENT_NOW_EXTRA_PIECES.load(Ordering::Relaxed).max(0) as u32),
             },
             PiecePriority::Now,
         );

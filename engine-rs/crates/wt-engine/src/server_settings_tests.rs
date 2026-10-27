@@ -294,3 +294,18 @@ fn shutdown_closes_preview_without_holding_its_registry_lock() {
     result.recv_timeout(Duration::from_secs(1)).expect("shutdown deadlocked in preview cleanup");
     assert!(preview.is_closed());
 }
+
+#[test]
+fn direct_play_limits_live_readers_and_releases_closed_slots() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    rec.write().direct_play = true;
+    let id = rec.read().id.clone();
+    let mut readers = Vec::new();
+    for _ in 0..4 { readers.push(server.open_playback(&id, 0).unwrap()); }
+    assert!(server.open_playback(&id, 0).is_err(), "fifth reader must exceed Go's limit");
+    readers.pop().unwrap().close();
+    server.open_playback(&id, 0).unwrap().close();
+    for reader in readers { reader.close(); }
+    server.close();
+}

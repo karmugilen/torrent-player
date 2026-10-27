@@ -41,7 +41,6 @@ fn settle(reader: &engine::playback::PlaybackReader, offset: i64) {
     reader.finish_focus();
 }
 
-#[ignore = "needs: Ghost Pro scaled windows and priority tiers"]
 #[test]
 fn test_ghost_pro_playback_startup_seek_and_scaled_windows() {
     for (name, piece_length, boost, urgent, forward, lookahead) in [
@@ -103,7 +102,6 @@ fn test_ghost_pro_instant_play_keeps_all_tiers_within_ram_allowance() {
     for reader in readers { reader.close(); }
 }
 
-#[ignore = "needs: Direct Play seek windows and shared cache"]
 #[test]
 fn test_direct_play_seek_is_smooth_forward_backward_and_middle() {
     let (eng, id) = ghost_fixture(1 << 20, 256, true);
@@ -163,7 +161,6 @@ fn test_ghost_pro_first_verified_read_expands_urgency() {
     reader.close();
 }
 
-#[ignore = "needs: Ghost Pro playback telemetry moves and clears"]
 #[test]
 fn test_ghost_pro_playback_telemetry_moves_clears_and_toggles() {
     let (eng, id) = ghost_fixture(1 << 20, 256, false);
@@ -189,10 +186,10 @@ fn test_ghost_pro_playback_telemetry_moves_clears_and_toggles() {
     assert!(ranges[1]["end"].as_u64().unwrap() < 127, "normal window did not shorten");
     eng.post_settings(r#"{"ghostProMode":true}"#);
     reader.park_idle();
-    assert!(read()["playback"].as_array().unwrap().is_empty(), "parked demand remains");
+    assert!(read()["playback"].as_array().is_none_or(Vec::is_empty), "parked demand remains");
     reader.apply_offset(100 << 20);
     reader.close();
-    assert!(read()["playback"].as_array().unwrap().is_empty(), "closed demand remains");
+    assert!(read()["playback"].as_array().is_none_or(Vec::is_empty), "closed demand remains");
 }
 
 #[test]

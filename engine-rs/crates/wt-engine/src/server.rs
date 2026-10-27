@@ -1660,6 +1660,12 @@ impl EngineServer {
         {
             self.reset_ghost();
         }
+        if req.ghost_mode.is_some() || req.ghost_pro_mode.is_some()
+            || req.peer_exploration.is_some() || req.ram_cache_bytes.is_some()
+        {
+            let ids: Vec<_> = self.records.read().keys().cloned().collect();
+            for id in ids { self.refresh_playback_windows(&id); }
+        }
         self.notify_change();
         self.handle_get_settings()
     }
@@ -1811,7 +1817,15 @@ impl EngineServer {
         let mut readers = self.playback_readers.lock();
         readers.retain(|_, reader| !reader.is_closed());
         readers.insert(handle, reader.clone());
+        drop(readers);
+        self.refresh_playback_windows(id);
         Ok(reader)
+    }
+
+    fn refresh_playback_windows(&self, id: &str) {
+        let readers: Vec<_> = self.playback_readers.lock().values()
+            .filter(|reader| reader.id == id && !reader.is_closed()).cloned().collect();
+        for reader in readers { reader.refresh_window(); }
     }
 
     pub fn open_preview(&self, id: &str, index: usize) -> std::io::Result<Arc<PreviewReader>> {
@@ -1852,11 +1866,15 @@ impl crate::playback::PlaybackHost for EngineServer {
             focused_file: rec.focused_file,
             files,
             piece_length: len,
-            open_reader_count: rec.playback_readers,
+            open_reader_count: self.playback_readers.lock().values()
+                .filter(|reader| reader.id == id && !reader.is_closed()).count(),
         })
     }
     fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
+    }
+    fn playback_readers_changed(&self, id: &str) {
+        if !self.shutting_down.load(Ordering::SeqCst) { self.refresh_playback_windows(id); }
     }
     fn payload_allowed(&self) -> bool {
         self.payload_transfers_allowed.load(Ordering::SeqCst)

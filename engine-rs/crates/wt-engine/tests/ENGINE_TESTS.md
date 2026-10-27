@@ -1,8 +1,10 @@
 # wt-engine integration test map
 
-Engine integration tests declared: 148 | Enabled: 92 | Waiting: 56 | Known core-blocked failures: 2
+Engine integration tests declared: 148 | Enabled: 100 | Waiting: 48 | Known core-blocked failures: 2
 
-Round 3 group 1: 12 additional preview tests passed unchanged and were enabled; all integration `needs:` ignores, including JSON tests, decreased from 70 to 58. Library tests: 47 pass. The two existing local swarm playback failures remain with Grok.
+Round 3 group 2: eight more playback/Ghost Pro tests pass (50 needs tests remain overall); all 11 Ghost Pro tests pass. The two empty-playback JSON assertions were corrected with coordinator approval to match Go omitted nil slices.
+
+Round 3 group 1: 12 additional preview tests passed unchanged and were enabled; all integration `needs:` ignores, including JSON tests, decreased from 70 to 58. Library tests: 48 pass. The two existing local swarm playback failures remain with Grok.
 
 Go `engine-go/*_test.go` → Rust `tests/engine_*.rs` via `EngineServer::dispatch_control`.
 
@@ -22,9 +24,9 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestPreviewReleaseInvalidatesTemporaryCompletion` | `engine_delivery_regression::test_preview_release_invalidates_temporary_completion` | pass |
 | `TestPreviewHonorsPayloadGate` | `engine_delivery_regression::test_preview_honors_payload_gate` | pass |
 | `TestDirectPlayLocalPeerSeeksBeyondRAMBudget` | `engine_direct_playback::test_direct_play_local_peer_seeks_beyond_ram_budget` | waiting: multi-peer local swarm transfer with seeking |
-| `TestIdleReaderParksAndResumesTheSameDescriptor` | `engine_direct_playback::test_idle_reader_parks_and_resumes_the_same_descriptor` | waiting: PlaybackReader park_idle and in_flight tracking |
+| `TestIdleReaderParksAndResumesTheSameDescriptor` | `engine_direct_playback::test_idle_reader_parks_and_resumes_the_same_descriptor` | pass |
 | `TestStalledReadRetriesWithoutReturningZerosOrDroppingPeers` | `engine_direct_playback::test_stalled_read_retries_without_returning_zeros_or_dropping_peers` | pass |
-| `TestDirectPlayCancelsWaitOnSeekAndClose` | `engine_direct_playback::test_direct_play_cancels_wait_on_seek_and_close` | waiting: cancellable wait on direct play read and cancel on seek/close |
+| `TestDirectPlayCancelsWaitOnSeekAndClose` | `engine_direct_playback::test_direct_play_cancels_wait_on_seek_and_close` | pass |
 | `TestClaudeSeekWithSlowAndFastSeed` | `engine_direct_playback::test_claude_seek_with_slow_and_fast_seed` | waiting: multi-peer slow and fast seed transfer |
 | `TestClaudeSeekSettingTogglesStealingAndResetsStats` | `engine_direct_playback::test_claude_seek_setting_toggles_stealing_and_resets_stats` | pass |
 | `TestGhostModeKeepsMeasuredGainsAndLimitsDialing` | `engine_ghost_mode::test_ghost_mode_keeps_measured_gains_and_limits_dialing` | pass |
@@ -34,12 +36,12 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestGhostModeSettingRestoresLatestBaseAndPreservesOtherExperiments` | `engine_ghost_mode::test_ghost_mode_setting_restores_latest_base_and_preserves_other_experiments` | pass |
 | `TestGhostModeSamplerHonorsPauseAndPayloadGate` | `engine_ghost_mode::test_ghost_mode_sampler_honors_pause_and_payload_gate` | pass |
 | `TestGhostModeCanToggleWhileSamplerRuns` | `engine_ghost_mode::test_ghost_mode_can_toggle_while_sampler_runs` | pass |
-| `TestGhostProPlaybackStartupSeekAndScaledWindows` | `engine_ghost_pro::test_ghost_pro_playback_startup_seek_and_scaled_windows` | waiting: Ghost Pro scaled windows and priority tiers |
+| `TestGhostProPlaybackStartupSeekAndScaledWindows` | `engine_ghost_pro::test_ghost_pro_playback_startup_seek_and_scaled_windows` | pass |
 | `TestGhostProInstantPlayKeepsAllTiersWithinRAMAllowance` | `engine_ghost_pro::test_ghost_pro_instant_play_keeps_all_tiers_within_ram_allowance` | pass |
-| `TestDirectPlaySeekIsSmoothForwardBackwardAndMiddle` | `engine_ghost_pro::test_direct_play_seek_is_smooth_forward_backward_and_middle` | waiting: Direct Play seek windows and shared cache |
+| `TestDirectPlaySeekIsSmoothForwardBackwardAndMiddle` | `engine_ghost_pro::test_direct_play_seek_is_smooth_forward_backward_and_middle` | pass |
 | `TestDirectPlayLargePiecesStayInsideTheCache` | `engine_ghost_pro::test_direct_play_large_pieces_stay_inside_the_cache` | pass |
 | `TestGhostProFirstVerifiedReadExpandsUrgency` | `engine_ghost_pro::test_ghost_pro_first_verified_read_expands_urgency` | pass |
-| `TestGhostProPlaybackTelemetryMovesClearsAndToggles` | `engine_ghost_pro::test_ghost_pro_playback_telemetry_moves_clears_and_toggles` | waiting: Ghost Pro playback telemetry moves and clears |
+| `TestGhostProPlaybackTelemetryMovesClearsAndToggles` | `engine_ghost_pro::test_ghost_pro_playback_telemetry_moves_clears_and_toggles` | pass |
 | `TestContiguousWantedPiecesExcludesReaderGapsAndCompletedPieces` | `engine_ghost_pro::test_contiguous_wanted_pieces_excludes_reader_gaps_and_completed_pieces` | pass |
 | `TestGhostProPrioritizesIdlePeersWithoutPlaybackPathPieces` | `engine_ghost_pro::test_ghost_pro_prioritizes_idle_peers_without_playback_path_pieces` | pass |
 | `TestGhostProChoosesZeroOverlapIdleVictimAndProtectsSeeders` | `engine_ghost_pro::test_ghost_pro_chooses_zero_overlap_idle_victim_and_protects_seeders` | pass |
@@ -85,11 +87,11 @@ Status values: `pass` (real test runs and passes), `waiting: <reason>` (real tes
 | `TestPlaybackGatedOpenPhaseDualNowAndMoovProbe` | `engine_playback::test_playback_gated_open_phase_dual_now_and_moov_probe` | waiting: playback gated open phase dual now and moov probe |
 | `TestPlaybackOpenPhaseExitOnBodyRead` | `engine_playback::test_playback_open_phase_exit_on_body_read` | waiting: playback open phase exit on body read |
 | `TestFilePieceRangeAndOverlapHelpers` | `engine_playback::test_file_piece_range_and_overlap_helpers` | pass |
-| `TestPlaybackCloseCancelsBlockedRead` | `engine_playback::test_playback_close_cancels_blocked_read` | waiting: playback close cancels blocked read |
+| `TestPlaybackCloseCancelsBlockedRead` | `engine_playback::test_playback_close_cancels_blocked_read` | pass |
 | `TestCompletedAndStreamingHTTPRanges` | `engine_playback::test_completed_and_streaming_http_ranges` | waiting: HTTP streaming range server requests |
 | `TestHTTPDisconnectCancelsMissingRangeAndAnotherRequestStillWorks` | `engine_playback::test_http_disconnect_cancels_missing_range_and_another_request_still_works` | waiting: HTTP disconnect cancels missing range request |
-| `TestTorrentStatusDoneUsesVerifiedNotOnlyLiveProgress` | `engine_playback::test_torrent_status_done_uses_verified_not_only_live_progress` | waiting: torrent status Done requires verified bytes completion |
-| `TestPlaybackRejectsUnselectedFilesAndUnverifiedCompletion` | `engine_playback::test_playback_rejects_unselected_files_and_unverified_completion` | waiting: playback rejects unselected files and unverified completion |
+| `TestTorrentStatusDoneUsesVerifiedNotOnlyLiveProgress` | `engine_playback::test_torrent_status_done_uses_verified_not_only_live_progress` | pass |
+| `TestPlaybackRejectsUnselectedFilesAndUnverifiedCompletion` | `engine_playback::test_playback_rejects_unselected_files_and_unverified_completion` | pass |
 | `TestLocalPeerDownloadProducesPlayableMedia` | `engine_playback::test_local_peer_download_produces_playable_media` | waiting: two-engine local swarm transfer produces playable media |
 | `TestPlaybackBoostRequestDecodes` | `engine_playback::test_playback_boost_request_decodes` | pass |
 | `TestPlaybackBoostStartupWindow` | `engine_playback::test_playback_boost_startup_window` | waiting: playback boost startup window expansion |
