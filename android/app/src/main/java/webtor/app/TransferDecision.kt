@@ -7,6 +7,7 @@ val LEGACY_DOWNLOAD_QUEUE_PREF_KEYS = listOf("downloadQueueMode", "downloadQueue
 val RETIRED_EXPERIMENT_PREF_KEYS = listOf(
     "playBoost", "adaptiveBuffer", "burstAwareBuffer", "peerExploration", "ghostMode",
     "ghostProMode", "claudeSeekMode", "fastPeerSearch", "preloadStart",
+    "hedgeRequests", "slowPeerYield", "dropChokers", "fileOnlyPlayback", "playNext",
 )
 
 /**

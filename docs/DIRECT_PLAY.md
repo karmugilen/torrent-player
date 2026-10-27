@@ -172,6 +172,9 @@ seek times so on and off can be compared.
 
 None was measured on a swarm before release.
 
+Since 2.3.0 these three, Play this file only and Play next video are always
+on and no longer shown in Settings; their saved switches are forgotten.
+
 ## 2.1.53: block arrival learned on the device
 
 `patches/torrent/webtor_arrival.go`. Every request records its inputs; every

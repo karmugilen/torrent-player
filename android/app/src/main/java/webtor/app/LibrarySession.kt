@@ -176,13 +176,8 @@ class LibrarySession(
                         antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
                         networkPolicy = savedNetworkPolicy(),
                         idleDropMinutes = settings.getInt("idleDropMinutes", defaults.idleDropMinutes).coerceIn(0, 240),
-                        fileOnlyPlayback = settings.getBoolean("fileOnlyPlayback", defaults.fileOnlyPlayback),
-                        hedgeRequests = settings.getBoolean("hedgeRequests", defaults.hedgeRequests),
-                        slowPeerYield = settings.getBoolean("slowPeerYield", defaults.slowPeerYield),
-                        dropChokers = settings.getBoolean("dropChokers", defaults.dropChokers),
                         pauseOnLowBattery = pauseOnLowBattery,
                         batteryPaused = pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging,
-                        playNext = settings.getBoolean("playNext", defaults.playNext),
                         downloadRateKiB = savedDownloadRateKiB(),
                     )
                 }
@@ -383,40 +378,6 @@ class LibrarySession(
         }
     }
 
-    fun setHedgeRequests(enabled: Boolean) {
-        settings.edit().putBoolean("hedgeRequests", enabled).apply()
-        _ui.update { it.copy(hedgeRequests = enabled) }
-        scope.launch {
-            if (_ui.value.engineReady) runCatching { withContext(io) { client.setHedgeRequests(enabled) } }
-            refreshSeekStats()
-        }
-    }
-
-    fun setSlowPeerYield(enabled: Boolean) {
-        settings.edit().putBoolean("slowPeerYield", enabled).apply()
-        _ui.update { it.copy(slowPeerYield = enabled) }
-        scope.launch {
-            if (_ui.value.engineReady) runCatching { withContext(io) { client.setSlowPeerYield(enabled) } }
-            refreshSeekStats()
-        }
-    }
-
-
-    fun setDropChokers(enabled: Boolean) {
-        settings.edit().putBoolean("dropChokers", enabled).apply()
-        _ui.update { it.copy(dropChokers = enabled) }
-        scope.launch {
-            if (_ui.value.engineReady) runCatching { withContext(io) { client.setDropChokers(enabled) } }
-            refreshSeekStats()
-        }
-    }
-
-    fun setFileOnlyPlayback(enabled: Boolean) {
-        settings.edit().putBoolean("fileOnlyPlayback", enabled).apply()
-        _ui.update { it.copy(fileOnlyPlayback = enabled) }
-        if (!enabled) finishPlayback(null)
-    }
-
     /** A player return or failed launch releases the saved torrent's file filter. */
     fun finishPlayback(uri: String?) {
         scope.launchCommand {
@@ -443,11 +404,6 @@ class LibrarySession(
         _ui.update { it.copy(pauseOnLowBattery = enabled) }
         publishBatteryPaused()
         networkUpdates.trySend(Unit)
-    }
-
-    fun setPlayNext(enabled: Boolean) {
-        settings.edit().putBoolean("playNext", enabled).apply()
-        _ui.update { it.copy(playNext = enabled) }
     }
 
     fun setDownloadRateKiB(value: Int) {

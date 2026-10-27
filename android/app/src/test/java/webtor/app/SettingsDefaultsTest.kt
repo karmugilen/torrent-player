@@ -17,6 +17,9 @@ class SettingsDefaultsTest {
         assertTrue(state.fileOnlyPlayback)
         assertTrue(state.pauseOnLowBattery)
         assertTrue(state.claudeSeekMode)
+        assertTrue(state.hedgeRequests)
+        assertTrue(state.slowPeerYield)
+        assertTrue(state.dropChokers)
         assertEquals(15, state.idleDropMinutes)
     }
 

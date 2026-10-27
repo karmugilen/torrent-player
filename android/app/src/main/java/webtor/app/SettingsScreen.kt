@@ -91,14 +91,9 @@ fun SettingsScreen(
     onAutoRamCache: () -> Unit = {},
     onPlaybackMethod: (PlaybackMethod) -> Unit = {},
     onRefreshSeekStats: () -> Unit = {},
-    onFileOnlyPlayback: (Boolean) -> Unit = {},
-    onHedgeRequests: (Boolean) -> Unit = {},
-    onSlowPeerYield: (Boolean) -> Unit = {},
-    onDropChokers: (Boolean) -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
     onPauseOnLowBattery: (Boolean) -> Unit = {},
-    onPlayNext: (Boolean) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -544,36 +539,6 @@ fun SettingsScreen(
                             }
                         }
                     }
-                    SwitchRow(
-                        title = "Hedged requests (experimental)",
-                        supporting = "When a block at the playhead is late, also ask a faster peer for it and use whichever copy comes first. Seek times above restart when you switch, so you can compare.",
-                        checked = state.hedgeRequests,
-                        onCheckedChange = onHedgeRequests,
-                    )
-                    SwitchRow(
-                        title = "Slow peers step aside (experimental)",
-                        supporting = "A peer slower than 48 KB/s skips a piece near the playhead that faster peers would finish first, and fetches further ahead instead.",
-                        checked = state.slowPeerYield,
-                        onCheckedChange = onSlowPeerYield,
-                    )
-                    SwitchRow(
-                        title = "Drop peers that won't share (experimental)",
-                        supporting = "A peer that keeps refusing to send for 5 s is disconnected when other peers are waiting, so a new one can take its place.",
-                        checked = state.dropChokers,
-                        onCheckedChange = onDropChokers,
-                    )
-                    SwitchRow(
-                        title = "Play this file only",
-                        supporting = "While playing a saved torrent, pauses downloads of its other selected files. They resume when you return from the player. Direct Play already streams only the playing file.",
-                        checked = state.fileOnlyPlayback,
-                        onCheckedChange = onFileOnlyPlayback,
-                    )
-                    SwitchRow(
-                        title = "Play next video",
-                        supporting = "When a video ends, starts the next selected video in the same torrent. Near the end, quietly loads the start of the next one so it opens instantly.",
-                        checked = state.playNext,
-                        onCheckedChange = onPlayNext,
-                    )
                     SectionDivider()
                     Column(
                         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp),

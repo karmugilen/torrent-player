@@ -169,14 +169,9 @@ class MainActivity : ComponentActivity() {
                                 onClearFolder = session::clearFolder,
                                 onIdleDropMinutes = session::setIdleDropMinutes,
                                 onRefreshSeekStats = session::refreshSeekStats,
-                                onFileOnlyPlayback = session::setFileOnlyPlayback,
-                                onHedgeRequests = session::setHedgeRequests,
-                                onSlowPeerYield = session::setSlowPeerYield,
-                                onDropChokers = session::setDropChokers,
                                 onNetworkPolicy = session::setNetworkPolicy,
                                 onDownloadRateKiB = session::setDownloadRateKiB,
                                 onPauseOnLowBattery = session::setPauseOnLowBattery,
-                                onPlayNext = session::setPlayNext,
                             )
                             Screen.Files -> {
                                 val entry = state.library.find { it.key == state.openTorrentKey }

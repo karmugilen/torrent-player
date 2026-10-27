@@ -76,12 +76,12 @@ data class UiState(
     val ghostMode: Boolean = false,
     val ghostProMode: Boolean = true,
     val claudeSeekMode: Boolean = true,
-    /** Experimental hedged requests for blocks stuck at the playhead. */
-    val hedgeRequests: Boolean = false,
-    /** Experimental: slow peers leave playback pieces to faster peers. */
-    val slowPeerYield: Boolean = false,
-    /** Experimental: drop peers that keep us choked. */
-    val dropChokers: Boolean = false,
+    /** Hedged requests for blocks stuck at the playhead. */
+    val hedgeRequests: Boolean = true,
+    /** Slow peers leave playback pieces to faster peers. */
+    val slowPeerYield: Boolean = true,
+    /** Drop peers that keep us choked. */
+    val dropChokers: Boolean = true,
     /** Minutes before an idle Direct Play session is dropped; 0 is off. */
     val idleDropMinutes: Int = 15,
     val seekStats: webtor.core.SeekStats? = null,
