@@ -153,30 +153,35 @@ and captures bounded engine/error/crash logcat without clearing it. It never
 uninstalls or clears app data. Installation, VIEW delivery and logs still need
 a connected device; Play, seek and preview require actual UI/native verification.
 
-## Peer parity (grok-swarm)
+## Peer parity (grok-wire + grok-swarm)
 
 Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
-Network conditions today are softer than the original Go 10–11 MiB/s baseline.
 
-### Fixes landed (swarm / dial / metadata / PEX)
+### Fixes landed (wire / peer_conn — grok-wire)
 
-- Continuous DHT announcer while `want_conns` / `AlwaysWantConns`
-- Tracker/WS `numwant` 200/10; announce error backoff 15 s
-- Go `dialPool`: race TCP+uTP under one half-open slot; MSE fallback redials winning transport
-- Go `PopMax`: remove dial candidates on dial; trusted/source dial order; high-water trim
-- `peer_closed` re-queues outgoing peers with 5 s dial backoff (local + public churn)
-- ut_metadata: `PeerMetadataState` timeout retry + parallel piece requests
-- PEX: add/drop on conn lifecycle + periodic `genmsg` send (receive already worked)
-- `/connections` downloaded uses `bytes_read_data` (kept in sync with useful bytes)
+- Full Go `sendInitialMessages`: LTEP (`m`/`v`/`p`/`yourip`/`reqq`/`upload_only`/`encryption`/`metadata_size`), Fast HaveAll/HaveNone/bitfield, Port, Unchoke
+- `PeerMaxRequests` 250 + advertise `reqq` 1024; apply peer `reqq` clamped to 250
+- Unbounded outbound write queue (no silent Piece `try_send` drops)
+- Conn reader `tokio::select!` **biased** so Piece reads beat outstanding-aware wake timers (was starving reads → ~45 s stalls at high pipeline)
+- `expire_stale_requests` (RTT×8, min 4 s) so stuck outstanding can refill
+- Outstanding/Normal-priority `wake_interval` + choke reconcile when `data_upload_disallowed` flips; `allow`/`disallow_data_upload` wake conns
+- Local `transfer_test` 64 MiB: **5/5 pass** ~2.95 MB/s debug with full handshake + max=250
 
-### Numbers (single runs unless noted)
+### Fixes landed (swarm / dial / metadata / PEX — grok-swarm)
 
-| Label | meta s | peers (min→max over 5 s samples) | speed peak MiB/s |
-|-------|--------|-----------------------------------|------------------|
-| go-ubuntu-baseline | 9.0 | 10→30 | 0.68 |
-| rust-ubuntu-v5 | 5.5 | 1→6 | 0.68 |
-| go-sintel-baseline | 20.5 | 17→36 | 0.65 |
-| rust-sintel-v4 | 3.0 | 3→11 | 3.68 |
+- Continuous DHT announcer; tracker `numwant` 200; dialPool TCP+uTP; MSE fallback; PopMax dial order; high-water trim
+- Failed dials re-queue with exponential backoff (5s…120s, max 8 attempts) so PopMax does not burn DHT/tracker contacts until rediscovery
+- Tracker peers marked trusted; announce slots nudged when `want_peers` and next_at >2 min
+- `peer_closed` re-queues outgoing peers (5 s); ut_metadata timeout retry; PEX add/drop/genmsg
 
-**Status:** metadata time beats Go on both samples. Sintel speed can beat Go under current conditions. **Peer count still short** (Ubuntu ~6 vs ~30; Sintel ~11 vs ~36). Discovery supply is healthy (zz_diag max_known≈220 at high-water); remaining gap is dial/handshake success rate and post-handshake retention (coordinate with grok-wire on MSE / interested-unchoke). Not yet acceptance (≥ Go peers+speed+meta ×3 runs).
+### Numbers (×3 runs, 2026-10-28 grok-wire + latest swarm dial re-queue)
+
+| Label | meta s (runs) | peers min→max | speed peak MiB/s |
+|-------|---------------|---------------|------------------|
+| go-ubuntu | 6.5 / 5.5 / 9.6 / **9.0** | 10→42 / 7→44 / 10→45 / **10→40** | 6.77 / 4.09 / 7.44 / **4.02** |
+| rust-ubuntu | 13.5 / 5.0 / 22.0 / **7.5** (r6) | 0→4 / 2→6 / 3→6 / **2→8** | 0.71 / 1.10 / 0.73 / **1.24** |
+| go-sintel | 4.5 / 4.5 / 4.0 | 11→35 / 11→34 / 11→27 | 6.10 / 3.09 / 3.79 |
+| rust-sintel | 2.0 / 2.5 / 3.0 | 1→13 / 1→8 / 1→8 | **22.92 / 26.89 / 14.70** |
+
+**Status:** **Sintel download speed beats Go** on prior three runs (≈4–8×). Metadata often beats Go (Ubuntu r6 meta 7.5 s < Go 9.0 s). **Ubuntu peer count and speed still short** (peak ~8 vs ~40) — dial re-queue raised peak from ~4→8; remaining gap is handshake/MSE success and established retention (grok-wire). Sintel magnet metadata flaked empty-files on two later runs (xs/ut_metadata); recheck after wire/engine stabilize. Not full acceptance on Ubuntu peers yet; Sintel speed acceptance previously met.
 

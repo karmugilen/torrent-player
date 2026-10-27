@@ -217,8 +217,8 @@ impl PeerTorrent for TorrentInner {
         if let Some(handle) = old {
             if handle.is_outgoing() {
                 // PopMax removed this addr on dial; re-queue so we redial after
-                // backoff (local swarm + public churn). Failed dials stay out
-                // until DHT/tracker/PEX rediscovery.
+                // backoff (local swarm + public churn). Failed dials for
+                // Tracker/Direct/PEX are also re-queued in the dialer.
                 self.dial_backoff
                     .lock()
                     .insert(addr, Instant::now() + Duration::from_secs(5));
@@ -231,7 +231,10 @@ impl PeerTorrent for TorrentInner {
                     pex: Default::default(),
                     trusted: matches!(
                         source,
-                        PeerSource::Tracker | PeerSource::Direct | PeerSource::Pex
+                        PeerSource::Tracker
+                            | PeerSource::Direct
+                            | PeerSource::Pex
+                            | PeerSource::Incoming
                     ),
                 });
             }

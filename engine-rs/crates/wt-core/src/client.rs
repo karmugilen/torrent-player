@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wt_types::{InfoHash, PeerId, PeerInfo, PeerSource};
 
@@ -716,6 +716,7 @@ impl ClientInner {
         let client = Arc::downgrade(self);
         let torrent = Arc::downgrade(torrent);
         let task = self.tokio_handle.spawn(async move {
+            let mut last_announce_refresh = Instant::now() - Duration::from_secs(60);
             loop {
                 let (Some(client), Some(torrent)) = (client.upgrade(), torrent.upgrade()) else {
                     break;
@@ -735,6 +736,16 @@ impl ClientInner {
                                 .total_half_open_conns
                                 .saturating_sub(client.half_open.current_total()),
                         );
+                // Refresh want_peers snapshot every 5s while under low-water so
+                // tracker slots can be nudged (see AnnounceDispatcher::update_torrent).
+                if torrent.known_peers.read().len() <= client.config.torrent_peers_low_water
+                    && last_announce_refresh.elapsed() >= Duration::from_secs(5)
+                {
+                    last_announce_refresh = Instant::now();
+                    if let Some(sources) = client.sources.read().clone() {
+                        sources.refresh_torrent(&ClientInner::torrent_keys_for(&torrent));
+                    }
+                }
                 for peer in torrent.take_dial_candidates(count) {
                     let cl = Arc::clone(&client);
                     let tor = Arc::clone(&torrent);
@@ -753,7 +764,21 @@ impl ClientInner {
                                 return;
                             }
                         }
-                        tor.dial_finished(peer.addr, ok);
+                        // Apply backoff / fail-count first, then re-queue so
+                        // take_dial_candidates honors the new backoff window.
+                        // DHT+tracker contacts are retried with exponential
+                        // backoff (cap 8 attempts) instead of waiting minutes
+                        // for rediscovery — needed while dial success << Go.
+                        if !ok {
+                            tor.dial_finished(peer.addr, false);
+                            if peer.source != PeerSource::WebSeed
+                                && tor.should_requeue_failed_dial(peer.addr)
+                            {
+                                tor.add_peers(vec![peer.clone()]);
+                            }
+                        } else {
+                            tor.dial_finished(peer.addr, true);
+                        }
                     });
                     let mut tasks = client.tasks.lock();
                     tasks.retain(|t| !t.is_finished());
@@ -852,7 +877,7 @@ impl ClientInner {
                 .map_err(|e| CoreError::Other(format!("webrtc incoming handshake: {e}")))?
         };
 
-        let (write_tx, write_rx) = mpsc::channel(crate::conn::OUTBOUND_MSG_QUEUE);
+        let (write_tx, write_rx) = mpsc::unbounded_channel();
         let write_waker = Arc::new(Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(crate::stats::AtomicConnStats::default());
@@ -974,7 +999,7 @@ impl ClientInner {
         info: AttachInfo,
         stream: Box<dyn crate::PeerStream>,
         handle: crate::conn::ConnHandle,
-        write_rx: mpsc::Receiver<crate::wire::Message>,
+        write_rx: mpsc::UnboundedReceiver<crate::wire::Message>,
         write_waker: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {

@@ -131,12 +131,27 @@ impl AnnounceDispatcher {
         let mut g = self.inner.lock();
         let ih = snap.info_hash;
         let newly = snap.newly_completed;
+        let want_peers = snap.want_peers;
         g.snapshots.insert(ih, snap);
         if newly {
             for (key, slot) in g.slots.iter_mut() {
                 if key.info_hash == ih && !slot.sent_completed {
                     slot.event = AnnounceEvent::Completed;
                     slot.next_at = Instant::now();
+                }
+            }
+        }
+        // Go `deferUpdateRegularTrackerAnnouncing` when under peer low-water.
+        // Pull slots that are still far out ( >2 min) forward to a 15s floor so
+        // PopMax'd contacts are rediscovered without waiting a full tracker
+        // interval (often 30 min).
+        if want_peers {
+            let now = Instant::now();
+            let far = now + Duration::from_secs(120);
+            let floor = now + Duration::from_secs(15);
+            for (key, slot) in g.slots.iter_mut() {
+                if key.info_hash == ih && !slot.active && slot.next_at > far {
+                    slot.next_at = floor;
                 }
             }
         }

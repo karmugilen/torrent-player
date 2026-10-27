@@ -565,7 +565,9 @@ impl Sources {
                     source: PeerSource::Tracker,
                     supports_encryption: false,
                     pex: Default::default(),
-                    trusted: false,
+                    // Prefer tracker contacts for dial order and high-water trim
+                    // (peer_closed already marks Tracker as trusted on re-queue).
+                    trusted: true,
                 })
                 .collect();
             if !mapped.is_empty() {

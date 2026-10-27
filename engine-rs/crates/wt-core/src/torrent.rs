@@ -120,6 +120,8 @@ pub struct TorrentInner {
     pub client: RwLock<Weak<crate::client::ClientInner>>,
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
     pub dial_backoff: Mutex<HashMap<SocketAddr, Instant>>,
+    /// Consecutive failed dials per addr; drives exponential re-queue backoff.
+    pub dial_fail_counts: Mutex<HashMap<SocketAddr, u8>>,
     pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
     pub peer_snapshots: RwLock<HashMap<SocketAddr, crate::stats::PeerConnInfo>>,
     pub choked_since: RwLock<HashMap<SocketAddr, Instant>>,
@@ -191,6 +193,7 @@ impl TorrentInner {
             client: RwLock::new(Weak::new()),
             dialing_peers: Mutex::new(HashSet::new()),
             dial_backoff: Mutex::new(HashMap::new()),
+            dial_fail_counts: Mutex::new(HashMap::new()),
             conn_handles: RwLock::new(HashMap::new()),
             peer_snapshots: RwLock::new(HashMap::new()),
             choked_since: RwLock::new(HashMap::new()),
@@ -425,14 +428,33 @@ impl TorrentInner {
         self.dialing_peers.lock().remove(&addr);
         if ok {
             self.dial_backoff.lock().remove(&addr);
+            self.dial_fail_counts.lock().remove(&addr);
         } else {
-            // Candidate already PopMax'd out of known_peers. Brief backoff so
-            // an immediate rediscovery does not redial the same dead addr.
+            // Exponential backoff: 5s, 10s, 20s, … capped at 120s. Dialer may
+            // re-queue the PeerInfo so we retry without waiting on rediscovery.
+            let n = {
+                let mut counts = self.dial_fail_counts.lock();
+                let e = counts.entry(addr).or_insert(0);
+                *e = e.saturating_add(1);
+                *e
+            };
+            let shift = n.saturating_sub(1).min(5);
+            let secs = (5u64 << shift).min(120);
             self.dial_backoff
                 .lock()
-                .insert(addr, Instant::now() + Duration::from_secs(5));
+                .insert(addr, Instant::now() + Duration::from_secs(secs));
         }
         self.bump_change();
+    }
+
+    /// Whether a failed dial should be re-queued for another attempt.
+    pub(crate) fn should_requeue_failed_dial(&self, addr: SocketAddr) -> bool {
+        self.dial_fail_counts
+            .lock()
+            .get(&addr)
+            .copied()
+            .unwrap_or(0)
+            < 8
     }
     pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify {
         &self.peer_notify
