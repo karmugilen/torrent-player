@@ -1165,7 +1165,10 @@ func (s *EngineServer) handleGetTorrent(w http.ResponseWriter, r *http.Request, 
 	warning := rec.Warning
 	if warning == nil {
 		if st := s.storage.GetStorage(rec.InfoHash); st != nil {
-			if err := st.CheckpointPersistError(); err != nil {
+			if err := st.WriteBackError(); err != nil {
+				msg := "saving downloaded data failed: " + err.Error()
+				warning = &msg
+			} else if err := st.CheckpointPersistError(); err != nil {
 				msg := "checkpoint persist failed: " + err.Error()
 				warning = &msg
 			}

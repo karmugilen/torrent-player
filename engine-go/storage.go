@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -245,6 +246,23 @@ type DocumentTorrentStorage struct {
 	// streamWatch holds pieces a blocked playback read waits on. Writes into
 	// them wake the read so it can return the bytes that just arrived.
 	streamWatch map[int]bool
+	// dirtySpans holds the byte ranges of a dirty piece written since its last
+	// flush, so a flush writes only those. A dirty piece without spans is
+	// flushed whole.
+	dirtySpans map[int][]streamByteRange
+	// partialSlots marks pieces put in RAM for a write without loading their
+	// saved bytes, holding the ranges written since. A read outside those
+	// loads the piece first (fillPartialSlotLocked).
+	partialSlots map[int][]streamByteRange
+	// savedPartial marks incomplete pieces with received bytes on disk. If
+	// such a piece leaves RAM, its next write loads them at once, while the
+	// rest still downloads; loading them at verification delayed the piece
+	// a player waits on after a seek.
+	savedPartial map[int]bool
+	// flushErr is the last failed background save; flushRetry delays the
+	// next attempt so a full or missing disk is not retried every 20 ms.
+	flushErr   error
+	flushRetry time.Duration
 }
 
 func streamDir(baseDir, infoHashHex string) string {
@@ -455,7 +473,7 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 		if st.maxCacheBytes <= 0 {
 			st.maxCacheBytes = DefaultStreamCacheMaxBytes
 		}
-		st.cacheDirty = make(map[int]bool)
+		st.cacheDirty, st.dirtySpans, st.partialSlots, st.savedPartial = make(map[int]bool), nil, nil, nil
 		st.cacheOrder.reset()
 		for index := range st.cache {
 			st.cacheDirty[index] = false
@@ -466,8 +484,21 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 			st.dropCacheLocked(oldest)
 		}
 	} else {
+		// A piece prepared in part holds zeros beyond the bytes received;
+		// write only those, so the file's existing bytes survive.
+		prepared := st.dirtySpans
 		for index, data := range st.cache {
-			if _, err := st.writeToFiles(int64(index)*st.chunkLength, data); err != nil {
+			spans := prepared[index]
+			if len(spans) == 0 {
+				spans = []streamByteRange{{0, int64(len(data))}}
+			}
+			var err error
+			for _, span := range spans {
+				if _, err = st.writeToFiles(int64(index)*st.chunkLength+span.start, data[span.start:span.end]); err != nil {
+					break
+				}
+			}
+			if err != nil {
 				for i := range st.files {
 					if st.files[i].File != nil {
 						_ = st.files[i].File.Close()
@@ -480,7 +511,7 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 			}
 		}
 		// Prepared bytes are on disk; keep them in the hot RAM cache when they fit.
-		st.cacheDirty = make(map[int]bool)
+		st.cacheDirty, st.dirtySpans, st.partialSlots, st.savedPartial = make(map[int]bool), nil, nil, nil
 		st.cacheOrder.reset()
 		for index := range st.cache {
 			st.touchCacheLocked(index)
@@ -488,6 +519,18 @@ func (st *DocumentTorrentStorage) attachDescriptors(descriptors []*int, selected
 		if st.cacheBytes > st.maxCacheBytes {
 			st.cache, st.cacheBytes = make(map[int][]byte), 0
 			st.cacheOrder.reset()
+		}
+		// Reads outside the prepared bytes load the rest from the file.
+		for index, spans := range prepared {
+			data, ok := st.cache[index]
+			if !ok || rangesCover(spans, 0, int64(len(data))) {
+				continue
+			}
+			if st.partialSlots == nil {
+				st.partialSlots = make(map[int][]streamByteRange)
+			}
+			st.partialSlots[index] = spans
+			st.markSavedPartialLocked(index)
 		}
 	}
 	loaded := st.loadCheckpointLocked(preIdentities)
@@ -668,9 +711,18 @@ func sameFile(a, b *os.File) bool {
 	return a == b
 }
 
+// filesOverlapping returns the files holding bytes of [start, end). Files are
+// in torrent order, so their ends never decrease: a binary search finds them
+// instead of scanning every file of a large pack for each 16 KiB block.
+func filesOverlapping(files []FileDescriptor, start, end int64) []FileDescriptor {
+	first := sort.Search(len(files), func(i int) bool { return files[i].Offset+files[i].Length > start })
+	last := first + sort.Search(len(files)-first, func(i int) bool { return files[first+i].Offset >= end })
+	return files[first:last]
+}
+
 func readFromFilesOn(files []FileDescriptor, start int64, buf []byte) (int, error) {
 	end, done := start+int64(len(buf)), 0
-	for _, f := range files {
+	for _, f := range filesOverlapping(files, start, end) {
 		from, to := maxInt64(start, f.Offset), minInt64(end, f.Offset+f.Length)
 		if from >= to {
 			continue
@@ -695,7 +747,7 @@ func readFromFilesOn(files []FileDescriptor, start int64, buf []byte) (int, erro
 
 func writeToFilesOn(files []FileDescriptor, start int64, data []byte) (int, error) {
 	end, done := start+int64(len(data)), 0
-	for _, f := range files {
+	for _, f := range filesOverlapping(files, start, end) {
 		from, to := maxInt64(start, f.Offset), minInt64(end, f.Offset+f.Length)
 		if from >= to {
 			continue
@@ -775,6 +827,14 @@ func (st *DocumentTorrentStorage) CheckpointPersistError() error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.checkpointLastErr
+}
+
+// WriteBackError returns the last failed background save of downloaded data,
+// or nil once a later save succeeds.
+func (st *DocumentTorrentStorage) WriteBackError() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.flushErr
 }
 
 // CheckpointDirty reports whether a durable checkpoint write is still pending.
@@ -961,7 +1021,7 @@ func (st *DocumentTorrentStorage) discardPieceLocked(index int) error {
 
 func (st *DocumentTorrentStorage) writeToFiles(start int64, data []byte) (int, error) {
 	end, done := start+int64(len(data)), 0
-	for _, f := range st.files {
+	for _, f := range filesOverlapping(st.files, start, end) {
 		from, to := maxInt64(start, f.Offset), minInt64(end, f.Offset+f.Length)
 		if from >= to {
 			continue
@@ -987,7 +1047,7 @@ func (st *DocumentTorrentStorage) writeToFiles(start int64, data []byte) (int, e
 
 func (st *DocumentTorrentStorage) readFromFiles(start int64, buf []byte) (int, error) {
 	end, done := start+int64(len(buf)), 0
-	for _, f := range st.files {
+	for _, f := range filesOverlapping(st.files, start, end) {
 		from, to := maxInt64(start, f.Offset), minInt64(end, f.Offset+f.Length)
 		if from >= to {
 			continue
@@ -1024,8 +1084,9 @@ func (st *DocumentTorrentStorage) Close() error {
 		time.Sleep(5 * time.Millisecond)
 		st.mu.Lock()
 	}
+	var flushErr error
 	if st.attached && !st.stream {
-		_ = st.flushAllDirtyLocked()
+		flushErr = st.flushAllDirtyLocked()
 		st.checkpointDirty = true
 		st.checkpointGen++
 		st.checkpointFlushing = true
@@ -1051,6 +1112,7 @@ func (st *DocumentTorrentStorage) Close() error {
 		}
 	}
 	st.attached, st.cache, st.cacheDirty, st.completed, st.cacheBytes = false, nil, nil, nil, 0
+	st.dirtySpans, st.partialSlots, st.savedPartial = nil, nil, nil
 	st.cacheOrder.reset()
 	st.streamRevision++
 	st.streamGridRuns = nil
@@ -1058,6 +1120,9 @@ func (st *DocumentTorrentStorage) Close() error {
 	st.identities = nil
 	st.freezeTrusted.Store(false)
 	st.mu.Unlock()
+	if flushErr != nil {
+		return fmt.Errorf("write back cached data: %w", flushErr)
+	}
 	return first
 }
 
@@ -1077,7 +1142,54 @@ func (st *DocumentTorrentStorage) dropCacheLocked(index int) {
 		}
 	}
 	delete(st.cacheDirty, index)
+	delete(st.dirtySpans, index)
+	delete(st.partialSlots, index)
 	st.cacheOrder.remove(index)
+}
+
+// markDirtyLocked records bytes [start, end) of a cached piece as not yet on disk.
+func (st *DocumentTorrentStorage) markDirtyLocked(index int, start, end int64) {
+	if start >= end {
+		return
+	}
+	st.cacheDirty[index] = true
+	if st.dirtySpans == nil {
+		st.dirtySpans = make(map[int][]streamByteRange)
+	}
+	st.dirtySpans[index] = mergeReceivedRange(st.dirtySpans[index], streamByteRange{start, end})
+}
+
+func (st *DocumentTorrentStorage) markCleanLocked(index int) {
+	st.cacheDirty[index] = false
+	delete(st.dirtySpans, index)
+}
+
+// fillPartialSlotLocked loads the saved bytes of a partial slot when a read
+// of [off, off+n) needs bytes not written since it was created. Its written
+// ranges are flushed first, so the disk holds the whole piece.
+func (st *DocumentTorrentStorage) fillPartialSlotLocked(index int, off, n int64) error {
+	written, ok := st.partialSlots[index]
+	if !ok {
+		return nil
+	}
+	data := st.cache[index]
+	end := min(off+n, int64(len(data)))
+	if off >= end || rangesCover(written, off, end) {
+		return nil
+	}
+	if err := st.flushPieceLocked(index); err != nil {
+		return err
+	}
+	if _, err := st.readFromFiles(int64(index)*st.chunkLength, data); err != nil {
+		return err
+	}
+	delete(st.partialSlots, index)
+	return nil
+}
+
+func rangesCover(ranges []streamByteRange, start, end int64) bool {
+	i := sort.Search(len(ranges), func(i int) bool { return ranges[i].end > start })
+	return i < len(ranges) && ranges[i].start <= start && ranges[i].end >= end
 }
 
 // ensureCacheSlotLocked makes sure piece index has a RAM buffer. created is
@@ -1127,7 +1239,7 @@ func (st *DocumentTorrentStorage) loadCacheFromDiskLocked(index int) {
 		// Sparse / never-written regions read as zeros; leave the buffer as-is.
 		return
 	}
-	st.cacheDirty[index] = false
+	st.markCleanLocked(index)
 }
 
 func (st *DocumentTorrentStorage) flushPieceLocked(index int) error {
@@ -1141,11 +1253,39 @@ func (st *DocumentTorrentStorage) flushPieceLocked(index int) error {
 	if !st.attached {
 		return fmt.Errorf("download storage is not configured")
 	}
-	if _, err := st.writeToFiles(int64(index)*st.chunkLength, data); err != nil {
-		return err
+	base := int64(index) * st.chunkLength
+	spans := st.dirtySpans[index]
+	if len(spans) == 0 {
+		if _, partial := st.partialSlots[index]; partial {
+			// Unwritten bytes of a partial slot are zeros, not the piece.
+			st.markCleanLocked(index)
+			return nil
+		}
+		if _, err := st.writeToFiles(base, data); err != nil {
+			return err
+		}
+		st.markCleanLocked(index)
+		return nil
 	}
-	st.cacheDirty[index] = false
+	for i, span := range spans {
+		if _, err := st.writeToFiles(base+span.start, data[span.start:span.end]); err != nil {
+			st.dirtySpans[index] = spans[i:]
+			return err
+		}
+	}
+	st.markCleanLocked(index)
+	st.markSavedPartialLocked(index)
 	return nil
+}
+
+func (st *DocumentTorrentStorage) markSavedPartialLocked(index int) {
+	if st.completed[index] {
+		return
+	}
+	if st.savedPartial == nil {
+		st.savedPartial = make(map[int]bool)
+	}
+	st.savedPartial[index] = true
 }
 
 func (st *DocumentTorrentStorage) flushAllDirtyLocked() error {
@@ -1169,15 +1309,21 @@ func (st *DocumentTorrentStorage) scheduleDiskFlushLocked() {
 		return
 	}
 	st.diskFlushing = true
+	delay := pieceDiskFlushDelay + st.flushRetry
 	go func() {
-		time.Sleep(pieceDiskFlushDelay)
+		time.Sleep(delay)
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		st.diskFlushing = false
 		if st.closed || !st.attached {
 			return
 		}
-		_ = st.flushAllDirtyLocked()
+		if err := st.flushAllDirtyLocked(); err != nil {
+			st.flushErr = err
+			st.flushRetry = min(max(2*st.flushRetry, 100*time.Millisecond), 5*time.Second)
+		} else {
+			st.flushErr, st.flushRetry = nil, 0
+		}
 		for _, dirty := range st.cacheDirty {
 			if dirty {
 				st.scheduleDiskFlushLocked()
@@ -1196,7 +1342,7 @@ func (st *DocumentTorrentStorage) notePieceFilesNeedSyncLocked(index int) {
 	}
 	start := int64(index) * st.chunkLength
 	end := start + st.info.Piece(index).Length()
-	for _, f := range st.files {
+	for _, f := range filesOverlapping(st.files, start, end) {
 		if f.File == nil {
 			continue
 		}
@@ -1241,6 +1387,9 @@ func (p *documentPiece) readAtLocked(b []byte, off int64) (int, error) {
 		return 0, errStreamEvicted
 	}
 	if data, ok := st.cache[index]; ok {
+		if err := st.fillPartialSlotLocked(index, off, int64(len(b))); err != nil {
+			return 0, err
+		}
 		st.touchCacheLocked(index)
 		if off >= int64(len(data)) {
 			return 0, io.EOF
@@ -1275,27 +1424,20 @@ func (p *documentPiece) readAtLocked(b []byte, off int64) (int, error) {
 	}
 	abs := int64(index)*st.chunkLength + off
 	st.lastReadOffset = abs
-	// Populate the hot cache from disk for repeated playhead reads.
-	expected := int64(p.piece.Length())
-	if created, err := st.ensureCacheSlotLocked(index, expected); err == nil {
-		if data := st.cache[index]; data != nil {
-			if created {
-				if _, err := st.readFromFiles(int64(index)*st.chunkLength, data); err != nil {
-					st.dropCacheLocked(index)
-					return st.readFromFiles(abs, b)
-				}
-				st.cacheDirty[index] = false
-			}
-			st.touchCacheLocked(index)
-			if off >= int64(len(data)) {
-				return 0, io.EOF
-			}
-			n := copy(b, data[off:])
-			if n != len(b) {
-				return n, io.EOF
-			}
-			return n, nil
+	// Read only the requested bytes. Loading the whole piece into RAM for
+	// each 16 KiB block a peer asked for read about eight times the uploaded
+	// bytes from disk and evicted pieces still downloading. Playback reads of
+	// verified ranges bypass storage, and the kernel caches the file.
+	length := p.piece.Length()
+	if off < 0 || off >= length {
+		return 0, io.EOF
+	}
+	if off+int64(len(b)) > length {
+		n, err := st.readFromFiles(abs, b[:length-off])
+		if err == nil {
+			err = io.EOF
 		}
+		return n, err
 	}
 	return st.readFromFiles(abs, b)
 }
@@ -1305,6 +1447,11 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 	defer st.mu.Unlock()
 	if st.closed {
 		return 0, fmt.Errorf("storage closed")
+	}
+	if len(b) == 0 {
+		// An empty write must not allocate a zeroed piece that attaching
+		// would later write over the file.
+		return 0, nil
 	}
 	index, expected := p.piece.Index(), int64(p.piece.Length())
 	if off < 0 || off+int64(len(b)) > expected {
@@ -1327,7 +1474,7 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 			st.touchCacheLocked(index)
 		}
 		copy(data[off:], b)
-		st.cacheDirty[index] = true
+		st.markDirtyLocked(index, off, off+int64(len(b)))
 		return len(b), nil
 	}
 	// Attached: RAM first (write-back). Disk flush is asynchronous so peer
@@ -1340,21 +1487,36 @@ func (p *documentPiece) WriteAt(b []byte, off int64) (int, error) {
 		// Cache full of dirty pieces that could not be flushed: fall back to disk.
 		return st.writeToFiles(int64(index)*st.chunkLength+off, b)
 	}
-	// Critical: after eviction a fresh slot is all zeros. Reload any chunks
-	// already flushed to disk before merging this write, otherwise the next
-	// flush zero-clobbers them, hash fails, and BytesCompleted loops
-	// (seen as ~37–60MB thrash around the 64MB write-back cap while playing).
+	// A fresh slot is all zeros, while chunks flushed before an eviction are
+	// on disk. Flushes write only received ranges, so the zeros never
+	// overwrite them, and a read that needs them loads the piece first.
+	// Loading here read every new piece from disk before its first block.
 	if created {
-		st.loadCacheFromDiskLocked(index)
+		if st.stream || st.completed[index] || st.savedPartial[index] {
+			st.loadCacheFromDiskLocked(index)
+		} else {
+			if st.partialSlots == nil {
+				st.partialSlots = make(map[int][]streamByteRange)
+			}
+			st.partialSlots[index] = nil
+		}
 	}
 	copy(st.cache[index][off:], b)
+	if written, ok := st.partialSlots[index]; ok && len(b) > 0 {
+		written = mergeReceivedRange(written, streamByteRange{off, off + int64(len(b))})
+		if len(written) == 1 && written[0].start == 0 && written[0].end == expected {
+			delete(st.partialSlots, index)
+		} else {
+			st.partialSlots[index] = written
+		}
+	}
 	if st.stream {
 		st.recordStreamWriteLocked(index, off, off+int64(len(b)), expected)
 		if st.streamWatch[index] {
 			st.notifyStreamReadyLocked()
 		}
 	}
-	st.cacheDirty[index] = true
+	st.markDirtyLocked(index, off, off+int64(len(b)))
 	st.touchCacheLocked(index)
 	st.scheduleDiskFlushLocked()
 	return len(b), nil
@@ -1383,6 +1545,7 @@ func (p *documentPiece) MarkComplete() error {
 		return err
 	}
 	p.storage.completed[index] = true
+	delete(p.storage.savedPartial, index)
 	p.storage.notePieceFilesNeedSyncLocked(index)
 	p.storage.checkpointDirty = true
 	p.storage.checkpointGen++

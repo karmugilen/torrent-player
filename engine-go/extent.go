@@ -37,7 +37,7 @@ func (st *DocumentTorrentStorage) byteSpans(absStart, length int64) ([]fileSpan,
 
 func (st *DocumentTorrentStorage) byteSpansLocked(start, end int64) ([]fileSpan, bool) {
 	var spans []fileSpan
-	for _, f := range st.files {
+	for _, f := range filesOverlapping(st.files, start, end) {
 		from, to := maxInt64(start, f.Offset), minInt64(end, f.Offset+f.Length)
 		if from >= to {
 			continue

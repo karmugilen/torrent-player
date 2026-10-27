@@ -98,6 +98,7 @@ func (st *DocumentTorrentStorage) attachDirectPlay(descriptors []*int, selected 
 	// Prepared transfers do not own payload data. Discard any unverified
 	// preparation buffers rather than trusting their old write bookkeeping.
 	st.cache, st.cacheDirty, st.cacheBytes = make(map[int][]byte), make(map[int]bool), 0
+	st.dirtySpans, st.partialSlots, st.savedPartial = nil, nil, nil
 	st.cacheOrder.reset()
 	st.streamRevision++
 	pruneStartupCaches(st.baseDir, st.infoHash.HexString())
@@ -854,7 +855,8 @@ func (st *DocumentTorrentStorage) injectVerifiedBytes(abs int64, data []byte) bo
 			continue
 		}
 		copy(st.cache[index], buf)
-		st.cacheDirty[index] = false
+		st.markCleanLocked(index)
+		delete(st.partialSlots, index)
 		st.completed[index] = true
 		delete(st.streamLost, index)
 		if st.stream {
