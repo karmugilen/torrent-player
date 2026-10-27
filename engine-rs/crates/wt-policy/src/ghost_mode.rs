@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_measured_gains_and_limits_dialing() {
+    fn test_ghost_mode_keeps_measured_gains_and_limits_dialing() {
         let mut g = Trace::new(30);
         assert_eq!(g.step(100), 30);
         assert_eq!(g.step(100), 40);
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn rolls_back_failed_probes_and_cools_down() {
+    fn test_ghost_mode_rolls_back_failed_probes_and_cools_down() {
         for speed in [100i64, 60] {
             let mut g = Trace::new(30);
             g.step(100);
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_probe_bursts_or_zero_throughput() {
+    fn test_ghost_mode_does_not_probe_bursts_or_zero_throughput() {
         let mut g = Trace::new(30);
         for speed in [0i64, 100, 1000, 10, 1000, 0, 0] {
             assert_eq!(g.step(speed), 30);
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn resets_for_changed_conditions() {
+    fn test_ghost_mode_resets_for_changed_conditions() {
         for condition in [
             "no spare slots",
             "cohort changed",

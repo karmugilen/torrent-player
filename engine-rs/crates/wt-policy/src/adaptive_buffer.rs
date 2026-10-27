@@ -5,7 +5,7 @@
 //! reader's forward budget for that tick. Pass the same controller across
 //! samples; create a fresh one per playback reader.
 
-use crate::constants::PLAYBACK_URGENT_BYTES;
+use crate::constants::ADAPTIVE_BUFFER_MIN_BYTES;
 
 /// Bounded headroom controller for variable reader demand.
 ///
@@ -74,7 +74,7 @@ impl AdaptiveBuffer {
                 .max(self.slow_mean + 2.0 * self.slow_variance.sqrt());
         }
         let mut target = ((8.0 * forecast).min(limit as f64)) as i64;
-        target = target.max(PLAYBACK_URGENT_BYTES * 2); // 4 MiB floor matches Go `4<<20`
+        target = target.max(ADAPTIVE_BUFFER_MIN_BYTES);
         if self.window <= 0 {
             self.window = target;
         }
@@ -84,7 +84,7 @@ impl AdaptiveBuffer {
         } else if target < self.window - self.window / 10 {
             self.window = target.max(self.window - step);
         }
-        self.window = self.window.max(4 << 20).min(limit);
+        self.window = self.window.max(ADAPTIVE_BUFFER_MIN_BYTES).min(limit);
         self.window
     }
 }
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_adds_headroom_for_variable_demand() {
+    fn test_adaptive_buffer_adds_headroom_for_variable_demand() {
         let variable = [256.0 * 1024.0, 1792.0 * 1024.0];
         // Plain: fixed 26 MiB-ish floor without adaptation — use a controller
         // that never saw variance by feeding only the mean of the pattern.
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn burst_aware_retains_headroom_across_longer_bursts() {
+    fn test_burst_aware_buffer_retains_headroom_across_longer_bursts() {
         let pattern = [256.0 * 1024.0, 1792.0 * 1024.0];
         let adaptive = run_pattern(false, &pattern, true);
         let burst = run_pattern(true, &pattern, true);

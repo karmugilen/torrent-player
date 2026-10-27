@@ -4,6 +4,9 @@
 
 use std::time::Duration;
 
+/// Adaptive buffer floor (`4<<20` in Go `demandBufferController.observe`).
+pub const ADAPTIVE_BUFFER_MIN_BYTES: i64 = 4 << 20;
+
 /// Playhead tip fetched at `PiecePriority::Now` (~2 MiB).
 pub const PLAYBACK_URGENT_BYTES: i64 = 2 * 1024 * 1024;
 /// Forward readahead beyond the urgent tip (~24 MiB).

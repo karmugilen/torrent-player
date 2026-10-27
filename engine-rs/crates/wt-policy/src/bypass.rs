@@ -299,7 +299,7 @@ mod tests {
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     #[test]
-    fn defaults_off() {
+    fn test_bypass_defaults_off() {
         let c = BypassController::default();
         let s = c.snapshot();
         assert!(!s.enabled && !s.active);
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn enable_activates_tcp_split() {
+    fn test_bypass_enable_activates_tcp_split() {
         let mut c = BypassController::default();
         let s = c.set_enabled(true, true);
         assert!(s.enabled && s.active);
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn split_fragments_initial_write() {
+    fn test_split_conn_fragments_initial_write() {
         let mut remaining = BYPASS_SPLIT_FIRST_BYTES;
         let mut writes: Vec<Vec<u8>> = Vec::new();
         let payload = b"BitTorrent protocolXXXXXXXX";
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn split_zero_progress_errors() {
+    fn test_split_conn_zero_progress_does_not_spin() {
         let mut remaining = BYPASS_SPLIT_FIRST_BYTES;
         let err = split_write_sync(
             &mut remaining,
@@ -356,6 +356,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("zero-progress"));
+    }
+
+    #[test]
+    fn test_bypass_uses_per_client_hook() {
+        // Controllers are independent; enabling one must not activate another.
+        let mut a = BypassController::default();
+        let b = BypassController::default();
+        let _ = a.set_enabled(true, true);
+        let status = b.snapshot();
+        assert!(!status.enabled && !status.active);
+        let _ = a.set_enabled(false, true);
+        assert!(!a.snapshot().active);
     }
 
     #[test]

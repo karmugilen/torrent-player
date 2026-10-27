@@ -147,7 +147,7 @@ mod tests {
     use crate::piece_span::PieceSpan;
 
     #[test]
-    fn rest_waits_for_readahead_not_lookahead() {
+    fn test_playback_rest_waits_for_readahead_not_lookahead() {
         let window = PlaybackWindow {
             urgent: PieceSpan::new(10, 12),
             readahead: PieceSpan::new(12, 20),
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn rests_wakes_and_becomes_drop_ready() {
+    fn test_idle_direct_play_rests_wakes_and_becomes_drop_ready() {
         let mut st = IdleDirectPlay::default();
         let start = Instant::now();
         let limit = Duration::from_secs(5 * 60);
@@ -198,7 +198,8 @@ mod tests {
     }
 
     #[test]
-    fn buffer_filling_blocks_rest() {
+    fn test_playing_reader_keeps_window_and_peers_while_idle_buffer_filling() {
+        // Policy part of idle_buffer_test.go: missing readahead blocks rest.
         let mut st = IdleDirectPlay::default();
         let start = Instant::now();
         let input = IdleTickInput {
@@ -216,5 +217,24 @@ mod tests {
             IdleAction::None
         );
         assert!(!st.resting());
+    }
+
+    #[test]
+    fn test_rest_does_not_zero_the_connection_cap_after_wake_policy() {
+        // Pure race gate: wake clears resting before rest applies a zero cap.
+        let mut st = IdleDirectPlay::default();
+        st.mark_resting();
+        assert!(st.resting());
+        st.mark_awake();
+        assert!(!st.resting());
+        let start = Instant::now();
+        st.touch(start);
+        let input = IdleTickInput {
+            eligible: true,
+            idle_limit: Some(Duration::from_secs(300)),
+            open_readers: 0,
+            buffer_filling: false,
+        };
+        assert_eq!(st.tick(start, &input), IdleAction::None);
     }
 }

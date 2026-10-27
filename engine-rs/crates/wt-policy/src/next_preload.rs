@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_ignores_same_file_and_non_video() {
+    fn test_direct_play_preloads_next_episode_near_the_end_plan_gate() {
         let files = [video(0, true), video(1, true)];
         let mut np = NextPreload::default();
         np.set_plan(0, None, &files);
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_near_end_not_on_probes() {
+    fn test_direct_play_preloads_next_episode_near_the_end_start_gate() {
         let files = [video(0, true), video(1, true)];
         let mut np = NextPreload::default();
         np.set_plan(0, Some(1), &files);

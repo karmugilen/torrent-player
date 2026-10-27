@@ -142,7 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn range_start_parses_single_ranges() {
+    fn test_range_start_parses_single_ranges() {
         let cases = [
             ("bytes=0-", 0),
             ("bytes=1048576-", 1 << 20),
@@ -160,29 +160,35 @@ mod tests {
     }
 
     #[test]
-    fn split_urgent_caps_now_at_two_mib() {
+    fn test_pieces_reports_playback_tiers_playhead_and_detail() {
         let piece_len = 1 << 20;
         let urgent = PieceSpan::new(40, 100);
         let (now, next) = split_urgent(urgent, piece_len);
         // 2 MiB / 1 MiB = 2 pieces (+0 extra)
         assert_eq!(now, PieceSpan::new(40, 42));
         assert_eq!(next, PieceSpan::new(42, 100));
-    }
 
-    #[test]
-    fn tiers_label_u_then_n() {
         let w = PlaybackWindow {
             urgent: PieceSpan::new(40, 45),
             readahead: PieceSpan::new(45, 60),
             lookahead: PieceSpan::default(),
             ..Default::default()
         };
-        let (tiers, playhead) = playback_tiers(&w, 1 << 20);
+        let (tiers, playhead) = playback_tiers(&w, piece_len);
         assert_eq!(playhead, Some(40));
+        assert_eq!(tiers.len(), 2);
         assert_eq!(tiers[0].priority, "U");
         assert_eq!(tiers[0].start, 40);
-        assert!(tiers[0].end - tiers[0].start + 1 <= 3);
+        assert!(tiers[0].end - tiers[0].start < 3);
         assert_eq!(tiers[1].priority, "N");
         assert_eq!(tiers[1].start, tiers[0].end + 1);
+        for t in &tiers {
+            assert!(t.start >= 40, "fetches behind the playhead");
+        }
+        let detail = playback_detail(&w, 256, |_| b'v').expect("detail");
+        assert_eq!(detail.playhead, 40);
+        assert!(detail.start <= 40);
+        assert!(detail.start as usize + detail.states.len() > 40);
+        assert!(detail.states.chars().all(|c| "vsrm".contains(c)));
     }
 }

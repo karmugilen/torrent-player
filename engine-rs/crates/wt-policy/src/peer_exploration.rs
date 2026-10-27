@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn protects_useful_uploading_and_new_peers() {
+    fn test_peer_exploration_protects_useful_uploading_and_new_peers() {
         let start = base(Instant::now());
         let mut policy = PeerExploration::default();
         let idle = 1u64;
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn limits_churn_and_requires_alternatives() {
+    fn test_peer_exploration_limits_churn_and_requires_alternatives() {
         let start = Instant::now();
         let a = 1u64;
         let b = 2u64;
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn protects_only_known_seed() {
+    fn test_peer_exploration_protects_the_only_known_seed() {
         let start = Instant::now();
         let mut policy = PeerExploration::default();
         let peers = [

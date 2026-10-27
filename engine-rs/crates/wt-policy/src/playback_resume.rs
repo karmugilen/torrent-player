@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn header_probe_does_not_replace_body_position() {
+    fn test_playback_close_reopen_preserves_resume_across_metadata_probes() {
         let mut r = ResumeRange::default();
         let piece_len = 1 << 20;
         let file_len = 24 * piece_len;

@@ -63,7 +63,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn irregular_samples_pause_and_counter_reset() {
+    fn test_transfer_rates_handle_irregular_samples_pause_and_counter_reset() {
         let start = Instant::now();
         let mut rates = TransferRates::default();
         rates.sample(start, 1000, 100, false);
@@ -89,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn torrents_keep_independent_rates() {
+    fn test_torrent_rates_and_eta_use_their_own_samples() {
         let start = Instant::now();
         let mut a = TransferRates {
             last_sample: Some(start),

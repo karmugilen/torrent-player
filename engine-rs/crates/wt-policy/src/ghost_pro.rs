@@ -224,7 +224,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contiguous_wanted_excludes_gaps_and_completed() {
+    fn test_contiguous_wanted_pieces_excludes_reader_gaps_and_completed_pieces() {
         let windows = [
             PlaybackWindow {
                 urgent: PieceSpan::new(10, 12),
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn prioritizes_idle_peers_without_playback_path_pieces() {
+    fn test_ghost_pro_prioritizes_idle_peers_without_playback_path_pieces() {
         let now = Instant::now();
         let outside = 1u64;
         let on_path = 2u64;
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn chooses_zero_overlap_idle_and_protects_seeders() {
+    fn test_ghost_pro_chooses_zero_overlap_idle_victim_and_protects_seeders() {
         let mut state = GhostProSwarm::default();
         let now = Instant::now();
         let p1 = 1u64;

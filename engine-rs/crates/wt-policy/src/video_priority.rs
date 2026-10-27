@@ -159,7 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_video_file_name_cases() {
+    fn test_is_video_file_name() {
         let cases = [
             ("clip.mp4", true),
             ("Show.MKV", true),
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_hints_raise_head_and_tail() {
+    fn test_video_startup_hints_raise_head_and_tail() {
         let piece_len = 1024 * 1024i64;
         let pieces = 48u32;
         let files = [VideoFileInput {
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_hints_skip_non_video_and_paused() {
+    fn test_video_startup_hints_skip_non_video_and_paused() {
         let piece_len = 1024 * 1024i64;
         let files = [
             VideoFileInput {
@@ -254,5 +254,31 @@ mod tests {
 
         ctx.paused = true;
         assert!(video_startup_hints(&files, &ctx).is_empty());
+    }
+
+    #[test]
+    fn test_video_startup_hints_playback_coexistence() {
+        // Soft hints stay Now while a reader is "open"; mid-file is not Now.
+        let piece_len = 1024 * 1024i64;
+        let files = [VideoFileInput {
+            index: 0,
+            display_path: "movie.mp4".into(),
+            layout: layout(48, piece_len),
+        }];
+        let mut selected = HashSet::new();
+        selected.insert(0);
+        let ctx = VideoHintContext {
+            transfers_allowed: true,
+            configured: true,
+            selected,
+            piece_length: piece_len,
+            ..Default::default()
+        };
+        let before = video_startup_hints(&files, &ctx);
+        assert_eq!(before.get(&0), Some(&PiecePriority::Now));
+        let during = video_startup_hints(&files, &ctx);
+        assert_eq!(during.get(&0), Some(&PiecePriority::Now));
+        let middle = (VIDEO_STARTUP_HEAD_BYTES / piece_len) as PieceIndex;
+        assert_ne!(during.get(&middle), Some(&PiecePriority::Now));
     }
 }
