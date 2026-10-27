@@ -202,7 +202,7 @@ mod tests {
             let endpoint = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).await.unwrap();
+                assert!(socket.read(&mut request).await.unwrap() > 0);
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     meta.len()
@@ -253,7 +253,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut request = [0; 4096];
-        socket.read(&mut request).await.unwrap();
+        assert!(socket.read(&mut request).await.unwrap() > 0);
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nd")
             .await

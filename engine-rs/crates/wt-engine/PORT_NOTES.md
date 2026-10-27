@@ -195,3 +195,39 @@ Owned by `agy-tests` (`tests/engine_*.rs`, `tests/support/`, `tests/ENGINE_TESTS
 
 
 
+## Focused server policy audit (2026-10-27, codex-engine)
+
+The revised task covers startup safety and Go-equivalent server limits; real
+swarm peer/throughput work belongs to grok-wire and grok-swarm.
+
+- Connection defaults match Go: maxPeers 55 on Android (constructor 0 means
+  100, cap 500), dial rate/burst 30, half-open 24 per torrent / 48 total,
+  dial timeout 8 s nominal / 2 s minimum, handshake timeout 5 s.
+- Validate RAM and peer settings before changing live peers; preserve a resting
+  torrent's zero connection cap. Unrelated settings no longer reset file/piece
+  demand or upload admission. Checking/closed torrents cannot enable payload.
+- Negative transfer rates retain their previous value; positive bursts follow
+  Go's 1-byte to 1-MiB bounds, and zero means unlimited without resetting burst.
+  Signed dial requests clamp to 10–80; idle and seeding caps follow Go bounds.
+- The policy sampler now publishes existing per-torrent transfer-rate samples.
+  Incomplete downloads retain reciprocal uploads with seeding disabled.
+- Added eight policy/input regressions and a real AndroidEngineHost warm-start
+  regression: cached contacts, no caller Tokio runtime, three starts and
+  idempotent start calls, plus /stats, /settings, /version and /cache.
+- Coordinator approved ownership of engine_swarm_playback.rs: seed fixtures
+  explicitly enable seeding before configure and keep readable/writable files;
+  leecher assertions and timeouts are unchanged.
+
+Validation: 46 library tests pass; engine_magnet_configure (2), engine_server
+(9, 2 still ignored), engine_settings (4), and engine_two_host (1) pass.
+The two-host magnet reaches 262144 verified bytes with done=true.
+API diff remains 30 MATCH / 0 DIFF / 0 CRITICAL. Engine all-target Clippy with
+--no-deps and -D warnings passes. Full dependency Clippy is blocked by the
+active wt-core conn/dialer.rs doc_lazy_continuation warning, reported to its owner.
+
+Full cargo test -p wt-engine still fails the two engine_swarm_playback tests:
+after the fixture correction, the first read stalls after 4 MiB of verified
+startup data and can lose all live peers; Claude seek stalls at a later offset.
+The core owner has the reproducible command and failure log via requests.md.
+No public peers_compare runs were made, as requested. Older needs-feature
+backlogs remain deferred under the coordinator's focused task.

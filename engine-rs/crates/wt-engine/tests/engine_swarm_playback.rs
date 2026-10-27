@@ -33,8 +33,15 @@ impl LocalSwarmPeer {
         let id = added["id"].as_str().unwrap().to_owned();
 
         let (configure_req, data_file) = if seed {
+            let (code, response) = engine.dispatch(
+                "POST", "/settings",
+                &json!({"seedingEnabled": true, "seedingAllowed": true}).to_string(),
+            );
+            assert_eq!(code, 200, "seed settings: {}", String::from_utf8_lossy(&response));
             let file_path = engine.download_dir.join("seed_payload.dat");
-            let f = std::fs::File::create(&file_path).expect("create seed file");
+            let f = std::fs::OpenOptions::new()
+                .create(true).truncate(true).read(true).write(true)
+                .open(&file_path).expect("create seed file");
             let fd = f.as_raw_fd();
             let req = json!({
                 "id": id,

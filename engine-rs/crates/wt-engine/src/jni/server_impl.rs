@@ -257,3 +257,46 @@ impl EngineHostApi for AndroidEngineHost {
         }
     }
 }
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn android_start_engine_restores_contacts_without_a_caller_runtime() {
+        let root = "/home/kar/.cache/wt-tmp/codex-engine";
+        std::fs::create_dir_all(root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        // Exercise the warm-start path that previously spawned DHT work without
+        // a Tokio reactor on the Java caller thread. TEST-NET is not a swarm.
+        let mut contacts = wt_storage::DhtContactStore::new();
+        contacts.remember_dht_contact(dir.path(), "192.0.2.1:6881", None);
+        assert_eq!(contacts.contacts().len(), 1);
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        for _ in 0..3 {
+            let host = AndroidEngineHost::new();
+            let path = dir.path().to_str().unwrap().as_bytes();
+            assert_eq!(host.start_engine(path, 55), 0);
+            assert_eq!(host.start_engine(path, 55), 0, "start must be idempotent");
+            for route in ["/stats", "/settings", "/version", "/cache"] {
+                let response = host.request_engine("GET", route, b"");
+                assert!(
+                    response.starts_with(b"200\n"),
+                    "{route}: {}",
+                    String::from_utf8_lossy(&response)
+                );
+            }
+            let server = host.current_server().unwrap();
+            assert!(server.stream_port.load(Ordering::SeqCst) > 0);
+            server.close();
+        }
+    }
+
+    #[test]
+    fn invalid_start_engine_arguments_return_errors() {
+        let host = AndroidEngineHost::new();
+        assert_eq!(host.start_engine(b"", 55), 1);
+        assert_eq!(host.start_engine(&[0xff], 55), 1);
+        assert!(host.current_server().is_none());
+    }
+}

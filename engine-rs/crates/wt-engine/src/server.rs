@@ -30,6 +30,9 @@ use crate::types::*;
 mod metadata_sources;
 #[path = "torrent_status.rs"]
 mod torrent_status;
+#[cfg(test)]
+#[path = "server_settings_tests.rs"]
+mod settings_tests;
 
 pub struct TorrentRecord {
     pub torrent: wt_core::Torrent,
@@ -434,6 +437,8 @@ impl EngineServer {
         let active = self.payload_transfers_allowed.load(Ordering::SeqCst)
             && rec.configured
             && !rec.paused
+            && !rec.checking
+            && !rec.torrent.closed()
             && rec.error.is_none();
         if !active {
             rec.torrent.disallow_data_download();
@@ -1518,6 +1523,18 @@ impl EngineServer {
             }
         };
 
+        // Validate the complete request before changing connection limits or policy.
+        if let Some(cache_bytes) = req.ram_cache_bytes {
+            if !(16 * 1024 * 1024..=1024 * 1024 * 1024).contains(&cache_bytes) {
+                return (
+                    400,
+                    serde_json::to_vec(
+                        &json!({"error": "RAM cache must be between 16 and 1024 MiB"}),
+                    )
+                    .unwrap(),
+                );
+            }
+        }
         if let Some(peers) = req.max_peers.filter(|&p| p != 0) {
             if !(8..=500).contains(&peers) {
                 return (
@@ -1527,24 +1544,22 @@ impl EngineServer {
                 );
             }
             self.max_peers.store(peers, Ordering::SeqCst);
-            for t in self.client.torrents() {
-                t.set_max_established_conns(peers);
+            let records: Vec<_> = self.records.read().values().cloned().collect();
+            for record in records {
+                let rec = record.read();
+                if !rec.resting {
+                    rec.torrent.set_max_established_conns(peers);
+                }
             }
         }
 
         if let Some(cache_bytes) = req.ram_cache_bytes {
-            if !(16 * 1024 * 1024..=1024 * 1024 * 1024).contains(&cache_bytes) {
-                return (
-                    400,
-                    serde_json::to_vec(&json!({"error": "ramCacheBytes out of bounds"})).unwrap(),
-                );
-            }
             self.ram_cache_bytes.store(cache_bytes, Ordering::SeqCst);
             self.storage.set_memory_limit(cache_bytes);
         }
 
         if let Some(dial) = req.dial_rate_per_sec {
-            let clamped = dial.clamp(10, 80);
+            let clamped = dial.clamp(10, 80) as usize;
             self.dial_rate_per_sec.store(clamped, Ordering::SeqCst);
             self.client.inner.dial_limiter.set_limit(clamped as f64);
         }
@@ -1593,7 +1608,8 @@ impl EngineServer {
             self.learned_arrival.store(la, Ordering::SeqCst);
         }
         if let Some(idle) = req.idle_drop_minutes {
-            self.idle_drop_minutes.store(idle, Ordering::SeqCst);
+            self.idle_drop_minutes
+                .store(idle.clamp(0, 240), Ordering::SeqCst);
         }
         if let Some(se) = req.seeding_enabled {
             self.seeding_enabled.store(se, Ordering::SeqCst);
@@ -1601,45 +1617,58 @@ impl EngineServer {
         if let Some(sa) = req.seeding_allowed {
             self.seeding_allowed.store(sa, Ordering::SeqCst);
         }
-        if let Some(ratio) = req.seed_ratio_milli {
+        if let Some(ratio) = req.seed_ratio_milli.filter(|v| (100..=10000).contains(v)) {
             self.seed_ratio_milli.store(ratio, Ordering::SeqCst);
         }
-        if let Some(mins) = req.seed_time_minutes {
+        if let Some(mins) = req.seed_time_minutes.filter(|v| (1..=1440).contains(v)) {
             self.seed_time_minutes.store(mins, Ordering::SeqCst);
         }
-        if let Some(down) = req.download_rate_bytes_sec {
+        if let Some(down) = req.download_rate_bytes_sec.filter(|&rate| rate >= 0) {
             self.download_rate_limit.store(down, Ordering::SeqCst);
-            self.client.inner.download_limiter.set_limit(if down > 0 {
-                down as f64
-            } else {
-                f64::INFINITY
-            });
+            Self::set_transfer_limiter(&self.client.inner.download_limiter, down);
         }
-        if let Some(up) = req.upload_rate_bytes_sec {
+        if let Some(up) = req.upload_rate_bytes_sec.filter(|&rate| rate >= 0) {
             self.upload_rate_limit.store(up, Ordering::SeqCst);
-            self.client.inner.upload_limiter.set_limit(if up > 0 {
-                up as f64
-            } else {
-                f64::INFINITY
-            });
+            Self::set_transfer_limiter(&self.client.inner.upload_limiter, up);
         }
         if let Some(allowed) = req.payload_transfers_allowed {
             self.payload_transfers_allowed
                 .store(allowed, Ordering::SeqCst);
         }
 
-        for r in self.records.read().values() {
-            let mut rec = r.write();
-            self.apply_transfer_state(&mut rec);
+        // File priorities and upload admission are independent of dialing/RAM settings.
+        if req.payload_transfers_allowed.is_some()
+            || req.seeding_enabled.is_some()
+            || req.seeding_allowed.is_some()
+            || req.seed_ratio_milli.is_some()
+            || req.seed_time_minutes.is_some()
+        {
+            let records: Vec<_> = self.records.read().values().cloned().collect();
+            for record in records {
+                self.apply_transfer_state(&mut record.write());
+            }
         }
-        if req.ghost_mode.is_some() || req.ghost_pro_mode.is_some()
-            || req.peer_exploration.is_some() || req.dial_rate_per_sec.is_some()
-            || req.max_peers.is_some() || req.payload_transfers_allowed.is_some()
+        if req.ghost_mode.is_some()
+            || req.ghost_pro_mode.is_some()
+            || req.peer_exploration.is_some()
+            || req.dial_rate_per_sec.is_some()
+            || req.max_peers.is_some_and(|peers| peers != 0)
+            || req.download_rate_bytes_sec.is_some()
+            || req.payload_transfers_allowed.is_some()
         {
             self.reset_ghost();
         }
         self.notify_change();
         self.handle_get_settings()
+    }
+
+    fn set_transfer_limiter(limiter: &wt_core::ratelimit::Limiter, rate: i64) {
+        if rate == 0 {
+            limiter.set_limit(f64::INFINITY);
+        } else {
+            limiter.set_limit(rate as f64);
+            limiter.set_burst(rate.clamp(1, 1024 * 1024) as usize);
+        }
     }
 
     fn handle_network_change(&self, body: &str) -> (u16, Vec<u8>) {
@@ -1963,7 +1992,7 @@ mod tests {
 
     #[test]
     fn test_server_stats_and_version() {
-        let server = EngineServer::new(0, "/tmp/wt-test-stats", 40).expect("init server");
+        let (_dir, server) = settings_tests::test_server();
         let (code, body) = server.request("GET", "/stats", "");
         assert_eq!(code, 200);
         let stats: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
@@ -1977,7 +2006,7 @@ mod tests {
 
     #[test]
     fn test_server_torrent_lifecycle() {
-        let server = EngineServer::new(0, "/tmp/wt-test-lifecycle", 40).expect("init server");
+        let (_dir, server) = settings_tests::test_server();
         let hash = "0123456789abcdef0123456789abcdef01234567";
         let add_payload = serde_json::json!({
             "torrentId": hash,
@@ -2025,7 +2054,7 @@ mod tests {
 
     #[test]
     fn test_server_configure_and_settings() {
-        let server = EngineServer::new(0, "/tmp/wt-test-cfg", 40).expect("init server");
+        let (_dir, server) = settings_tests::test_server();
         let cfg_payload = serde_json::json!({
             "maxPeers": 88,
             "ghostMode": true,

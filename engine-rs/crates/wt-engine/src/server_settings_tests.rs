@@ -1,0 +1,283 @@
+//! Server policy regressions; no public swarm or peer traffic is needed.
+use super::*;
+
+pub(super) fn test_server() -> (tempfile::TempDir, Arc<EngineServer>) {
+    let root = "/home/kar/.cache/wt-tmp/codex-engine";
+    std::fs::create_dir_all(root).unwrap();
+    let dir = tempfile::tempdir_in(root).unwrap();
+    let server = EngineServer::new_with_config(0, dir.path(), 55, |config| {
+        config.no_dht = true;
+        config.disable_utp = true;
+        config.disable_webtorrent = true;
+        config.dial_for_peer_conns = false;
+    })
+    .unwrap();
+    (dir, server)
+}
+
+fn add_torrent(server: &EngineServer) -> Arc<RwLock<TorrentRecord>> {
+    let info_bytes = wt_meta::encode_info(&wt_types::Info {
+        name: "policy.bin".into(),
+        piece_length: 16384,
+        pieces: vec![0; 40],
+        files: vec![wt_types::FileInfo {
+            length: 32768,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let hash = wt_meta::info_hash_v1(&info_bytes).to_hex();
+    let bytes = wt_meta::encode_metainfo(&wt_types::MetaInfo {
+        info_bytes,
+        ..Default::default()
+    })
+    .unwrap();
+    let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+    assert_eq!(
+        server
+            .request(
+                "POST",
+                "/add",
+                &json!({"prepare":true,"torrentData":data}).to_string()
+            )
+            .0,
+        200
+    );
+    let rec = server.record_by_id(&hash).unwrap();
+    {
+        let mut record = rec.write();
+        record.configured = true;
+        record.selected = vec![0];
+        server.apply_transfer_state(&mut record);
+    }
+    rec
+}
+
+fn settings(server: &EngineServer, body: serde_json::Value) -> serde_json::Value {
+    let (status, response) = server.request("POST", "/settings", &body.to_string());
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    serde_json::from_slice(&response).unwrap()
+}
+
+#[test]
+fn connection_defaults_match_go_and_max_peers_keeps_half_open_limits() {
+    let (_dir, server) = test_server();
+    let config = &server.client.inner.config;
+    assert_eq!(config.established_conns_per_torrent, 55);
+    assert_eq!(config.half_open_conns_per_torrent, 24);
+    assert_eq!(config.total_half_open_conns, 48);
+    assert_eq!(config.nominal_dial_timeout, Duration::from_secs(8));
+    assert_eq!(config.min_dial_timeout, Duration::from_secs(2));
+    assert_eq!(config.handshakes_timeout, Duration::from_secs(5));
+    assert_eq!(config.dial_rate, 30.0);
+    let rec = add_torrent(&server);
+    settings(&server, json!({"maxPeers":500}));
+    assert_eq!(rec.read().torrent.set_max_established_conns(500), 500);
+    assert_eq!(server.client.inner.config.half_open_conns_per_torrent, 24);
+    assert_eq!(server.client.inner.config.total_half_open_conns, 48);
+    server.close();
+}
+
+#[test]
+fn rejected_settings_do_not_partially_change_peer_limits() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    assert_eq!(
+        server
+            .request("POST", "/settings", r#"{"maxPeers":500,"ramCacheBytes":1}"#)
+            .0,
+        400
+    );
+    assert_eq!(server.max_peers.load(Ordering::SeqCst), 55);
+    assert_eq!(rec.read().torrent.set_max_established_conns(55), 55);
+    server.close();
+}
+
+#[test]
+fn unrelated_settings_preserve_urgent_piece_demand_and_resting_peer_cap() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    {
+        let mut record = rec.write();
+        record
+            .torrent
+            .set_piece_priority(0, wt_core::PiecePriority::Now);
+        record.resting = true;
+        record.torrent.set_max_established_conns(0);
+    }
+    settings(
+        &server,
+        json!({"maxPeers":88,"dialRatePerSec":40,"ramCacheBytes":33554432}),
+    );
+    assert_eq!(
+        rec.read().torrent.piece_state(0).priority,
+        wt_core::PiecePriority::Now
+    );
+    assert_eq!(rec.read().torrent.set_max_established_conns(0), 0);
+    assert_eq!(server.client.inner.dial_limiter.limit(), 40.0);
+    assert_eq!(server.client.inner.dial_limiter.burst(), 40);
+    server.close();
+}
+
+#[test]
+fn transfer_settings_ignore_negative_rates_and_keep_go_bursts() {
+    let (_dir, server) = test_server();
+    settings(
+        &server,
+        json!({"downloadRateBytesSec":65536,"uploadRateBytesSec":4096}),
+    );
+    assert_eq!(server.client.inner.download_limiter.burst(), 65536);
+    assert_eq!(server.client.inner.upload_limiter.burst(), 4096);
+    let reply = settings(
+        &server,
+        json!({"downloadRateBytesSec":-1,"uploadRateBytesSec":-1}),
+    );
+    assert_eq!(reply["downloadRateBytesSec"], 65536);
+    assert_eq!(reply["uploadRateBytesSec"], 4096);
+    settings(
+        &server,
+        json!({"downloadRateBytesSec":0,"uploadRateBytesSec":0}),
+    );
+    assert!(server.client.inner.download_limiter.limit().is_infinite());
+    assert!(server.client.inner.upload_limiter.limit().is_infinite());
+    assert_eq!(server.client.inner.download_limiter.burst(), 65536);
+    server.close();
+}
+
+#[test]
+fn dial_and_seeding_limits_follow_go_bounds() {
+    let (_dir, server) = test_server();
+    let reply = settings(
+        &server,
+        json!({"dialRatePerSec":-10,"idleDropMinutes":-1,
+        "seedRatioMilli":-1,"seedTimeMinutes":0}),
+    );
+    assert_eq!(reply["dialRatePerSec"], 10);
+    assert_eq!(reply["idleDropMinutes"], 0);
+    assert_eq!(reply["seedRatioMilli"], 1000);
+    assert_eq!(reply["seedTimeMinutes"], 60);
+    let reply = settings(
+        &server,
+        json!({"dialRatePerSec":999,"idleDropMinutes":999,
+        "seedRatioMilli":10000,"seedTimeMinutes":1440}),
+    );
+    assert_eq!(reply["dialRatePerSec"], 80);
+    assert_eq!(reply["idleDropMinutes"], 240);
+    assert_eq!(reply["seedRatioMilli"], 10000);
+    assert_eq!(reply["seedTimeMinutes"], 1440);
+    server.close();
+}
+
+#[test]
+fn incomplete_selection_keeps_reciprocal_uploads_with_seeding_disabled() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    settings(
+        &server,
+        json!({"seedingEnabled":false,"seedingAllowed":false}),
+    );
+    assert!(!rec
+        .read()
+        .torrent
+        .inner
+        .data_upload_disallowed
+        .load(Ordering::SeqCst));
+    assert!(!rec
+        .read()
+        .torrent
+        .inner
+        .data_download_disallowed
+        .load(Ordering::SeqCst));
+    assert!(!rec.read().seeding);
+    settings(&server, json!({"payloadTransfersAllowed":false}));
+    assert!(rec
+        .read()
+        .torrent
+        .inner
+        .data_upload_disallowed
+        .load(Ordering::SeqCst));
+    assert!(rec
+        .read()
+        .torrent
+        .inner
+        .data_download_disallowed
+        .load(Ordering::SeqCst));
+    server.close();
+}
+
+#[test]
+fn checking_selection_never_enables_payload_on_policy_updates() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    rec.write().checking = true;
+    settings(&server, json!({"payloadTransfersAllowed":true}));
+    let record = rec.read();
+    assert!(record
+        .torrent
+        .inner
+        .data_upload_disallowed
+        .load(Ordering::SeqCst));
+    assert!(record
+        .torrent
+        .inner
+        .data_download_disallowed
+        .load(Ordering::SeqCst));
+    assert_eq!(
+        record.torrent.piece_state(0).priority,
+        wt_core::PiecePriority::None
+    );
+    drop(record);
+    server.close();
+}
+
+#[test]
+fn control_routes_handle_malformed_and_extreme_inputs_without_panicking() {
+    let (_dir, server) = test_server();
+    let rec = add_torrent(&server);
+    let id = rec.read().id.clone();
+    for route in [
+        "/add",
+        "/play",
+        "/file-only",
+        "/focus",
+        "/configure",
+        "/select",
+        "/pause",
+        "/resume",
+        "/remove",
+        "/forget-peers",
+        "/settings",
+        "/network",
+        "/bypass",
+        "/cache/clear",
+    ] {
+        for body in [
+            "{",
+            "null",
+            "true",
+            "[]",
+            "{}",
+            r#"{"id":[],"selected":true}"#,
+        ] {
+            let (code, response) = server.request("POST", route, body);
+            assert!((200..500).contains(&code), "{route} {body}: {code}");
+            serde_json::from_slice::<serde_json::Value>(&response).unwrap();
+        }
+    }
+    for route in [
+        format!("/torrent/{id}"),
+        format!("/metadata/{id}"),
+        format!("/connections/{id}"),
+        format!("/pieces/{id}?maxBuckets=18446744073709551615&begin=18446744073709551615&end=0"),
+        format!("/preview-state/{id}?fileIndex=18446744073709551615"),
+        "/pieces/missing".into(),
+        "/torrent/missing".into(),
+        "/not-a-route".into(),
+    ] {
+        let (code, response) = server.request("GET", &route, "");
+        assert!((200..500).contains(&code), "{route}: {code}");
+        serde_json::from_slice::<serde_json::Value>(&response).unwrap();
+    }
+    server.close();
+}

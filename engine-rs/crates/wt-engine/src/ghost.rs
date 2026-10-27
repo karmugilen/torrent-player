@@ -217,6 +217,7 @@ impl EngineServer {
                     break;
                 }
                 let now = Instant::now();
+                server.sample_transfer_rates(now);
                 server.ghost_mode_tick(now);
                 server.ghost_pro_mode_tick(now);
                 server.peer_exploration_tick(now);

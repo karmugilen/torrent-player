@@ -368,7 +368,7 @@ pub struct SettingsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_transfers_allowed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dial_rate_per_sec: Option<usize>,
+    pub dial_rate_per_sec: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seek_log_path: Option<String>,
     #[serde(default, skip_serializing_if = "empty_string")]
