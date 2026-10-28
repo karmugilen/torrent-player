@@ -208,9 +208,16 @@ impl Drop for ClientRuntime {
 
 impl ClientInner {
     pub fn new(cfg: ClientConfig) -> Result<Arc<Self>> {
-        let blocking = cfg.piece_hashers_per_torrent.saturating_mul(4).max(8);
+        let blocking = cfg.piece_hashers_per_torrent.saturating_mul(4).max(16);
+        // 4 workers starved dials under Ubuntu stream load (dial_ok ~19 with
+        // reader vs ~60 without). Match host CPUs so handshake/dial tasks keep
+        // pace with piece IO on the same runtime.
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .clamp(8, 16);
         let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
+            .worker_threads(workers)
             .max_blocking_threads(blocking)
             .thread_name("wt-client")
             .enable_all()
