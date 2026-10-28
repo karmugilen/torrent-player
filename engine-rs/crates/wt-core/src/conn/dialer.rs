@@ -259,29 +259,17 @@ async fn dial_first_raw(
             Ok(stream) => {
                 if winner.is_none() {
                     winner = Some((stream, transport));
-                    // Wait for the other transport so we can keep it as a
-                    // handshake spare. Prefer TCP when both succeed: public
-                    // uTP piece throughput is still weak (107.175 on uTP often
-                    // stays at downloaded=0 while the same peer on TCP feeds
-                    // multi-MiB). 750ms covers slow TCP connects that lose the
-                    // race to a fast uTP SYN-ACK.
+                    // Go dialPool.getFirst(): first connected transport wins.
+                    // Brief wait only to keep the other as a handshake/MSE spare
+                    // (not a TCP preference). Bunny retain2: Go held ~15 uTP vs
+                    // Rust ~5 while TCP counts matched — the old 750ms TCP-prefer
+                    // after a fast uTP SYN-ACK starved uTP-established peers.
                     if pending > 0 {
-                        let wait = if winner
-                            .as_ref()
-                            .is_some_and(|(_, t)| *t == Transport::Utp)
-                        {
-                            Duration::from_millis(750)
-                        } else {
-                            Duration::from_millis(250)
-                        };
-                        match tokio::time::timeout(wait, rx.recv()).await {
+                        match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
                             Ok(Some((t2, Ok(s2)))) => {
                                 pending = pending.saturating_sub(1);
                                 drain_remaining_dials(rx, pending);
                                 let (w_stream, w_t) = winner.take().unwrap();
-                                if w_t == Transport::Utp && t2 == Transport::Tcp {
-                                    return Ok((s2, t2, Some((w_stream, w_t))));
-                                }
                                 return Ok((w_stream, w_t, Some((s2, t2))));
                             }
                             Ok(Some((_t2, Err(e)))) => {

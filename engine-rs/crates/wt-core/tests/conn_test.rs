@@ -412,8 +412,7 @@ async fn test_utp_dial_and_accept_roundtrip() {
     listener.close();
 }
 
-/// Prefer TCP when the dial race produces both transports (uTP public piece
-/// path still underperforms; see SMOKE TCP-prefer notes).
+/// uTP piece path multi-chunk transfer (SACK strip + first-wins dial race).
 #[tokio::test]
 async fn test_utp_piece_multichunk_transfer() {
     let mut cfg = test_config();
@@ -533,9 +532,10 @@ async fn test_utp_piece_multichunk_transfer() {
 }
 
 /// Go dialPool.getFirst returns on the first success and drains losers. A prior
-/// Rust spare-wait (250–750ms) held half-open slots after TCP already connected.
+/// Rust 750ms TCP-prefer after a fast uTP SYN-ACK starved uTP-established peers
+/// (Bunny retain2: Go ~15 uTP vs Rust ~5 while TCP counts matched).
 #[tokio::test]
-async fn dial_race_prefers_tcp_when_both_connect() {
+async fn dial_race_first_wins_finishes_promptly() {
     let mut cfg = test_config();
     cfg.disable_tcp = false;
     cfg.disable_utp = false; // race both; uTP to a TCP-only peer fails slowly
@@ -586,13 +586,19 @@ async fn dial_race_prefers_tcp_when_both_connect() {
     .await
     .expect("dial_peer");
     let elapsed = t0.elapsed();
-    // Webtor: wait briefly for TCP when uTP wins first — uTP piece path often
-    // delivers 0 bytes on public swarms. Localhost should still finish quickly.
+    // Spare-wait is 250ms max; localhost first-wins must finish promptly.
     assert!(
         elapsed < Duration::from_millis(1500),
-        "dial race with TCP prefer must finish promptly (elapsed {elapsed:?})"
+        "dial race first-wins must finish promptly (elapsed {elapsed:?})"
     );
-    assert_eq!(outcome.handle.transport(), Transport::Tcp);
+    assert!(
+        matches!(
+            outcome.handle.transport(),
+            Transport::Tcp | Transport::Utp
+        ),
+        "first connected transport wins, got {:?}",
+        outcome.handle.transport()
+    );
 
     let _server = tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv())
         .await
