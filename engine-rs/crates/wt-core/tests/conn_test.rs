@@ -412,10 +412,10 @@ async fn test_utp_dial_and_accept_roundtrip() {
     listener.close();
 }
 
-/// Go dialPool.getFirst returns on the first success and drains losers. A prior
-/// Rust spare-wait (250–750ms) held half-open slots after TCP already connected.
+/// Prefer TCP when the dial race produces both transports (uTP public piece
+/// path still underperforms; see SMOKE TCP-prefer notes).
 #[tokio::test]
-async fn dial_race_returns_first_success_without_spare_wait() {
+async fn dial_race_prefers_tcp_when_both_connect() {
     let mut cfg = test_config();
     cfg.disable_tcp = false;
     cfg.disable_utp = false; // race both; uTP to a TCP-only peer fails slowly
@@ -466,10 +466,11 @@ async fn dial_race_returns_first_success_without_spare_wait() {
     .await
     .expect("dial_peer");
     let elapsed = t0.elapsed();
-    // Localhost TCP+HS is a few ms. The old spare-wait added ≥250ms after TCP won.
+    // Webtor: wait briefly for TCP when uTP wins first — uTP piece path often
+    // delivers 0 bytes on public swarms. Localhost should still finish quickly.
     assert!(
-        elapsed < Duration::from_millis(200),
-        "first success must not wait for the race loser (elapsed {elapsed:?})"
+        elapsed < Duration::from_millis(1500),
+        "dial race with TCP prefer must finish promptly (elapsed {elapsed:?})"
     );
     assert_eq!(outcome.handle.transport(), Transport::Tcp);
 
