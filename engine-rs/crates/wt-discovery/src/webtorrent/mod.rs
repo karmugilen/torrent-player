@@ -403,6 +403,7 @@ impl TrackerClient {
                 )
             };
             if let Some(mut outbound) = outbound {
+                let answered_ih = outbound.info_hash;
                 match outbound
                     .transport
                     .accept_answer(&answer.sdp_type, &answer.sdp)
@@ -419,6 +420,13 @@ impl TrackerClient {
                         if let Some(cb) = status {
                             cb(&TrackerStatusEvent::AnnounceSuccessful { url, info_hash });
                         }
+                        // Go `handleAnswer`: after an offer is answered, announce
+                        // again so the tracker can hand out a fresh offer (keeps
+                        // WebRTC dial supply from stalling after the first match).
+                        let this = Arc::clone(self);
+                        tokio::spawn(async move {
+                            this.announce(answered_ih, AnnounceEvent::None, 1).await;
+                        });
                     }
                     Err(e) => tracing::warn!(error = %e, "accept answer failed"),
                 }

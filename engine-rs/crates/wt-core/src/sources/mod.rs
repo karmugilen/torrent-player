@@ -77,9 +77,11 @@ use crate::{ClientConfig, CoreError, Result, StatusEvent, TorrentSpec};
 pub const DHT_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Go `dhtAnnouncer` sleeps 5 minutes after an announce error (DNS etc.).
 pub const DHT_ANNOUNCE_ERROR_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// Go `timeboxedAnnounceToDht` keeps one get_peers traversal open this long.
+pub const DHT_ANNOUNCE_TIMEBOX: Duration = Duration::from_secs(15 * 60);
 /// Kept for SourcesConfig / callers; continuous announcer supersedes the old
 /// 15-minute timer while `want_conns` is true (Go `dhtAnnouncer`).
-pub const DEFAULT_DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_DHT_ANNOUNCE_INTERVAL: Duration = DHT_ANNOUNCE_TIMEBOX;
 
 /// Status callback list (same shape as `ClientConfig.callbacks.status_updated`).
 pub type StatusCallbacks = Vec<Arc<dyn Fn(&StatusEvent) + Send + Sync>>;
@@ -628,9 +630,8 @@ impl Sources {
                     tokio::time::sleep(DHT_IDLE_POLL_INTERVAL).await;
                     continue;
                 }
-                // One full traversal (up to 60s); then immediately again while
-                // want_conns — Go timeboxes to 15m but restarts as soon as the
-                // announce ends.
+                // Go `timeboxedAnnounceToDht`: one traversal up to 15m, then
+                // immediately again while want_conns.
                 let ok = announce_to_dht(&dht, &keys, port, &sink, PeerSource::DhtGetPeers).await;
                 if !ok {
                     tracing::warn!(
@@ -748,17 +749,12 @@ async fn announce_to_dht(
                 continue;
             }
         };
-        // Hard cap 60s (Go timeboxes much longer). After the first peer batch,
-        // finish on 5s idle so the continuous dhtAnnouncer can start another
-        // traversal sooner — a fixed short idle from t=0 dropped late peers.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut got_peers = false;
+        // Go `timeboxedAnnounceToDht`: keep consuming PeersValues until the
+        // stream ends or 15m elapses. A short idle abort starved unique addrs
+        // mid-run once the first nearby DHT nodes had been queried.
+        let deadline = tokio::time::Instant::now() + DHT_ANNOUNCE_TIMEBOX;
         while tokio::time::Instant::now() < deadline {
-            let wait = if got_peers {
-                Duration::from_secs(5)
-            } else {
-                deadline.saturating_duration_since(tokio::time::Instant::now())
-            };
+            let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(wait, handle.next()).await {
                 Ok(Some(vals)) => {
                     let peers: Vec<PeerInfo> = vals
@@ -775,7 +771,6 @@ async fn announce_to_dht(
                         })
                         .collect();
                     if !peers.is_empty() {
-                        got_peers = true;
                         total_peers += peers.len();
                         tracing::debug!(
                             "dht get_peers +{} for {} (batch)",
@@ -786,7 +781,7 @@ async fn announce_to_dht(
                     }
                 }
                 Ok(None) => break,
-                Err(_) => break,
+                Err(_) => break, // timebox elapsed
             }
         }
         handle.close();
