@@ -101,7 +101,7 @@ use crate::arrival::{ArrivalPeer, ArrivalSample, ARRIVAL_FEATURES, ARRIVAL_UNCHO
 use crate::choking::{upload_allowed, ChokeConfig, PeerChokeInput};
 use crate::conn::{ConnHandle, ConnHandler};
 use crate::metadata::{PeerMetadataState, METADATA_REQUEST_TIMEOUT};
-use crate::pex::{PexCursor, PEX_INTERVAL};
+use crate::pex::{PexCursor, PEX_INTERVAL, PEX_RETRY_DELAY};
 use crate::picker::{
     block_coord_from_req_index, compute_playback_pipeline_limit, req_index_from_piece_and_offset,
 };
@@ -730,16 +730,29 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return;
         };
         let now = Instant::now();
+        // Go Share: non-empty → sched pexInterval; empty → sched pexRetryDelay.
+        // last_pex_sent None allows the first attempt immediately (AfterFunc(0)).
+        let wait = if self.pex_cursor.is_some() {
+            PEX_INTERVAL
+        } else {
+            PEX_RETRY_DELAY
+        };
         if self
             .last_pex_sent
-            .is_some_and(|t| now.saturating_duration_since(t) < PEX_INTERVAL)
+            .is_some_and(|t| now.saturating_duration_since(t) < wait)
         {
             return;
         }
         let Some(msg) = self.torrent.pex_genmsg(&mut self.pex_cursor) else {
+            self.last_pex_sent = Some(now);
+            self.pex_cursor = None;
             return;
         };
-        if msg.is_empty() && self.last_pex_sent.is_some() {
+        if msg.is_empty() {
+            self.last_pex_sent = Some(now);
+            // Go leaves the cursor unchanged when Len==0 so the next try is still
+            // a full snapshot once live conns appear in PexState.
+            self.pex_cursor = None;
             return;
         }
         self.send(handle, msg.to_message(pex_id));
@@ -1650,9 +1663,21 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                         .on_peer_listen_port(self.state.remote_addr, port);
                 }
             }
+            // Go: t.pex.Add(c); c.pex.Init(c) once the extended handshake arrives.
+            if !self.torrent.pex_disabled() && !self.pex_listed {
+                let utp = matches!(self.state.transport, Transport::Utp);
+                self.torrent.pex_note_connected(
+                    self.state.remote_addr,
+                    self.state.encrypted,
+                    utp,
+                );
+                self.pex_listed = true;
+            }
             self.request_metadata_pieces(handle);
             self.state.need_request_update = true;
             self.update_requests(handle);
+            // Go pex.Init AfterFunc(0) wakes the writer to Share immediately.
+            self.maybe_send_pex(handle);
             return Ok(());
         }
         // BEP 10 mappings are directional: our IDs route inbound messages;
@@ -1698,7 +1723,11 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return Ok(());
         }
         if id == self.our_ext_pex && !self.torrent.pex_disabled() {
-            let msg = PexMsg::decode(&payload).map_err(|e| CoreError::Other(e.to_string()))?;
+            // Soft-discard malformed ut_pex like metadata; do not kill the conn.
+            let msg = match PexMsg::decode(&payload) {
+                Ok(m) => m,
+                Err(_) => return Ok(()),
+            };
             self.torrent.ingest_pex(self.state.remote_addr, &msg)?;
         }
         Ok(())
@@ -1775,7 +1804,12 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             return Some(Duration::from_millis(100));
         }
         if self.state.peer_ext_ut_pex.is_some() && !self.torrent.pex_disabled() {
-            Some(PEX_INTERVAL)
+            // First / empty snapshot retries at Go pexRetryDelay; steady state at pexInterval.
+            if self.pex_cursor.is_none() {
+                Some(PEX_RETRY_DELAY)
+            } else {
+                Some(PEX_INTERVAL)
+            }
         } else {
             None
         }
