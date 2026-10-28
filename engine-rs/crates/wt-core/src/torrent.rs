@@ -752,8 +752,11 @@ impl TorrentInner {
     pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {
         self.dialing_peers.lock().remove(&addr);
         if ok {
-            self.dial_backoff.lock().remove(&addr);
-            self.dial_fail_counts.lock().remove(&addr);
+            // Handshake success alone must NOT clear fail_count/backoff.
+            // Bunny retain runs: dial_ok cleared the penalty, then unhelpful RST
+            // re-armed only fail_count=1 (2s), so the same Chinese DHT contacts
+            // redialed ~9×/60s. Clear only via `clear_dial_penalty` once the
+            // peer delivers useful data (Go: PopMax + no requeue avoids this).
         } else {
             // Exponential backoff: 2s, 4s, 8s, … capped at 60s. Dialer re-queues
             // so we retry without waiting solely on rediscovery.
@@ -772,10 +775,16 @@ impl TorrentInner {
         self.bump_change();
     }
 
+    /// Wipe dial fail/backoff after the peer proves helpful (useful chunk).
+    pub(crate) fn clear_dial_penalty(&self, addr: SocketAddr) {
+        self.dial_backoff.lock().remove(&addr);
+        self.dial_fail_counts.lock().remove(&addr);
+    }
+
     /// Post-handshake close that never delivered useful data must count like a
-    /// dial failure for scheduling. `dial_finished(ok=true)` clears fail/backoff
-    /// after handshake; DHT rediscovery then re-`add_peers` and we immediately
-    /// redial the same dead contacts (Bunny: 44/69 dial_oks wasted on churn).
+    /// dial failure for scheduling. Handshake `dial_finished(ok=true)` no longer
+    /// clears fail/backoff; DHT rediscovery must still respect the escalating
+    /// penalty or the same dead contacts burn half-open slots (Bunny: 9×/60s).
     /// Go avoids this by not requeueing after PopMax + slower recirculation.
     /// Only reset/decode/eof; helpful peers (useful bytes or LastHelpful) are
     /// left alone so normal disconnects do not poison dial forever.
@@ -1606,9 +1615,10 @@ mod dial_parity_tests {
 
     #[test]
     fn unhelpful_reset_after_dial_ok_applies_backoff_and_defers_redial() {
-        // dial_ok clears fail/backoff; unhelpful post-HS RST must restore the
-        // dial_finished(false) penalty so DHT re-add cannot burn half-open slots
-        // (Bunny: 180.112.182.96:20081 dial_ok→RST×9 in 60s).
+        // dial_ok must NOT clear fail/backoff; unhelpful post-HS RST applies
+        // dial_finished(false) so DHT re-add cannot burn half-open slots
+        // (Bunny retain: same Chinese DHT contacts dial_ok→RST×9 when dial_ok
+        // wiped fail_count back to 0 each time).
         let t = torrent();
         let addr: SocketAddr = "180.112.182.96:20081".parse().unwrap();
         let peer = PeerInfo {
@@ -1622,8 +1632,10 @@ mod dial_parity_tests {
         t.add_peers(vec![peer.clone()]);
         assert_eq!(t.take_dial_candidates(1).len(), 1);
         t.dial_finished(addr, true);
-        assert!(t.dial_fail_counts.lock().get(&addr).is_none());
-        assert!(t.dial_backoff.lock().get(&addr).is_none());
+        assert!(
+            t.dial_fail_counts.lock().get(&addr).is_none(),
+            "fresh dial_ok leaves fail_count empty"
+        );
 
         t.maybe_penalize_unhelpful_close(
             addr,
@@ -1650,6 +1662,67 @@ mod dial_parity_tests {
         );
         assert_eq!(t.dial_pending_ready(), 0);
         assert!(t.should_requeue_failed_dial(addr));
+    }
+
+    #[test]
+    fn dial_ok_does_not_reset_fail_count_so_unhelpful_churn_escalates() {
+        // Regression for retain-1/2: dial_ok cleared fail_count → every RST
+        // restarted at 2s backoff → 9 dials/60s on the same addr.
+        let t = torrent();
+        let addr: SocketAddr = "117.84.182.58:20027".parse().unwrap();
+        let peer = PeerInfo {
+            id: None,
+            addr,
+            source: PeerSource::DhtGetPeers,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        };
+        for expected in 1u8..=4 {
+            if expected > 1 {
+                t.add_peers(vec![peer.clone()]);
+                assert_eq!(
+                    t.take_dial_candidates(1).len(),
+                    0,
+                    "fail {expected}: must still be in backoff from prior RST"
+                );
+                // Expire backoff so we can dial again (simulates time passing).
+                t.dial_backoff.lock().remove(&addr);
+            }
+            t.add_peers(vec![peer.clone()]);
+            assert_eq!(t.take_dial_candidates(1).len(), 1);
+            t.dial_finished(addr, true);
+            assert_eq!(
+                t.dial_fail_counts.lock().get(&addr).copied().unwrap_or(0),
+                expected.saturating_sub(1),
+                "dial_ok must preserve prior fail_count (expected {})",
+                expected.saturating_sub(1)
+            );
+            t.maybe_penalize_unhelpful_close(
+                addr,
+                "write error: Connection reset by peer (os error 104)",
+                0,
+                false,
+            );
+            assert_eq!(
+                t.dial_fail_counts.lock().get(&addr).copied(),
+                Some(expected),
+                "each unhelpful close must escalate fail_count"
+            );
+        }
+        // After 4 failures, backoff is 2<<3=16s — not the flat 2s loop.
+        let until = *t.dial_backoff.lock().get(&addr).expect("backoff armed");
+        assert!(
+            until >= Instant::now() + Duration::from_secs(8),
+            "escalated backoff must exceed first-step 2s, got {:?}",
+            until.saturating_duration_since(Instant::now())
+        );
+        // Helpful chunk clears so a later rediscovery can dial fresh.
+        t.clear_dial_penalty(addr);
+        assert!(t.dial_fail_counts.lock().get(&addr).is_none());
+        assert!(t.dial_backoff.lock().get(&addr).is_none());
+        t.add_peers(vec![peer]);
+        assert_eq!(t.take_dial_candidates(1).len(), 1);
     }
 
     #[test]

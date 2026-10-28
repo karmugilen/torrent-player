@@ -171,6 +171,8 @@ pub trait PeerTorrent: Send + Sync {
     fn note_peer_piece(&self, _peer: PeerKey, _piece: PieceIndex, _has: bool) {}
     fn peer_closed(&self, _addr: SocketAddr) {}
     fn update_peer_snapshot(&self, _info: PeerConnInfo) {}
+    /// Peer delivered useful payload — clear dial fail/backoff for this addr.
+    fn note_peer_helpful(&self, _addr: SocketAddr) {}
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
     /// Go `Torrent.onWriteChunkErr` — storage/cache write failures while receiving.
@@ -1619,6 +1621,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.stats.add_bytes_read_useful(data.len() as i64);
         // The I/O driver accounts wire bytes; the handler owns useful bytes.
         handle.stats().bytes_read_useful_data.fetch_add(data.len() as i64, Ordering::Relaxed);
+        // First useful chunk forgives prior unhelpful dial penalties so a later
+        // normal disconnect can redial without waiting out stale backoff.
+        self.torrent.note_peer_helpful(self.state.remote_addr);
         self.torrent.on_chunk_received(self.key(), req, data.len());
 
         if self.torrent.piece_all_dirty(index) {

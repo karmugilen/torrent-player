@@ -211,6 +211,10 @@ impl PeerTorrent for TorrentInner {
         }
     }
 
+    fn note_peer_helpful(&self, addr: SocketAddr) {
+        self.clear_dial_penalty(addr);
+    }
+
     fn peer_closed(&self, addr: SocketAddr) {
         let had_last_helpful = self
             .conns
@@ -236,8 +240,8 @@ impl PeerTorrent for TorrentInner {
                 handle.source(),
                 reason.chars().take(120).collect::<String>()
             );
-            // dial_ok cleared fail/backoff; unhelpful reset/decode/eof must
-            // restore dial scheduling penalty so DHT re-adds cannot burn slots.
+            // Unhelpful reset/decode/eof escalate fail_count; dial_ok no longer
+            // clears it — only note_peer_helpful does.
             self.maybe_penalize_unhelpful_close(
                 addr,
                 &reason,
