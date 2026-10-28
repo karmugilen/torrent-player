@@ -89,29 +89,17 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
 
     let dial_timeout = cfg.nominal_dial_timeout.max(cfg.min_dial_timeout);
 
-    // Race transports; keep a late second success for handshake fallback so we
-    // do not drop a live uTP/TCP socket only to redial it (Go has 9/35 uTP on
-    // Ubuntu; Rust was sticking at 0 uTP after draining the race loser).
-    let (raw_stream, winning_transport, mut spare) =
-        dial_first_raw(&params, dial_timeout).await?;
-
-    // Fast-fail the *preferred* MSE attempt (2s). Ubuntu sees ~20+ MSE
-    // early-EOF/timeouts per minute when Preferred=true; waiting the full
-    // 5s handshakes_timeout before plaintext fallback burned half-open
-    // slots and left dial_ok ~14 vs Go ~32. Fallback below still uses the
-    // full handshake timeout for plaintext / other-transport retries.
-    let prefer_hs_timeout = if prefer_obfuscated && allow_fallback {
-        Duration::from_secs(2).min(cfg.handshakes_timeout)
-    } else {
-        cfg.handshakes_timeout
-    };
-
+    let mut pool = DialPool::default();
+    for transport in candidate_transports(&params) {
+        pool.add(&params, transport, dial_timeout);
+    }
+    let (stream, transport) = pool.get_first().await?;
     match complete_bt_handshake(
         &params,
-        raw_stream,
-        winning_transport,
+        stream,
+        transport,
         prefer_obfuscated,
-        prefer_hs_timeout,
+        cfg.handshakes_timeout,
     )
     .await
     {
@@ -119,192 +107,71 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
         Err(first_err) if allow_fallback => {
             tracing::debug!(
                 addr = %params.remote_addr,
-                transport = ?winning_transport,
+                ?transport,
                 obfuscated = prefer_obfuscated,
                 error = %first_err,
-                "preferred header obfuscation failed; trying spare/fallback"
+                "preferred header obfuscation failed; trying fallback"
             );
-            let full_hs = cfg.handshakes_timeout;
-            // 0) Spare race loser (already connected): try opposite obfuscation
-            // on the live socket, then redial that transport with preferred.
-            if let Some((spare_stream, spare_transport)) = spare.take() {
-                if let Ok(outcome) = complete_bt_handshake(
-                    &params,
-                    spare_stream,
-                    spare_transport,
-                    !prefer_obfuscated,
-                    full_hs,
-                )
-                .await
-                {
-                    return Ok(outcome);
-                }
-                if let Ok((raw, t)) = dial_raw_one(&params, spare_transport, dial_timeout).await {
-                    if let Ok(outcome) = complete_bt_handshake(
-                        &params,
-                        raw,
-                        t,
-                        prefer_obfuscated,
-                        full_hs,
-                    )
-                    .await
-                    {
-                        return Ok(outcome);
-                    }
-                }
-            }
-            // 1) Same transport, opposite obfuscation (Go).
-            if let Ok((raw2, transport2)) =
-                dial_raw_one(&params, winning_transport, dial_timeout).await
-            {
-                if let Ok(outcome) = complete_bt_handshake(
-                    &params,
-                    raw2,
-                    transport2,
-                    !prefer_obfuscated,
-                    full_hs,
-                )
-                .await
-                {
-                    return Ok(outcome);
-                }
-            }
-            // 2) Other transports: try both obfuscation modes (unique).
-            // When preferred=false, `[false, prefer]` was `[false, false]` and
-            // never attempted MSE — Ubuntu r47 then logged ~27 bt_hs fails on
-            // peers that require encryption.
-            let obfuscation_order = if prefer_obfuscated {
-                [true, false]
-            } else {
-                [false, true]
-            };
-            for transport in candidate_transports(&params) {
-                if transport == winning_transport {
-                    continue;
-                }
-                for obfuscated in obfuscation_order {
-                    let Ok((raw, t)) = dial_raw_one(&params, transport, dial_timeout).await else {
-                        continue;
-                    };
-                    if let Ok(outcome) =
-                        complete_bt_handshake(&params, raw, t, obfuscated, full_hs).await
-                    {
-                        return Ok(outcome);
-                    }
-                }
-            }
-            Err(CoreError::Other(format!(
-                "handshake failed (preferred obfuscation={prefer_obfuscated}: {first_err}; same+other transport fallbacks exhausted)"
-            )))
+            // Go dialAndCompleteHandshake adds the winning dialer back to the
+            // original pool. Its redial races any transport still in flight;
+            // only the next success gets the opposite-obfuscation handshake.
+            pool.add(&params, transport, dial_timeout);
+            let (stream, transport) = pool.get_first().await?;
+            complete_bt_handshake(
+                &params,
+                stream,
+                transport,
+                !prefer_obfuscated,
+                cfg.handshakes_timeout,
+            )
+            .await
         }
-        Err(e) => Err(e),
+        Err(err) => Err(err),
     }
 }
 
-/// Go `dialPool`: start all candidate dialers, return the first success.
-/// Also returns a late second success (if any) so handshake fallback can use
-/// the already-open socket instead of immediately draining it.
-async fn dial_first_raw(
-    params: &DialParams<'_>,
-    dial_timeout: Duration,
-) -> Result<(
-    Box<dyn PeerStream>,
-    Transport,
-    Option<(Box<dyn PeerStream>, Transport)>,
-)> {
-    let candidates = candidate_transports(params);
-    if candidates.is_empty() {
-        return Err(CoreError::Other("no dial transports enabled".into()));
-    }
-    if candidates.len() == 1 {
-        let t = candidates[0];
-        let stream = dial_raw(params, t, dial_timeout).await?;
-        return Ok((stream, t, None));
-    }
+/// Go dialPool: start all transports, hand off each first success immediately,
+/// and keep the other dials available until the handshake decision is made.
+/// Dropping the JoinSet cancels pending dials and drops unused connected streams
+/// (Go's deferred context cancellation and drainAndCloseRemainingDials).
+#[derive(Default)]
+struct DialPool {
+    dials: tokio::task::JoinSet<(Transport, Result<Box<dyn PeerStream>>)>,
+}
 
-    let n = candidates.len();
-    let (tx, mut rx) = mpsc::channel::<(Transport, Result<Box<dyn PeerStream>>)>(n);
-    for transport in candidates {
-        let tx = tx.clone();
+impl DialPool {
+    fn add(&mut self, params: &DialParams<'_>, transport: Transport, timeout: Duration) {
         let addr = params.remote_addr;
         let disable_tcp = params.cfg.disable_tcp;
         let disable_utp = params.cfg.disable_utp;
         let hook = params.tcp_conn_hook.cloned();
         let utp = params.utp_socket.cloned();
-        tokio::spawn(async move {
+        self.dials.spawn(async move {
             let result = dial_raw_owned(
                 addr,
                 transport,
-                dial_timeout,
+                timeout,
                 disable_tcp,
                 disable_utp,
                 hook.as_ref(),
                 utp.as_ref(),
             )
             .await;
-            let _ = tx.send((transport, result)).await;
+            (transport, result)
         });
     }
-    drop(tx);
 
-    let mut last_err = None;
-    let mut pending = n;
-    let mut winner: Option<(Box<dyn PeerStream>, Transport)> = None;
-    while pending > 0 {
-        let Some((transport, result)) = rx.recv().await else {
-            break;
-        };
-        pending -= 1;
-        match result {
-            Ok(stream) => {
-                if winner.is_none() {
-                    winner = Some((stream, transport));
-                    // Go dialPool.getFirst(): first connected transport wins.
-                    // Brief wait only to keep the other as a handshake/MSE spare
-                    // (not a TCP preference). Bunny retain2: Go held ~15 uTP vs
-                    // Rust ~5 while TCP counts matched — the old 750ms TCP-prefer
-                    // after a fast uTP SYN-ACK starved uTP-established peers.
-                    if pending > 0 {
-                        match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
-                            Ok(Some((t2, Ok(s2)))) => {
-                                pending = pending.saturating_sub(1);
-                                drain_remaining_dials(rx, pending);
-                                let (w_stream, w_t) = winner.take().unwrap();
-                                return Ok((w_stream, w_t, Some((s2, t2))));
-                            }
-                            Ok(Some((_t2, Err(e)))) => {
-                                pending = pending.saturating_sub(1);
-                                let _ = e;
-                            }
-                            Ok(None) | Err(_) => {}
-                        }
-                    }
-                    drain_remaining_dials(rx, pending);
-                    let (w_stream, w_t) = winner.take().unwrap();
-                    return Ok((w_stream, w_t, None));
-                }
+    async fn get_first(&mut self) -> Result<(Box<dyn PeerStream>, Transport)> {
+        let mut last_err = None;
+        while let Some(result) = self.dials.join_next().await {
+            match result {
+                Ok((transport, Ok(stream))) => return Ok((stream, transport)),
+                Ok((_, Err(err))) => last_err = Some(err),
+                Err(err) => last_err = Some(CoreError::Other(format!("dial task failed: {err}"))),
             }
-            Err(e) => last_err = Some(e),
         }
+        Err(last_err.unwrap_or_else(|| CoreError::Other("all initial dials failed".into())))
     }
-    if let Some((stream, transport)) = winner {
-        return Ok((stream, transport, None));
-    }
-    Err(last_err.unwrap_or_else(|| CoreError::Other("all initial dials failed".into())))
-}
-
-fn drain_remaining_dials(
-    mut rx: mpsc::Receiver<(Transport, Result<Box<dyn PeerStream>>)>,
-    pending: usize,
-) {
-    if pending == 0 {
-        return;
-    }
-    tokio::spawn(async move {
-        while let Some((_t, other)) = rx.recv().await {
-            drop(other);
-        }
-    });
 }
 
 fn candidate_transports(params: &DialParams<'_>) -> Vec<Transport> {
@@ -321,15 +188,6 @@ fn candidate_transports(params: &DialParams<'_>) -> Vec<Transport> {
     out
 }
 
-async fn dial_raw_one(
-    params: &DialParams<'_>,
-    transport: Transport,
-    dial_timeout: Duration,
-) -> Result<(Box<dyn PeerStream>, Transport)> {
-    let stream = dial_raw(params, transport, dial_timeout).await?;
-    Ok((stream, transport))
-}
-
 async fn complete_bt_handshake(
     params: &DialParams<'_>,
     raw_stream: Box<dyn PeerStream>,
@@ -338,6 +196,8 @@ async fn complete_bt_handshake(
     hs_timeout: Duration,
 ) -> Result<DialOutcome> {
     let cfg = params.cfg;
+    // Go sets one connection deadline before both protocol handshakes.
+    let deadline = tokio::time::Instant::now() + hs_timeout;
 
     let (mut stream, is_encrypted): (Box<dyn PeerStream>, bool) = if use_header_obfuscation {
         let provides = if cfg.header_obfuscation_policy.preferred
@@ -348,7 +208,7 @@ async fn complete_bt_handshake(
             CryptoMethod::ALL
         };
         let mse_fut = mse::initiate_handshake(raw_stream, &params.info_hash.0, None, provides);
-        let (encrypted_stream, crypto_method) = tokio::time::timeout(hs_timeout, mse_fut)
+        let (encrypted_stream, crypto_method) = tokio::time::timeout_at(deadline, mse_fut)
             .await
             .map_err(|_| CoreError::Other("MSE handshake timeout".to_string()))?
             .map_err(|e| CoreError::Other(format!("MSE negotiation failed: {e}")))?;
@@ -367,7 +227,7 @@ async fn complete_bt_handshake(
         &params.our_peer_id,
         &reserved_bits,
     );
-    let peer_hs = tokio::time::timeout(hs_timeout, hs_fut)
+    let peer_hs = tokio::time::timeout_at(deadline, hs_fut)
         .await
         .map_err(|_| CoreError::Other("BitTorrent handshake timeout".to_string()))?
         .map_err(|e| CoreError::Other(format!("BitTorrent handshake failed: {e}")))?;
@@ -409,23 +269,6 @@ async fn complete_bt_handshake(
         peer_extension_bits: peer_ext_bits,
         peer_id,
     })
-}
-
-async fn dial_raw(
-    params: &DialParams<'_>,
-    chosen_transport: Transport,
-    dial_timeout: Duration,
-) -> Result<Box<dyn PeerStream>> {
-    dial_raw_owned(
-        params.remote_addr,
-        chosen_transport,
-        dial_timeout,
-        params.cfg.disable_tcp,
-        params.cfg.disable_utp,
-        params.tcp_conn_hook,
-        params.utp_socket,
-    )
-    .await
 }
 
 async fn dial_raw_owned(
@@ -524,8 +367,14 @@ mod reduced_dial_timeout_tests {
         let half_open = 24;
         assert_eq!(reduced_dial_timeout(min, nominal, half_open, 0), nominal);
         assert_eq!(reduced_dial_timeout(min, nominal, half_open, 23), nominal);
-        assert_eq!(reduced_dial_timeout(min, nominal, half_open, 24), Duration::from_secs(4));
-        assert_eq!(reduced_dial_timeout(min, nominal, half_open, 48), Duration::from_secs(2).max(nominal / 3));
+        assert_eq!(
+            reduced_dial_timeout(min, nominal, half_open, 24),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            reduced_dial_timeout(min, nominal, half_open, 48),
+            Duration::from_secs(2).max(nominal / 3)
+        );
         assert_eq!(reduced_dial_timeout(min, nominal, half_open, 4000), min);
     }
 
@@ -536,8 +385,14 @@ mod reduced_dial_timeout_tests {
         let half_open = 40;
         assert_eq!(reduced_dial_timeout(min, nominal, half_open, 0), nominal);
         assert_eq!(reduced_dial_timeout(min, nominal, half_open, 39), nominal);
-        assert_eq!(reduced_dial_timeout(min, nominal, half_open, 40), nominal / 2);
-        assert_eq!(reduced_dial_timeout(min, nominal, half_open, 80), nominal / 3);
+        assert_eq!(
+            reduced_dial_timeout(min, nominal, half_open, 40),
+            nominal / 2
+        );
+        assert_eq!(
+            reduced_dial_timeout(min, nominal, half_open, 80),
+            nominal / 3
+        );
         assert_eq!(reduced_dial_timeout(min, nominal, half_open, 4000), min);
     }
 }

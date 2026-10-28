@@ -586,16 +586,13 @@ async fn dial_race_first_wins_finishes_promptly() {
     .await
     .expect("dial_peer");
     let elapsed = t0.elapsed();
-    // Spare-wait is 250ms max; localhost first-wins must finish promptly.
+    // Localhost first-wins must finish promptly.
     assert!(
         elapsed < Duration::from_millis(1500),
         "dial race first-wins must finish promptly (elapsed {elapsed:?})"
     );
     assert!(
-        matches!(
-            outcome.handle.transport(),
-            Transport::Tcp | Transport::Utp
-        ),
+        matches!(outcome.handle.transport(), Transport::Tcp | Transport::Utp),
         "first connected transport wins, got {:?}",
         outcome.handle.transport()
     );
@@ -606,6 +603,178 @@ async fn dial_race_first_wins_finishes_promptly() {
         .expect("conn");
     outcome.handle.close("done");
     listener.close();
+}
+
+/// The winner must start its handshake while the other transport is still
+/// dialing. Go getFirst does not wait for a spare connection.
+#[tokio::test]
+async fn dial_race_handshakes_before_slow_loser_connects() {
+    use wt_wire::handshake::{default_peer_extension_bytes, handshake};
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = tcp.local_addr().unwrap();
+    // Keep UDP bound but silent, so the uTP dial remains pending.
+    let _udp = tokio::net::UdpSocket::bind(addr).await.unwrap();
+    let ih = InfoHash([0x44; 20]);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = tcp.accept().await.unwrap();
+        handshake(
+            &mut stream,
+            &ih,
+            &[0x31; 20],
+            &default_peer_extension_bytes(),
+        )
+        .await
+        .unwrap();
+        stream
+    });
+    let cfg = test_config();
+    let tracker = HalfOpenTracker::new();
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        dial_peer(DialParams {
+            remote_addr: addr,
+            info_hash: ih,
+            our_peer_id: [0x32; 20],
+            transport: None,
+            source: PeerSource::Direct,
+            metadata_size: None,
+            cfg: &cfg,
+            tracker: &tracker,
+            dial_limiter: None,
+            tcp_conn_hook: None,
+            utp_socket: None,
+            require_plain: true,
+        }),
+    )
+    .await;
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "a connected TCP peer must handshake without waiting for the uTP loser"
+    );
+    assert_eq!(result.unwrap().unwrap().handle.transport(), Transport::Tcp);
+    assert_eq!(tracker.current_total(), 0);
+}
+
+/// A bad peer must consume only the preferred handshake and one fallback,
+/// even when both raw transports connect. Extra retries pin half-open slots.
+#[tokio::test]
+async fn dial_race_bad_peer_gets_only_one_handshake_fallback() {
+    use tokio::io::AsyncReadExt;
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = tcp.local_addr().unwrap();
+    let utp = Arc::new(UtpSocket::bind(addr).await.unwrap());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let tcp_attempts = attempts.clone();
+    let tcp_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = tcp.accept().await.unwrap();
+            let attempts = tcp_attempts.clone();
+            tokio::spawn(async move {
+                if stream.read_u8().await.is_ok() {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    let utp_server = utp.clone();
+    let utp_attempts = attempts.clone();
+    let udp_server = tokio::spawn(async move {
+        loop {
+            let mut stream = utp_server.accept().await.unwrap();
+            let attempts = utp_attempts.clone();
+            tokio::spawn(async move {
+                if stream.read_u8().await.is_ok() {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                }
+                // UtpStream currently needs explicit shutdown to send FIN.
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+            });
+        }
+    });
+    let mut cfg = test_config();
+    cfg.handshakes_timeout = Duration::from_millis(200);
+    cfg.nominal_dial_timeout = Duration::from_millis(500);
+    let tracker = HalfOpenTracker::new();
+    let result = dial_peer(DialParams {
+        remote_addr: addr,
+        info_hash: InfoHash([0x45; 20]),
+        our_peer_id: [0x32; 20],
+        transport: None,
+        source: PeerSource::Direct,
+        metadata_size: None,
+        cfg: &cfg,
+        tracker: &tracker,
+        dial_limiter: None,
+        tcp_conn_hook: None,
+        utp_socket: None,
+        require_plain: false,
+    })
+    .await;
+    tcp_server.abort();
+    udp_server.abort();
+    utp.close();
+    assert!(result.is_err(), "the peer rejects every handshake");
+    assert_eq!(
+        attempts.load(Ordering::Relaxed),
+        2,
+        "Go tries one preferred handshake and one fallback total"
+    );
+    assert_eq!(tracker.current_total(), 0);
+}
+
+/// Go initiateProtocolHandshakes gives MSE and BT one shared deadline.
+#[tokio::test]
+async fn dial_race_mse_and_bt_share_handshake_deadline() {
+    use wt_wire::handshake::{default_peer_extension_bytes, handshake};
+    use wt_wire::mse::{receive_handshake, CryptoMethod};
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = tcp.local_addr().unwrap();
+    let ih = InfoHash([0x46; 20]);
+    let server = tokio::spawn(async move {
+        let (stream, _) = tcp.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut stream = receive_handshake(stream, [ih.0.to_vec()], |_| CryptoMethod::RC4)
+            .await
+            .unwrap()
+            .stream;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = handshake(
+            &mut stream,
+            &ih,
+            &[0x31; 20],
+            &default_peer_extension_bytes(),
+        )
+        .await;
+    });
+    let mut cfg = test_config();
+    cfg.handshakes_timeout = Duration::from_millis(500);
+    cfg.header_obfuscation_policy.require_preferred = true;
+    let tracker = HalfOpenTracker::new();
+    let result = dial_peer(DialParams {
+        remote_addr: addr,
+        info_hash: ih,
+        our_peer_id: [0x32; 20],
+        transport: Some(Transport::Tcp),
+        source: PeerSource::Direct,
+        metadata_size: None,
+        cfg: &cfg,
+        tracker: &tracker,
+        dial_limiter: None,
+        tcp_conn_hook: None,
+        utp_socket: None,
+        require_plain: false,
+    })
+    .await;
+    server.abort();
+    assert!(
+        result.is_err(),
+        "MSE plus BT exceeded the shared 500ms deadline"
+    );
+    assert_eq!(tracker.current_total(), 0);
 }
 
 #[tokio::test]
