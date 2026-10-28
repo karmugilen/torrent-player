@@ -1,39 +1,43 @@
-## In plain words (updated 18:05)
+## In plain words (updated 28 Oct 10:05)
 
-**Where we are:** 7 of the 8 parts are finished and tested, including the
-torrent core. Two full Rust engines now download a torrent from each other
-through the control API. The last part, the engine (`wt-engine`), still needs
-about 95 smaller features that the Go tests check (preview, playback windows,
-Ghost mode, trackers, telemetry).
+**Where we are:** the Rust engine runs on your phone. It starts, adds magnets,
+downloads and streams. All 8 parts are written. The torrent core and the
+engine work end to end, and the control API answers exactly like Go
+(30/30 match).
 
-**What works today:** two Rust clients can download a file from each other
-over TCP and uTP and verify every byte. Magnet links work, and a seek gets its
-first 64 KiB in 76 ms. The Android `libengine.so` builds. All 30 control-API
-answers now match the Go engine (0 differences). The slow Direct Play save now
-runs off the storage lock, like Go.
+**Fixed so far (highlights):**
+- Magnets found no peers: DHT took the uTP port, which switched off all
+  discovery (8d2f401)
+- The extra public trackers Go adds after metadata, and DHT searches that
+  run to completion (9ca6b7e)
+- uTP handshake with real clients (qBittorrent, libtorrent), TCP/uTP dial
+  race, faster dial retries, and peers no longer dropped for harmless errors
+- Speed: seek tuning applied, deeper request pipeline, TCP_NODELAY, and
+  Go-style dropping of choking peers
+- Engine features: tests waiting on features went from 70 to 38 (170 tests
+  pass, 0 fail)
 
-**What is left (3 of 13 milestones):**
+**Real-swarm results (same computer, Go vs Rust):**
 
-1. The engine features the Go tests check. All 143 tests are written in Rust
-   and 51 pass. 92 wait on features that agy-engine and agy-core are building.
-   63 of the ports were too thin compared with Go (6 of them "passed" without
-   really testing), so agy-tests is redoing those properly.
-2. Speed/RAM/CPU comparison of the full engine against Go (agy-perf is
-   running it now). The Rust core alone downloads at 43 MiB/s on loopback,
-   against the Go engine's 19.5.
-3. The final release (optimized) APK. A debug APK with the Rust engine is
-   already installed on your phone, and the engine starts on it.
+| | Go | Rust |
+|---|---|---|
+| Sintel metadata | about 20 s | **1.5 s** |
+| Sintel speed | about 0.6 MiB/s | **20-37 MiB/s** |
+| Ubuntu metadata | 4-14 s | **3-5 s** |
+| Ubuntu peers | 28-41 | 15-21 (behind) |
+| Ubuntu speed | 3-12 MiB/s | 1.2-2 MiB/s (behind) |
 
-**Who is doing it:** 4 Antigravity agents, each on its own part, working on
-their own. The machine rebooted at 16:05, which closed the earlier Codex
-agents. Their work was saved and committed before the new agents started.
+**What is left:**
+1. Ubuntu-style big swarms: peers and speed still 2.5-6x behind Go
+   (grok-swarm, grok-wire)
+2. 38 engine tests still waiting on features or faithful ports (codex-engine)
+3. The full Go-vs-Rust benchmark, then merge into your main branch
 
-| Agent | Doing |
-|---|---|
-| agy-core | core done; now the playback and preview features the tests need |
-| agy-engine | two-engine download done; now the server-side features the tests need |
-| agy-tests | redoing the 63 thin test ports faithfully; switches tests on as features land |
-| agy-perf | full-engine speed/RAM/CPU comparison vs Go |
+**Latest APK:** artifacts/webtor-rust-engine-release-39572f2.apk (all fixes up
+to 39572f2).
+
+**Agents now:** grok-swarm and grok-wire (Ubuntu peers/speed), codex-engine
+(engine features). Codex has 18 % of its weekly limit left, resetting on 2 Nov.
 
 **Safety:** builds stay out of `/tmp`, at least 25 GB of disk is kept free, and
 a governor pauses builds when free RAM drops below 10 %.

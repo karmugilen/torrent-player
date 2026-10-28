@@ -86,3 +86,4 @@
 -|agy-engine round 1 done and verified (c5a7a13): two engine-host processes download by magnet + x.pe to 100 % with SHA-1 checked bytes; api-diff 30/0/0 re-run by the coordinator; clippy clean
 -|All Go engine tests now have real ports (0 placeholders); about 95 wait on named engine features; agy-engine (server) and agy-core (preview/playback) build them
 -|agy-tests round 1 (53962a0): 87 pass / 0 fail / 92 ignored, but NOT accepted: 63 tests are under 40 % of their Go size (6 of them run and pass hollowly, e.g. seek comparisons); round 2 makes them faithful (docs/specs/weak_ports.py checks it)
+-|Overnight: about 40 commits. uTP BEP29 handshake fixed, dial race/backoff, PEX send, peers not dropped on soft errors, seek tuning wired; Sintel 20-37 MiB/s (Go 0.6), metadata faster than Go; Ubuntu still 2.5-6x slower than Go. codex-engine waiting tests 70 -> 38. APK 39572f2 built.

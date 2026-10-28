@@ -1,41 +1,45 @@
 # Rust engine port progress
 
-## In plain words (updated 18:05)
+## In plain words (updated 28 Oct 10:05)
 
-**Where we are:** 7 of the 8 parts are finished and tested, including the
-torrent core. Two full Rust engines now download a torrent from each other
-through the control API. The last part, the engine (`wt-engine`), still needs
-about 95 smaller features that the Go tests check (preview, playback windows,
-Ghost mode, trackers, telemetry).
+**Where we are:** the Rust engine runs on your phone. It starts, adds magnets,
+downloads and streams. All 8 parts are written. The torrent core and the
+engine work end to end, and the control API answers exactly like Go
+(30/30 match).
 
-**What works today:** two Rust clients can download a file from each other
-over TCP and uTP and verify every byte. Magnet links work, and a seek gets its
-first 64 KiB in 76 ms. The Android `libengine.so` builds. All 30 control-API
-answers now match the Go engine (0 differences). The slow Direct Play save now
-runs off the storage lock, like Go.
+**Fixed so far (highlights):**
+- Magnets found no peers: DHT took the uTP port, which switched off all
+  discovery (8d2f401)
+- The extra public trackers Go adds after metadata, and DHT searches that
+  run to completion (9ca6b7e)
+- uTP handshake with real clients (qBittorrent, libtorrent), TCP/uTP dial
+  race, faster dial retries, and peers no longer dropped for harmless errors
+- Speed: seek tuning applied, deeper request pipeline, TCP_NODELAY, and
+  Go-style dropping of choking peers
+- Engine features: tests waiting on features went from 70 to 38 (170 tests
+  pass, 0 fail)
 
-**What is left (3 of 13 milestones):**
+**Real-swarm results (same computer, Go vs Rust):**
 
-1. The engine features the Go tests check. All 143 tests are written in Rust
-   and 51 pass. 92 wait on features that agy-engine and agy-core are building.
-   63 of the ports were too thin compared with Go (6 of them "passed" without
-   really testing), so agy-tests is redoing those properly.
-2. Speed/RAM/CPU comparison of the full engine against Go (agy-perf is
-   running it now). The Rust core alone downloads at 43 MiB/s on loopback,
-   against the Go engine's 19.5.
-3. The final release (optimized) APK. A debug APK with the Rust engine is
-   already installed on your phone, and the engine starts on it.
+| | Go | Rust |
+|---|---|---|
+| Sintel metadata | about 20 s | **1.5 s** |
+| Sintel speed | about 0.6 MiB/s | **20-37 MiB/s** |
+| Ubuntu metadata | 4-14 s | **3-5 s** |
+| Ubuntu peers | 28-41 | 15-21 (behind) |
+| Ubuntu speed | 3-12 MiB/s | 1.2-2 MiB/s (behind) |
 
-**Who is doing it:** 4 Antigravity agents, each on its own part, working on
-their own. The machine rebooted at 16:05, which closed the earlier Codex
-agents. Their work was saved and committed before the new agents started.
+**What is left:**
+1. Ubuntu-style big swarms: peers and speed still 2.5-6x behind Go
+   (grok-swarm, grok-wire)
+2. 38 engine tests still waiting on features or faithful ports (codex-engine)
+3. The full Go-vs-Rust benchmark, then merge into your main branch
 
-| Agent | Doing |
-|---|---|
-| agy-core | core done; now the playback and preview features the tests need |
-| agy-engine | two-engine download done; now the server-side features the tests need |
-| agy-tests | redoing the 63 thin test ports faithfully; switches tests on as features land |
-| agy-perf | full-engine speed/RAM/CPU comparison vs Go |
+**Latest APK:** artifacts/webtor-rust-engine-release-39572f2.apk (all fixes up
+to 39572f2).
+
+**Agents now:** grok-swarm and grok-wire (Ubuntu peers/speed), codex-engine
+(engine features). Codex has 18 % of its weekly limit left, resetting on 2 Nov.
 
 **Safety:** builds stay out of `/tmp`, at least 25 GB of disk is kept free, and
 a governor pauses builds when free RAM drops below 10 %.
@@ -57,24 +61,27 @@ wt-parity     [##############################] 100%  done     grok-1, codex-3
 wt-engine     [#############################.]  95%  running  agy-engine+tests
 ```
 
-Started 10:59 · elapsed 6.7 h · now 99%
+Started 10:59 · elapsed 23.1 h · now 99%
 
-ETA: not enough history yet to estimate.
+ETA (rough, from the last 1387 min at 4.3%/h):
+
+- crates complete: ~10:17 (in 0.2 h)
+- whole port incl. integration, benchmarks vs Go, Android APK: ~14:17 (in 4.2 h; the 4 h after the crates is a planning guess)
 
 | Crate | Owner | Status | Go lines | Rust lines | Go tests | Rust tests | Stubs left | Note |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | wt-meta | grok-1 | done | 2383 | 1360 | 40 | 39 | 0 | verified: 39 tests, clippy+fmt clean (c191e96) |
-| wt-wire | agy-1 | done | 1635 | 2779 | 25 | 31 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
-| wt-discovery | grok-2 | done | 3652 | 3115 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
-| wt-core | agy-core | done | 13626 | 11951 | 121 | 212 | 0 | verified: all tests pass, clippy clean, 43 MiB/s release loopback (d348339, agy-core) |
-| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 2642 | 65 | 111 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
+| wt-wire | agy-1 | done | 1635 | 2844 | 25 | 33 | 0 | verified: 31 tests, clippy all-targets clean (9721c3f) |
+| wt-discovery | grok-2 | done | 3652 | 3136 | 20 | 28 | 0 | verified: 28 tests, clippy all-targets clean (fb0e093, 2648dd6) |
+| wt-core | agy-core | done | 13626 | 13122 | 121 | 214 | 0 | verified: all tests pass, clippy clean, 43 MiB/s release loopback (d348339, agy-core) |
+| wt-storage | agy-3, grok-5, grok-7 | done | 4572 | 2642 | 65 | 112 | 0 | verified: 109 tests, 0 ignored, 0 fail, clippy clean |
 | wt-policy | grok-3 | done | 1815 | 1920 | 45 | 40 | 0 | verified: 40 tests, 45 Go tests mapped (882bc1e) |
-| wt-parity | grok-1, codex-3 | done | 0 | 3395 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
-| wt-engine | agy-engine+tests | running | 5609 | 5485 | 71 | 179 | 0 | agy-engine (server, API diff 29 match / 1 critical, two-engine transfer) + agy-tests (11 real engine tests pass, 132 to port) |
-## Milestones (the real finish line): 10/13
+| wt-parity | grok-1, codex-3 | done | 0 | 3400 | 0 | 1 | 0 | verified: harness + Go baseline (518f33f); Rust numbers once engine-host is wired |
+| wt-engine | agy-engine+tests | running | 5609 | 6245 | 71 | 210 | 0 | agy-engine (server, API diff 29 match / 1 critical, two-engine transfer) + agy-tests (11 real engine tests pass, 132 to port) |
+## Milestones (the real finish line): 11/13
 
 ```text
-MILESTONES [#######################.......] 10/13
+MILESTONES [#########################.....] 11/13
 ```
 
 - [x] All 8 crates compile; wt-meta, wt-wire, wt-discovery, wt-policy, wt-storage done with tests passing
@@ -86,10 +93,10 @@ MILESTONES [#######################.......] 10/13
 - [x] Magnet (ut_metadata) transfer and reader seek on the new connection path (library tests: magnet 256 KiB verified, seek first 64 KiB in 76 ms)
 - [x] Two engine-host processes transfer a torrent through the control API (engine_two_host: real processes, magnet + x.pe, SHA-1 checked; c5a7a13)
 - [x] Control API JSON: 0 CRITICAL (30 MATCH / 0 DIFF / 0 CRITICAL, re-verified by the coordinator after c5a7a13)
-- [ ] Engine integration tests: real ports passing (all 143 written, 51 pass, 92 wait on features; 63 hollow ports being redone)
+- [ ] Engine integration tests: real ports passing (170 pass, 0 fail, 38 still waiting on features or faithful ports)
 - [x] Direct Play startup saves off the storage lock (bounded background queue, slow-save test passes, codex-3)
 - [ ] Go-vs-Rust parity run: throughput, TTFB, seek, RAM, CPU same or better
-- [ ] Rust APK built with -Pwebtor.engine=rust and tested on a device (debug APK installed on the phone, engine starts; release APK at the end)
+- [x] Rust APK built with -Pwebtor.engine=rust and tested on a device (release APK installed, engine starts, magnet downloads on the phone)
 
 The crate bars above count code written; these milestones count things that work.
 
@@ -105,7 +112,7 @@ The crate bars above count code written; these milestones count things that work
 
 ## Pending
 
-- [ ] wt-engine (agy-engine+tests): 95%, 5485 of ~4487 Rust lines, 179/71 tests
+- [ ] wt-engine (agy-engine+tests): 95%, 6245 of ~4487 Rust lines, 210/71 tests
 - [ ] Integration: Rust engine end-to-end, parity tests vs Go
 - [ ] Benchmarks: throughput, seek-to-first-byte, RAM vs Go
 - [ ] Android: libengine.so (arm64) + APK build
@@ -114,33 +121,15 @@ The crate bars above count code written; these milestones count things that work
 
 | Worker | Crate | Work | State |
 |---|---|---|---|
-| agy-core | wt-core (all) + wt-engine playback, preview, stream | wt-core done and verified (d348339: all tests pass, 43 MiB/s release); now the playback and preview engine features the tests need | running |
-| agy-engine | wt-engine server | round 1 done and verified (c5a7a13: two engines download, api-diff 30/0/0); now the server-side features the ported tests wait on | running |
-| agy-tests | wt-engine tests | round 1: all 143 tests written, 51 pass, 92 wait on features (53962a0), but 63 ports are hollow vs Go; now making those faithful | running |
-| agy-perf | wt-storage, wt-parity, Android | Direct Play startup save off the lock, Rust APK build, Go-vs-Rust parity run | running |
+| grok-swarm | wt-core discovery/dialing/metadata/PEX | metadata now faster than Go; Ubuntu peers 15-21 vs Go 28-41; fixing mid-run decay | running |
+| grok-wire | wt-core peer wire/data flow | uTP BEP29 fixed, wake interval and pipeline fixes; Ubuntu speed still behind Go | running |
 
 ## Earlier workers (finished or closed)
 
 | Worker | Crate | Work | State |
 |---|---|---|---|
-| grok-1 | wt-core (peer_conn) | wt-meta, wt-parity, webtor seek decisions (3c0d3fc) done; now the per-peer state machine | closed |
-| grok-2 | wt-core (lint) | wt-discovery and wt-core sources (1a08cbc) done; now clippy-clean the finished wt-core modules | closed |
-| grok-3 | wt-engine (playback, stream_http, previews, network) | integration test skeleton (c841eac, mostly placeholders) + stream server/preview/network (9ccd54b) done; now playback.rs on wt_core::Reader + wt_policy | closed |
-| grok-4 | wt-engine (types.rs JSON) | API diff tool done (6969bd9: 11 match, 19 diff, 14 critical); now fixing JSON shapes in types.rs | closed |
-| grok-5 | wt-core (end-to-end tests) | strategy/choking (ef844c8), metadata/pex/ratelimit (76e488f), Direct Play storage (5f688b0) done; now library e2e transfer tests | closed |
-| agy-1 | wt-core (conn driver) | wt-wire done (9721c3f, 31 tests, uTP 569 MB/s loopback); now peer connection I/O driver + shared UDP socket | closed |
-| agy-2 | wt-core | client, torrent, peer conns, reader, Webtor seek patches, arrival net | closed |
-| agy-3 | wt-storage (benchmarks vs Go) | wt-storage done (b29e56c, 93 tests); now Go-vs-Rust storage benchmarks | closed |
-| agy-4 | wt-engine (integration) | control API routes (e25edb6, WIP); now wiring EngineServer onto wt_core/wt_storage/wt_policy | closed |
-| grok-6 | wt-core (client.rs) | hashing pool + web seed peer done (0dc46ba; SHA-1 2245 MiB/s release); now the Client | closed |
-| grok-7 | wt-storage (accessors) | test suite done (9eb5a54); now the 7 missing accessors + switching on 16 ignored tests | closed |
-| grok-8 | wt-core (reader) | Reader done (e6be3ec, 19 tests); released | done |
-| grok-9 | wt-core (torrent_impls.rs) | piece state + storage glue done (7a327e6, 13+22 tests); now PeerTorrent + ReaderHost impls for TorrentInner | closed |
-| codex-1 | wt-core (torrent side) | torrent.rs, torrent_impls.rs, peer_conn/reader/metadata/hashing wiring, e2e tests; clippy clean | closed (reboot) |
-| codex-2 | wt-engine (server + playback) | server.rs on wt_core, PlaybackHost, two-engine transfer; engine-host builds | closed (reboot) |
-| codex-3 | wt-storage perf + wt-parity | storage bench done (eeb9bef); fixing Direct Play startup save under lock; parity harness repeat-order fixed | closed (reboot) |
-| codex-4 | wt-core (Client, connections, ClientConfig) | dialer on agreed interface; adding tracker dial hook + handshake callback; integration tests written | closed (reboot) |
-| codex-5 | wt-engine (types.rs + tests) | 9 Go JSON goldens pass; engine tests 11 real passing / 132 placeholders / 0 failing | closed (reboot) |
+| codex-engine | wt-engine (all src + tests) | round 3 done: waiting tests 70 -> 38, 170 pass / 0 fail, API 30/0/0 | idle (weekly limit 18 %) |
+| codex-smoke | real-world testing | held until the Ubuntu speed fix lands | paused |
 
 ## Coordinator log
 
@@ -232,10 +221,67 @@ The crate bars above count code written; these milestones count things that work
 - agy-engine round 1 done and verified (c5a7a13): two engine-host processes download by magnet + x.pe to 100 % with SHA-1 checked bytes; api-diff 30/0/0 re-run by the coordinator; clippy clean
 - All Go engine tests now have real ports (0 placeholders); about 95 wait on named engine features; agy-engine (server) and agy-core (preview/playback) build them
 - agy-tests round 1 (53962a0): 87 pass / 0 fail / 92 ignored, but NOT accepted: 63 tests are under 40 % of their Go size (6 of them run and pass hollowly, e.g. seek comparisons); round 2 makes them faithful (docs/specs/weak_ports.py checks it)
+- Overnight: about 40 commits. uTP BEP29 handshake fixed, dial race/backoff, PEX send, peers not dropped on soft errors, seek tuning wired; Sintel 20-37 MiB/s (Go 0.6), metadata faster than Go; Ubuntu still 2.5-6x slower than Go. codex-engine waiting tests 70 -> 38. APK 39572f2 built.
 
 ## Commits
 
 ```text
+39572f2 docs(SMOKE): same-day Go r20 baseline vs rust r59
+2af1e31 wt-core/engine: cap request flood; expose choke diagnostics; SMOKE
+87a45ff wt-core: scale client tokio workers with host CPUs
+6a57b9b wt-core: prefer TCP longer when uTP wins the dial race
+b35d333 wt-core: gate drop_chokers on dial-pool pressure like Go
+49c85fc wt-engine: enable mid-file responsive reads for playback
+3eb3bfd wt-core: TCP_NODELAY + raise request pipeline floor to 64
+e55feea wt-engine: wire drop_chokers loop; fix MSE dual-mode fallback
+67e9b32 wt-core/engine: wire SeekTuning + sticky interest for Ubuntu throughput
+554de8f docs(SMOKE): r43 sustained ~1.2 MiB/s; Go r18 10.5 MiB/s baseline
+b16a0d2 wt-core: raise playback request pipeline floor for slow-start peers
+c209f14 docs(SMOKE): rust-sintel-r7 21→39 peers / 34.8 MiB/s with uTP
+af43c78 docs(SMOKE): r41 1.58 MiB/s after SlowPeerYield; Go r17 7.15 baseline
+5c701d6 wt-core: SlowPeerYield must not starve new peers on Now pieces
+8f4b089 wt-core: prefer TCP in dial grace window while uTP throughput lags
+2d50412 wt-core: drop 2s uTP MSE abort now that BEP29 handshake works
+2226411 docs(SMOKE): rust-ubuntu-r38 10→33 peers with 7 uTP after BEP29 fix
+aa9b643 wt-core: uTP-prefer dial window + unbounded writer / biased reads
+e0371c4 wt-wire: fix public uTP BEP29 handshake (libtorrent/qBittorrent)
+b1b2c62 docs(requests): enrich uTP gap evidence for grok-wire
+3fabf06 smoke: peers_compare enables seeding for tit-for-tat
+fb4d532 docs(SMOKE): rust-sintel-r5 14→32 peers / 12.4 MiB/s
+73dacd2 wt-core: dial uTP on ephemeral socket; guard empty files
+03dbc46 wt-core: spare dial-race socket + uTP gap evidence
+b1aeed9 wt-core: faster dial-fail backoff; peers_compare enables exploration
+608ba34 wt-core: raise dial half-open floor to 48/96
+d12dc72 wt-core: TCP-prefer dial race + fail-count dial order
+9b17869 wt-core: try other transport after MSE/handshake failure
+98f0194 wt-core: keep reduced dial timeout on known pool size
+7a3db4f wt-core: soft-discard PEX TooFrequent; refresh SMOKE peer numbers
+e551897 wt-core: stop killing peers on metadata/PEX soft errors
+1c5ce23 wt-core: requeue failed dials with exp backoff; nudge announces
+91c8b76 wt-engine: record remaining port coverage and final verification
+77280dd wt-engine: give restored torrents independent record identities
+8ad99d7 wt-core: requeue peers on half-open dial race; faster dialer poll
+69570d4 wt-engine: persist and restore verified playback resume windows
+a28c24a wt-core: swarm dial/metadata/PEX parity steps toward Go peers
+8fadb87 wt-engine: preserve Go selection and original tracker exports
+3c0c5d3 wt-engine: refresh shared playback windows and Ghost Pro tiers
+18060a4 wt-engine: publish live preview state and close readers safely
+3cc5dcf engine-rs: codex-engine round 3 spec
+937e297 wt-engine: preserve peer demand and match Go settings policy
+25a2c7a engine-rs: Grok peer-parity specs (grok-wire, grok-swarm); codex-play stopped
+b43baf6 engine-rs: focus the 3 remaining Codex workers on peer/speed parity; peers_compare.py
+9ca6b7e Supplement public trackers once magnet metadata arrives (Go watchMetadata); let DHT lookups run to completion
+5ae904a engine-rs: phone findings (WebRTC DTLS panic, startup panic in WIP build)
+58632fa wt-engine jni: log panic message and location on Android
+06959bd engine-rs: checkpoint at Codex hourly limit (magnet wait-for-metadata, ghost/telemetry/exploration modules, test ports, smoke tools; compiles)
+8d2f401 wt-core: start trackers and DHT for real swarms (DHT took the uTP port and EADDRINUSE disabled all discovery)
+d4e2592 wt-storage: expose cheap Direct Play telemetry snapshots
+de68adc engine-rs: Codex replacements for the agy roles
+1a28219 engine-rs: ownership changes for the Codex wave
+0579495 engine-rs: Codex wave specs (server features, faithful tests, real-world smoke)
+26b2979 wt-engine: implement status_fingerprint, target-aware preview release, and ghost-pro mutual exclusivity
+20b9803 engine-rs: urgent request - configure must wait for magnet metadata
+ff2827a engine-rs: agy-tests round 1 review, progress update
 66a7830 engine-rs: agy-tests round 2 (hollow ports list)
 53962a0 wt-engine: port full engine integration test suite from Go with zero placeholders
 2149464 engine-rs: two-engine transfer verified, milestones 10/13
