@@ -565,9 +565,10 @@ impl Sources {
                     source: PeerSource::Tracker,
                     supports_encryption: false,
                     pex: Default::default(),
-                    // Prefer tracker contacts for dial order and high-water trim
-                    // (peer_closed already marks Tracker as trusted on re-queue).
-                    trusted: true,
+                    // Go AppendFromTracker leaves Trusted=false; marking tracker
+                    // peers trusted made them monopolize PopMax ahead of dialable
+                    // DHT contacts and burned half-open on firewalled timeouts.
+                    trusted: false,
                 })
                 .collect();
             if !mapped.is_empty() {

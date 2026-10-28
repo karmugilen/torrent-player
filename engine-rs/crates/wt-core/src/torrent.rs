@@ -114,7 +114,10 @@ pub struct TorrentInner {
     pub known_peers: RwLock<HashSet<PeerInfo>>,
     pub client: RwLock<Weak<crate::client::ClientInner>>,
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
-    /// Consecutive failed dials per addr; drives exponential re-queue backoff.
+    /// Not-before instant for re-queued dial failures (exp backoff).
+    pub dial_backoff: Mutex<HashMap<SocketAddr, Instant>>,
+    /// Consecutive failed dials per addr; drives exponential re-queue backoff
+    /// and dial-candidate ordering (fresh before recirculated dead contacts).
     pub swarm_diagnostics: Mutex<crate::stats::SwarmDiagnostics>,
     pub dial_fail_counts: Mutex<HashMap<SocketAddr, u8>>,
     pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
@@ -187,6 +190,7 @@ impl TorrentInner {
             known_peers: RwLock::new(HashSet::new()),
             client: RwLock::new(Weak::new()),
             dialing_peers: Mutex::new(HashSet::new()),
+            dial_backoff: Mutex::new(HashMap::new()),
             swarm_diagnostics: Mutex::new(Default::default()),
             dial_fail_counts: Mutex::new(HashMap::new()),
             conn_handles: RwLock::new(HashMap::new()),
@@ -424,25 +428,41 @@ impl TorrentInner {
     }
 
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
-        // Go prioritizedPeers.PopMax: trust, then BEP 40 priority.
+        // Go prioritizedPeers.PopMax is trust then BEP 40. Pure Pop without
+        // rediscovery drains the pool faster than tracker/DHT refill on Ubuntu
+        // (pool 220→<40, dialFailures.timeout≈400). Failed dials are re-queued
+        // with exp backoff; among ready peers prefer lower fail_counts so
+        // recirculated dead contacts do not starve never-tried addrs.
         let handles = self.conn_handles.read();
         let mut dialing = self.dialing_peers.lock();
+        let backoff = self.dial_backoff.lock();
+        let fail_counts = self.dial_fail_counts.lock();
+        let now = Instant::now();
         let mut known = self.known_peers.write();
         let mut eligible: Vec<PeerInfo> = known
             .iter()
             .filter(|p| {
                 !handles.contains_key(&p.addr)
                     && !dialing.contains(&p.addr)
+                    && backoff.get(&p.addr).is_none_or(|until| *until <= now)
             })
             .cloned()
             .collect();
-        eligible.sort_by_cached_key(|p| std::cmp::Reverse((
-            p.trusted, self.peer_priority(p.addr), PEER_ADDRESS_HASH.hash_one(p.addr.to_string()),
-        )));
         // The same endpoint can arrive from tracker, DHT and PEX. Go checks
         // connectingToPeerAddr before starting each attempt; reserve it once.
         let mut seen = HashSet::new();
         eligible.retain(|p| seen.insert(p.addr));
+        eligible.sort_by_cached_key(|p| {
+            let fails = fail_counts.get(&p.addr).copied().unwrap_or(0);
+            (
+                fails,
+                std::cmp::Reverse((
+                    p.trusted,
+                    self.peer_priority(p.addr),
+                    PEER_ADDRESS_HASH.hash_one(p.addr.to_string()),
+                )),
+            )
+        });
         eligible.truncate(max);
         for p in &eligible {
             known.retain(|x| x.addr != p.addr);
@@ -451,16 +471,59 @@ impl TorrentInner {
         eligible
     }
 
+    /// Peers waiting to dial right now (not connected, not dialing, not in
+    /// backoff). Used as `pendingPeers` for `reducedDialTimeout` so a pool
+    /// full of cooling-down failures does not force min timeout on the few
+    /// ready candidates (Go's peers.Len() only counts dialable reserve).
+    pub(crate) fn dial_pending_ready(&self) -> usize {
+        let handles = self.conn_handles.read();
+        let dialing = self.dialing_peers.lock();
+        let backoff = self.dial_backoff.lock();
+        let now = Instant::now();
+        let known = self.known_peers.read();
+        let mut seen = HashSet::new();
+        known
+            .iter()
+            .filter(|p| {
+                seen.insert(p.addr)
+                    && !handles.contains_key(&p.addr)
+                    && !dialing.contains(&p.addr)
+                    && backoff.get(&p.addr).is_none_or(|until| *until <= now)
+            })
+            .count()
+    }
+
     pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {
         self.dialing_peers.lock().remove(&addr);
         if ok {
+            self.dial_backoff.lock().remove(&addr);
             self.dial_fail_counts.lock().remove(&addr);
         } else {
-            let mut counts = self.dial_fail_counts.lock();
-            let count = counts.entry(addr).or_insert(0);
-            *count = count.saturating_add(1);
+            // Exponential backoff: 2s, 4s, 8s, … capped at 60s. Dialer re-queues
+            // so we retry without waiting solely on rediscovery.
+            let n = {
+                let mut counts = self.dial_fail_counts.lock();
+                let e = counts.entry(addr).or_insert(0);
+                *e = e.saturating_add(1);
+                *e
+            };
+            let shift = n.saturating_sub(1).min(5);
+            let secs = (2u64 << shift).min(60);
+            self.dial_backoff
+                .lock()
+                .insert(addr, Instant::now() + Duration::from_secs(secs));
         }
         self.bump_change();
+    }
+
+    /// Whether a failed dial should be re-queued for another attempt.
+    pub(crate) fn should_requeue_failed_dial(&self, addr: SocketAddr) -> bool {
+        self.dial_fail_counts
+            .lock()
+            .get(&addr)
+            .copied()
+            .unwrap_or(0)
+            < 8
     }
 
     pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify {
@@ -1172,7 +1235,7 @@ mod dial_parity_tests {
     }
 
     #[test]
-    fn dial_pool_uses_trust_then_bep40_priority_even_after_failures() {
+    fn dial_pool_prefers_fresh_peers_before_failed_then_trust_bep40() {
         let t = torrent();
         let local = "0.0.0.0:0".parse().unwrap();
         let mut peers: Vec<PeerInfo> = (1..=8).map(|n| PeerInfo {
@@ -1181,13 +1244,64 @@ mod dial_parity_tests {
             pex: Default::default(), trusted: true,
         }).collect();
         peers.sort_by_key(|p| std::cmp::Reverse(wt_discovery::bep40_priority(local, p.addr)));
-        let expected: Vec<_> = peers.iter().map(|p| p.addr).collect();
-        // Go does not lower the priority of a rediscovered peer after a dial failure.
-        t.dial_fail_counts.lock().insert(expected[0], 7);
+        let best = peers[0].addr;
+        let fresh = peers[1].addr;
+        // Recirculated failures must not monopolize half-open over never-tried peers.
+        t.dial_fail_counts.lock().insert(best, 7);
         t.add_peers(peers);
-        let got: Vec<_> = t.take_dial_candidates(8).iter().map(|p| p.addr).collect();
-        assert_eq!(got.iter().map(|addr| wt_discovery::bep40_priority(local, *addr)).collect::<Vec<_>>(),
-            expected.iter().map(|addr| wt_discovery::bep40_priority(local, *addr)).collect::<Vec<_>>());
+        let got: Vec<_> = t.take_dial_candidates(2).iter().map(|p| p.addr).collect();
+        assert_eq!(got[0], fresh, "fresh peer before fail_count=7 contact: {got:?}");
+        assert!(!got.contains(&best), "high fail_count deferred while fresh remain: {got:?}");
+    }
+
+    #[test]
+    fn dial_pool_survives_failed_pops_via_requeue_backoff() {
+        // Pure PopMax without requeue drains known_peers faster than rediscovery
+        // (Bunny: pool 220→<40 while dialFailures.timeout≈400). Re-queue with
+        // backoff keeps candidates available after N failures.
+        let t = torrent();
+        let peers: Vec<PeerInfo> = (1..=6)
+            .map(|n| PeerInfo {
+                id: None,
+                addr: format!("198.51.100.{n}:6881").parse().unwrap(),
+                source: PeerSource::DhtGetPeers,
+                supports_encryption: false,
+                pex: Default::default(),
+                trusted: false,
+            })
+            .collect();
+        t.add_peers(peers.clone());
+        let batch = t.take_dial_candidates(6);
+        assert_eq!(batch.len(), 6);
+        assert_eq!(t.known_peers.read().len(), 0, "Pop removes from reserve");
+        for p in &batch {
+            t.dial_finished(p.addr, false);
+            assert!(t.should_requeue_failed_dial(p.addr));
+            // Mirror client dialer: re-queue after recording fail/backoff.
+            t.add_peers(vec![p.clone()]);
+        }
+        assert_eq!(
+            t.known_peers.read().len(),
+            6,
+            "requeue must restore dial reserve after failures"
+        );
+        assert_eq!(
+            t.take_dial_candidates(6).len(),
+            0,
+            "backoff must defer immediate re-dial of the same dead contacts"
+        );
+        assert_eq!(
+            t.dial_pending_ready(),
+            0,
+            "reducedDialTimeout pending ignores backoff peers"
+        );
+        // Expire backoff and confirm peers are dialable again (not deleted forever).
+        t.dial_backoff.lock().clear();
+        let again = t.take_dial_candidates(6);
+        assert_eq!(again.len(), 6, "after backoff, fail_counts must not delete forever");
+        assert!(again.iter().all(|p| {
+            t.dial_fail_counts.lock().get(&p.addr).copied().unwrap_or(0) == 1
+        }));
     }
 
     #[test]

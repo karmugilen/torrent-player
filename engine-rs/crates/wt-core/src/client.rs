@@ -795,10 +795,18 @@ impl ClientInner {
                                 msg.chars().take(160).collect::<String>()
                             );
                         }
-                        // Go pops attempts from the pool. Rediscovery can add
-                        // them again; failed/closed peers have no timer-driven requeue.
+                        // Apply fail-count/backoff first, then re-queue so
+                        // take_dial_candidates honors the new backoff window.
+                        // Go relies on rediscovery alone after PopMax; on Ubuntu
+                        // that drains the pool (220→<40) before trackers/DHT
+                        // refill. Cap 8 retries with exp backoff.
                         if !ok {
                             tor.dial_finished(peer.addr, false);
+                            if peer.source != PeerSource::WebSeed
+                                && tor.should_requeue_failed_dial(peer.addr)
+                            {
+                                tor.add_peers(vec![peer.clone()]);
+                            }
                         } else {
                             tor.swarm_diagnostics.lock().dial_ok += 1;
                             let transport = tor
@@ -978,7 +986,9 @@ impl ClientInner {
             cfg.disable_tcp = true;
         }
         // Go reducedDialTimeout(min, nominal, HalfOpenConnsPerTorrent, peers.Len()).
-        let pending = torrent.known_peers.read().len();
+        // Count only ready (non-backoff) reserve peers so a pool of cooling-down
+        // failures does not clamp every retry to MinDialTimeout.
+        let pending = torrent.dial_pending_ready();
         cfg.nominal_dial_timeout = crate::conn::reduced_dial_timeout(
             cfg.min_dial_timeout,
             cfg.nominal_dial_timeout,
