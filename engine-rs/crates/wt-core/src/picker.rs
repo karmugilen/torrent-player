@@ -158,3 +158,49 @@ pub fn compute_playback_pipeline_limit(
     n.max(tuning.min_pipeline.max(1) as usize)
         .max(PLAYBACK_PIPELINE_FLOOR)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tuning::{set_seek_tuning, SeekTuning};
+    use std::time::Duration;
+
+    #[test]
+    fn playback_pipeline_limit_matches_go_bdp_formula() {
+        set_seek_tuning(SeekTuning {
+            pipeline_rtt: 2.0,
+            min_pipeline: 0,
+            ..SeekTuning::default()
+        });
+        // No sample yet → uncapped (Go returns 0).
+        assert_eq!(
+            compute_playback_pipeline_limit(1_000_000.0, Duration::ZERO, true),
+            0
+        );
+        assert_eq!(
+            compute_playback_pipeline_limit(1_000_000.0, Duration::from_millis(100), false),
+            0
+        );
+        // rate=1 MiB/s, rtt=100ms, PipelineRTT=2 → BDP chunks ≈ 12 + max(MinPipeline, 2).
+        let n = compute_playback_pipeline_limit(
+            1_048_576.0,
+            Duration::from_millis(100),
+            true,
+        );
+        assert_eq!(n, 14);
+        set_seek_tuning(SeekTuning::default());
+    }
+
+    #[test]
+    fn playback_pipeline_limit_has_no_artificial_64_floor() {
+        set_seek_tuning(SeekTuning {
+            pipeline_rtt: 2.0,
+            ..SeekTuning::default()
+        });
+        let n = compute_playback_pipeline_limit(50_000.0, Duration::from_millis(50), true);
+        // Tiny BDP must stay near Go's +2 floor, not the old 64 request floor.
+        assert!(n < 64, "pipeline={n} must not force a 64-request floor");
+        assert!(n >= 2);
+        set_seek_tuning(SeekTuning::default());
+    }
+}
