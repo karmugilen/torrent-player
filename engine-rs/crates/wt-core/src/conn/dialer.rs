@@ -260,19 +260,26 @@ async fn dial_first_raw(
             Ok(stream) => {
                 if winner.is_none() {
                     winner = Some((stream, transport));
-                    // Wait briefly for the other transport so we can keep it
-                    // as a handshake spare instead of draining.
+                    // Wait for the other transport so we can keep it as a
+                    // handshake spare. Prefer TCP when both succeed: public
+                    // uTP piece throughput is still weak (107.175 on uTP often
+                    // stays at downloaded=0 while the same peer on TCP feeds
+                    // multi-MiB). 750ms covers slow TCP connects that lose the
+                    // race to a fast uTP SYN-ACK.
                     if pending > 0 {
-                        let wait = Duration::from_millis(200);
+                        let wait = if winner
+                            .as_ref()
+                            .is_some_and(|(_, t)| *t == Transport::Utp)
+                        {
+                            Duration::from_millis(750)
+                        } else {
+                            Duration::from_millis(250)
+                        };
                         match tokio::time::timeout(wait, rx.recv()).await {
                             Ok(Some((t2, Ok(s2)))) => {
                                 pending = pending.saturating_sub(1);
                                 drain_remaining_dials(rx, pending);
                                 let (w_stream, w_t) = winner.take().unwrap();
-                                // Prefer TCP when both land in the grace window —
-                                // uTP handshake works (BEP29) but public uTP piece
-                                // throughput is still weak vs TCP; keep uTP as spare
-                                // so handshake fallback / uTP-only peers still work.
                                 if w_t == Transport::Utp && t2 == Transport::Tcp {
                                     return Ok((s2, t2, Some((w_stream, w_t))));
                                 }
