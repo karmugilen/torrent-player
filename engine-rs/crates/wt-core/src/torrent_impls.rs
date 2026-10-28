@@ -212,12 +212,21 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn peer_closed(&self, addr: SocketAddr) {
+        let had_last_helpful = self
+            .conns
+            .read()
+            .get(&addr)
+            .is_some_and(|c| c.inner.read().last_useful_chunk_received.is_some());
         let old = self.conn_handles.write().remove(&addr);
         self.conns.write().remove(&addr);
         if let Some(handle) = old {
             let reason = handle
                 .close_reason()
                 .unwrap_or_else(|| "unspecified".into());
+            let useful_bytes = handle
+                .stats()
+                .bytes_read_useful_data
+                .load(Ordering::Relaxed);
             *self.swarm_diagnostics.lock().closes
                 .entry(crate::stats::failure_kind(&reason).into()).or_default() += 1;
             eprintln!(
@@ -227,7 +236,14 @@ impl PeerTorrent for TorrentInner {
                 handle.source(),
                 reason.chars().take(120).collect::<String>()
             );
-
+            // dial_ok cleared fail/backoff; unhelpful reset/decode/eof must
+            // restore dial scheduling penalty so DHT re-adds cannot burn slots.
+            self.maybe_penalize_unhelpful_close(
+                addr,
+                &reason,
+                useful_bytes,
+                had_last_helpful,
+            );
         }
         self.peer_pieces.write().remove(&peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);

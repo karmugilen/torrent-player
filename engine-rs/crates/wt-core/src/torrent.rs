@@ -772,6 +772,30 @@ impl TorrentInner {
         self.bump_change();
     }
 
+    /// Post-handshake close that never delivered useful data must count like a
+    /// dial failure for scheduling. `dial_finished(ok=true)` clears fail/backoff
+    /// after handshake; DHT rediscovery then re-`add_peers` and we immediately
+    /// redial the same dead contacts (Bunny: 44/69 dial_oks wasted on churn).
+    /// Go avoids this by not requeueing after PopMax + slower recirculation.
+    /// Only reset/decode/eof; helpful peers (useful bytes or LastHelpful) are
+    /// left alone so normal disconnects do not poison dial forever.
+    pub(crate) fn maybe_penalize_unhelpful_close(
+        &self,
+        addr: SocketAddr,
+        reason: &str,
+        useful_bytes: i64,
+        had_last_helpful: bool,
+    ) {
+        let kind = crate::stats::failure_kind(reason);
+        if !matches!(kind, "reset" | "decode" | "eof") {
+            return;
+        }
+        if useful_bytes > 0 || had_last_helpful {
+            return;
+        }
+        self.dial_finished(addr, false);
+    }
+
     /// Whether a failed dial should be re-queued for another attempt.
     pub(crate) fn should_requeue_failed_dial(&self, addr: SocketAddr) -> bool {
         self.dial_fail_counts
@@ -1578,6 +1602,214 @@ mod dial_parity_tests {
         assert!(again.iter().all(|p| {
             t.dial_fail_counts.lock().get(&p.addr).copied().unwrap_or(0) == 1
         }));
+    }
+
+    #[test]
+    fn unhelpful_reset_after_dial_ok_applies_backoff_and_defers_redial() {
+        // dial_ok clears fail/backoff; unhelpful post-HS RST must restore the
+        // dial_finished(false) penalty so DHT re-add cannot burn half-open slots
+        // (Bunny: 180.112.182.96:20081 dial_ok→RST×9 in 60s).
+        let t = torrent();
+        let addr: SocketAddr = "180.112.182.96:20081".parse().unwrap();
+        let peer = PeerInfo {
+            id: None,
+            addr,
+            source: PeerSource::DhtGetPeers,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        };
+        t.add_peers(vec![peer.clone()]);
+        assert_eq!(t.take_dial_candidates(1).len(), 1);
+        t.dial_finished(addr, true);
+        assert!(t.dial_fail_counts.lock().get(&addr).is_none());
+        assert!(t.dial_backoff.lock().get(&addr).is_none());
+
+        t.maybe_penalize_unhelpful_close(
+            addr,
+            "write error: Connection reset by peer (os error 104)",
+            0,
+            false,
+        );
+        assert_eq!(
+            t.dial_fail_counts.lock().get(&addr).copied().unwrap_or(0),
+            1,
+            "unhelpful reset must increment fail_count like dial_finished(false)"
+        );
+        assert!(
+            t.dial_backoff.lock().get(&addr).is_some_and(|until| *until > Instant::now()),
+            "unhelpful reset must arm exp backoff"
+        );
+
+        // DHT mid-run rediscovery re-adds; take_dial_candidates must still defer.
+        t.add_peers(vec![peer]);
+        assert_eq!(
+            t.take_dial_candidates(4).len(),
+            0,
+            "backoff after unhelpful close must defer immediate redial"
+        );
+        assert_eq!(t.dial_pending_ready(), 0);
+        assert!(t.should_requeue_failed_dial(addr));
+    }
+
+    #[test]
+    fn unhelpful_decode_eof_kinds_also_penalize_zero_byte_closes() {
+        let t = torrent();
+        let decode_addr: SocketAddr = "221.228.157.207:20041".parse().unwrap();
+        let eof_addr: SocketAddr = "198.51.100.9:6881".parse().unwrap();
+        t.dial_finished(decode_addr, true);
+        t.dial_finished(eof_addr, true);
+        t.maybe_penalize_unhelpful_close(
+            decode_addr,
+            "frame decode error: Connection reset by peer (os error 104)",
+            0,
+            false,
+        );
+        t.maybe_penalize_unhelpful_close(
+            eof_addr,
+            "connection closed by peer (EOF)",
+            0,
+            false,
+        );
+        assert_eq!(t.dial_fail_counts.lock().get(&decode_addr).copied(), Some(1));
+        assert_eq!(t.dial_fail_counts.lock().get(&eof_addr).copied(), Some(1));
+        assert!(t.dial_backoff.lock().contains_key(&decode_addr));
+        assert!(t.dial_backoff.lock().contains_key(&eof_addr));
+    }
+
+    #[test]
+    fn helpful_peer_close_does_not_poison_dial_forever() {
+        let t = torrent();
+        let addr: SocketAddr = "203.0.113.77:51413".parse().unwrap();
+        let peer = PeerInfo {
+            id: None,
+            addr,
+            source: PeerSource::Tracker,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        };
+        t.add_peers(vec![peer.clone()]);
+        let _ = t.take_dial_candidates(1);
+        t.dial_finished(addr, true);
+
+        // Useful bytes → never treat as dial failure, even on reset/eof.
+        t.maybe_penalize_unhelpful_close(
+            addr,
+            "write error: Connection reset by peer (os error 104)",
+            16_384,
+            true,
+        );
+        assert!(
+            t.dial_fail_counts.lock().get(&addr).is_none(),
+            "helpful peer must not gain fail_count"
+        );
+        assert!(
+            t.dial_backoff.lock().get(&addr).is_none(),
+            "helpful peer must not get dial backoff"
+        );
+
+        // LastHelpful alone (no bytes race) also protects.
+        t.maybe_penalize_unhelpful_close(
+            addr,
+            "connection closed by peer (EOF)",
+            0,
+            true,
+        );
+        assert!(t.dial_fail_counts.lock().get(&addr).is_none());
+
+        // Intentional choker drop must not use dial-fail path.
+        t.maybe_penalize_unhelpful_close(addr, "choked too long", 0, false);
+        assert!(t.dial_fail_counts.lock().get(&addr).is_none());
+
+        t.add_peers(vec![peer]);
+        assert_eq!(
+            t.take_dial_candidates(1).len(),
+            1,
+            "after helpful close, rediscovery must dial immediately"
+        );
+    }
+
+    #[test]
+    fn peer_closed_path_applies_unhelpful_backoff_via_conn_handle() {
+        use crate::peer_conn::PeerTorrent;
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::{mpsc, Notify};
+        use wt_types::Transport;
+
+        let t = torrent();
+        let addr: SocketAddr = "180.112.182.96:20027".parse().unwrap();
+        let peer = PeerInfo {
+            id: None,
+            addr,
+            source: PeerSource::DhtGetPeers,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        };
+        t.add_peers(vec![peer.clone()]);
+        let _ = t.take_dial_candidates(1);
+        t.dial_finished(addr, true);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stats = Arc::new(crate::stats::AtomicConnStats::default());
+        let handle = crate::conn::ConnHandle::new(
+            addr,
+            true,
+            Transport::Tcp,
+            false,
+            t.info_hash,
+            None,
+            PeerSource::DhtGetPeers,
+            [0u8; 8],
+            tx,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&stats),
+        );
+        handle.close("write error: Connection reset by peer (os error 104)");
+        t.conn_handles.write().insert(addr, handle);
+
+        PeerTorrent::peer_closed(&t, addr);
+
+        assert_eq!(t.dial_fail_counts.lock().get(&addr).copied(), Some(1));
+        assert!(t.dial_backoff.lock().contains_key(&addr));
+        t.add_peers(vec![peer]);
+        assert_eq!(
+            t.take_dial_candidates(2).len(),
+            0,
+            "peer_closed unhelpful reset must defer DHT redial"
+        );
+
+        // Helpful path: useful bytes protect against poisoning.
+        let addr2: SocketAddr = "203.0.113.88:6881".parse().unwrap();
+        t.dial_finished(addr2, true);
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let stats2 = Arc::new(crate::stats::AtomicConnStats::default());
+        stats2
+            .bytes_read_useful_data
+            .store(32_768, Ordering::Relaxed);
+        let handle2 = crate::conn::ConnHandle::new(
+            addr2,
+            true,
+            Transport::Tcp,
+            false,
+            t.info_hash,
+            None,
+            PeerSource::Tracker,
+            [0u8; 8],
+            tx2,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+            stats2,
+        );
+        handle2.close("connection closed by peer (EOF)");
+        t.conn_handles.write().insert(addr2, handle2);
+        PeerTorrent::peer_closed(&t, addr2);
+        assert!(
+            t.dial_fail_counts.lock().get(&addr2).is_none(),
+            "helpful peer_closed must not poison dial"
+        );
     }
 
     #[test]
