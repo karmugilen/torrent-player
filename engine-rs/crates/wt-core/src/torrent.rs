@@ -601,7 +601,7 @@ impl TorrentInner {
             // Remaining after this pop would be total-1-idx; Go checks
             // `wcs.Len() >= (max+1)/2` AFTER popping, i.e. remaining >= half.
             let remaining_after = total - 1 - idx;
-            if remaining_after >= (max + 1) / 2
+            if remaining_after >= max.div_ceil(2)
                 && c.completed_handshake.elapsed() > Duration::from_secs(60)
             {
                 return Some(c.addr);
