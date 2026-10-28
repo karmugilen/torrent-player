@@ -243,7 +243,20 @@ impl TorrentInner {
         {
             let mut known = self.known_peers.write();
             for peer in peers {
-                if known.insert(peer.clone()) {
+                // Go prioritizedPeers keys on trusted + BEP40 prio + addr hash,
+                // so the same addr+trust from tracker/DHT/PEX replaces rather
+                // than growing the pool (inflated pending → dial churn).
+                let replaced = known
+                    .iter()
+                    .find(|p| p.addr == peer.addr && p.trusted == peer.trusted)
+                    .cloned();
+                if let Some(old) = replaced {
+                    known.remove(&old);
+                    known.insert(peer.clone());
+                    if old != peer {
+                        added.push(peer);
+                    }
+                } else if known.insert(peer.clone()) {
                     added.push(peer);
                 }
             }
@@ -1140,6 +1153,11 @@ mod dial_parity_tests {
         t.add_peers(vec![peer.clone()]);
         peer.source = wt_types::PeerSource::Pex;
         t.add_peers(vec![peer.clone()]);
+        assert_eq!(
+            t.known_peers.read().len(),
+            1,
+            "Go prioritizedPeers replaces same addr+trust from another source"
+        );
         peer.addr = second;
         peer.trusted = false;
         t.add_peers(vec![peer]);
