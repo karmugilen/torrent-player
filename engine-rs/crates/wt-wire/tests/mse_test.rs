@@ -146,3 +146,20 @@ async fn test_receive_random_data_fails() {
     let res = receive_handshake(server, candidates, default_crypto_selector).await;
     assert!(res.is_err());
 }
+
+#[tokio::test]
+async fn encrypted_stream_keeps_cipher_position_on_partial_writes_and_pending() {
+    use bytes::Bytes;
+    use wt_wire::mse::{MseStream, Rc4};
+    let (sender, receiver) = duplex(7);
+    let key = b"backpressure regression";
+    let mut sender = MseStream::new(sender, None, Some(Rc4::new(key)), Bytes::new());
+    let mut receiver = MseStream::new(receiver, Some(Rc4::new(key)), None, Bytes::new());
+    let expected: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    let mut got = vec![0; expected.len()];
+    let (written, read) = tokio::join!(sender.write_all(&expected), receiver.read_exact(&mut got));
+    written.unwrap();
+    read.unwrap();
+    assert_eq!(got.iter().zip(&expected).position(|(a, b)| a != b), None,
+        "encrypted bytes changed after a short write or Pending");
+}

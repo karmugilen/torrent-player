@@ -228,10 +228,24 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for MseStream<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if let Some(ref mut enc) = self.encrypt {
+        if let Some(enc) = self.encrypt.as_ref() {
+            // AsyncWrite can accept a prefix or return Pending. Only commit
+            // keystream bytes the socket accepted, so retries and cancelled
+            // writes cannot desynchronize the remote decryptor.
+            let mut next = enc.clone();
             let mut encrypted = buf.to_vec();
-            enc.apply(&mut encrypted);
-            Pin::new(&mut self.stream).poll_write(cx, &encrypted)
+            next.apply(&mut encrypted);
+            match Pin::new(&mut self.stream).poll_write(cx, &encrypted) {
+                Poll::Ready(Ok(n)) => {
+                    if n == buf.len() {
+                        self.encrypt = Some(next);
+                    } else if let Some(enc) = self.encrypt.as_mut() {
+                        enc.apply(&mut encrypted[..n]);
+                    }
+                    Poll::Ready(Ok(n))
+                }
+                other => other,
+            }
         } else {
             Pin::new(&mut self.stream).poll_write(cx, buf)
         }
