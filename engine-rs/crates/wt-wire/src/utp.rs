@@ -5,7 +5,7 @@ use std::io::{self, Error, ErrorKind};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -279,6 +279,7 @@ fn encode_ack_packet(st: &StreamState, delay: u32, sack: Option<&[u8]>) -> Bytes
 /// A uTP Stream socket implementing `AsyncRead + AsyncWrite`.
 pub struct UtpStream {
     inner: Arc<UtpStreamInner>,
+    registry: Weak<StreamRegistry>,
     /// Keeps the owning `UtpSocket` alive for ephemeral dial sockets so the
     /// recv/send pumps are not left only on detached task Arcs.
     _socket: Option<Arc<UtpSocket>>,
@@ -295,10 +296,51 @@ impl UtpStream {
         self.inner.state.lock().remote_addr
     }
 
+    fn close_write(&self) {
+        let mut st = self.inner.state.lock();
+        if !st.write_closed && !st.is_reset {
+            st.write_closed = true;
+            let hdr = PacketHeader {
+                type_ver: (ST_FIN << 4) | UTP_VERSION,
+                extension: EXT_NONE,
+                connection_id: st.send_id,
+                timestamp_micros: wall_micros(),
+                timestamp_diff_micros: st.last_measured_delay,
+                wnd_size: DEFAULT_RECV_WND,
+                seq_nr: st.seq_nr,
+                ack_nr: st.ack_nr,
+            };
+            st.seq_nr = st.seq_nr.wrapping_add(1);
+            let mut pkt = BytesMut::with_capacity(HEADER_SIZE);
+            hdr.encode(&mut pkt);
+            let target = st.remote_addr;
+            let _ = self.inner.socket_tx.send((pkt.freeze(), target));
+        }
+    }
+
     /// Attach a strong ref to the parent socket (ephemeral outgoing dials).
     pub fn with_socket(mut self, socket: Arc<UtpSocket>) -> Self {
         self._socket = Some(socket);
         self
+    }
+}
+
+impl Drop for UtpStream {
+    fn drop(&mut self) {
+        self.close_write();
+        let key = {
+            let state = self.inner.state.lock();
+            (state.remote_addr, state._recv_id)
+        };
+        if let Some(registry) = self.registry.upgrade() {
+            let mut streams = registry.lock();
+            if streams
+                .get(&key)
+                .is_some_and(|inner| Arc::ptr_eq(inner, &self.inner))
+            {
+                streams.remove(&key);
+            }
+        }
     }
 }
 
@@ -506,31 +548,14 @@ impl AsyncWrite for UtpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut st = self.inner.state.lock();
-        if !st.write_closed {
-            st.write_closed = true;
-            let hdr = PacketHeader {
-                type_ver: (ST_FIN << 4) | UTP_VERSION,
-                extension: EXT_NONE,
-                connection_id: st.send_id,
-                timestamp_micros: wall_micros(),
-                timestamp_diff_micros: st.last_measured_delay,
-                wnd_size: DEFAULT_RECV_WND,
-                seq_nr: st.seq_nr,
-                ack_nr: st.ack_nr,
-            };
-            st.seq_nr = st.seq_nr.wrapping_add(1);
-            let mut pkt = BytesMut::with_capacity(HEADER_SIZE);
-            hdr.encode(&mut pkt);
-            let target = st.remote_addr;
-            let _ = self.inner.socket_tx.send((pkt.freeze(), target));
-        }
+        self.close_write();
 
         Poll::Ready(Ok(()))
     }
 }
 
-pub type StreamMap = Arc<Mutex<HashMap<(SocketAddr, u16), Arc<UtpStreamInner>>>>;
+type StreamRegistry = Mutex<HashMap<(SocketAddr, u16), Arc<UtpStreamInner>>>;
+pub type StreamMap = Arc<StreamRegistry>;
 pub type SynMap =
     Arc<Mutex<HashMap<(SocketAddr, u16), oneshot::Sender<io::Result<Arc<UtpStreamInner>>>>>>;
 
@@ -714,6 +739,7 @@ impl UtpSocket {
 
                     let stream = UtpStream {
                         inner,
+                        registry: Arc::downgrade(&streams_in),
                         _socket: None,
                     };
                     let _ = accept_tx.send(stream);
@@ -1044,6 +1070,7 @@ impl UtpSocket {
                 pending.armed = false;
                 Ok(UtpStream {
                     inner,
+                    registry: Arc::downgrade(&self.streams),
                     _socket: None,
                 })
             }

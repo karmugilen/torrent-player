@@ -1161,3 +1161,65 @@ async fn request_wake_is_coalesced_and_does_not_extend_read_deadline() {
     );
     writer.abort();
 }
+
+/// Go dials uTP from the listening socket, so peers see the advertised endpoint
+/// and the UDP mapping already used by discovery. A per-dial ephemeral socket
+/// discards that mapping, as well as multiplying socket/pump lifetimes.
+#[tokio::test]
+async fn test_utp_dial_reuses_listener_endpoint_and_transfers_data() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut cfg = test_config();
+    cfg.disable_tcp = true;
+    let ih = InfoHash([0x48; 20]);
+    let server = PeerListener::bind(&cfg).await.unwrap();
+    let client = PeerListener::bind(&cfg).await.unwrap();
+    let (accepted_tx, mut accepted_rx) = mpsc::channel(4);
+    server.spawn_accept_loop(
+        cfg.clone(),
+        [0x31; 20],
+        HalfOpenTracker::new(),
+        Arc::new(move || vec![ih.0]),
+        Arc::new(move |hash| *hash == ih),
+        accepted_tx,
+    );
+    let tracker = HalfOpenTracker::new();
+    let mut outgoing = dial_peer(DialParams {
+        remote_addr: format!("127.0.0.1:{}", server.listen_port())
+            .parse()
+            .unwrap(),
+        info_hash: ih,
+        our_peer_id: [0x32; 20],
+        transport: Some(Transport::Utp),
+        source: PeerSource::Direct,
+        metadata_size: None,
+        cfg: &cfg,
+        tracker: &tracker,
+        dial_limiter: None,
+        tcp_conn_hook: None,
+        utp_socket: client.utp_socket(),
+        require_plain: false,
+    })
+    .await
+    .unwrap();
+    let mut incoming = accepted_rx.recv().await.unwrap();
+    assert_eq!(
+        incoming.handle.remote_addr().port(),
+        client.listen_port(),
+        "outgoing uTP must use the listening endpoint, like Go"
+    );
+    let payload = vec![0x5a; 64 * 1024];
+    let mut received = vec![0; payload.len()];
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (sent, read) = tokio::join!(
+            outgoing.stream.write_all(&payload),
+            incoming.stream.read_exact(&mut received)
+        );
+        sent.unwrap();
+        read.unwrap();
+    })
+    .await
+    .unwrap();
+    assert_eq!(received, payload);
+    server.close();
+    client.close();
+}

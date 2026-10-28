@@ -596,3 +596,26 @@ async fn test_utp_unknown_reset_is_not_echoed() {
         "echoing an unknown RST creates a reset loop"
     );
 }
+
+#[tokio::test]
+async fn test_utp_dropped_stream_leaves_shared_socket_usable() {
+    let server = UtpSocket::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let client = UtpSocket::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let stream = client.connect(server.local_addr().unwrap()).await.unwrap();
+    let incoming = server.accept().await.unwrap();
+    assert_eq!(client.active_streams_count(), 1);
+    drop(stream);
+    assert_eq!(
+        client.active_streams_count(),
+        0,
+        "dropping a race loser must remove its stream registration"
+    );
+    let again = client.connect(server.local_addr().unwrap()).await.unwrap();
+    let accepted = server.accept().await.unwrap();
+    assert_eq!(client.active_streams_count(), 1);
+    drop((again, incoming, accepted));
+}

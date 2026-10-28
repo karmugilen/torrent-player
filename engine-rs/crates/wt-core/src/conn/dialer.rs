@@ -304,37 +304,24 @@ async fn dial_raw_owned(
             if disable_utp {
                 return Err(CoreError::Other("uTP transport disabled".to_string()));
             }
-            // Prefer a dedicated ephemeral uTP socket for outgoing dials.
-            // Sharing the listener socket with accept/DHT demux yielded 0
-            // public-swarm uTP peerconns (Go holds ~25% uTP on Ubuntu);
-            // force-uTP on the shared socket never completed handshake.
-            // Keep the listener socket as fallback when ephemeral bind fails.
-            // Pin the Arc on the stream so recv/send pumps stay rooted.
-            let (sock, keep_alive) = {
-                let bind_addr: SocketAddr = "0.0.0.0:0"
-                    .parse()
-                    .map_err(|e| CoreError::Other(format!("invalid addr: {e}")))?;
-                match UtpSocket::bind(bind_addr).await {
-                    Ok(s) => {
-                        let s = Arc::new(s);
-                        (s.clone(), Some(s))
-                    }
-                    Err(_) => {
-                        let s = utp_socket.ok_or_else(|| {
-                            CoreError::Other("no uTP socket for outgoing dial".into())
-                        })?;
-                        (Arc::clone(s), None)
-                    }
+            // Go dials from its listening uTP socket. Reuse that endpoint and
+            // its discovery/NAT mapping; create a private socket only for
+            // standalone dial_peer callers that have no listener.
+            let sock = match utp_socket {
+                Some(socket) => Arc::clone(socket),
+                None => {
+                    let bind_addr = if remote_addr.is_ipv4() {
+                        "0.0.0.0:0"
+                    } else {
+                        "[::]:0"
+                    };
+                    Arc::new(UtpSocket::bind(bind_addr.parse().unwrap()).await?)
                 }
             };
-
             let utp = wt_wire::transport::dial_utp(&sock, remote_addr, dial_timeout)
                 .await
-                .map_err(CoreError::Io)?;
-            let utp = match keep_alive {
-                Some(s) => utp.with_socket(s),
-                None => utp,
-            };
+                .map_err(CoreError::Io)?
+                .with_socket(sock);
             Ok(Box::new(utp))
         }
         other => Err(CoreError::Other(format!(
