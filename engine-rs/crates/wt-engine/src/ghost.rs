@@ -222,6 +222,17 @@ impl EngineServer {
                 server.ghost_pro_mode_tick(now);
                 server.peer_exploration_tick(now);
                 server.seed_tick();
+                // Go `dropChokersLoop`: free slots held by peers that keep us
+                // choked while we are interested (CHOKE_TIMEOUT = 5s).
+                if server.drop_chokers.load(Ordering::SeqCst) {
+                    let after = Duration::from_secs(5);
+                    for rec in server.records.read().values() {
+                        let rec = rec.read();
+                        if !rec.resting {
+                            let _ = rec.torrent.drop_chokers(after);
+                        }
+                    }
+                }
                 server.refresh_torrent_trackers();
                 let fingerprint = server.status_fingerprint();
                 if previous.is_some_and(|last| last != fingerprint) {

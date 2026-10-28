@@ -170,12 +170,20 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
                     return Ok(outcome);
                 }
             }
-            // 2) Other transports: plaintext then preferred.
+            // 2) Other transports: try both obfuscation modes (unique).
+            // When preferred=false, `[false, prefer]` was `[false, false]` and
+            // never attempted MSE — Ubuntu r47 then logged ~27 bt_hs fails on
+            // peers that require encryption.
+            let obfuscation_order = if prefer_obfuscated {
+                [true, false]
+            } else {
+                [false, true]
+            };
             for transport in candidate_transports(&params) {
                 if transport == winning_transport {
                     continue;
                 }
-                for obfuscated in [false, prefer_obfuscated] {
+                for obfuscated in obfuscation_order {
                     let Ok((raw, t)) = dial_raw_one(&params, transport, dial_timeout).await else {
                         continue;
                     };
