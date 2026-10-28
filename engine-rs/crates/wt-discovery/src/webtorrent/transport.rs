@@ -10,6 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -160,7 +162,16 @@ impl Transport {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media)
             .map_err(|e| WebTorrentError::Webrtc(e.to_string()))?;
+        // webrtc-srtp 0.14 advertises AES-256 but derives its 32-byte key
+        // using Aes128, panicking during DTLS setup even for data channels.
+        let mut settings = SettingEngine::default();
+        settings.set_srtp_protection_profiles(vec![
+            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+        ]);
         Ok(APIBuilder::new()
+            .with_setting_engine(settings)
             .with_media_engine(media)
             .with_interceptor_registry(registry)
             .build())

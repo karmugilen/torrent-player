@@ -171,3 +171,48 @@ async fn exchange_4mib() {
     assert!(got.iter().all(|&b| b == 0xAB));
     let _ = writer.await;
 }
+
+/// Public WebTorrent peers can prefer AES-256 SRTP even for data-only sessions.
+/// webrtc-srtp 0.14 derives that 32-byte key with Aes128 and panics.
+#[tokio::test]
+async fn peer_preferring_aes256_srtp_falls_back_without_panicking() {
+    use webrtc::api::setting_engine::SettingEngine;
+    use webrtc::dtls::extension::extension_use_srtp::SrtpProtectionProfile;
+
+    let mut settings = SettingEngine::default();
+    settings.set_srtp_protection_profiles(vec![
+        SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
+        SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+    ]);
+    wt_discovery::ensure_rustls_provider();
+    let api = APIBuilder::new().with_setting_engine(settings).build();
+    let remote = api.new_peer_connection(RTCConfiguration::default()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    remote.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            dc.on_message(Box::new(move |message| {
+                let tx = tx.clone();
+                Box::pin(async move { let _ = tx.send(message.data).await; })
+            }));
+        })
+    }));
+    let (mut local, offer) = Transport::create_offer(&[]).await.unwrap();
+    let offer = webrtc::peer_connection::sdp::session_description::RTCSessionDescription::offer(offer.sdp).unwrap();
+    remote.set_remote_description(offer).await.unwrap();
+    let answer = remote.create_answer(None).await.unwrap();
+    let mut gathering = remote.gathering_complete_promise().await;
+    remote.set_local_description(answer).await.unwrap();
+    let _ = gathering.recv().await;
+    let answer = remote.local_description().await.unwrap();
+    let connected = tokio::time::timeout(std::time::Duration::from_secs(10), local.accept_answer("answer", &answer.sdp)).await;
+    if let Ok(Ok(mut stream)) = connected {
+        stream.write_all(b"safe SRTP negotiation").await.unwrap();
+        let data = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(&data[..], b"safe SRTP negotiation");
+    } else {
+        remote.close().await.ok();
+        panic!("peer preferring AES-256 failed to negotiate a supported SRTP profile");
+    }
+    remote.close().await.unwrap();
+}
