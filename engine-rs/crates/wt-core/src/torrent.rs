@@ -3,6 +3,8 @@
 use bytes::Bytes;
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
+use std::sync::LazyLock;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -24,6 +26,11 @@ use crate::storage_adapter::verify_piece_hash;
 use crate::tuning::current_seek_tuning;
 use crate::wire::Message;
 use crate::{CoreError, PieceState, Result};
+
+// Go prioritizedPeers uses one random address-hash seed per process to
+// spread equal BEP 40 priorities across endpoints instead of clustering IPs.
+static PEER_ADDRESS_HASH: LazyLock<std::collections::hash_map::RandomState> =
+    LazyLock::new(std::collections::hash_map::RandomState::new);
 
 pub struct PieceEntry {
     pub index: PieceIndex,
@@ -411,11 +418,13 @@ impl TorrentInner {
             })
             .cloned()
             .collect();
-        eligible.sort_by(|a, b| {
-            b.trusted.cmp(&a.trusted)
-                .then_with(|| self.peer_priority(b.addr).cmp(&self.peer_priority(a.addr)))
-                .then_with(|| b.addr.cmp(&a.addr))
-        });
+        eligible.sort_by_cached_key(|p| std::cmp::Reverse((
+            p.trusted, self.peer_priority(p.addr), PEER_ADDRESS_HASH.hash_one(p.addr.to_string()),
+        )));
+        // The same endpoint can arrive from tracker, DHT and PEX. Go checks
+        // connectingToPeerAddr before starting each attempt; reserve it once.
+        let mut seen = HashSet::new();
+        eligible.retain(|p| seen.insert(p.addr));
         eligible.truncate(max);
         for p in &eligible {
             known.retain(|x| x.addr != p.addr);
@@ -1119,6 +1128,24 @@ mod dial_parity_tests {
             "192.0.2.1:6881".parse::<SocketAddr>().unwrap(), "192.0.2.2:6881".parse::<SocketAddr>().unwrap(),
         ]);
         assert_eq!(t.wants_conns(), 2, "Go wantAnyConns counts established peers only");
+    }
+
+    #[test]
+    fn one_address_from_multiple_sources_uses_only_one_dial_slot() {
+        let t = torrent();
+        let first: SocketAddr = "192.0.2.1:6881".parse().unwrap();
+        let second: SocketAddr = "192.0.2.2:6881".parse().unwrap();
+        let mut peer = PeerInfo { id: None, addr: first, source: wt_types::PeerSource::Direct,
+            supports_encryption: false, pex: Default::default(), trusted: true };
+        t.add_peers(vec![peer.clone()]);
+        peer.source = wt_types::PeerSource::Pex;
+        t.add_peers(vec![peer.clone()]);
+        peer.addr = second;
+        peer.trusted = false;
+        t.add_peers(vec![peer]);
+        let candidates = t.take_dial_candidates(2);
+        assert_eq!(candidates.iter().map(|p| p.addr).collect::<HashSet<_>>().len(), 2,
+            "duplicate discovery must not spend half-open slots on the same address");
     }
 
     #[test]
