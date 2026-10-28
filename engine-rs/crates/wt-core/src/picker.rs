@@ -140,7 +140,9 @@ pub fn compute_playback_pipeline_limit(
     // Floor keeps slow-start peers from collapsing to 2–3 outstanding
     // blocks (BDP with low rate × default 200ms RTT), which locked Ubuntu
     // ISO transfers well below Go on the same seeds.
-    const PLAYBACK_PIPELINE_FLOOR: usize = 32;
+    // 64 blocks ≈ 1 MiB outstanding — keeps TCP cwnd fed on public seeds
+    // where BDP at slow-start would otherwise sit at 2–3 blocks.
+    const PLAYBACK_PIPELINE_FLOOR: usize = 64;
     if tuning.pipeline_rtt > 0.0 {
         if rtt.is_zero() || download_rate <= 0.0 || !has_focus {
             return 0;

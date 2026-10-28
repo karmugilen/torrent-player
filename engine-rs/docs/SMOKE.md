@@ -193,6 +193,8 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
 | go-ubuntu-r18 | 14.0 | 16→32 | **10.55** | TCP 23 + uTP 9; 29/32 active; **452 MiB** |
 | go-ubuntu-r19 | 10.0 | 14→33 | **12.02** | TCP 23 + uTP 9; **31/32** active; **496 MiB** |
+| rust-ubuntu-r50 | 3.0 | 7→15 | 1.38 | TCP 12 + uTP 3; 6/15 active; 30 MiB; nodelay+floor64 |
+| rust-ubuntu-r49 | 4.5 | 5→18 | 1.46 | TCP 15 + uTP 3; 8/18 active; 34 MiB |
 | rust-ubuntu-r48 | 4.0 | 12→16 | **2.05** | TCP 10 + uTP 2; **11/12** active; **48 MiB**; drop_chokers wired |
 | rust-ubuntu-r47 | 4.0 | 5→18 | 1.88 | plaintext-first trial (bt_hs spike); 8/18 active; 40 MiB |
 | rust-sintel-r8 | 1.5 | 18→44 | **37.16** | peak above r7; end peers drained after burst |

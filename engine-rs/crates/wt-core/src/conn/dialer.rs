@@ -452,6 +452,9 @@ async fn dial_raw_owned(
                 .await
                 .map_err(|_| CoreError::Other("TCP connect timeout".to_string()))?
                 .map_err(CoreError::Io)?;
+            // Request/piece pipelining is latency-sensitive; Nagle delays
+            // small Request messages behind larger writes.
+            let _ = tcp.set_nodelay(true);
 
             if let Some(hook) = tcp_conn_hook {
                 Ok(hook(tcp))

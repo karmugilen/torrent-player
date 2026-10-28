@@ -146,6 +146,7 @@ impl PeerListener {
                         Ok(res) => res,
                         Err(_) => break,
                     };
+                    let _ = stream.set_nodelay(true);
 
                     let guard = match c_tr.acquire_global(c_cfg.total_half_open_conns) {
                         Some(g) => g,

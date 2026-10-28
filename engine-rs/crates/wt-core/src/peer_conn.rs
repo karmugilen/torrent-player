@@ -1196,7 +1196,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         // left qBittorrent peers at tens of KiB. Preserve capacity on choked
         // / empty top-ups; floor so slow-start never falls below a useful
         // pipeline (pairs with PLAYBACK_PIPELINE_FLOOR).
-        const PEAK_REQUESTS_FLOOR: usize = 32;
+        const PEAK_REQUESTS_FLOOR: usize = 64;
         let peak = if self.state.peer_choking && added == 0 {
             self.state.peak_requests
         } else if added == 0 && !was_empty {
