@@ -35,7 +35,8 @@ impl LocalSwarmPeer {
         let (configure_req, data_file) = if seed {
             let (code, response) = engine.dispatch(
                 "POST", "/settings",
-                &json!({"seedingEnabled": true, "seedingAllowed": true}).to_string(),
+                // This fixture must seed across repeated reads and duplicate requests.
+                &json!({"seedingEnabled": true, "seedingAllowed": true, "seedRatioMilli": 10000}).to_string(),
             );
             assert_eq!(code, 200, "seed settings: {}", String::from_utf8_lossy(&response));
             let file_path = engine.download_dir.join("seed_payload.dat");
@@ -128,6 +129,7 @@ fn build_40mib_swarm_fixture() -> (Vec<u8>, String) {
     use sha1::{Digest, Sha1};
     let info = wt_types::Info {
         name: "movie.mp4".into(),
+        private: Some(true),
         piece_length: piece_len,
         pieces: data
             .chunks(piece_len as usize)
