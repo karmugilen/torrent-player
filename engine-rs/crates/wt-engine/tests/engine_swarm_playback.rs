@@ -22,6 +22,9 @@ struct LocalSwarmPeer {
 impl LocalSwarmPeer {
     fn new(torrent_b64: &str, data: &[u8], seed: bool, stream_cache_bytes: usize) -> Self {
         let engine = TestEngine::new();
+        // The policy sampler applies the global RAM setting to stream storage.
+        // Set it as well as configure's cache so this actually crosses the RAM bound.
+        engine.post_settings(&json!({"ramCacheBytes": stream_cache_bytes}).to_string());
 
         let (code, raw) = engine.dispatch(
             "POST",
