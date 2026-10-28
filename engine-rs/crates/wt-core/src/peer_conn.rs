@@ -1614,7 +1614,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
             if let Some(reqq) = ext.reqq {
                 if reqq > 0 {
-                    self.state.max_requests = (reqq as usize).clamp(1, DEFAULT_PEER_MAX_REQUESTS);
+                    self.state.max_requests = (reqq as usize).clamp(1, MAX_LOCAL_TO_REMOTE_REQUESTS);
                 }
             }
             if let Some(port) = ext.p {

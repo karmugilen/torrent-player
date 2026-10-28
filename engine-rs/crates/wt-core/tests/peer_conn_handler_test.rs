@@ -668,3 +668,15 @@ fn peer_conn_info_snapshot() {
     assert!(info.peer_choking);
     assert!(info.am_choking);
 }
+
+#[test]
+fn ltep_reqq_preserves_advertised_capacity_above_250() {
+    for (advertised, expected) in [(0, 250), (500, 500), (1024, 1024), (u32::MAX, ((1 << 20) - (1 << 19) - 5) / 17)] {
+        let tor = FakeTorrent::new();
+        let (handle, _rx) = make_handle("127.0.0.1:4999".parse().unwrap());
+        let mut peer = PeerConnHandler::new(tor, &handle);
+        let ext = ExtendedHandshake { reqq: Some(advertised), ..Default::default() };
+        peer.on_message(&handle, Message::Extended { id: 0, payload: ext.encode() }).unwrap();
+        assert_eq!(peer.peer_conn_info().peer_max_requests, expected as usize, "reqq={advertised}");
+    }
+}
