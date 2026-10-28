@@ -243,21 +243,26 @@ impl TorrentInner {
         {
             let mut known = self.known_peers.write();
             for peer in peers {
-                // Go prioritizedPeers keys on trusted + BEP40 prio + addr hash,
-                // so the same addr+trust from tracker/DHT/PEX replaces rather
-                // than growing the pool (inflated pending → dial churn).
-                let replaced = known
+                // Go prioritizedPeers ReplaceOrInsert keys on (trusted, prio, addrHash):
+                // same address + same trust replaces in place so a later PEX sighting
+                // updates Source and pex_dialed can fire when the dialer pops it.
+                let prior = known
                     .iter()
                     .find(|p| p.addr == peer.addr && p.trusted == peer.trusted)
                     .cloned();
-                if let Some(old) = replaced {
-                    known.remove(&old);
-                    known.insert(peer.clone());
-                    if old != peer {
-                        added.push(peer);
+                match prior {
+                    Some(old) => {
+                        known.remove(&old);
+                        known.insert(peer.clone());
+                        if old != peer {
+                            added.push(peer);
+                        }
                     }
-                } else if known.insert(peer.clone()) {
-                    added.push(peer);
+                    None => {
+                        if known.insert(peer.clone()) {
+                            added.push(peer);
+                        }
+                    }
                 }
             }
             // Go DeleteMin while over high water: drop untrusted first.
