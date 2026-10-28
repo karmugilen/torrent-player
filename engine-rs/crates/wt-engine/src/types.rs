@@ -417,6 +417,18 @@ pub struct PeerConnectionView {
     pub uploaded: i64,
     #[serde(skip_serializing_if = "empty_string")]
     pub country: Option<String>,
+    /// Remote is choking us (swarm diagnostics; ignored by older clients).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_choking: Option<bool>,
+    /// We sent Interested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub am_interested: Option<bool>,
+    /// Outstanding block requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_requests: Option<usize>,
+    /// Estimated peer completion 0.0–1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_completion: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

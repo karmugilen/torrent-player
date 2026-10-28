@@ -391,9 +391,9 @@ impl PeerConn {
                 peer_allowed_fast: HashSet::new(),
                 peer_extension_bits: [0u8; 8],
                 max_requests: DEFAULT_PEER_MAX_REQUESTS,
-                // Ramp like HEAD (16); Go starts at 0 but our WholeQueue+wake path needs a floor.
-                // Start closer to a full pipeline so public seeds are not
-                // warmed up with only a handful of blocks (Ubuntu gap vs Go).
+                // Start at a full pipeline floor. Go ramps from 0; our wake
+                // path needs a floor or public seeds stay at tens of KiB
+                // (r44–r48). Flooding is capped in nominal_max / refill.
                 peak_requests: 64,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
@@ -663,9 +663,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 peer_allowed_fast: HashSet::new(),
                 peer_extension_bits: handle.peer_extension_bits(),
                 max_requests: DEFAULT_PEER_MAX_REQUESTS,
-                // Ramp like HEAD (16); Go starts at 0 but our WholeQueue+wake path needs a floor.
-                // Start closer to a full pipeline so public seeds are not
-                // warmed up with only a handful of blocks (Ubuntu gap vs Go).
+                // Start at a full pipeline floor. Go ramps from 0; our wake
+                // path needs a floor or public seeds stay at tens of KiB
+                // (r44–r48). Flooding is capped in nominal_max / refill.
                 peak_requests: 64,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
@@ -1191,12 +1191,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             added,
             was_empty,
         ) as usize;
-        // WholeQueue would set peak=0 when a 100ms wake runs while choked
-        // (no requests can be added). That collapsed nominal_max to 2 and
-        // left qBittorrent peers at tens of KiB. Preserve capacity on choked
-        // / empty top-ups; floor so slow-start never falls below a useful
-        // pipeline (pairs with PLAYBACK_PIPELINE_FLOOR).
+        // WholeQueue would set peak=0 when a 100ms wake runs while choked.
+        // Preserve capacity on choked/empty top-ups; floor so slow-start
+        // never falls below a useful pipeline. Cap growth so WholeQueue
+        // cannot walk peak to LTEP reqq (250) after a stall.
         const PEAK_REQUESTS_FLOOR: usize = 64;
+        const PEAK_REQUESTS_CEILING: usize = 128;
         let peak = if self.state.peer_choking && added == 0 {
             self.state.peak_requests
         } else if added == 0 && !was_empty {
@@ -1207,19 +1207,27 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.peak_requests = peak
             .max(PEAK_REQUESTS_FLOOR)
             .max(1)
+            .min(PEAK_REQUESTS_CEILING)
             .min(self.state.max_requests.max(1));
         let _ = before;
     }
 
     fn nominal_max(&self) -> usize {
-        let tuning = self.torrent.seek_tuning();
+        // Go `nominalMaxRequests`: min(PeerMaxRequests, peak*2), then min with
+        // playback pipeline when set. Always honor LTEP reqq. Hard ceiling
+        // stops WholeQueue+stall from opening 200+ outstanding.
+        const NOMINAL_CEILING: usize = 128;
         let base = (self.state.peak_requests.max(1) * 2).max(1);
         let pipe = self.state.webtor_pipeline_limit;
-        if pipe > 0 && self.torrent.request_focus_index().is_some() {
-            return base.min(pipe).max(1);
-        }
-        let _ = tuning;
-        base.min(self.state.max_requests).max(1)
+        let capped = if pipe > 0 && self.torrent.request_focus_index().is_some() {
+            base.min(pipe)
+        } else {
+            base
+        };
+        capped
+            .min(NOMINAL_CEILING)
+            .min(self.state.max_requests.max(1))
+            .max(1)
     }
 
     /// Apply HOL rescue / hedge moves that involve this peer (Go nudge path).

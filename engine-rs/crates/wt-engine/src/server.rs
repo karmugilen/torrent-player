@@ -1502,6 +1502,10 @@ impl EngineServer {
                     downloaded: peer.conn_stats.bytes_read_data,
                     uploaded: peer.conn_stats.bytes_written_data,
                     country,
+                    peer_choking: Some(peer.peer_choking),
+                    am_interested: Some(peer.am_interested),
+                    pending_requests: Some(peer.pending_requests),
+                    peer_completion: Some(peer.peer_completion),
                 });
             }
         }

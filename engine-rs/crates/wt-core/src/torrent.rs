@@ -832,10 +832,17 @@ impl TorrentInner {
             c_inner.rtt.estimate,
             self.request_focus.load(Ordering::Relaxed) > 0,
         );
+        // Match Go `nominalMaxRequests`: peak*2 and LTEP reqq, with pipeline
+        // as an extra cap. Never use bare max_requests (250) — that flooded
+        // seeds with 100–228 outstanding and left downloaded=0.
+        const NOMINAL_CEILING: usize = 128;
+        let peak_cap = (c_inner.peak_requests.max(1).saturating_mul(2))
+            .max(1)
+            .min(NOMINAL_CEILING);
         let max_reqs = if pipeline_limit > 0 {
-            pipeline_limit
+            pipeline_limit.min(peak_cap).min(c_inner.max_requests.max(1))
         } else {
-            c_inner.max_requests
+            peak_cap.min(c_inner.max_requests.max(1))
         };
 
         if c_inner.outstanding_requests.len() >= max_reqs {

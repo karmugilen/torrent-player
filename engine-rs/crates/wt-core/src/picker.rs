@@ -138,10 +138,9 @@ pub fn compute_playback_pipeline_limit(
 ) -> usize {
     let tuning = current_seek_tuning();
     // Floor keeps slow-start peers from collapsing to 2–3 outstanding
-    // blocks (BDP with low rate × default 200ms RTT), which locked Ubuntu
-    // ISO transfers well below Go on the same seeds.
-    // 64 blocks ≈ 1 MiB outstanding — keeps TCP cwnd fed on public seeds
-    // where BDP at slow-start would otherwise sit at 2–3 blocks.
+    // blocks (BDP with low rate × default 200ms RTT). 64 ≈ 1 MiB outstanding
+    // — matched best Ubuntu runs (r48). Growth beyond this is capped in
+    // nominal_max / peak ceiling so WholeQueue cannot walk to reqq=250.
     const PLAYBACK_PIPELINE_FLOOR: usize = 64;
     if tuning.pipeline_rtt > 0.0 {
         if rtt.is_zero() || download_rate <= 0.0 || !has_focus {

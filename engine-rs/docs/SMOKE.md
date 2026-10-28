@@ -181,10 +181,15 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 - **MSE fallback:** other-transport retries always try both obfuscation modes (preferred=false no longer skips MSE)
 - **SeekTuning wire:** EngineServer now `set_seek_tuning` on new()+settings (Go `baseSeekTuning`); hedge/slowPeerYield/learnedArrival were AtomicBool-only and never reached wt-core
 - **Sticky Interested:** do not send NotInterested while incomplete and peer still has pieces we lack (qBittorrent punishment)
-- **Peak floor:** preserve `peak_requests` while choked; floor at 32 so WholeQueue wakes cannot collapse nominal_max to 2
+- **Peak floor:** preserve `peak_requests` while choked; floor at 64 so WholeQueue wakes cannot collapse nominal_max to 2; ceiling 128 so stall cannot walk peak to LTEP reqq 250
 - **MSE preferred fast-fail:** 2s on preferred obfuscation then plaintext/other-transport fallback (was burning 5s × MSE fails)
 - **Half-open:** dial path raises torrent/global half-open to at least 64/128 (engine config may still say 24/48) so timeout-heavy Ubuntu can keep more dials in flight
 - **uTP BEP 29 (wt-wire):** fixed swapped send/recv connection_ids; SYN-ACK `ack_nr = seq-1` (libtorrent ignores DATA with `ack_nr > seq-1`); wall-clock timestamps; ACK every DATA; retransmit while blocked on read. Public qBittorrent HS ok; `WT_FORCE_UTP` now holds 15–16 uTP peers (was 0 dial_ok)
+- **drop_chokers gate:** only drop when dial-pool waiting > 2× free established slots (Go WebtorDropChokers); was killing 107.175 while maxPeers still free
+- **TCP prefer:** 750ms grace when uTP wins dial race so TCP can still take the conn (uTP piece path often stays at downloaded=0)
+- **Client workers:** scale wt-client tokio workers to 8–16 from available_parallelism (fixed 4 starved dials under stream; dial_ok ~19 vs ~60 idle)
+- **Request refill cap:** `refill_peer_requests` uses peak×2/pipeline, never bare max_requests=250 (was flooding pending=100–228 with downloaded=0)
+- **/connections diagnostics:** optional peerChoking / amInterested / pendingRequests / peerCompletion for swarm probes
 
 ### Numbers (latest same-machine runs after uTP BEP29 fix)
 
@@ -194,11 +199,16 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
 | go-ubuntu-r18 | 14.0 | 16→32 | **10.55** | TCP 23 + uTP 9; 29/32 active; **452 MiB** |
 | go-ubuntu-r19 | 10.0 | 14→33 | **12.02** | TCP 23 + uTP 9; **31/32** active; **496 MiB** |
+| rust-ubuntu-r59 | 5.0 | 8→20 | 1.23 | TCP 17 + uTP 3; **13/20** active; 12 MiB; drop_chokers gate+req cap; 107.175 2.9 MiB pending~65; mid-run decay |
+| rust-ubuntu-r56 | 9.5 | 13→21 | 1.30 | TCP 16 + uTP 3; **13/19** active; 34 MiB; workers+TCP prefer |
+| rust-ubuntu-r53 | 3.5 | 8→19 | 1.40 | TCP 15 + uTP 4; 9/19 active; 23 MiB; drop_chokers gate keeps 107.175 |
 | rust-ubuntu-r51 | 3.0 | 9→19 | 1.59 | TCP 18; 10/18 active; 40 MiB; mid-file responsive; 107.175 4.1 MiB |
 | rust-ubuntu-r50 | 3.0 | 7→15 | 1.38 | TCP 12 + uTP 3; 6/15 active; 30 MiB; nodelay+floor64 |
 | rust-ubuntu-r49 | 4.5 | 5→18 | 1.46 | TCP 15 + uTP 3; 8/18 active; 34 MiB |
 | rust-ubuntu-r48 | 4.0 | 12→16 | **2.05** | TCP 10 + uTP 2; **11/12** active; **48 MiB**; drop_chokers wired |
 | rust-ubuntu-r47 | 4.0 | 5→18 | 1.88 | plaintext-first trial (bt_hs spike); 8/18 active; 40 MiB |
+| rust-sintel-r11 | 1.5 | 14→34 | **22.14** | TCP 27 + uTP 5; 22/32 active; 392 MiB |
+| rust-sintel-r10 | 1.5 | 10→32 | 20.70 | TCP 24 + uTP 7; 22/31 active; 366 MiB |
 | rust-sintel-r8 | 1.5 | 18→44 | **37.16** | peak above r7; end peers drained after burst |
 | rust-ubuntu-r46 | 3.5 | 8→15 | **1.78** | TCP 12 + uTP 3; **13/15** active; **45 MiB**; SeekTuning wired |
 | rust-ubuntu-r45 | 4.5 | 9→19 | 0.96 | TCP 17 + uTP 2; 12/19 active; 24 MiB; MSE fast-fail |
@@ -210,5 +220,5 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | rust-sintel-r7 | 1.5 | **21→39** | **34.8** | TCP 32 + **uTP 5**; **30/37** active; **855 MiB** |
 | rust-sintel-r6 | 2.5 | 13→24 | 10.53 | TCP 20 + uTP 3; 17/23 active; 164 MiB |
 
-**Status:** Best Ubuntu **r48: 2.05 MiB/s / 48 MiB / 11/12 active**; r51 with mid-file responsive: 1.59 / 40 MiB / 107.175 **4.1 MiB** (was ~49 KiB). Sintel-r8 peak 37. Gap vs Go r19 (**12 MiB/s / 496 MiB / 31/32**) remains ~6× — dial_ok~15–20 vs ~32 peers and per-peer still short. Not Ubuntu speed parity yet.
+**Status:** Best Ubuntu still **r48: 2.05 MiB/s / 48 MiB / 11/12 active**. After drop_chokers gate + request-cap: peers hold ~19–22 (was ~11 when chokers killed 107.175) and 13/20 active, but peak ~1.3 and mid-run decay leaves ~12–34 MiB/60s. Sintel-r8/r11 healthy (22–37 MiB/s). Gap vs Go r19 (**12 MiB/s / 496 MiB / 31/32**) remains — next: mid-file stall after startup head + per-peer fill. Not Ubuntu speed parity yet.
 
