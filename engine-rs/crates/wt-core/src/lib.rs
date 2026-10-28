@@ -868,57 +868,70 @@ impl Torrent {
         (total, unchoked)
     }
 
+    /// Go `WebtorDropChokers`: drop peers that keep us choked while interested,
+    /// but only when the dial pool is backed up relative to free slots
+    /// (`waiting > 2 * free`). Without that gate we killed good seeds (e.g.
+    /// 107.175.93.162) while plenty of established slots were still free.
     pub fn drop_chokers(&self, after: Duration) -> usize {
-        let snapshots = self.inner.peer_snapshots.read();
-        let since = self.inner.choked_since.read();
-        let selected: Vec<_> = snapshots
-            .values()
-            .filter(|p| {
-                p.peer_choking
-                    && p.am_interested
-                    && since
-                        .get(&p.remote_addr)
-                        .is_some_and(|t| t.elapsed() >= after)
-            })
-            .take(2)
-            .map(|p| p.remote_addr)
-            .collect();
-        drop(since);
-        drop(snapshots);
-        if !selected.is_empty() {
-            let handles = self.inner.conn_handles.read();
-            for addr in &selected {
-                if let Some(handle) = handles.get(addr) {
-                    handle.close("choked too long");
+        if self.inner.closed.load(Ordering::Relaxed)
+            || self
+                .inner
+                .data_download_disallowed
+                .load(Ordering::Relaxed)
+        {
+            return 0;
+        }
+        let waiting = self.inner.known_peers.read().len();
+        let established = self.inner.conn_handles.read().len();
+        let max_est = self.inner.max_established_conns.load(Ordering::Relaxed);
+        let free = max_est.saturating_sub(established);
+        // Go: `if t.peers.Len() <= 2*max(t.maxEstablishedConns-len(t.conns), 0)`
+        if waiting <= 2 * free {
+            return 0;
+        }
+
+        let mut to_drop = Vec::new();
+        {
+            let conns = self.inner.conns.read();
+            for (&addr, c) in conns.iter() {
+                if to_drop.len() == 2 {
+                    break;
+                }
+                let inner = c.inner.read();
+                if !inner.peer_choking || !inner.am_interested {
+                    continue;
+                }
+                // Go: since = max(webtorChokedSince, lastBecameInterested)
+                let mut since = inner.webtor_choked_since;
+                if let Some(li) = inner.last_became_interested {
+                    since = Some(match since {
+                        Some(s) if li > s => li,
+                        Some(s) => s,
+                        None => li,
+                    });
+                }
+                if since.is_some_and(|s| s.elapsed() >= after) {
+                    to_drop.push(addr);
                 }
             }
+        }
+        if to_drop.is_empty() {
+            return 0;
+        }
+        let handles = self.inner.conn_handles.read();
+        let mut dropped = 0usize;
+        for addr in &to_drop {
+            if let Some(handle) = handles.get(addr) {
+                handle.close("choked too long");
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
             self.inner
                 .chokers_dropped
-                .fetch_add(selected.len() as i64, Ordering::Relaxed);
-            return selected.len();
+                .fetch_add(dropped as i64, Ordering::Relaxed);
         }
-        let mut conns = self.inner.conns.write();
-        let mut to_drop = Vec::new();
-        for (&addr, c) in conns.iter() {
-            let inner = c.inner.read();
-            if inner.peer_choking && inner.am_interested {
-                if let Some(choked_at) = inner.webtor_choked_since {
-                    if choked_at.elapsed() >= after {
-                        to_drop.push(addr);
-                        if to_drop.len() == 2 {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        for addr in &to_drop {
-            if let Some(c) = conns.remove(addr) {
-                c.close();
-                self.inner.chokers_dropped.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        to_drop.len()
+        dropped
     }
 
     pub fn chokers_dropped(&self) -> i64 {
