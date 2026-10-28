@@ -49,6 +49,7 @@ struct FakeTorrent {
     bumps: AtomicU32,
     info_hash: [u8; 20],
     focused: AtomicBool,
+    urgent: AtomicBool,
 }
 
 impl FakeTorrent {
@@ -72,6 +73,7 @@ impl FakeTorrent {
             bumps: AtomicU32::new(0),
             info_hash: [7u8; 20],
             focused: AtomicBool::new(true),
+            urgent: AtomicBool::new(true),
         })
     }
 }
@@ -120,7 +122,7 @@ impl PeerTorrent for FakeTorrent {
         self.complete.lock().contains(&piece)
     }
     fn piece_priority(&self, _piece: u32) -> PiecePriority {
-        PiecePriority::Now
+        if self.urgent.load(Ordering::Relaxed) { PiecePriority::Now } else { PiecePriority::Normal }
     }
     fn chunk_dirty(&self, req: RequestIndex) -> bool {
         self.dirty.lock().contains(&req)
@@ -761,4 +763,47 @@ fn normal_download_refills_after_draining_the_queue() {
     peer.on_wake(&handle);
     assert!(!drain(&mut rx).iter().any(|m| matches!(m, Message::Request { .. })),
         "normal downloads must not rebuild and top up a busy queue after every block");
+}
+
+#[test]
+fn stolen_request_is_cancelled_on_the_previous_peer_without_erasing_new_owner() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4995".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    let (index, begin) = drain(&mut rx).into_iter().find_map(|m| match m {
+        Message::Request { index, begin, .. } => Some((index, begin)), _ => None,
+    }).unwrap();
+    let request = index * 2 + begin / CHUNK;
+    let new_owner = tor.peer_key("127.0.0.1:4994".parse().unwrap());
+    tor.assign_request(request, new_owner, Instant::now());
+    peer.on_wake(&handle);
+    assert!(drain(&mut rx).iter().any(|m| matches!(m,
+        Message::Cancel { index: i, begin: b, .. } if *i == index && *b == begin)),
+        "a stolen request must leave the previous peer's pipeline");
+    assert_eq!(tor.requesting_peer(request), Some(new_owner));
+    assert_eq!(peer.peer_conn_info().cancelled, 1);
+    peer.on_message(&handle, Message::Reject { index, begin, length: CHUNK }).unwrap();
+    assert_eq!(tor.requesting_peer(request), Some(new_owner));
+}
+
+#[test]
+fn refocus_reaches_the_live_handler_and_cancels_old_nonurgent_requests() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4993".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    let (index, begin) = drain(&mut rx).into_iter().find_map(|m| match m {
+        Message::Request { index, begin, .. } => Some((index, begin)), _ => None,
+    }).unwrap();
+    tor.urgent.store(false, Ordering::Relaxed);
+    handle.request_refocus();
+    peer.on_wake(&handle);
+    assert!(drain(&mut rx).iter().any(|m| matches!(m,
+        Message::Cancel { index: i, begin: b, .. } if *i == index && *b == begin)));
+    peer.on_wake(&handle);
+    assert!(!drain(&mut rx).iter().any(|m| matches!(m, Message::Cancel { .. })),
+        "a consumed refocus must not cancel the replacement queue again");
 }

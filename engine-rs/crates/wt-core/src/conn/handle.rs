@@ -51,6 +51,7 @@ pub struct ConnHandleInner {
     pub write_tx: mpsc::UnboundedSender<Message>,
     pub write_waker: Arc<Notify>,
     pub read_waker: Notify,
+    refocus_requested: AtomicBool,
 }
 
 impl ConnHandle {
@@ -87,6 +88,7 @@ impl ConnHandle {
                 write_tx,
                 write_waker,
                 read_waker: Notify::new(),
+                refocus_requested: AtomicBool::new(false),
             }),
         }
     }
@@ -119,6 +121,19 @@ impl ConnHandle {
     /// Explicitly wake the connection writer to flush queued messages.
     pub fn flush(&self) {
         self.inner.write_waker.notify_waiters();
+    }
+
+    pub fn request_refocus(&self) {
+        self.inner.refocus_requested.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    pub(crate) fn refocus_pending(&self) -> bool {
+        self.inner.refocus_requested.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn take_refocus(&self) -> bool {
+        self.inner.refocus_requested.swap(false, Ordering::Relaxed)
     }
 
     /// Coalesce request-update notifications until the reader handles them.

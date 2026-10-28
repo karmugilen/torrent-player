@@ -764,7 +764,7 @@ impl ClientInner {
                             // races must not permanently discard reachable peers.
                             if msg.contains("half-open limit exceeded") {
                                 tor.add_peers(vec![peer.clone()]);
-                                tor.dial_finished(peer.addr, true); // clear backoff
+                                tor.dial_finished(peer.addr, true);
                                 return;
                             }
                             *tor.swarm_diagnostics.lock().dial_failures
@@ -792,11 +792,8 @@ impl ClientInner {
                                 msg.chars().take(160).collect::<String>()
                             );
                         }
-                        // Apply backoff / fail-count first, then re-queue so
-                        // take_dial_candidates honors the new backoff window.
-                        // DHT+tracker contacts are retried with exponential
-                        // backoff (cap 8 attempts) instead of waiting minutes
-                        // for rediscovery — needed while dial success << Go.
+                        // Go pops attempts from the pool. Rediscovery can add
+                        // them again; failed/closed peers have no timer-driven requeue.
                         if !ok {
                             tor.dial_finished(peer.addr, false);
                         } else {

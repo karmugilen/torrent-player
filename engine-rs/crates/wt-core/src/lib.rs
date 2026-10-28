@@ -853,6 +853,9 @@ impl Torrent {
     }
 
     pub fn refocus_requests(&self) {
+        for handle in self.inner.conn_handles.read().values() {
+            handle.request_refocus();
+        }
         self.inner.wake_all_connections();
         let conns = self.inner.conns.read();
         for c in conns.values() {

@@ -896,6 +896,24 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let _ = handle.send_message(msg);
     }
 
+    /// Cancel the local request without erasing an assignment stolen by another peer.
+    fn cancel_outstanding(&mut self, handle: &ConnHandle, req: RequestIndex) {
+        if !self.state.outstanding_requests.remove(&req) { return; }
+        let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
+        self.send(handle, Message::Cancel { index: coord.piece, begin: coord.offset, length: coord.length.max(1) });
+        let bits = PeerExtensionBits(self.state.peer_extension_bits);
+        let rejects_cancels = bits.supports_fast() && self.state.peer_id.is_none_or(|id|
+            !id.starts_with(b"-TR") || id[7] != b'-' || id[3] >= b'4');
+        if rejects_cancels { self.state.cancelled_requests.insert(req); }
+        let owner = self.torrent.requesting_peer(req);
+        if owner == Some(self.key()) {
+            self.torrent.clear_assignment(req);
+        }
+        if (owner.is_none() || owner == Some(self.key())) && self.torrent.hedge_peer(req).is_none() {
+            self.torrent.clear_chunk_requested(req);
+        }
+    }
+
     /// Drop outstanding requests that have waited too long so the pipeline can refill.
     fn expire_stale_requests(&mut self, handle: &ConnHandle) {
         let now = Instant::now();
@@ -948,6 +966,16 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return;
         }
         self.state.need_request_update = false;
+        // Go cancels the previous owner synchronously when stealing. Our peer
+        // handlers own their queues, so reconcile that ownership on their wake.
+        let refocus = handle.take_refocus();
+        let displaced: Vec<_> = self.state.outstanding_requests.iter().copied().filter(|&req| {
+            let owner_changed = self.torrent.requesting_peer(req) != Some(self.key())
+                && self.torrent.hedge_peer(req) != Some(self.key());
+            let piece = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length()).piece;
+            owner_changed || (refocus && self.torrent.piece_priority(piece) < PiecePriority::Now)
+        }).collect();
+        for req in displaced { self.cancel_outstanding(handle, req); }
         let tuning = self.torrent.seek_tuning();
         // Go `webtorPipelineLimit`: fix pipeline for this refill (BDP + floor).
         self.state.webtor_pipeline_limit = compute_playback_pipeline_limit(
@@ -1204,6 +1232,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 break;
             }
             self.state.outstanding_requests.insert(r);
+            *self.state.valid_receive_chunks.entry(r).or_default() += 1;
             self.state.cancelled_requests.remove(&r);
             self.state.rtt.on_request_sent(r);
             self.torrent.mark_chunk_requested(r);
@@ -1704,8 +1733,11 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             }
         } else {
             self.expire_stale_requests(handle);
-            if self.state.need_request_update || self.is_low_on_requests()
-                || self.torrent.request_focus_index().is_some() {
+            let displaced = self.state.outstanding_requests.iter().any(|&req|
+                self.torrent.requesting_peer(req) != Some(self.key())
+                    && self.torrent.hedge_peer(req) != Some(self.key()));
+            if self.state.need_request_update || self.is_low_on_requests() || displaced
+                || handle.refocus_pending() || self.torrent.request_focus_index().is_some() {
                 self.update_requests(handle);
             }
         }
@@ -1824,8 +1856,8 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 let _ = total;
                 self.state.outstanding_requests.remove(&req);
                 self.state.cancelled_requests.remove(&req);
-                self.torrent.clear_chunk_requested(req);
                 if self.torrent.requesting_peer(req) == Some(self.key()) {
+                    self.torrent.clear_chunk_requested(req);
                     self.torrent.clear_assignment(req);
                 }
                 if self.torrent.hedge_peer(req) == Some(self.key()) {
