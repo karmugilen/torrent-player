@@ -777,9 +777,12 @@ func (cl *Client) outgoingTCPConnHook() func(net.Conn) net.Conn {
 	return v.(hookBox).fn
 }
 
-func dialFromSocket(ctx context.Context, s Dialer, addr string, hook func(net.Conn) net.Conn) net.Conn {
+func dialFromSocket(ctx context.Context, s Dialer, addr string, hook func(net.Conn) net.Conn, onError func(error)) net.Conn {
 	c, err := s.Dial(ctx, addr)
 	if err != nil {
+		if onError != nil {
+			onError(err)
+		}
 		log.ContextLogger(ctx).Levelf(log.Debug, "error dialing %q: %v", addr, err)
 	}
 	// This is a bit optimistic, but it looks non-trivial to thread this through the proxy code. Set
@@ -889,6 +892,11 @@ func (cl *Client) dialAndCompleteHandshake(opts outgoingConnOpts) (c *PeerConn, 
 		resCh: make(chan DialResult),
 		addr:  addr.String(),
 		hook:  hook,
+		onError: func(err error) {
+			cl.lock()
+			defer cl.unlock()
+			webtorCountReason(&opts.t.webtorDiagnostics.TransportFailures, err)
+		},
 	}
 	defer dialPool.startDrainer()
 	dialTimeout := opts.t.getDialTimeoutUnlocked()

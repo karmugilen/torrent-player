@@ -27,14 +27,15 @@ func (c *PeerConn) WebtorPipelineDiagnostics() WebtorPipelineDiagnostics {
 
 // WebtorSwarmDiagnostics combines live gauges with cumulative per-torrent counters.
 type WebtorSwarmDiagnostics struct {
-	PoolSize     int               `json:"poolSize"`
-	Dialing      int               `json:"dialing"`
-	Established  int               `json:"established"`
-	DialOK       uint64            `json:"dialOk"`
-	DialFailures map[string]uint64 `json:"dialFailures"`
-	Closes       map[string]uint64 `json:"closes"`
-	PexReceived  uint64            `json:"pexReceived"`
-	PexDialed    uint64            `json:"pexDialed"`
+	TransportFailures map[string]uint64 `json:"transportFailures"`
+	PoolSize          int               `json:"poolSize"`
+	Dialing           int               `json:"dialing"`
+	Established       int               `json:"established"`
+	DialOK            uint64            `json:"dialOk"`
+	DialFailures      map[string]uint64 `json:"dialFailures"`
+	Closes            map[string]uint64 `json:"closes"`
+	PexReceived       uint64            `json:"pexReceived"`
+	PexDialed         uint64            `json:"pexDialed"`
 }
 
 func webtorFailureKind(err error) string {
@@ -80,6 +81,10 @@ func (t *Torrent) WebtorSwarmDiagnostics() WebtorSwarmDiagnostics {
 	s.DialFailures = make(map[string]uint64, len(t.webtorDiagnostics.DialFailures))
 	for k, v := range t.webtorDiagnostics.DialFailures {
 		s.DialFailures[k] = v
+	}
+	s.TransportFailures = make(map[string]uint64, len(t.webtorDiagnostics.TransportFailures))
+	for k, v := range t.webtorDiagnostics.TransportFailures {
+		s.TransportFailures[k] = v
 	}
 	s.Closes = make(map[string]uint64, len(t.webtorDiagnostics.Closes))
 	for k, v := range t.webtorDiagnostics.Closes {

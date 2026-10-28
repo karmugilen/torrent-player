@@ -6,10 +6,11 @@ import (
 )
 
 type dialPool struct {
-	resCh chan DialResult
-	addr  string
-	left  int
-	hook  func(net.Conn) net.Conn
+	resCh   chan DialResult
+	addr    string
+	left    int
+	hook    func(net.Conn) net.Conn
+	onError func(error)
 }
 
 func (me *dialPool) getFirst() (res DialResult) {
@@ -27,7 +28,7 @@ func (me *dialPool) add(ctx context.Context, dialer Dialer, hook func(net.Conn) 
 	}
 	go func() {
 		me.resCh <- DialResult{
-			dialFromSocket(ctx, dialer, me.addr, hook),
+			dialFromSocket(ctx, dialer, me.addr, hook, me.onError),
 			dialer,
 		}
 	}()
