@@ -319,3 +319,47 @@ fn test_claude_seek_with_slow_and_fast_seed() {
         slow_seed.close();
     }
 }
+
+/// After Direct Play RAM eviction, dirty chunks for a partial piece must be
+/// cleared so the scheduler requests them again (Go errStreamEvicted).
+#[test]
+fn evicted_partial_stream_piece_becomes_requestable_again() {
+    use wt_core::peer_conn::PeerTorrent;
+    let (data, torrent_b64) = build_40mib_swarm_fixture();
+    let peer = LocalSwarmPeer::new(&torrent_b64, &data, false, 16 << 20);
+    let torrent = peer
+        .engine
+        .server
+        .records
+        .read()
+        .get(&peer.id)
+        .unwrap()
+        .read()
+        .torrent
+        .clone();
+    let storage = peer
+        .engine
+        .server
+        .storage
+        .get_storage(&torrent.info_hash().to_hex())
+        .unwrap();
+    let chunk = vec![7; 16 << 10];
+    PeerTorrent::write_chunk(torrent.inner.as_ref(), 100, 0, &chunk).unwrap();
+    PeerTorrent::mark_chunk_dirty(torrent.inner.as_ref(), 400);
+    let mut byte = [0];
+    assert_eq!(storage.piece_at(100).read_at(&mut byte, 0).unwrap(), 1);
+    for piece in 200..500 {
+        PeerTorrent::write_chunk(torrent.inner.as_ref(), piece, 0, &chunk).unwrap();
+        PeerTorrent::mark_chunk_dirty(torrent.inner.as_ref(), piece * 4);
+    }
+    assert!(
+        storage.piece_at(100).read_at(&mut byte, 0).is_err(),
+        "fixture must evict the partial piece"
+    );
+    torrent.update_piece_completion(100);
+    assert!(
+        !PeerTorrent::chunk_dirty(torrent.inner.as_ref(), 400),
+        "an evicted partial block must be downloaded again rather than waiting forever"
+    );
+    peer.close();
+}

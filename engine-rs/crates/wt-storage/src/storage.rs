@@ -451,7 +451,8 @@ impl DocumentTorrentStorage {
     }
 
     /// Assign the stream-completion callback (Go `onStreamEvict`). Invoked
-    /// asynchronously after Direct Play `mark_complete`; `close` does not join it.
+    /// asynchronously after Direct Play RAM eviction and `mark_complete`;
+    /// `close` does not join it.
     pub fn set_on_stream_evict(&self, callback: Option<Arc<dyn Fn(usize) + Send + Sync>>) {
         self.inner.lock().on_stream_evict = callback;
     }
@@ -1680,6 +1681,7 @@ impl DocumentTorrentStorage {
         let begin = (abs / inner.chunk_length) as usize;
         let last = ((end - 1) / inner.chunk_length) as usize;
         let mut installed = false;
+        let mut pending_refresh = Vec::new();
 
         for index in begin..=last {
             let piece = info.piece(index as u32);
@@ -1703,12 +1705,12 @@ impl DocumentTorrentStorage {
                 }
             }
 
-            if self
-                .ensure_stream_slot_locked(&mut inner, index, piece.length)
-                .is_err()
-            {
+            let Ok((_created, refresh)) =
+                self.ensure_stream_slot_locked(&mut inner, index, piece.length)
+            else {
                 continue;
-            }
+            };
+            pending_refresh.extend(refresh);
             if let Some(cache_slot) = inner.cache.get_mut(&index) {
                 cache_slot.copy_from_slice(buf);
             }
@@ -1730,6 +1732,14 @@ impl DocumentTorrentStorage {
 
         if installed {
             inner.stream_ready.notify();
+        }
+        let callback = inner.on_stream_evict.clone();
+        drop(inner);
+        if let Some(cb) = callback {
+            for v in pending_refresh {
+                let cb = Arc::clone(&cb);
+                std::thread::spawn(move || cb(v));
+            }
         }
         installed
     }
@@ -1930,16 +1940,20 @@ impl DocumentTorrentStorage {
         Ok(true)
     }
 
+    /// Ensures a stream RAM slot. Returns `(created, pieces_to_refresh)` —
+    /// callers must invoke `on_stream_evict` for those pieces **after**
+    /// releasing the storage lock (Go `queueCompletionLocked` / drain).
     fn ensure_stream_slot_locked(
         &self,
         inner: &mut StorageInner,
         index: usize,
         expected: i64,
-    ) -> StorageResult<bool> {
+    ) -> StorageResult<(bool, Vec<usize>)> {
+        let mut refresh = Vec::new();
         if let Some(data) = inner.cache.get(&index) {
             if data.len() as i64 == expected {
                 inner.cache_order.touch(index as i32);
-                return Ok(false);
+                return Ok((false, refresh));
             }
             self.drop_cache_locked(inner, index);
         }
@@ -1994,6 +2008,7 @@ impl DocumentTorrentStorage {
             inner.stream_whole.remove(&v);
             if !inner.startup_saved.get(&v).copied().unwrap_or(false) {
                 inner.completed.remove(&v);
+                refresh.push(v);
             }
         }
 
@@ -2001,7 +2016,7 @@ impl DocumentTorrentStorage {
         inner.cache_bytes += expected;
         inner.stream_revision += 1;
         inner.cache_order.touch(index as i32);
-        Ok(true)
+        Ok((true, refresh))
     }
 
     fn drop_cache_locked(&self, inner: &mut StorageInner, index: usize) {
@@ -2696,9 +2711,13 @@ impl PieceStorage for DocumentPiece {
         }
 
         // Attached:
+        let mut pending_refresh = Vec::new();
         let created = if inner.stream {
-            self.storage
-                .ensure_stream_slot_locked(&mut inner, index, expected)?
+            let (created, refresh) = self
+                .storage
+                .ensure_stream_slot_locked(&mut inner, index, expected)?;
+            pending_refresh = refresh;
+            created
         } else {
             match self
                 .storage
@@ -2791,6 +2810,15 @@ impl PieceStorage for DocumentPiece {
             },
         );
         inner.cache_order.touch(index as i32);
+
+        let callback = inner.on_stream_evict.clone();
+        drop(inner);
+        if let Some(cb) = callback {
+            for v in pending_refresh {
+                let cb = Arc::clone(&cb);
+                std::thread::spawn(move || cb(v));
+            }
+        }
 
         Ok(buf.len())
     }

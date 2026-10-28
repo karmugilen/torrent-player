@@ -453,10 +453,36 @@ impl Torrent {
         let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece));
         let comp = piece_storage.completion();
         let complete = comp.ok && comp.complete;
+        let (begin, end) = crate::picker::piece_req_index_range(
+            piece,
+            info.piece_length,
+            info.total_length(),
+        );
+        // Bounded Direct Play RAM can drop a partial piece while dirty bits
+        // still claim we have those blocks (Go errStreamEvicted: "must be
+        // fetched again"). Probe storage: if we tracked local data but the
+        // piece is no longer readable, treat it as an eviction.
+        let had_local_data = {
+            let pieces = self.inner.pieces.read();
+            let dirty = self.inner.dirty_chunks.read();
+            let p = pieces.get(piece as usize);
+            let was_complete = p.map(|p| p.complete).unwrap_or(false);
+            let was_partial = p
+                .map(|p| p.partial || !p.chunks_received.is_empty())
+                .unwrap_or(false);
+            let has_dirty = (begin..end).any(|r| dirty.contains(&r));
+            was_complete || was_partial || has_dirty
+        };
+        let storage_lost = !complete
+            && had_local_data
+            && {
+                let mut probe = [0u8];
+                piece_storage.read_at(&mut probe, 0).is_err()
+            };
         let evicted = {
             let mut pieces = self.inner.pieces.write();
             if let Some(p) = pieces.get_mut(piece as usize) {
-                let evicted = p.complete && !complete;
+                let evicted = (p.complete && !complete) || storage_lost;
                 p.complete = complete;
                 p.ok = comp.ok;
                 if evicted {
@@ -471,17 +497,16 @@ impl Torrent {
         };
         // Completion and dirty/request bitmaps must agree after bounded storage
         // discards a piece, otherwise the scheduler never requests it again.
+        if evicted {
+            let mut dirty = self.inner.dirty_chunks.write();
+            for req in begin..end {
+                dirty.remove(&req);
+            }
+        }
         if let Some(book) = self.inner.book.write().as_mut() {
             book.set_complete_cached(piece, comp.ok, complete);
             if evicted {
-                let (begin, end) = crate::picker::piece_req_index_range(
-                    piece,
-                    info.piece_length,
-                    info.total_length(),
-                );
-                let mut dirty = self.inner.dirty_chunks.write();
                 for req in begin..end {
-                    dirty.remove(&req);
                     book.mark_chunk_pending(req);
                 }
             }

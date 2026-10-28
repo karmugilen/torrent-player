@@ -398,13 +398,15 @@ impl EngineServer {
 
     /// Go `baseSeekTuning` + `torrent.SetSeekTuning`.
     fn apply_seek_tuning(&self) {
-        let mut tuning = wt_core::SeekTuning::default();
-        tuning.hedge = self.hedge_requests.load(Ordering::SeqCst);
-        tuning.slow_peer_yield = self.slow_peer_yield.load(Ordering::SeqCst);
-        tuning.learned_arrival = self.learned_arrival.load(Ordering::SeqCst);
-        // Hedge uses HOLAfterMs timing; enable the HOL/hedge path when Hedge is on.
-        tuning.hol_rescue = false;
-        wt_core::set_seek_tuning(tuning);
+        // Hedge uses HOLAfterMs timing; hol_rescue stays off while Hedge is on
+        // (Go DefaultSeekTuning + experimental switches).
+        wt_core::set_seek_tuning(wt_core::SeekTuning {
+            hedge: self.hedge_requests.load(Ordering::SeqCst),
+            slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
+            learned_arrival: self.learned_arrival.load(Ordering::SeqCst),
+            hol_rescue: false,
+            ..wt_core::SeekTuning::default()
+        });
     }
 
     pub fn close_preview_for(&self, id: &str) {
@@ -1225,6 +1227,20 @@ impl EngineServer {
         };
 
         let stream = req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM);
+        if stream {
+            // Go server.go configure: clamp stream RAM and wire onStreamEvict so
+            // discarded pieces refresh completion (dirty bits become requestable).
+            if let Some(bytes) = req.stream_cache_bytes.filter(|&b| b > 0) {
+                storage.set_cache_limit(bytes.clamp(16 << 20, wt_storage::MAX_RAM_CACHE_BYTES));
+            }
+            let torrent_for_cb = torrent.clone();
+            let rec_for_cb = Arc::clone(&rec_arc);
+            storage.set_on_stream_evict(Some(Arc::new(move |index| {
+                if !rec_for_cb.read().torrent.closed() {
+                    torrent_for_cb.update_piece_completion(index as u32);
+                }
+            })));
+        }
         if let Err(e) = storage.attach_descriptors_mode(&descriptors, &selected, stream) {
             return (
                 400,
@@ -1244,6 +1260,22 @@ impl EngineServer {
         rec.selected = selected;
         if stream {
             rec.direct_play = true;
+            // Match Go: temporary stream-cache pressure must not permanently
+            // disable download; the failed chunk is re-requested.
+            let t = rec.torrent.clone();
+            let t_cb = t.clone();
+            t.set_on_write_chunk_error(Some(Arc::new(move |err: &wt_core::CoreError| {
+                let busy = match err {
+                    wt_core::CoreError::Storage(wt_types::StorageError::Other(msg)) => {
+                        msg.contains("busy") || msg.contains("full") || msg.contains("evict")
+                    }
+                    wt_core::CoreError::Storage(wt_types::StorageError::Unavailable) => true,
+                    _ => false,
+                };
+                if !busy {
+                    t_cb.disallow_data_download();
+                }
+            })));
         }
         self.apply_transfer_state(&mut rec);
         self.notify_change();
