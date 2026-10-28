@@ -1184,4 +1184,67 @@ mod dial_parity_tests {
         assert_eq!(got.iter().map(|addr| wt_discovery::bep40_priority(local, *addr)).collect::<Vec<_>>(),
             expected.iter().map(|addr| wt_discovery::bep40_priority(local, *addr)).collect::<Vec<_>>());
     }
+
+    #[test]
+    fn pex_ingest_reaches_dial_candidates_with_pex_source() {
+        use crate::peer_conn::PeerTorrent;
+        use std::net::SocketAddrV4;
+        use wt_wire::ext::PexMsg;
+
+        let t = torrent();
+        let from: SocketAddr = "198.51.100.1:6881".parse().unwrap();
+        let added: SocketAddrV4 = "203.0.113.10:51413".parse().unwrap();
+        let msg = PexMsg {
+            added: vec![added],
+            added_flags: vec![Default::default()],
+            ..Default::default()
+        };
+        t.ingest_pex(from, &msg).unwrap();
+        assert_eq!(t.swarm_diagnostics.lock().pex_received, 1);
+
+        let candidates = t.take_dial_candidates(8);
+        assert_eq!(candidates.len(), 1, "PEX added peers must enter the dial pool: {candidates:?}");
+        assert_eq!(candidates[0].addr, SocketAddr::V4(added));
+        assert_eq!(
+            candidates[0].source,
+            PeerSource::Pex,
+            "dial path tags pex_dialed from PeerSource::Pex"
+        );
+        // Mirror client dialer: selected PEX candidates increment pex_dialed.
+        if candidates[0].source == PeerSource::Pex {
+            t.swarm_diagnostics.lock().pex_dialed += 1;
+        }
+        assert_eq!(t.swarm_diagnostics.lock().pex_dialed, 1);
+    }
+
+    #[test]
+    fn pex_replaces_same_addr_untrusted_discovery_like_go() {
+        // Go prioritizedPeers ReplaceOrInsert keys on (trusted, prio, addrHash):
+        // a later PEX sighting of an untrusted DHT addr must dial as Pex.
+        let t = torrent();
+        let addr: SocketAddr = "203.0.113.50:6881".parse().unwrap();
+        t.add_peers(vec![PeerInfo {
+            id: None,
+            addr,
+            source: PeerSource::DhtGetPeers,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        }]);
+        t.add_peers(vec![PeerInfo {
+            id: None,
+            addr,
+            source: PeerSource::Pex,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        }]);
+        let candidates = t.take_dial_candidates(4);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].source,
+            PeerSource::Pex,
+            "Go replaces same-(addr,trusted) so PEX wins over DHT for pex_dialed"
+        );
+    }
 }

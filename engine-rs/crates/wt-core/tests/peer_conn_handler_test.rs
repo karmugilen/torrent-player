@@ -43,6 +43,7 @@ struct FakeTorrent {
     meta_total: Mutex<Option<u32>>,
     meta_done: AtomicBool,
     pex_msgs: Mutex<Vec<PexMsg>>,
+    pex_connected: Mutex<Vec<SocketAddr>>,
     dht_nodes: Mutex<Vec<SocketAddr>>,
     listen_ports: Mutex<Vec<(SocketAddr, u16)>>,
     peer_pieces: Mutex<HashMap<PeerKey, HashSet<u32>>>,
@@ -67,6 +68,7 @@ impl FakeTorrent {
             meta_total: Mutex::new(None),
             meta_done: AtomicBool::new(false),
             pex_msgs: Mutex::new(Vec::new()),
+            pex_connected: Mutex::new(Vec::new()),
             dht_nodes: Mutex::new(Vec::new()),
             listen_ports: Mutex::new(Vec::new()),
             peer_pieces: Mutex::new(HashMap::new()),
@@ -302,6 +304,9 @@ impl PeerTorrent for FakeTorrent {
     fn ingest_pex(&self, _from: SocketAddr, msg: &PexMsg) -> Result<()> {
         self.pex_msgs.lock().push(msg.clone());
         Ok(())
+    }
+    fn pex_note_connected(&self, addr: SocketAddr, _encrypted: bool, _utp: bool) {
+        self.pex_connected.lock().push(addr);
     }
     fn add_dht_node(&self, addr: SocketAddr) {
         self.dht_nodes.lock().push(addr);
@@ -652,10 +657,19 @@ fn pex_ingest_and_port_dht() {
     )
     .unwrap();
     let _ = drain(&mut rx);
+    assert_eq!(
+        *tor.pex_connected.lock(),
+        vec![addr],
+        "Go t.pex.Add(c) on extended handshake so outbound PEX has live peers"
+    );
 
-    let pex = PexMsg::default();
+    let pex = PexMsg {
+        added: vec!["203.0.113.9:6881".parse().unwrap()],
+        ..Default::default()
+    };
     peer.on_message(&handle, pex.to_message(2)).unwrap();
     assert_eq!(tor.pex_msgs.lock().len(), 1);
+    assert_eq!(tor.pex_msgs.lock()[0].added.len(), 1);
 
     peer.on_message(&handle, Message::Port(6881)).unwrap();
     assert_eq!(tor.listen_ports.lock().len(), 1);
