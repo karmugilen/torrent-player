@@ -164,7 +164,9 @@ Owned for this dispatch: `src/conn/` (`mod.rs`, `handle.rs`, `driver.rs`, `diale
   - Outgoing `TcpConnHook` support for anti-DPI proxy wrappers.
   - Message Stream Encryption (MSE) negotiation with anacrolix default policy (`preferred = true, require_preferred = false`).
   - BitTorrent protocol handshake with reserved extension bits (DHT, Fast, LTEP, v2 upgrade).
-  - BEP 10 LTEP extension handshake exchange with `extended_handshake_client_version`, `reqq`, `metadata_size`, `yourip`, and `upload_only`.
+  - BEP 10 LTEP extension handshake exchange with `extended_handshake_client_version`, `reqq`, `metadata_size`, `yourip` (no `upload_only` — Go omits it).
+  - `PeerConnHandler::start` matches Go `sendInitialMessages` (LTEP / HaveNone|HaveAll|bitfield / Port only; no Unchoke; no empty bitfield when !Fast && no pieces; omit `p` when listen port is 0).
+  - `on_wake` request refill gated like Go `isLowOnRequests` (no playback-focus bypass that doubled PeakWholeQueue every 100ms).
 - **Inbound Listener (`src/conn/listener.rs`)**:
   - `PeerListener`: Binds dual-stack TCP listeners and/or uTP sockets on `listen_port` (or ephemeral port 0).
   - Inbound MSE stream encryption handling with SKEY search iterator across active torrents.

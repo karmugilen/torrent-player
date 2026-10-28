@@ -793,7 +793,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.torrent.peer_key(self.state.remote_addr)
     }
 
-    /// Go `sendInitialMessages`: LTEP handshake, HaveNone/HaveAll/bitfield, optional Port, Unchoke.
+    /// Go `sendInitialMessages` (Transmission order): LTEP, HaveNone/HaveAll/bitfield, optional Port.
+    /// Does **not** Unchoke or fill requests — Go leaves that to `upload` / peer-driven
+    /// `updateRequests` after the remote's bitfield/unchoke.
     pub fn start(&mut self, handle: &ConnHandle) {
         let peer_bits = PeerExtensionBits(self.state.peer_extension_bits);
         if peer_bits.supports_extended() {
@@ -805,11 +807,15 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                     .insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
             }
             ext.v = Some(self.torrent.extended_handshake_client_version());
-            ext.p = Some(self.torrent.listen_port());
+            // Go `p` has omitempty — never advertise listen port 0.
+            let listen = self.torrent.listen_port();
+            if listen > 0 {
+                ext.p = Some(listen);
+            }
             ext.yourip = Some(handle.remote_addr().ip());
             ext.reqq = Some(self.torrent.local_reqq());
             ext.metadata_size = self.torrent.metadata_size();
-            ext.upload_only = Some(self.torrent.is_seeding());
+            // Go ExtendedHandshakeMessage has no upload_only field — omit it.
             ext.encryption = Some(self.torrent.prefers_encryption() || handle.is_encrypted());
             self.send(
                 handle,
@@ -831,7 +837,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             } else if count > 0 {
                 self.send_bitfield(handle, count);
             }
-        } else if count > 0 {
+        } else if have_any {
+            // Go `postBitfield`: skip when we have nothing (no empty bitfield).
             self.send_bitfield(handle, count);
         }
 
@@ -841,12 +848,54 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
         }
 
-        if !self.torrent.data_upload_disallowed() {
-            self.state.am_choking = false;
-            self.send(handle, Message::Unchoke);
-        }
-        self.update_requests(handle);
         self.torrent.update_peer_snapshot(self.peer_conn_info());
+    }
+
+    /// Go `peerHasWantedPieces`: peer holds something in our pending set (tit-for-tat).
+    fn peer_has_wanted_pieces(&self) -> bool {
+        if self.state.peer_sent_have_all {
+            let n = self.torrent.num_pieces();
+            return n > 0
+                && !(0..n).all(|i| self.torrent.piece_complete(i))
+                && (0..n).any(|i| {
+                    self.torrent.piece_priority(i) > PiecePriority::None
+                        && !self.torrent.piece_complete(i)
+                });
+        }
+        if !self.torrent.have_info() {
+            return !self.state.peer_pieces.is_empty();
+        }
+        self.state.peer_pieces.iter().any(|&p| {
+            self.torrent.piece_priority(p) > PiecePriority::None && !self.torrent.piece_complete(p)
+        })
+    }
+
+    /// Go `upload` choke/unchoke reconciliation via `uploadAllowed`.
+    fn reconcile_choke(&mut self, handle: &ConnHandle) {
+        let cfg = self.torrent.choke_config();
+        let input = PeerChokeInput {
+            id: self.key(),
+            interested: self.state.peer_interested,
+            currently_choking: self.state.am_choking,
+            download_rate: self.state.download_rate.rate(),
+            upload_rate: self.state.upload_rate.rate(),
+            bytes_downloaded: self.state.stats.snapshot().bytes_read_useful_data,
+            bytes_uploaded: self.state.stats.snapshot().bytes_written_data,
+            is_snubbed: self.state.is_snubbed,
+        };
+        let allowed = upload_allowed(&input, &cfg, self.peer_has_wanted_pieces());
+        let should_choke = !allowed;
+        if self.state.am_choking != should_choke {
+            self.state.am_choking = should_choke;
+            self.send(
+                handle,
+                if should_choke {
+                    Message::Choke
+                } else {
+                    Message::Unchoke
+                },
+            );
+        }
     }
 
     fn send_bitfield(&self, handle: &ConnHandle, count: u32) {
@@ -1736,18 +1785,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
 impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
     fn on_wake(&mut self, handle: &ConnHandle) {
-        let should_choke = self.torrent.data_upload_disallowed();
-        if self.state.am_choking != should_choke {
-            self.state.am_choking = should_choke;
-            self.send(
-                handle,
-                if should_choke {
-                    Message::Choke
-                } else {
-                    Message::Unchoke
-                },
-            );
-        }
+        // Go `fillWriteBuffer` → `upload`: choke/unchoke only via uploadAllowed.
+        self.reconcile_choke(handle);
         if self.torrent.data_download_disallowed() {
             let requests: Vec<_> = self.state.outstanding_requests.drain().collect();
             for req in requests {
@@ -1774,8 +1813,15 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             let displaced = self.state.outstanding_requests.iter().any(|&req|
                 self.torrent.requesting_peer(req) != Some(self.key())
                     && self.torrent.hedge_peer(req) != Some(self.key()));
-            if self.state.need_request_update || self.is_low_on_requests() || displaced
-                || handle.refocus_pending() || self.torrent.request_focus_index().is_some() {
+            // Go only runs updateRequests when low on requests / needRequestUpdate /
+            // refocus — NOT on every wake merely because request_focus is set.
+            // The old `focus.is_some()` bypass refilled every 100ms under PeakWholeQueue
+            // and grew pending to 300–500 (Bunny peerfix) while Go stayed ~20.
+            if self.state.need_request_update
+                || self.is_low_on_requests()
+                || displaced
+                || handle.refocus_pending()
+            {
                 self.update_requests(handle);
             }
         }
@@ -1789,8 +1835,19 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         if !self.torrent.has_metadata() {
             return Some(Duration::from_secs(1));
         }
-        // Reconcile Choke/Unchoke when seed policy flips data_upload_disallowed.
-        let should_choke = self.torrent.data_upload_disallowed();
+        // Reconcile choke when seed policy or tit-for-tat gate may have flipped.
+        let cfg = self.torrent.choke_config();
+        let input = PeerChokeInput {
+            id: self.key(),
+            interested: self.state.peer_interested,
+            currently_choking: self.state.am_choking,
+            download_rate: self.state.download_rate.rate(),
+            upload_rate: self.state.upload_rate.rate(),
+            bytes_downloaded: self.state.stats.snapshot().bytes_read_useful_data,
+            bytes_uploaded: self.state.stats.snapshot().bytes_written_data,
+            is_snubbed: self.state.is_snubbed,
+        };
+        let should_choke = !upload_allowed(&input, &cfg, self.peer_has_wanted_pieces());
         if self.state.am_choking != should_choke {
             return Some(Duration::from_millis(50));
         }

@@ -51,6 +51,7 @@ struct FakeTorrent {
     info_hash: [u8; 20],
     focused: AtomicBool,
     urgent: AtomicBool,
+    seeding: AtomicBool,
 }
 
 impl FakeTorrent {
@@ -76,6 +77,7 @@ impl FakeTorrent {
             info_hash: [7u8; 20],
             focused: AtomicBool::new(true),
             urgent: AtomicBool::new(true),
+            seeding: AtomicBool::new(false),
         })
     }
 }
@@ -114,7 +116,7 @@ impl PeerTorrent for FakeTorrent {
         false
     }
     fn is_seeding(&self) -> bool {
-        false
+        self.seeding.load(Ordering::Relaxed)
     }
     fn closed(&self) -> bool {
         false
@@ -358,7 +360,7 @@ fn drain(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<Message> {
 }
 
 #[test]
-fn start_sends_ltep_havenone_and_unchoke() {
+fn start_sends_ltep_havenone_like_go_send_initial_messages() {
     let tor = FakeTorrent::new();
     let addr: SocketAddr = "127.0.0.1:3999".parse().unwrap();
     let (handle, mut rx) = make_handle(addr);
@@ -376,16 +378,33 @@ fn start_sends_ltep_havenone_and_unchoke() {
     assert!(ext.m.contains_key(EXTENSION_NAME_METADATA));
     assert!(ext.m.contains_key(EXTENSION_NAME_PEX));
     assert!(
+        ext.upload_only.is_none(),
+        "Go ExtendedHandshakeMessage has no upload_only: {ext:?}"
+    );
+    assert!(
+        ext.p.is_none(),
+        "Go omitempty skips listen port 0, got p={:?}",
+        ext.p
+    );
+    assert!(
         msgs.iter().any(|m| matches!(m, Message::HaveNone)),
         "expected HaveNone when Fast+no pieces, got {msgs:?}"
     );
     assert!(
-        msgs.iter().any(|m| matches!(m, Message::Unchoke)),
-        "expected Unchoke, got {msgs:?}"
+        msgs.iter().all(|m| !matches!(m, Message::Unchoke)),
+        "Go sendInitialMessages does not Unchoke: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().all(|m| !matches!(m, Message::Interested | Message::Request { .. })),
+        "Go defers interest/requests until peer bitfield/unchoke: {msgs:?}"
     );
     assert!(
         msgs.iter().all(|m| !matches!(m, Message::Bitfield(_))),
         "should not send empty Bitfield when HaveNone applies: {msgs:?}"
+    );
+    assert!(
+        peer.peer_conn_info().am_choking,
+        "must stay choking after start like Go"
     );
 }
 
@@ -742,9 +761,16 @@ async fn payload_upload_account_counts_written_bytes_once() {
     use wt_core::conn::spawn_connection_driver;
     use wt_wire::codec::{FramedReader, FramedWriter};
     let tor = FakeTorrent::new();
+    // Go uploadAllowed: seeding → unchoke; start() itself no longer Unchokes.
+    tor.seeding.store(true, Ordering::Relaxed);
+    for i in 0..NUM_PIECES {
+        tor.complete.lock().insert(i);
+    }
     let (handle, rx) = make_handle("127.0.0.1:4998".parse().unwrap());
     let mut peer = PeerConnHandler::new(tor, &handle);
     peer.start(&handle);
+    // Seed reconcile: first wake unchokes via uploadAllowed(seeding).
+    peer.on_wake(&handle);
     let (local, remote) = tokio::io::duplex(128 << 10);
     let (reader_task, writer_task) = spawn_connection_driver(
         local, peer, handle.clone(), rx, Arc::new(Notify::new()), None, None,
@@ -858,4 +884,40 @@ fn refocus_reaches_the_live_handler_and_cancels_old_nonurgent_requests() {
     peer.on_wake(&handle);
     assert!(!drain(&mut rx).iter().any(|m| matches!(m, Message::Cancel { .. })),
         "a consumed refocus must not cancel the replacement queue again");
+}
+
+#[test]
+fn playback_focus_does_not_top_up_busy_queue_every_wake() {
+    // Regression: on_wake used to call update_requests whenever
+    // request_focus_index().is_some(), so under PeakWholeQueue a 100ms wake
+    // doubled outstanding until peerMax (~2000). Bunny peerfix showed
+    // pendingRequests 293–514 with pipelineLimit 0/11; Go stayed ~20.
+    let tor = FakeTorrent::new();
+    assert!(
+        tor.request_focus_index().is_some(),
+        "fixture defaults to playback focus"
+    );
+    let (handle, mut rx) = make_handle("127.0.0.1:4992".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor, &handle);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    let _ = drain(&mut rx);
+    let after_first = peer.peer_conn_info().pending_requests;
+    assert!(
+        (1..=8).contains(&after_first),
+        "slow-start should open a small queue, got {after_first}"
+    );
+    for _ in 0..20 {
+        peer.on_wake(&handle);
+        let _ = drain(&mut rx);
+    }
+    let after_wakes = peer.peer_conn_info().pending_requests;
+    assert_eq!(
+        after_wakes, after_first,
+        "Go isLowOnRequests: a non-empty queue must not refill on every wake just because focus is set (was {after_first}, now {after_wakes})"
+    );
+    assert!(
+        after_wakes < 64,
+        "must not approach the historical 300+ flood, got {after_wakes}"
+    );
 }

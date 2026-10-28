@@ -1,6 +1,6 @@
 //! Incoming TCP and uTP listeners with MSE, InfoHash routing, and half-open tracking.
 //!
-//! LTEP / HaveNone / Unchoke are sent by `PeerConnHandler::start` (Go `sendInitialMessages`).
+//! LTEP / HaveNone are sent by `PeerConnHandler::start` (Go `sendInitialMessages`).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -316,7 +316,7 @@ async fn handle_inbound_inner(
     let peer_ext_bits = peer_hs.extensions;
     let peer_id = peer_hs.peer_id;
 
-    // LTEP / HaveNone / Unchoke deferred to PeerConnHandler::start (Go sendInitialMessages).
+    // LTEP / HaveNone deferred to PeerConnHandler::start (Go sendInitialMessages).
     let (write_tx, write_rx) = mpsc::unbounded_channel();
     let write_waker = Arc::new(Notify::new());
     let closed = Arc::new(AtomicBool::new(false));

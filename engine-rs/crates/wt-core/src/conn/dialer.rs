@@ -6,7 +6,7 @@
 //! - Try preferred header-obfuscation, then fall back on the *same* winning
 //!   transport when `RequirePreferred` is false.
 //!
-//! LTEP / HaveNone / Unchoke are sent by `PeerConnHandler::start`.
+//! LTEP / HaveNone are sent by `PeerConnHandler::start` (Go sendInitialMessages).
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
