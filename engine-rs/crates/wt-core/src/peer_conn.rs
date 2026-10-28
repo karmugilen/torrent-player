@@ -1628,8 +1628,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if id == EXT_HANDSHAKE_ID {
             let ext =
                 ExtendedHandshake::decode(&payload).map_err(|e| CoreError::Other(e.to_string()))?;
-            self.state.peer_ext_ut_metadata = ext.m.get(EXTENSION_NAME_METADATA).copied();
-            self.state.peer_ext_ut_pex = ext.m.get(EXTENSION_NAME_PEX).copied();
+            if let Some(&id) = ext.m.get(EXTENSION_NAME_METADATA) {
+                self.state.peer_ext_ut_metadata = (id != 0).then_some(id);
+            }
+            if let Some(&id) = ext.m.get(EXTENSION_NAME_PEX) {
+                self.state.peer_ext_ut_pex = (id != 0).then_some(id);
+            }
             self.state.peer_metadata_size = ext.metadata_size;
             if let Some(name) = ext.v.clone() {
                 self.state.client_name = name;
@@ -1651,7 +1655,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.update_requests(handle);
             return Ok(());
         }
-        if Some(id) == self.state.peer_ext_ut_metadata || id == self.our_ext_metadata {
+        // BEP 10 mappings are directional: our IDs route inbound messages;
+        // the remote IDs are used only when sending messages to that peer.
+        if id == self.our_ext_metadata {
             // Malformed / non-metadata payloads on this id are common; do not
             // kill the connection (was "missing msg_type" mass disconnect).
             let msg = match MetadataMsg::decode(payload) {
@@ -1660,12 +1666,15 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             };
             match msg.msg_type {
                 MetadataMsgType::Request => {
+                    let Some(reply_id) = self.state.peer_ext_ut_metadata else {
+                        return Ok(());
+                    };
                     if let Some((total, data)) = self.torrent.metadata_piece(msg.piece) {
                         let resp = MetadataMsg::data(msg.piece, total, data);
-                        self.send(handle, resp.to_message(id));
+                        self.send(handle, resp.to_message(reply_id));
                     } else {
                         let rej = MetadataMsg::reject(msg.piece);
-                        self.send(handle, rej.to_message(id));
+                        self.send(handle, rej.to_message(reply_id));
                     }
                 }
                 MetadataMsgType::Data => {
@@ -1688,7 +1697,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
             return Ok(());
         }
-        if Some(id) == self.state.peer_ext_ut_pex || id == self.our_ext_pex {
+        if id == self.our_ext_pex && !self.torrent.pex_disabled() {
             let msg = PexMsg::decode(&payload).map_err(|e| CoreError::Other(e.to_string()))?;
             self.torrent.ingest_pex(self.state.remote_addr, &msg)?;
         }

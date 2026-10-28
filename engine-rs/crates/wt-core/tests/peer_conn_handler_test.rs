@@ -597,6 +597,44 @@ fn metadata_exchange_end_to_end() {
 }
 
 #[test]
+fn pex_uses_our_advertised_id_when_peer_metadata_id_collides() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4010".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.start(&handle);
+    let _ = drain(&mut rx);
+    let mut hs = ExtendedHandshake::default();
+    hs.m.insert(EXTENSION_NAME_METADATA.to_string(), 2);
+    hs.m.insert(EXTENSION_NAME_PEX.to_string(), 1);
+    peer.on_message(&handle, hs.to_message()).unwrap();
+    let pex = PexMsg {
+        added: vec!["192.0.2.1:6881".parse().unwrap()],
+        ..Default::default()
+    };
+    peer.on_message(&handle, pex.to_message(2)).unwrap();
+    assert_eq!(*tor.pex_msgs.lock(), vec![pex],
+        "remote extension IDs select outbound messages, not inbound routing");
+}
+
+#[test]
+fn metadata_response_uses_the_peers_advertised_id() {
+    let tor = FakeTorrent::new();
+    *tor.meta_total.lock() = Some(4);
+    tor.meta_pieces.lock().insert(0, Bytes::from_static(b"info"));
+    tor.meta_done.store(true, Ordering::Relaxed);
+    let (handle, mut rx) = make_handle("127.0.0.1:4011".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor, &handle);
+    let mut hs = ExtendedHandshake::default();
+    hs.m.insert(EXTENSION_NAME_METADATA.to_string(), 7);
+    peer.on_message(&handle, hs.to_message()).unwrap();
+    let _ = drain(&mut rx);
+    peer.on_message(&handle, MetadataMsg::request(0).to_message(1)).unwrap();
+    let messages = drain(&mut rx);
+    assert!(messages.iter().any(|m| matches!(m, Message::Extended { id: 7, .. })),
+        "metadata replies must use the remote mapping: {messages:?}");
+}
+
+#[test]
 fn pex_ingest_and_port_dht() {
     let tor = FakeTorrent::new();
     let addr: SocketAddr = "127.0.0.1:4006".parse().unwrap();
