@@ -176,6 +176,7 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 - **Retention:** ignore malformed ut_metadata (`missing msg_type`) and soft-discard PEX Cooldown/TooFrequent instead of closing the peerconn — was dropping ~40 dial_ok down to ~4 live peers
 - **Dial race:** prefer **uTP** when both TCP+uTP raw-connect within 200ms grace (TCP kept as handshake spare); fast-fail preferred MSE (2s) only when uTP won; other-transport plaintext-then-MSE fallback after same-transport Go fallback
 - **Dial order:** among eligible peers, never-failed before retries, then trusted, then source rank — stops burning half-open on firewalled tracker contacts while DHT waits
+- **Mid-file responsive:** playback enables dirty-chunk reads outside startup head/tail (Go applyResponsiveLocked); was always false
 - **drop_chokers loop:** policy sampler now calls `Torrent::drop_chokers(5s)` when setting on (Go dropChokersLoop) — was AtomicBool-only
 - **MSE fallback:** other-transport retries always try both obfuscation modes (preferred=false no longer skips MSE)
 - **SeekTuning wire:** EngineServer now `set_seek_tuning` on new()+settings (Go `baseSeekTuning`); hedge/slowPeerYield/learnedArrival were AtomicBool-only and never reached wt-core
@@ -193,6 +194,7 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
 | go-ubuntu-r18 | 14.0 | 16→32 | **10.55** | TCP 23 + uTP 9; 29/32 active; **452 MiB** |
 | go-ubuntu-r19 | 10.0 | 14→33 | **12.02** | TCP 23 + uTP 9; **31/32** active; **496 MiB** |
+| rust-ubuntu-r51 | 3.0 | 9→19 | 1.59 | TCP 18; 10/18 active; 40 MiB; mid-file responsive; 107.175 4.1 MiB |
 | rust-ubuntu-r50 | 3.0 | 7→15 | 1.38 | TCP 12 + uTP 3; 6/15 active; 30 MiB; nodelay+floor64 |
 | rust-ubuntu-r49 | 4.5 | 5→18 | 1.46 | TCP 15 + uTP 3; 8/18 active; 34 MiB |
 | rust-ubuntu-r48 | 4.0 | 12→16 | **2.05** | TCP 10 + uTP 2; **11/12** active; **48 MiB**; drop_chokers wired |
@@ -208,5 +210,5 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | rust-sintel-r7 | 1.5 | **21→39** | **34.8** | TCP 32 + **uTP 5**; **30/37** active; **855 MiB** |
 | rust-sintel-r6 | 2.5 | 13→24 | 10.53 | TCP 20 + uTP 3; 17/23 active; 164 MiB |
 
-**Status:** Best Ubuntu **r48: 2.05 MiB/s / 48 MiB / 11/12 active** after SeekTuning+drop_chokers wire (were AtomicBool-only). Same-peer 107.175 now 2–3 MiB (was ~49 KiB; Go ~27 MiB). Sintel-r8 peak **37 MiB/s**. Gap vs Go r19 (**12 MiB/s / 496 MiB / 31/32**) remains ~6× speed / ~10× bytes — peer count ~12–18 vs ~32 and per-peer still short. Not Ubuntu speed parity yet.
+**Status:** Best Ubuntu **r48: 2.05 MiB/s / 48 MiB / 11/12 active**; r51 with mid-file responsive: 1.59 / 40 MiB / 107.175 **4.1 MiB** (was ~49 KiB). Sintel-r8 peak 37. Gap vs Go r19 (**12 MiB/s / 496 MiB / 31/32**) remains ~6× — dial_ok~15–20 vs ~32 peers and per-peer still short. Not Ubuntu speed parity yet.
 

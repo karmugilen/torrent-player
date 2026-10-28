@@ -1238,7 +1238,23 @@ impl PlaybackSession {
             raise_span(&mut demand, self.tail_span, PiecePriority::Now);
         }
         self.backend.set_readahead(reader_ra);
-        self.backend.set_responsive(false);
+        // Go `applyResponsiveLocked`: allow dirty-chunk reads mid-file when
+        // unverifiedReads is on. Stream peers_compare previously forced
+        // responsive=false always, so the reader waited on piece hash and
+        // starved the 64 MiB stream cache / request pipeline. Keep head/tail
+        // verified (startup spans) like Go.
+        let head = if self.boost {
+            self.startup_head_bytes
+        } else {
+            VIDEO_STARTUP_HEAD_BYTES
+        };
+        let tail = if self.boost {
+            self.startup_tail_bytes
+        } else {
+            VIDEO_STARTUP_TAIL_BYTES
+        };
+        let mid = offset >= head && offset < self.length.saturating_sub(tail);
+        self.backend.set_responsive(mid);
         if let Some(host) = &self.host {
             let entering: Vec<u32> = demand
                 .keys()
