@@ -198,6 +198,7 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | go-ubuntu-r17 | 11.0 | 10→37 | **7.15** | TCP 30 + uTP 5; **34/35** downloaded>0; 297 MiB |
 | go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
 | go-ubuntu-r18 | 14.0 | 16→32 | **10.55** | TCP 23 + uTP 9; 29/32 active; **452 MiB** |
+| go-ubuntu-r20 | 8.0 | 4→28 | 3.13 | TCP 23 + uTP 3; **23/26** active; **111 MiB**; same-day swarm weaker |
 | go-ubuntu-r19 | 10.0 | 14→33 | **12.02** | TCP 23 + uTP 9; **31/32** active; **496 MiB** |
 | rust-ubuntu-r59 | 5.0 | 8→20 | 1.23 | TCP 17 + uTP 3; **13/20** active; 12 MiB; drop_chokers gate+req cap; 107.175 2.9 MiB pending~65; mid-run decay |
 | rust-ubuntu-r56 | 9.5 | 13→21 | 1.30 | TCP 16 + uTP 3; **13/19** active; 34 MiB; workers+TCP prefer |
@@ -220,5 +221,5 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | rust-sintel-r7 | 1.5 | **21→39** | **34.8** | TCP 32 + **uTP 5**; **30/37** active; **855 MiB** |
 | rust-sintel-r6 | 2.5 | 13→24 | 10.53 | TCP 20 + uTP 3; 17/23 active; 164 MiB |
 
-**Status:** Best Ubuntu still **r48: 2.05 MiB/s / 48 MiB / 11/12 active**. After drop_chokers gate + request-cap: peers hold ~19–22 (was ~11 when chokers killed 107.175) and 13/20 active, but peak ~1.3 and mid-run decay leaves ~12–34 MiB/60s. Sintel-r8/r11 healthy (22–37 MiB/s). Gap vs Go r19 (**12 MiB/s / 496 MiB / 31/32**) remains — next: mid-file stall after startup head + per-peer fill. Not Ubuntu speed parity yet.
+**Status:** Best Ubuntu still **r48: 2.05 MiB/s / 48 MiB**. Same-day Go r20 is **3.13 MiB/s / 111 MiB / 23/26** (swarm weaker than r19 12 MiB/s). Rust r59 **1.23 / 12 MiB / 13/20** — ~2.5× below same-day Go on speed, ~9× on bytes; peers held (~20) after drop_chokers gate. Sintel healthy. Next: mid-run decay + per-peer fill. Not parity.
 
