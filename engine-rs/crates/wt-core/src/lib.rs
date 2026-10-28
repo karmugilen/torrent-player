@@ -691,6 +691,10 @@ impl Torrent {
                         0.0
                     },
                     pending_requests: inner.outstanding_requests.len(),
+                    peer_max_requests: inner.max_requests,
+                    peak_requests: inner.peak_requests,
+                    pipeline_limit: inner.webtor_pipeline_limit,
+                    nominal_max_requests: inner.nominal_max_requests(),
                     rtt: inner.rtt.estimate,
                     queued: inner.outstanding_requests.len(),
                     cancelled: inner.cancelled_requests.len(),
@@ -891,10 +895,7 @@ impl Torrent {
     /// 107.175.93.162) while plenty of established slots were still free.
     pub fn drop_chokers(&self, after: Duration) -> usize {
         if self.inner.closed.load(Ordering::Relaxed)
-            || self
-                .inner
-                .data_download_disallowed
-                .load(Ordering::Relaxed)
+            || self.inner.data_download_disallowed.load(Ordering::Relaxed)
         {
             return 0;
         }

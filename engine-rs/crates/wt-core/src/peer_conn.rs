@@ -208,10 +208,7 @@ pub trait PeerTorrent: Send + Sync {
         Ok(())
     }
     /// Pieces still needed from this peer (excludes peer-local in-flight).
-    fn metadata_pieces_to_request(
-        &self,
-        peer: &crate::metadata::PeerMetadataState,
-    ) -> Vec<u32> {
+    fn metadata_pieces_to_request(&self, peer: &crate::metadata::PeerMetadataState) -> Vec<u32> {
         let _ = peer;
         Vec::new()
     }
@@ -221,10 +218,7 @@ pub trait PeerTorrent: Send + Sync {
     /// Record a disconnect for outbound PEX (Go `pex.Drop`).
     fn pex_note_closed(&self, _addr: SocketAddr, _encrypted: bool, _utp: bool) {}
     /// Build next ut_pex payload; updates `cursor`.
-    fn pex_genmsg(
-        &self,
-        cursor: &mut Option<crate::pex::PexCursor>,
-    ) -> Option<PexMsg> {
+    fn pex_genmsg(&self, cursor: &mut Option<crate::pex::PexCursor>) -> Option<PexMsg> {
         let _ = cursor;
         None
     }
@@ -362,6 +356,22 @@ pub struct PeerConnInner {
     pub valid_receive_chunks: HashMap<RequestIndex, u32>,
     pub is_snubbed: bool,
     pub need_request_update: bool,
+}
+
+impl PeerConnInner {
+    /// Go `nominalMaxRequests`, including the current playback cap.
+    pub(crate) fn nominal_max_requests(&self) -> usize {
+        let base = self
+            .peak_requests
+            .saturating_mul(2)
+            .min(self.max_requests)
+            .clamp(1, MAX_LOCAL_TO_REMOTE_REQUESTS);
+        if self.webtor_pipeline_limit > 0 {
+            base.min(self.webtor_pipeline_limit)
+        } else {
+            base
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -626,6 +636,10 @@ impl PeerConn {
             upload_rate: inner.upload_rate.rate(),
             peer_completion: 0.0,
             pending_requests: inner.outstanding_requests.len(),
+            peer_max_requests: inner.max_requests,
+            peak_requests: inner.peak_requests,
+            pipeline_limit: inner.webtor_pipeline_limit,
+            nominal_max_requests: inner.nominal_max_requests(),
             rtt: inner.rtt.estimate,
             queued: inner.outstanding_requests.len(),
             cancelled: inner.cancelled_requests.len(),
@@ -859,6 +873,10 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             upload_rate: self.state.upload_rate.rate(),
             peer_completion: self.peer_completion(),
             pending_requests: self.state.outstanding_requests.len(),
+            peer_max_requests: self.state.max_requests,
+            peak_requests: self.state.peak_requests,
+            pipeline_limit: self.state.webtor_pipeline_limit,
+            nominal_max_requests: self.nominal_max(),
             rtt: self.state.rtt.estimate,
             queued: self.state.outstanding_requests.len(),
             cancelled: self.state.cancelled_requests.len(),
@@ -1246,22 +1264,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     }
 
     fn nominal_max(&self) -> usize {
-        // Go `nominalMaxRequests`: min(PeerMaxRequests, peak*2,
-        // maxLocalToRemoteRequests), then min with the playback pipeline when
-        // set. The former 128 cap compensated for the wall-clock rate
-        // estimator; with Go's expecting-time rate it only throttled fast peers.
-        const NOMINAL_CEILING: usize = MAX_LOCAL_TO_REMOTE_REQUESTS;
-        let base = (self.state.peak_requests.max(1) * 2).max(1);
-        let pipe = self.state.webtor_pipeline_limit;
-        let capped = if pipe > 0 && self.torrent.request_focus_index().is_some() {
-            base.min(pipe)
-        } else {
-            base
-        };
-        capped
-            .min(NOMINAL_CEILING)
-            .min(self.state.max_requests.max(1))
-            .max(1)
+        self.state.nominal_max_requests()
     }
 
     /// Apply HOL rescue / hedge moves that involve this peer (Go nudge path).
@@ -1611,8 +1614,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
             if let Some(reqq) = ext.reqq {
                 if reqq > 0 {
-                    self.state.max_requests =
-                        (reqq as usize).clamp(1, DEFAULT_PEER_MAX_REQUESTS);
+                    self.state.max_requests = (reqq as usize).clamp(1, DEFAULT_PEER_MAX_REQUESTS);
                 }
             }
             if let Some(port) = ext.p {
@@ -1863,11 +1865,8 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         self.closed.store(true, Ordering::Relaxed);
         if self.pex_listed {
             let utp = matches!(self.state.transport, Transport::Utp);
-            self.torrent.pex_note_closed(
-                self.state.remote_addr,
-                self.state.encrypted,
-                utp,
-            );
+            self.torrent
+                .pex_note_closed(self.state.remote_addr, self.state.encrypted, utp);
             self.pex_listed = false;
         }
         // Drop availability

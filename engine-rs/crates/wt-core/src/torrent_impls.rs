@@ -572,7 +572,7 @@ impl PeerTorrent for TorrentInner {
                 rtt: info.rtt,
                 queued: info.queued as u32,
                 cancelled: info.cancelled as u32,
-                nominal_max: 64,
+                nominal_max: info.nominal_max_requests as u32,
                 peer_choking: info.peer_choking,
                 closed: false,
                 last_useful: info
@@ -591,7 +591,7 @@ impl PeerTorrent for TorrentInner {
             rtt: inner.rtt.estimate,
             queued: inner.outstanding_requests.len() as u32,
             cancelled: inner.cancelled_requests.len() as u32,
-            nominal_max: inner.max_requests.max(1) as u32,
+            nominal_max: inner.nominal_max_requests() as u32,
             peer_choking: inner.peer_choking,
             closed,
             last_useful: inner.last_useful_chunk_received,
@@ -669,10 +669,7 @@ impl PeerTorrent for TorrentInner {
         Ok(())
     }
 
-    fn metadata_pieces_to_request(
-        &self,
-        peer: &crate::metadata::PeerMetadataState,
-    ) -> Vec<u32> {
+    fn metadata_pieces_to_request(&self, peer: &crate::metadata::PeerMetadataState) -> Vec<u32> {
         self.metadata.read().pieces_to_request(peer)
     }
 

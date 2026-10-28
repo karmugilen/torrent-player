@@ -165,3 +165,59 @@ fn reader_host_have_wait_read_positions() {
     let got = host.wait_change(after, Duration::from_millis(20));
     assert_eq!(got, after);
 }
+
+#[test]
+fn webtor_snapshot_preserves_live_peer_request_capacity() {
+    use tokio::sync::{mpsc, Notify};
+    use wt_core::peer_conn::PeerConn;
+    use wt_types::PeerSource;
+
+    let t = fresh_torrent();
+    let addr = "127.0.0.1:6881".parse().unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let conn = PeerConn::new(addr, true, PeerSource::Direct, tx, Arc::new(Notify::new()));
+    {
+        let mut state = conn.inner.write();
+        state.max_requests = 500;
+        state.peak_requests = 200;
+        state.webtor_pipeline_limit = 128;
+        state.outstanding_requests.extend(0..64);
+    }
+    let key = peer_key_from_addr(addr);
+    t.conns.write().insert(addr, conn.clone());
+    let live = PeerTorrent::webtor_peer_snap(t.as_ref(), key).unwrap();
+    assert_eq!(live.nominal_max, 128);
+    // The handler publishes this same snapshot path for the HOL/hedge/steal consumers.
+    PeerTorrent::update_peer_snapshot(t.as_ref(), conn.peer_conn_info());
+    let snap = PeerTorrent::webtor_peer_snap(t.as_ref(), key).unwrap();
+    assert_eq!(snap.queued, 64);
+    assert_eq!(snap.nominal_max, 128);
+    assert!(
+        snap.queued < snap.nominal_max,
+        "a peer at 64 pending still has room"
+    );
+    for (peak, peer_max, pipeline, expected) in [
+        (200, 500, 0, 400),
+        (200, 100, 0, 100),
+        (0, 500, 0, 1),
+        (
+            100000,
+            100000,
+            0,
+            ((1 << 20) - (1 << 19) - 5) / 17,
+        ),
+    ] {
+        let mut state = conn.inner.write();
+        state.peak_requests = peak;
+        state.max_requests = peer_max;
+        state.webtor_pipeline_limit = pipeline;
+        drop(state);
+        PeerTorrent::update_peer_snapshot(t.as_ref(), conn.peer_conn_info());
+        assert_eq!(
+            PeerTorrent::webtor_peer_snap(t.as_ref(), key)
+                .unwrap()
+                .nominal_max,
+            expected
+        );
+    }
+}
