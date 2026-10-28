@@ -6,6 +6,9 @@ Ubuntu magnet: magnet:?xt=urn:btih:d160b8d8ea35a5b4e52837468fc8f03d55cef1f7&tr=h
 A result.json and host.log are retained in ~/.cache/wt-tmp/peers-<label>.
 """
 import collections
+import hashlib
+import re
+import datetime
 import json
 import os
 import pathlib
@@ -29,7 +32,11 @@ def main():
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     dash = '-' if label.startswith('go-') else '--'
-    result = {'label': label, 'requested_seconds': seconds, 'samples': []}
+    result = {'label': label, 'requested_seconds': seconds, 'samples': [],
+              'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'requested_port': port}
+    if pathlib.Path(binary).is_file():
+        result['binary_sha256'] = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest()
     stop = threading.Event()
     process = None
 
@@ -46,7 +53,15 @@ def main():
                 [binary, dash+'port', str(port), dash+'path', str(work / 'data'),
                  dash+'max-peers', '55'], stdout=log, stderr=subprocess.STDOUT,
                 env={**os.environ, 'WT_SWARM_DIAGNOSTICS': '1'})
-        for _ in range(100):
+        ready_deadline = time.monotonic() + 20
+        while time.monotonic() < ready_deadline:
+            # Both hosts may fall back to an ephemeral listener if their preferred
+            # port was claimed after our free-port probe. Follow the actual port.
+            startup_log = (work / 'host.log').read_text(errors='replace')
+            actual = re.search(r'control listening on http://127\.0\.0\.1:(\d+)|ctlPort=(\d+)', startup_log)
+            if actual:
+                port = int(actual.group(1) or actual.group(2))
+                result['control_port'] = port
             if process.poll() is not None:
                 raise RuntimeError(f'host exited during startup: {process.returncode}')
             try:
@@ -55,7 +70,7 @@ def main():
             except (OSError, urllib.error.URLError):
                 time.sleep(0.1)
         else:
-            raise RuntimeError('host did not become ready in 10 seconds')
+            raise RuntimeError('host did not become ready in 20 seconds')
         call('POST', '/settings', {
             'maxPeers': 55, 'dialRatePerSec': 30, 'peerExploration': True,
             'claudeSeekMode': True, 'hedgeRequests': True, 'slowPeerYield': True,
