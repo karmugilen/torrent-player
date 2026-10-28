@@ -1,10 +1,13 @@
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use wt_wire::utp::{PacketHeader, UtpSocket, EXT_NONE, HEADER_SIZE, ST_DATA, ST_STATE, ST_SYN};
+use wt_wire::utp::{
+    split_extensions, PacketHeader, UtpSocket, EXT_NONE, EXT_SELECTIVE_ACK, HEADER_SIZE, ST_DATA,
+    ST_STATE, ST_SYN,
+};
 
 /// BEP 29: a raw UDP peer that speaks correct connection IDs must complete
 /// handshake with our initiator (send=A+1, recv=A after SYN with A).
@@ -221,14 +224,15 @@ async fn test_utp_public_peer_hs() {
         .unwrap();
     println!("local {:?}", sock.local_addr().unwrap());
     let t0 = Instant::now();
-    let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(8), sock.connect(addr)).await {
-        Ok(Ok(s)) => {
-            println!("utp connect ok in {:?}", t0.elapsed());
-            s
-        }
-        Ok(Err(e)) => panic!("connect err {e} in {:?}", t0.elapsed()),
-        Err(_) => panic!("connect timeout in {:?}", t0.elapsed()),
-    };
+    let mut stream =
+        match tokio::time::timeout(std::time::Duration::from_secs(8), sock.connect(addr)).await {
+            Ok(Ok(s)) => {
+                println!("utp connect ok in {:?}", t0.elapsed());
+                s
+            }
+            Ok(Err(e)) => panic!("connect err {e} in {:?}", t0.elapsed()),
+            Err(_) => panic!("connect timeout in {:?}", t0.elapsed()),
+        };
     let mut hs = vec![19u8];
     hs.extend_from_slice(b"BitTorrent protocol");
     hs.extend_from_slice(&[0u8; 8]);
@@ -241,9 +245,225 @@ async fn test_utp_public_peer_hs() {
     let _ = stream.flush().await;
     println!("wrote hs in {:?}", t0.elapsed());
     let mut buf = [0u8; 68];
-    match tokio::time::timeout(std::time::Duration::from_secs(10), stream.read_exact(&mut buf)).await {
-        Ok(Ok(_)) => println!("read hs ok in {:?} reserved={:?} peer_id={:?}", t0.elapsed(), &buf[20..28], String::from_utf8_lossy(&buf[48..])),
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_exact(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok(_)) => println!(
+            "read hs ok in {:?} reserved={:?} peer_id={:?}",
+            t0.elapsed(),
+            &buf[20..28],
+            String::from_utf8_lossy(&buf[48..])
+        ),
         Ok(Err(e)) => panic!("read err {e} after {:?}", t0.elapsed()),
         Err(_) => panic!("read timeout after {:?}", t0.elapsed()),
     }
+}
+
+/// Concurrent bidirectional multi-chunk transfer (Request/Piece-like).
+/// Reproduces stalls that unidirectional 64 MiB misses.
+#[tokio::test]
+async fn test_utp_bidirectional_multichunk() {
+    let server_sock = UtpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    let server_addr = server_sock.local_addr().unwrap();
+    let client_sock = UtpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    const CHUNK: usize = 16 * 1024;
+    const N: usize = 64; // 1 MiB each direction
+    const TOTAL: usize = CHUNK * N;
+
+    let server_task = tokio::spawn(async move {
+        let stream = server_sock.accept().await.unwrap();
+        let (mut rh, mut wh) = tokio::io::split(stream);
+
+        let writer = tokio::spawn(async move {
+            let mut sent = 0usize;
+            let mut payload = vec![0u8; CHUNK];
+            while sent < TOTAL {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b = ((sent + i) % 251) as u8;
+                }
+                tokio::io::AsyncWriteExt::write_all(&mut wh, &payload)
+                    .await
+                    .unwrap();
+                sent += CHUNK;
+            }
+            tokio::io::AsyncWriteExt::flush(&mut wh).await.unwrap();
+            sent
+        });
+
+        let reader = tokio::spawn(async move {
+            let mut got = 0usize;
+            let mut buf = vec![0u8; CHUNK];
+            while got < TOTAL {
+                let n = tokio::io::AsyncReadExt::read(&mut rh, &mut buf)
+                    .await
+                    .unwrap();
+                assert!(n > 0, "unexpected EOF at {got}");
+                for (i, b) in buf.iter().enumerate().take(n) {
+                    assert_eq!(*b, ((got + i) % 251) as u8, "mismatch at {got}+{i}");
+                }
+                got += n;
+            }
+            got
+        });
+
+        let (w, r) = tokio::join!(writer, reader);
+        assert_eq!(w.unwrap(), TOTAL);
+        assert_eq!(r.unwrap(), TOTAL);
+    });
+
+    let client_task = tokio::spawn(async move {
+        let stream = client_sock.connect(server_addr).await.unwrap();
+        let (mut rh, mut wh) = tokio::io::split(stream);
+
+        let writer = tokio::spawn(async move {
+            let mut sent = 0usize;
+            let mut payload = vec![0u8; CHUNK];
+            while sent < TOTAL {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b = ((sent + i) % 251) as u8;
+                }
+                tokio::io::AsyncWriteExt::write_all(&mut wh, &payload)
+                    .await
+                    .unwrap();
+                sent += CHUNK;
+            }
+            tokio::io::AsyncWriteExt::flush(&mut wh).await.unwrap();
+            sent
+        });
+
+        let reader = tokio::spawn(async move {
+            let mut got = 0usize;
+            let mut buf = vec![0u8; CHUNK];
+            while got < TOTAL {
+                let n = tokio::io::AsyncReadExt::read(&mut rh, &mut buf)
+                    .await
+                    .unwrap();
+                assert!(n > 0, "unexpected EOF at {got}");
+                for (i, b) in buf.iter().enumerate().take(n) {
+                    assert_eq!(*b, ((got + i) % 251) as u8, "mismatch at {got}+{i}");
+                }
+                got += n;
+            }
+            got
+        });
+
+        let (w, r) = tokio::join!(writer, reader);
+        assert_eq!(w.unwrap(), TOTAL);
+        assert_eq!(r.unwrap(), TOTAL);
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (r1, r2) = tokio::join!(server_task, client_task);
+        r1.unwrap();
+        r2.unwrap();
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "bidirectional multi-chunk uTP transfer timed out"
+    );
+}
+
+#[test]
+fn test_split_extensions_selective_ack() {
+    let mut body = BytesMut::new();
+    body.put_u8(EXT_NONE);
+    body.put_u8(4);
+    body.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+    body.extend_from_slice(b"PAYLOAD");
+    let (payload, sack) = split_extensions(EXT_SELECTIVE_ACK, body.freeze()).expect("split");
+    assert_eq!(&payload[..], b"PAYLOAD");
+    assert_eq!(sack.as_deref(), Some(&[0x01, 0x00, 0x00, 0x00][..]));
+}
+
+/// Peer DATA packets may carry selective-ACK extensions; payload must exclude them.
+#[tokio::test]
+async fn test_utp_skips_selective_ack_extension_on_data() {
+    use wt_wire::utp::{wall_micros, UTP_VERSION};
+
+    let raw = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    let raw_addr = raw.local_addr().unwrap();
+    let client = UtpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    let acceptor = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        let (n, peer) = raw.recv_from(&mut buf).await.unwrap();
+        let mut slice = bytes::Bytes::copy_from_slice(&buf[..n]);
+        let syn = PacketHeader::decode(&mut slice).unwrap();
+        assert_eq!(syn.type_ver >> 4, ST_SYN);
+        let a = syn.connection_id;
+        let send_id = a;
+        // SYN-ACK
+        let resp = PacketHeader {
+            type_ver: (ST_STATE << 4) | UTP_VERSION,
+            extension: EXT_NONE,
+            connection_id: send_id,
+            timestamp_micros: wall_micros(),
+            timestamp_diff_micros: 0,
+            wnd_size: 1_048_576,
+            seq_nr: 42,
+            ack_nr: syn.seq_nr,
+        };
+        let mut out = BytesMut::with_capacity(HEADER_SIZE);
+        resp.encode(&mut out);
+        raw.send_to(&out, peer).await.unwrap();
+
+        // Wait for initiator DATA (BT-like), ACK it
+        let (n, _) = raw.recv_from(&mut buf).await.unwrap();
+        let mut slice = bytes::Bytes::copy_from_slice(&buf[..n]);
+        let data = PacketHeader::decode(&mut slice).unwrap();
+        assert_eq!(data.type_ver >> 4, ST_DATA);
+
+        // Reply with DATA that includes a selective-ACK extension before payload.
+        // Format after 20-byte header: next_ext_type (0), len, bitmask..., then payload.
+        let payload = b"PIECE_OK_PAYLOAD!!"; // 18 bytes
+        let mut pkt = BytesMut::new();
+        let hdr = PacketHeader {
+            type_ver: (ST_DATA << 4) | UTP_VERSION,
+            extension: EXT_SELECTIVE_ACK,
+            connection_id: send_id,
+            timestamp_micros: wall_micros(),
+            timestamp_diff_micros: 0,
+            wnd_size: 1_048_576,
+            seq_nr: 42, // first DATA = STATE.seq (libutp)
+            ack_nr: data.seq_nr,
+        };
+        hdr.encode(&mut pkt);
+        pkt.put_u8(EXT_NONE); // next extension type
+        pkt.put_u8(4); // sack len
+        pkt.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // bitmask
+        pkt.extend_from_slice(payload);
+        raw.send_to(&pkt, peer).await.unwrap();
+        payload.len()
+    });
+
+    let client_task = tokio::spawn(async move {
+        let mut stream = client.connect(raw_addr).await.unwrap();
+        stream.write_all(b"request-bytes-here").await.unwrap();
+        let mut buf = vec![0u8; 18];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            stream.read_exact(&mut buf),
+        )
+        .await
+        .expect("read timeout — extension bytes likely poisoned payload framing")
+        .expect("read err");
+        assert_eq!(&buf[..], b"PIECE_OK_PAYLOAD!!");
+    });
+
+    let (a, c) = tokio::join!(acceptor, client_task);
+    a.unwrap();
+    c.unwrap();
 }

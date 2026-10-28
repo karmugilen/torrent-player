@@ -415,6 +415,126 @@ async fn test_utp_dial_and_accept_roundtrip() {
 /// Prefer TCP when the dial race produces both transports (uTP public piece
 /// path still underperforms; see SMOKE TCP-prefer notes).
 #[tokio::test]
+async fn test_utp_piece_multichunk_transfer() {
+    let mut cfg = test_config();
+    cfg.disable_tcp = true;
+
+    let our_ih = InfoHash([0x56; 20]);
+    let server_peer_id: PeerId = [0xcc; 20];
+    let client_peer_id: PeerId = [0xdd; 20];
+
+    let listener = PeerListener::bind(&cfg).await.expect("bind uTP listener");
+    let listen_port = listener.listen_port();
+
+    let (accepted_tx, mut accepted_rx) = mpsc::channel(16);
+    let server_tracker = HalfOpenTracker::new();
+    let skey_ih = our_ih;
+    let skey_provider = Arc::new(move || vec![skey_ih.0]);
+    let lk_ih = our_ih;
+    let lookup = Arc::new(move |ih: &InfoHash| *ih == lk_ih);
+
+    listener.spawn_accept_loop(
+        cfg.clone(),
+        server_peer_id,
+        server_tracker,
+        skey_provider,
+        lookup,
+        accepted_tx,
+    );
+
+    let client_tracker = HalfOpenTracker::new();
+    let dial_addr: SocketAddr = format!("127.0.0.1:{listen_port}").parse().unwrap();
+    let dial_params = DialParams {
+        remote_addr: dial_addr,
+        info_hash: our_ih,
+        our_peer_id: client_peer_id,
+        transport: Some(Transport::Utp),
+        source: PeerSource::Direct,
+        metadata_size: None,
+        cfg: &cfg,
+        tracker: &client_tracker,
+        dial_limiter: None,
+        tcp_conn_hook: None,
+        utp_socket: None,
+        require_plain: false,
+    };
+
+    let client_outcome = dial_peer(dial_params).await.expect("dial uTP peer failed");
+    let server_conn = tokio::time::timeout(Duration::from_secs(4), accepted_rx.recv())
+        .await
+        .expect("uTP accept timed out")
+        .expect("channel closed");
+
+    const TOTAL: usize = 256 * 1024; // 256 KiB of piece payload
+    const CHUNK: usize = 16 * 1024;
+    let num_chunks = TOTAL / CHUNK;
+
+    let bytes_received = Arc::new(AtomicUsize::new(0));
+    let done_notify = Arc::new(Notify::new());
+    let receiver = FastCountingHandler {
+        bytes_received: bytes_received.clone(),
+        notify: done_notify.clone(),
+        target_bytes: TOTAL,
+    };
+
+    let (_s_r, _s_w) = spawn_connection_driver(
+        server_conn.stream,
+        ChannelHandler {
+            tx: mpsc::unbounded_channel().0,
+        },
+        server_conn.handle.clone(),
+        server_conn.write_rx,
+        server_conn.write_waker,
+        None,
+        None,
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    );
+
+    let (_c_r, _c_w) = spawn_connection_driver(
+        client_outcome.stream,
+        receiver,
+        client_outcome.handle.clone(),
+        client_outcome.write_rx,
+        client_outcome.write_waker,
+        None,
+        None,
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    );
+
+    let piece_payload = Bytes::from(vec![0x5au8; CHUNK]);
+    let seeder = server_conn.handle.clone();
+    let send_task = tokio::spawn(async move {
+        for i in 0..num_chunks {
+            let msg = Message::Piece {
+                index: 0,
+                begin: (i * CHUNK) as u32,
+                piece: piece_payload.clone(),
+            };
+            seeder.send_message_async(msg).await.unwrap();
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), done_notify.notified())
+        .await
+        .expect("uTP piece multi-chunk transfer timed out");
+    send_task.await.unwrap();
+
+    let received = bytes_received.load(Ordering::Relaxed);
+    assert_eq!(
+        received, TOTAL,
+        "uTP piece path must deliver all payload bytes"
+    );
+
+    client_outcome.handle.close("done");
+    server_conn.handle.close("done");
+    listener.close();
+}
+
+/// Go dialPool.getFirst returns on the first success and drains losers. A prior
+/// Rust spare-wait (250–750ms) held half-open slots after TCP already connected.
+#[tokio::test]
 async fn dial_race_prefers_tcp_when_both_connect() {
     let mut cfg = test_config();
     cfg.disable_tcp = false;

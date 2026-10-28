@@ -31,6 +31,40 @@ pub const LEDBAT_TARGET_MICROS: u32 = 100_000; // 100ms
 pub const INITIAL_CWND: usize = 512 * 1024; // 512 KiB
 pub const MAX_CWND: usize = 8 * 1024 * 1024; // 8 MiB for high loopback throughput
 pub const DEFAULT_RECV_WND: u32 = 8 * 1024 * 1024;
+pub const DUP_ACKS_BEFORE_RESEND: u16 = 3;
+
+/// Skip linked uTP extension headers after the 20-byte packet header.
+/// `first_ext` is `PacketHeader.extension`. Returns remaining payload and
+/// selective-ACK bitmask (if present). Matches libutp/BEP 29 layout:
+/// each extension is `[next_type][len][len bytes…]` where the *current*
+/// type came from the previous `next_type` (or the header for the first).
+pub fn split_extensions(first_ext: u8, mut data: Bytes) -> io::Result<(Bytes, Option<Bytes>)> {
+    let mut ext = first_ext;
+    let mut sack: Option<Bytes> = None;
+    while ext != EXT_NONE {
+        if data.len() < 2 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "uTP extension header truncated",
+            ));
+        }
+        let next = data[0];
+        let len = data[1] as usize;
+        data.advance(2);
+        if data.len() < len {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "uTP extension body truncated",
+            ));
+        }
+        let body = data.split_to(len);
+        if ext == EXT_SELECTIVE_ACK {
+            sack = Some(body);
+        }
+        ext = next;
+    }
+    Ok((data, sack))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PacketHeader {
@@ -131,6 +165,8 @@ struct StreamState {
     bytes_in_flight: usize,
     write_closed: bool,
     write_waker: Option<Waker>,
+    dup_ack_count: u16,
+    fast_resend_seq: Option<u16>,
 
     // Recv state
     expected_seq_nr: u16,
@@ -164,6 +200,8 @@ impl StreamState {
             bytes_in_flight: 0,
             write_closed: false,
             write_waker: None,
+            dup_ack_count: 0,
+            fast_resend_seq: None,
             expected_seq_nr: 0,
             recv_buf: BytesMut::with_capacity(256 * 1024),
             out_of_order: BTreeMap::new(),
@@ -175,11 +213,75 @@ impl StreamState {
             is_reset: false,
         }
     }
+
+    /// Build selective-ACK bitmask for packets past `ack_nr` that sit in the OOO buffer.
+    fn selective_ack_bitmask(&self) -> Option<Vec<u8>> {
+        if self.out_of_order.is_empty() {
+            return None;
+        }
+        let mut max_offset = 0u16;
+        for &seq in self.out_of_order.keys() {
+            let offset = seq.wrapping_sub(self.ack_nr);
+            // bit 0 = ack_nr+2 => offset 2
+            if offset >= 2 {
+                max_offset = max_offset.max(offset);
+            }
+        }
+        if max_offset < 2 {
+            return None;
+        }
+        let bits_needed = (max_offset - 1) as usize; // offset 2 => bit 0
+        let bytes_needed = bits_needed.div_ceil(32) * 4; // multiple of 4
+        let mut mask = vec![0u8; bytes_needed.max(4)];
+        for &seq in self.out_of_order.keys() {
+            let offset = seq.wrapping_sub(self.ack_nr);
+            if offset < 2 {
+                continue;
+            }
+            let bit = (offset - 2) as usize;
+            let byte = bit / 8;
+            let bit_in_byte = bit % 8;
+            if byte < mask.len() {
+                mask[byte] |= 1 << bit_in_byte;
+            }
+        }
+        Some(mask)
+    }
+}
+
+fn encode_ack_packet(st: &StreamState, delay: u32, sack: Option<&[u8]>) -> Bytes {
+    let (ext, ext_overhead) = match sack {
+        Some(m) if !m.is_empty() => (EXT_SELECTIVE_ACK, 2 + m.len()),
+        _ => (EXT_NONE, 0),
+    };
+    let mut b = BytesMut::with_capacity(HEADER_SIZE + ext_overhead);
+    let resp = PacketHeader {
+        type_ver: (ST_STATE << 4) | UTP_VERSION,
+        extension: ext,
+        connection_id: st.send_id,
+        timestamp_micros: wall_micros(),
+        timestamp_diff_micros: delay,
+        wnd_size: DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32),
+        seq_nr: st.seq_nr,
+        ack_nr: st.ack_nr,
+    };
+    resp.encode(&mut b);
+    if let Some(m) = sack {
+        if !m.is_empty() {
+            b.put_u8(EXT_NONE);
+            b.put_u8(m.len() as u8);
+            b.extend_from_slice(m);
+        }
+    }
+    b.freeze()
 }
 
 /// A uTP Stream socket implementing `AsyncRead + AsyncWrite`.
 pub struct UtpStream {
     inner: Arc<UtpStreamInner>,
+    /// Keeps the owning `UtpSocket` alive for ephemeral dial sockets so the
+    /// recv/send pumps are not left only on detached task Arcs.
+    _socket: Option<Arc<UtpSocket>>,
 }
 
 pub struct UtpStreamInner {
@@ -191,6 +293,12 @@ pub struct UtpStreamInner {
 impl UtpStream {
     pub fn peer_addr(&self) -> SocketAddr {
         self.inner.state.lock().remote_addr
+    }
+
+    /// Attach a strong ref to the parent socket (ephemeral outgoing dials).
+    pub fn with_socket(mut self, socket: Arc<UtpSocket>) -> Self {
+        self._socket = Some(socket);
+        self
     }
 }
 
@@ -565,7 +673,10 @@ impl UtpSocket {
                     resp.encode(&mut b);
                     let _ = out_tx_in.send((b.freeze(), peer));
 
-                    let stream = UtpStream { inner };
+                    let stream = UtpStream {
+                        inner,
+                        _socket: None,
+                    };
                     let _ = accept_tx.send(stream);
                     continue;
                 }
@@ -588,10 +699,10 @@ impl UtpSocket {
                             let send_id = recv_id.wrapping_add(1);
                             let mut st = StreamState::new(send_id, recv_id, peer, start_time);
                             st.seq_nr = 2; // ST_SYN consumed seq 1
-                            // libtorrent/libutp: ST_STATE does not consume seq_nr. Init
-                            // ack_nr to seq-1; first peer DATA still uses seq (== STATE.seq).
-                            // Using ack_nr=STATE.seq makes libtorrent ignore our DATA
-                            // (ack_nr > m_seq_nr-1) — public uTP HS then stalls forever.
+                                           // libtorrent/libutp: ST_STATE does not consume seq_nr. Init
+                                           // ack_nr to seq-1; first peer DATA still uses seq (== STATE.seq).
+                                           // Using ack_nr=STATE.seq makes libtorrent ignore our DATA
+                                           // (ack_nr > m_seq_nr-1) — public uTP HS then stalls forever.
                             st.ack_nr = hdr.seq_nr.wrapping_sub(1);
                             st.expected_seq_nr = hdr.seq_nr;
                             st.last_remote_ack = hdr.ack_nr;
@@ -624,6 +735,15 @@ impl UtpSocket {
                     }
                 };
 
+                // Strip extension headers before touching the payload. Public
+                // libtorrent/qBittorrent peers attach selective-ACK on DATA;
+                // treating those bytes as BT payload poisons length-prefix
+                // framing and leaves established uTP peers at downloaded=0.
+                let (payload, sack) = match split_extensions(hdr.extension, raw) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
                 // Process packet on stream
                 let mut st = inner.state.lock();
                 st.remote_wnd = hdr.wnd_size;
@@ -632,7 +752,7 @@ impl UtpSocket {
                     st.base_delay_micros = delay;
                 }
 
-                // LEDBAT congestion window update
+                // LEDBAT congestion window update (increase when under target).
                 let queue_delay = delay.saturating_sub(st.base_delay_micros);
                 if queue_delay < LEDBAT_TARGET_MICROS {
                     let off_target = LEDBAT_TARGET_MICROS - queue_delay;
@@ -641,8 +761,9 @@ impl UtpSocket {
                     st.cwnd = (st.cwnd + inc).min(MAX_CWND);
                 }
 
-                // Handle ACKs
+                // Handle cumulative ACKs
                 let mut acked_any = false;
+                let prev_ack = st.last_remote_ack;
                 while let Some(front) = st.unacked.front() {
                     let diff = hdr.ack_nr.wrapping_sub(front.seq_nr) as i16;
                     if diff >= 0 {
@@ -655,16 +776,76 @@ impl UtpSocket {
                 }
                 if acked_any {
                     st.last_remote_ack = hdr.ack_nr;
+                    st.dup_ack_count = 0;
+                } else if hdr.ack_nr == prev_ack && !st.unacked.is_empty() {
+                    st.dup_ack_count = st.dup_ack_count.saturating_add(1);
                 }
+
+                // Selective ACK: count sacked packets past the cumulative ack
+                // and fast-retransmit the HOL packet once we see enough evidence.
+                // Packets stay in `unacked` until the cumulative ack advances
+                // (libutp also frees sacked slots; cumulative path is sufficient).
+                let mut sacked_after = 0u16;
+                if let Some(ref mask) = sack {
+                    for byte in mask.iter() {
+                        sacked_after = sacked_after.saturating_add(byte.count_ones() as u16);
+                    }
+                }
+
+                let front_seq = st.unacked.front().map(|p| p.seq_nr);
+                let need_fast_resend = (st.dup_ack_count >= DUP_ACKS_BEFORE_RESEND
+                    || sacked_after >= DUP_ACKS_BEFORE_RESEND)
+                    && front_seq.is_some()
+                    && st.fast_resend_seq != front_seq;
+
+                let resend = if need_fast_resend {
+                    let front = st.unacked.front_mut().expect("checked is_some");
+                    front.sent_at = Instant::now();
+                    let seq = front.seq_nr;
+                    let len = front.len;
+                    let payload = front.payload.clone();
+                    st.fast_resend_seq = Some(seq);
+                    st.cwnd = (st.cwnd / 2).max(MAX_PAYLOAD_SIZE);
+                    Some((
+                        seq,
+                        len,
+                        payload,
+                        st.send_id,
+                        wall_micros(),
+                        st.last_measured_delay,
+                        DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32),
+                        st.ack_nr,
+                        st.remote_addr,
+                    ))
+                } else {
+                    None
+                };
+
                 if let Some(w) = st.write_waker.take() {
                     w.wake();
                 }
 
+                if let Some((seq, len, payload, send_id, ts, dly, wnd, ack, target)) = resend {
+                    let rhdr = PacketHeader {
+                        type_ver: (ST_DATA << 4) | UTP_VERSION,
+                        extension: EXT_NONE,
+                        connection_id: send_id,
+                        timestamp_micros: ts,
+                        timestamp_diff_micros: dly,
+                        wnd_size: wnd,
+                        seq_nr: seq,
+                        ack_nr: ack,
+                    };
+                    let mut pkt = BytesMut::with_capacity(HEADER_SIZE + len);
+                    rhdr.encode(&mut pkt);
+                    pkt.extend_from_slice(&payload);
+                    let _ = out_tx_in.send((pkt.freeze(), target));
+                }
+
                 match pkt_type {
                     ST_DATA => {
-                        let _payload_len = raw.len();
                         if hdr.seq_nr == st.expected_seq_nr {
-                            st.recv_buf.extend_from_slice(&raw);
+                            st.recv_buf.extend_from_slice(&payload);
                             st.expected_seq_nr = st.expected_seq_nr.wrapping_add(1);
 
                             // Check out of order queue
@@ -681,7 +862,7 @@ impl UtpSocket {
                                 w.wake();
                             }
                         } else if hdr.seq_nr.wrapping_sub(st.expected_seq_nr) as i16 > 0 {
-                            st.out_of_order.insert(hdr.seq_nr, raw);
+                            st.out_of_order.insert(hdr.seq_nr, payload);
                         }
 
                         st.ack_nr = st.expected_seq_nr.wrapping_sub(1);
@@ -689,23 +870,12 @@ impl UtpSocket {
 
                         // ACK every DATA promptly — delayed ACK (>=2) starved
                         // public-swarm peers that wait for ack before more data.
-                        let should_ack =
-                            st.unacked_recv_count >= 1 || !st.out_of_order.is_empty();
+                        let should_ack = st.unacked_recv_count >= 1 || !st.out_of_order.is_empty();
                         if should_ack {
                             st.unacked_recv_count = 0;
-                            let resp = PacketHeader {
-                                type_ver: (ST_STATE << 4) | UTP_VERSION,
-                                extension: EXT_NONE,
-                                connection_id: st.send_id,
-                                timestamp_micros: wall_micros(),
-                                timestamp_diff_micros: delay,
-                                wnd_size: DEFAULT_RECV_WND,
-                                seq_nr: st.seq_nr,
-                                ack_nr: st.ack_nr,
-                            };
-                            let mut b = BytesMut::with_capacity(HEADER_SIZE);
-                            resp.encode(&mut b);
-                            let _ = out_tx_in.send((b.freeze(), peer));
+                            let sack_bytes = st.selective_ack_bitmask();
+                            let pkt = encode_ack_packet(&st, delay, sack_bytes.as_deref());
+                            let _ = out_tx_in.send((pkt, peer));
                         }
                     }
                     ST_FIN => {
@@ -715,20 +885,8 @@ impl UtpSocket {
                         if let Some(w) = st.read_waker.take() {
                             w.wake();
                         }
-                        // Send ACK for FIN
-                        let resp = PacketHeader {
-                            type_ver: (ST_STATE << 4) | UTP_VERSION,
-                            extension: EXT_NONE,
-                            connection_id: st.send_id,
-                            timestamp_micros: wall_micros(),
-                            timestamp_diff_micros: delay,
-                            wnd_size: DEFAULT_RECV_WND,
-                            seq_nr: st.seq_nr,
-                            ack_nr: st.ack_nr,
-                        };
-                        let mut b = BytesMut::with_capacity(HEADER_SIZE);
-                        resp.encode(&mut b);
-                        let _ = out_tx_in.send((b.freeze(), peer));
+                        let pkt = encode_ack_packet(&st, delay, None);
+                        let _ = out_tx_in.send((pkt, peer));
                     }
                     ST_RESET => {
                         st.is_reset = true;
@@ -740,7 +898,7 @@ impl UtpSocket {
                         }
                     }
                     ST_STATE => {
-                        // Handled above in ACK processing
+                        // Cumulative + selective ACKs handled above.
                     }
                     _ => {}
                 }
@@ -803,7 +961,10 @@ impl UtpSocket {
             .map_err(|_| Error::new(ErrorKind::BrokenPipe, "socket closed"))?;
 
         match tokio::time::timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(inner)) => Ok(UtpStream { inner }),
+            Ok(Ok(inner)) => Ok(UtpStream {
+                inner,
+                _socket: None,
+            }),
             _ => {
                 self.syn_senders.lock().remove(&(remote, conn_id));
                 Err(Error::new(ErrorKind::TimedOut, "uTP connect timed out"))

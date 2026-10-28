@@ -61,4 +61,9 @@
 - **Safety**: 100% `#![forbid(unsafe_code)]` - no unsafe blocks across the crate.
 
 ## Left / Future Improvements
-- Explicit selective ACK (SACK) extension encoding if needed by external non-standard uTP peers (currently standard cumulative ACKs handle all transfers).
+- LEDBAT base-delay history (2-minute sliding min) still approximates with a single sample; adequate for download path after extension/SACK fix.
+- MTU probing / packet-size backoff not ported from libutp.
+
+## uTP public download stall (fixed)
+- Root cause: incoming DATA/STATE with BEP 29 selective-ACK extensions had their extension bytes appended into `recv_buf`, poisoning BitTorrent length-prefix framing. Handshake often succeeded (no SACK yet); after the first lossy gap peers attach SACK and the piece path stalled at `downloaded=0` while the conn stayed up.
+- Fix: `split_extensions` strips the linked extension list (libutp layout) before payload delivery; ACKs may carry SACK; duplicate ACK / SACK counts trigger HOL fast-retransmit.

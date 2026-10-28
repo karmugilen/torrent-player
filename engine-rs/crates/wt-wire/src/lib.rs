@@ -32,4 +32,4 @@ pub use transport::{
     dial_peer, dial_tcp, dial_utp, listen_dual_stack_tcp, listen_dual_stack_utp, listen_tcp,
     listen_utp, WireStream,
 };
-pub use utp::{PacketHeader, UtpSocket, UtpStream};
+pub use utp::{split_extensions, PacketHeader, UtpSocket, UtpStream};

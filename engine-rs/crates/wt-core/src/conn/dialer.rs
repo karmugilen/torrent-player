@@ -85,8 +85,7 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
     } else {
         cfg.header_obfuscation_policy.preferred
     };
-    let allow_fallback =
-        !params.require_plain && !cfg.header_obfuscation_policy.require_preferred;
+    let allow_fallback = !params.require_plain && !cfg.header_obfuscation_policy.require_preferred;
 
     let dial_timeout = cfg.nominal_dial_timeout.max(cfg.min_dial_timeout);
 
@@ -455,10 +454,11 @@ async fn dial_raw_owned(
             if disable_tcp {
                 return Err(CoreError::Other("TCP transport disabled".to_string()));
             }
-            let tcp = tokio::time::timeout(dial_timeout, tokio::net::TcpStream::connect(remote_addr))
-                .await
-                .map_err(|_| CoreError::Other("TCP connect timeout".to_string()))?
-                .map_err(CoreError::Io)?;
+            let tcp =
+                tokio::time::timeout(dial_timeout, tokio::net::TcpStream::connect(remote_addr))
+                    .await
+                    .map_err(|_| CoreError::Other("TCP connect timeout".to_string()))?
+                    .map_err(CoreError::Io)?;
             // Request/piece pipelining is latency-sensitive; Nagle delays
             // small Request messages behind larger writes.
             let _ = tcp.set_nodelay(true);
@@ -478,7 +478,8 @@ async fn dial_raw_owned(
             // public-swarm uTP peerconns (Go holds ~25% uTP on Ubuntu);
             // force-uTP on the shared socket never completed handshake.
             // Keep the listener socket as fallback when ephemeral bind fails.
-            let (sock, _keep_alive) = {
+            // Pin the Arc on the stream so recv/send pumps stay rooted.
+            let (sock, keep_alive) = {
                 let bind_addr: SocketAddr = "0.0.0.0:0"
                     .parse()
                     .map_err(|e| CoreError::Other(format!("invalid addr: {e}")))?;
@@ -491,7 +492,7 @@ async fn dial_raw_owned(
                         let s = utp_socket.ok_or_else(|| {
                             CoreError::Other("no uTP socket for outgoing dial".into())
                         })?;
-                        ((*s).clone(), None)
+                        (Arc::clone(s), None)
                     }
                 }
             };
@@ -499,6 +500,10 @@ async fn dial_raw_owned(
             let utp = wt_wire::transport::dial_utp(&sock, remote_addr, dial_timeout)
                 .await
                 .map_err(CoreError::Io)?;
+            let utp = match keep_alive {
+                Some(s) => utp.with_socket(s),
+                None => utp,
+            };
             Ok(Box::new(utp))
         }
         other => Err(CoreError::Other(format!(
