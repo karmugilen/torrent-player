@@ -805,7 +805,8 @@ impl TorrentInner {
         self.dial_finished(addr, false);
     }
 
-    /// Whether a failed dial should be re-queued for another attempt.
+    /// Fail-count still below the old requeue cap (tests / diagnostics).
+    #[cfg(test)]
     pub(crate) fn should_requeue_failed_dial(&self, addr: SocketAddr) -> bool {
         self.dial_fail_counts
             .lock()
