@@ -108,13 +108,22 @@ impl UdpClient {
         }
         // `self.host` is already `host:port` (or `[v6]:port`) from the URL parser.
         let host = self.host.clone();
-        // host already includes port from URL.
-        let mut iter = tokio::net::lookup_host(&host)
+        let candidates: Vec<SocketAddr> = tokio::net::lookup_host(&host)
             .await
-            .map_err(|e| TrackerError::Other(format!("resolve {host}: {e}")))?;
-        let addr = iter
-            .next()
-            .ok_or_else(|| TrackerError::Other(format!("no addresses for {host}")))?;
+            .map_err(|e| TrackerError::Other(format!("resolve {host}: {e}")))?
+            .collect();
+        if candidates.is_empty() {
+            return Err(TrackerError::Other(format!("no addresses for {host}")));
+        }
+        // Shared datagram IO is typically IPv4-only (the first dual-stack uTP
+        // socket). Sending to an IPv6 AAAA result yields EAFNOSUPPORT (97).
+        let local = self.io.local_addr().map_err(TrackerError::Io)?;
+        let addr = select_remote_for_local(local, &candidates).ok_or_else(|| {
+            TrackerError::Other(format!(
+                "no {} addresses for {host} (local {local})",
+                if local.is_ipv6() { "IPv6" } else { "IPv4" }
+            ))
+        })?;
         *self.remote.lock() = Some(addr);
         Ok(addr)
     }
@@ -337,6 +346,19 @@ fn parse_compact_peers6(b: &[u8]) -> Result<Vec<Peer>> {
 
 use std::net::IpAddr;
 
+/// Prefer a remote address whose family matches the local datagram socket.
+///
+/// A shared IPv4 uTP socket cannot send to an IPv6 tracker endpoint; picking
+/// the first `lookup_host` result (often AAAA) caused mass "Address family
+/// not supported" tracker failures and fewer dial candidates.
+fn select_remote_for_local(local: SocketAddr, candidates: &[SocketAddr]) -> Option<SocketAddr> {
+    let want_v6 = local.is_ipv6();
+    candidates
+        .iter()
+        .copied()
+        .find(|addr| addr.is_ipv6() == want_v6)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +370,27 @@ mod tests {
         assert_eq!(udp_timeout(2), Duration::from_secs(60));
         assert_eq!(udp_timeout(8), Duration::from_secs(3840));
         assert_eq!(udp_timeout(9), Duration::from_secs(3840));
+    }
+
+    #[test]
+    fn ipv4_socket_skips_leading_ipv6_tracker_address() {
+        let local: SocketAddr = "0.0.0.0:6881".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:6969".parse().unwrap();
+        let v4: SocketAddr = "203.0.113.9:6969".parse().unwrap();
+        assert_eq!(
+            select_remote_for_local(local, &[v6, v4]),
+            Some(v4),
+            "AAAA-first DNS must not bind an IPv4 shared socket to IPv6"
+        );
+        assert_eq!(select_remote_for_local(local, &[v6]), None);
+    }
+
+    #[test]
+    fn ipv6_socket_prefers_ipv6_tracker_address() {
+        let local: SocketAddr = "[::]:6881".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:6969".parse().unwrap();
+        let v4: SocketAddr = "203.0.113.9:6969".parse().unwrap();
+        assert_eq!(select_remote_for_local(local, &[v4, v6]), Some(v6));
     }
 
     #[test]
