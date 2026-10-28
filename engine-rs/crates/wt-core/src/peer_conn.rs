@@ -411,10 +411,8 @@ impl PeerConn {
                 peer_allowed_fast: HashSet::new(),
                 peer_extension_bits: [0u8; 8],
                 max_requests: DEFAULT_PEER_MAX_REQUESTS,
-                // Start at a full pipeline floor. Go ramps from 0; our wake
-                // path needs a floor or public seeds stay at tens of KiB
-                // (r44–r48). Flooding is capped in nominal_max / refill.
-                peak_requests: 8,
+                // Go ramps from an empty queue (nominal capacity starts at one).
+                peak_requests: 0,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),
@@ -692,10 +690,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 peer_allowed_fast: HashSet::new(),
                 peer_extension_bits: handle.peer_extension_bits(),
                 max_requests: DEFAULT_PEER_MAX_REQUESTS,
-                // Start at a full pipeline floor. Go ramps from 0; our wake
-                // path needs a floor or public seeds stay at tens of KiB
-                // (r44–r48). Flooding is capped in nominal_max / refill.
-                peak_requests: 8,
+                // Go ramps from an empty queue (nominal capacity starts at one).
+                peak_requests: 0,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),
@@ -953,6 +949,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
         self.state.need_request_update = false;
         let tuning = self.torrent.seek_tuning();
+        // Go `webtorPipelineLimit`: fix pipeline for this refill (BDP + floor).
+        self.state.webtor_pipeline_limit = compute_playback_pipeline_limit(
+            self.state.download_rate.rate(),
+            self.state.rtt.estimate,
+            self.torrent.request_focus_index().is_some(),
+        );
         if tuning.hol_rescue || tuning.hedge {
             self.apply_hol_and_hedge(handle, &tuning);
         }
@@ -1010,13 +1012,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             &snap,
             &peer_snap,
             &desired.piece_states,
-        );
-
-        // Go `webtorPipelineLimit`: fix pipeline for this refill (BDP + floor).
-        self.state.webtor_pipeline_limit = compute_playback_pipeline_limit(
-            self.state.download_rate.rate(),
-            self.state.rtt.estimate,
-            self.torrent.request_focus_index().is_some(),
         );
 
         let was_empty = self.state.outstanding_requests.is_empty();
@@ -1224,23 +1219,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             added,
             was_empty,
         ) as usize;
-        // WholeQueue would set peak=0 when a 100ms wake runs while choked.
-        // Preserve capacity on choked/empty top-ups; modest floor for
-        // slow-start (Go has no peak floor — 8 ≈ 128 KiB avoids the r58
-        // peak=0 stall without the r59/r60 HOL of floor 64). Like Go, growth
-        // is bounded by the peer's reqq and the local write buffer only.
-        const PEAK_REQUESTS_FLOOR: usize = 8;
-        const PEAK_REQUESTS_CEILING: usize = MAX_LOCAL_TO_REMOTE_REQUESTS;
-        let peak = if self.state.peer_choking && added == 0 {
-            self.state.peak_requests
-        } else if added == 0 && !was_empty {
-            self.state.peak_requests.max(computed)
-        } else {
-            computed
-        };
-        self.state.peak_requests = peak
-            .clamp(PEAK_REQUESTS_FLOOR, PEAK_REQUESTS_CEILING)
-            .min(self.state.max_requests.max(1));
+        self.state.peak_requests = computed;
         let _ = before;
     }
 
@@ -1265,6 +1244,20 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
     fn nominal_max(&self) -> usize {
         self.state.nominal_max_requests()
+    }
+
+    /// Go `isLowOnRequests`: normal downloads refill an empty queue;
+    /// playback may opt into fractional/half-pipeline refills.
+    fn is_low_on_requests(&self) -> bool {
+        let tuning = self.torrent.seek_tuning();
+        let pending = self.state.outstanding_requests.len();
+        if tuning.refill_at > 0.0 && self.torrent.request_focus_index().is_some() {
+            pending <= (self.nominal_max() as f64 * tuning.refill_at) as usize
+        } else if tuning.full_pipeline {
+            pending <= self.nominal_max() / 2
+        } else {
+            pending == 0 && self.state.cancelled_requests.is_empty()
+        }
     }
 
     /// Apply HOL rescue / hedge moves that involve this peer (Go nudge path).
@@ -1541,7 +1534,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.torrent.queue_piece_hash(index);
         }
 
-        self.state.need_request_update = true;
+        self.state.need_request_update = self.is_low_on_requests();
         self.torrent.bump_change();
         let _ = handle;
         Ok(())
@@ -1711,7 +1704,10 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             }
         } else {
             self.expire_stale_requests(handle);
-            self.update_requests(handle);
+            if self.state.need_request_update || self.is_low_on_requests()
+                || self.torrent.request_focus_index().is_some() {
+                self.update_requests(handle);
+            }
         }
         self.request_metadata_pieces(handle);
         self.maybe_send_pex(handle);
@@ -1779,7 +1775,6 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 piece,
             } => {
                 self.handle_piece(handle, index, begin, piece)?;
-                self.update_requests(handle);
             }
             Message::Cancel {
                 index,

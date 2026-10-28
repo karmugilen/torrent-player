@@ -446,10 +446,14 @@ impl PeerTorrent for TorrentInner {
         drop(pieces);
 
         let rs = self.request_state.read();
+        let mut outstanding_by_peer = HashMap::<SocketAddr, u64>::new();
+        for request in rs.values() {
+            *outstanding_by_peer.entry(request.peer).or_default() += 1;
+        }
         let mut assignments = HashMap::new();
         for (r, a) in rs.iter() {
             let peer = peer_key_from_addr(a.peer);
-            let outstanding = rs.values().filter(|x| x.peer == a.peer).count() as u64;
+            let outstanding = outstanding_by_peer[&a.peer];
             assignments.insert(
                 *r,
                 PeerRequestAssignment {

@@ -48,6 +48,7 @@ struct FakeTorrent {
     peer_pieces: Mutex<HashMap<PeerKey, HashSet<u32>>>,
     bumps: AtomicU32,
     info_hash: [u8; 20],
+    focused: AtomicBool,
 }
 
 impl FakeTorrent {
@@ -70,6 +71,7 @@ impl FakeTorrent {
             peer_pieces: Mutex::new(HashMap::new()),
             bumps: AtomicU32::new(0),
             info_hash: [7u8; 20],
+            focused: AtomicBool::new(true),
         })
     }
 }
@@ -228,7 +230,7 @@ impl PeerTorrent for FakeTorrent {
     }
 
     fn request_focus_index(&self) -> Option<RequestIndex> {
-        Some(0)
+        self.focused.load(Ordering::Relaxed).then_some(0)
     }
     fn urgent_steal_after(&self) -> Duration {
         Duration::ZERO
@@ -710,4 +712,53 @@ async fn payload_upload_account_counts_written_bytes_once() {
     reader_task.abort();
     writer_task.abort();
     assert_eq!(written, i64::from(CHUNK), "seeding policy must see actual uploaded bytes");
+}
+
+#[test]
+fn peak_capacity_starts_at_zero_and_recovers_after_choke_without_a_floor() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4997".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor, &handle);
+    assert_eq!(peer.peer_conn_info().peak_requests, 0);
+    assert_eq!(peer.peer_conn_info().nominal_max_requests, 1);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    assert!(drain(&mut rx).iter().any(|m| matches!(m, Message::Request { .. })));
+    peer.on_message(&handle, Message::Choke).unwrap();
+    peer.on_wake(&handle);
+    assert_eq!(peer.peer_conn_info().peak_requests, 0);
+    // Fast peers acknowledge cancels with Reject before those slots are reusable.
+    for msg in drain(&mut rx) {
+        if let Message::Cancel { index, begin, length } = msg {
+            peer.on_message(&handle, Message::Reject { index, begin, length }).unwrap();
+        }
+    }
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    assert!(drain(&mut rx).iter().any(|m| matches!(m, Message::Request { .. })));
+}
+
+#[test]
+fn normal_download_refills_after_draining_the_queue() {
+    let tor = FakeTorrent::new();
+    tor.focused.store(false, Ordering::Relaxed);
+    let (handle, mut rx) = make_handle("127.0.0.1:4996".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor, &handle);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    let first = drain(&mut rx).into_iter().find_map(|m| match m {
+        Message::Request { index, begin, length } => Some((index, begin, length)), _ => None,
+    }).unwrap();
+    peer.on_message(&handle, Message::Piece {
+        index: first.0, begin: first.1, piece: Bytes::from(vec![0; first.2 as usize]),
+    }).unwrap();
+    let wave: Vec<_> = drain(&mut rx).into_iter().filter_map(|m| match m {
+        Message::Request { index, begin, length } => Some((index, begin, length)), _ => None,
+    }).collect();
+    assert!(wave.len() >= 2, "the queue should grow from Go's initial one request");
+    peer.on_message(&handle, Message::Piece {
+        index: wave[0].0, begin: wave[0].1, piece: Bytes::from(vec![0; wave[0].2 as usize]),
+    }).unwrap();
+    peer.on_wake(&handle);
+    assert!(!drain(&mut rx).iter().any(|m| matches!(m, Message::Request { .. })),
+        "normal downloads must not rebuild and top up a busy queue after every block");
 }
