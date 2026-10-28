@@ -1564,10 +1564,10 @@ mod dial_parity_tests {
     }
 
     #[test]
-    fn dial_pool_survives_failed_pops_via_requeue_backoff() {
-        // Pure PopMax without requeue drains known_peers faster than rediscovery
-        // (Bunny: pool 220→<40 while dialFailures.timeout≈400). Re-queue with
-        // backoff keeps candidates available after N failures.
+    fn dial_pool_rediscovery_respects_fail_backoff_after_pop() {
+        // Go PopMax: failed dials leave the pool; mid-run tracker/DHT/PEX
+        // rediscovery re-adds. Backoff must still defer immediate redial so
+        // rediscovery cannot burn half-open on the same dead contacts.
         let t = torrent();
         let peers: Vec<PeerInfo> = (1..=6)
             .map(|n| PeerInfo {
@@ -1585,14 +1585,13 @@ mod dial_parity_tests {
         assert_eq!(t.known_peers.read().len(), 0, "Pop removes from reserve");
         for p in &batch {
             t.dial_finished(p.addr, false);
-            assert!(t.should_requeue_failed_dial(p.addr));
-            // Mirror client dialer: re-queue after recording fail/backoff.
+            // Rediscovery (not dialer requeue) puts the contact back.
             t.add_peers(vec![p.clone()]);
         }
         assert_eq!(
             t.known_peers.read().len(),
             6,
-            "requeue must restore dial reserve after failures"
+            "rediscovery restores dial reserve after failures"
         );
         assert_eq!(
             t.take_dial_candidates(6).len(),

@@ -795,18 +795,15 @@ impl ClientInner {
                                 msg.chars().take(160).collect::<String>()
                             );
                         }
-                        // Apply fail-count/backoff first, then re-queue so
-                        // take_dial_candidates honors the new backoff window.
-                        // Go relies on rediscovery alone after PopMax; on Ubuntu
-                        // that drains the pool (220→<40) before trackers/DHT
-                        // refill. Cap 8 retries with exp backoff.
+                        // Go PopMax: failed dials leave the pool; rediscovery
+                        // (tracker/DHT/PEX mid-run feed) re-adds them. Requeue
+                        // kept pending≈200 → reducedDialTimeout stuck at min
+                        // (Bunny retain3: ~565 timeouts/60s) while Go's shrinking
+                        // peers.Len() allowed longer dials and a higher mid-run
+                        // peer spike. Keep fail_count/backoff so rediscovery
+                        // cannot immediately redial the same dead contact.
                         if !ok {
                             tor.dial_finished(peer.addr, false);
-                            if peer.source != PeerSource::WebSeed
-                                && tor.should_requeue_failed_dial(peer.addr)
-                            {
-                                tor.add_peers(vec![peer.clone()]);
-                            }
                         } else {
                             tor.swarm_diagnostics.lock().dial_ok += 1;
                             let transport = tor
