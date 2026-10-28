@@ -776,6 +776,39 @@ fn test_peer_that_keeps_us_choked_is_dropped() {
     assert_eq!(drop[0].id, 1);
 }
 
+/// Go gate: with free established slots and dial-pool waiting ≤ 2×free,
+/// drop_chokers must not kill live (even long-choking) downloaders.
+#[test]
+fn test_drop_chokers_spares_peers_when_established_slots_free() {
+    let mut clock = ManualClock::new();
+    let t0 = clock.now();
+    clock.advance(Duration::from_secs(30));
+    let choker = MockPeer {
+        interested: true,
+        choking: true,
+        choked_since: Some(t0),
+        last_interested: Some(t0),
+        ..MockPeer::new(1)
+    };
+    let giver = MockPeer {
+        interested: true,
+        choking: false,
+        last_useful: Some(clock.now()),
+        ..MockPeer::new(2)
+    };
+    let peers = vec![choker, giver];
+    // max=55, established=14 → free=41; 2*free=82; waiting=40 ≤ 82
+    let drop = chokers_to_drop(&clock, &peers, Duration::from_secs(5), 40, 55, 14);
+    assert!(
+        drop.is_empty(),
+        "free established slots: must not drop live downloaders (Go WebtorDropChokers gate)"
+    );
+    // Same peers, but pool pressure above 2×free
+    let drop = chokers_to_drop(&clock, &peers, Duration::from_secs(5), 83, 55, 14);
+    assert_eq!(drop.len(), 1);
+    assert_eq!(drop[0].id, 1, "only the choker is dropped; giver stays");
+}
+
 #[test]
 fn test_top_up_of_a_busy_peer_keeps_its_request_limit() {
     assert_eq!(next_peak_requests(PeakMode::Added, 16, 20, 1, false), 1);

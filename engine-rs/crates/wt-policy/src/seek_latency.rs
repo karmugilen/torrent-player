@@ -110,7 +110,11 @@ pub struct ChokedPeer {
     pub we_want_data: bool,
 }
 
-/// Peers that should be dropped this tick (WebTorrent CHOKE_TIMEOUT).
+/// Peers past CHOKE_TIMEOUT while we want data.
+///
+/// Live engine path uses `wt_core::Torrent::drop_chokers`, which also applies
+/// Go's dial-pool gate (`waiting > 2 * free established slots`). Callers of
+/// this helper must apply that gate themselves before closing peers.
 pub fn drop_chokers(enabled: bool, peers: &[ChokedPeer]) -> Vec<PeerKey> {
     if !enabled {
         return Vec::new();

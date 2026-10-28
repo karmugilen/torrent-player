@@ -303,20 +303,38 @@ impl TorrentInner {
             return Err(CoreError::Other("peer address mismatch".into()));
         }
         let _ = (
-            info.outgoing,
             info.transport,
             info.encrypted,
             info.peer_id,
             info.reserved,
             info.source,
         );
+        // Duplicate remote: reject (Go closes the new one / prefers network).
+        if self.conn_handles.read().contains_key(&info.remote) {
+            return Err(CoreError::Other("duplicate peer".into()));
+        }
+        let max = self.max_established_conns.load(Ordering::Relaxed);
+        if self.conn_handles.read().len() >= max {
+            // Go: replace worstBadConn when at maxEstablishedConns.
+            let outgoing = self
+                .conn_handles
+                .read()
+                .values()
+                .filter(|h| h.is_outgoing())
+                .count();
+            let established = self.conn_handles.read().len();
+            let incoming = established.saturating_sub(outgoing);
+            let incoming_is_bad = (incoming.saturating_sub(outgoing) > 1) && info.outgoing;
+            let outgoing_is_bad = (outgoing.saturating_sub(incoming) > 1) && !info.outgoing;
+            let Some(victim) = self.worst_bad_conn_addr(incoming_is_bad, outgoing_is_bad) else {
+                return Err(CoreError::Other("don't want conn".into()));
+            };
+            self.drop_conn_addr(victim, "replaced by better peer");
+        }
         let mut handles = self.conn_handles.write();
-        if handles.contains_key(&info.remote)
-            || handles.len() >= self.max_established_conns.load(Ordering::Relaxed)
-        {
-            return Err(CoreError::Other(
-                "duplicate peer or connection limit reached".into(),
-            ));
+        if handles.len() >= max {
+            // Race: another attach won the slot.
+            return Err(CoreError::Other("don't want conn".into()));
         }
         handles.insert(info.remote, handle.clone());
         drop(handles);
@@ -418,13 +436,251 @@ impl TorrentInner {
             .max(0).min(configured as i64) as usize
     }
 
+    /// Go `wantAnyConns` / `wantOutgoingConns`: under the established cap return
+    /// free slots; at the cap still return 1 when a bad conn can be replaced
+    /// (so openNewConns can dial a replacement like Go).
     pub(crate) fn wants_conns(&self) -> usize {
         if self.closed.load(Ordering::Relaxed) {
             return 0;
         }
-        self.max_established_conns
-            .load(Ordering::Relaxed)
-            .saturating_sub(self.conn_handles.read().len())
+        let max = self.max_established_conns.load(Ordering::Relaxed);
+        let established = self.conn_handles.read().len();
+        if established < max {
+            return max - established;
+        }
+        let outgoing = self
+            .conn_handles
+            .read()
+            .values()
+            .filter(|h| h.is_outgoing())
+            .count();
+        let incoming = established.saturating_sub(outgoing);
+        // Go wantOutgoingConns at max: prefer replacing excess incoming.
+        let incoming_is_bad = incoming.saturating_sub(outgoing) > 1;
+        if self
+            .worst_bad_conn_addr(incoming_is_bad, false)
+            .is_some()
+        {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Go `PeerConn.useful`: metadata peer, seeding interest, or has wanted pieces.
+    fn conn_is_useful(&self, addr: SocketAddr) -> bool {
+        let conns = self.conns.read();
+        let Some(c) = conns.get(&addr) else {
+            return false;
+        };
+        let inner = c.inner.read();
+        if c.closed.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self.info.read().is_none() {
+            return inner.peer_ext_ut_metadata.is_some();
+        }
+        if self.seeding.load(Ordering::Relaxed) && inner.peer_interested {
+            return true;
+        }
+        // Approximate peerHasWantedPieces: any piece we lack that they have.
+        let pieces = self.pieces.read();
+        if inner.peer_sent_have_all {
+            return pieces.iter().any(|p| !p.complete);
+        }
+        inner.peer_pieces.iter().any(|&p| {
+            pieces
+                .get(p as usize)
+                .map(|e| !e.complete)
+                .unwrap_or(true)
+        })
+    }
+
+    /// Go `worstBadConn` / `worstBadConnFromSlice`: pick a replaceable bad
+    /// connection (bad direction, wasted chunks, or aged worse-half).
+    pub(crate) fn worst_bad_conn_addr(
+        &self,
+        incoming_is_bad: bool,
+        outgoing_is_bad: bool,
+    ) -> Option<SocketAddr> {
+        let handles = self.conn_handles.read();
+        if handles.is_empty() {
+            return None;
+        }
+        let max = self.max_established_conns.load(Ordering::Relaxed);
+        let conns = self.conns.read();
+
+        struct Cand {
+            addr: SocketAddr,
+            bad_direction: bool,
+            useful: bool,
+            last_helpful: Option<Instant>,
+            completed_handshake: Instant,
+            wasted: i64,
+            useful_chunks: i64,
+            peer_prio: u32,
+        }
+
+        let mut cands: Vec<Cand> = Vec::with_capacity(handles.len());
+        for (addr, handle) in handles.iter() {
+            if handle.is_closed() {
+                continue;
+            }
+            let outgoing = handle.is_outgoing();
+            let bad_direction = (incoming_is_bad && !outgoing) || (outgoing_is_bad && outgoing);
+            let stats = handle.stats().snapshot();
+            let (last_helpful, _) = conns
+                .get(addr)
+                .map(|c| {
+                    let i = c.inner.read();
+                    (i.last_useful_chunk_received, i.connected_at)
+                })
+                .unwrap_or((None, handle.connected_at()));
+            cands.push(Cand {
+                addr: *addr,
+                bad_direction,
+                useful: self.conn_is_useful(*addr),
+                last_helpful,
+                completed_handshake: handle.connected_at(),
+                wasted: stats.chunks_read_wasted,
+                useful_chunks: stats.chunks_read_useful,
+                peer_prio: self.peer_priority(*addr),
+            });
+        }
+        drop(conns);
+        drop(handles);
+
+        // worseConnInput.Less / heap order: worst first (bad-dir, !useful,
+        // older helpful, older handshake, lower peer priority).
+        cands.sort_by(|a, b| {
+            use std::cmp::Ordering as O;
+            // bad_direction true is worse → should come first
+            match (a.bad_direction, b.bad_direction) {
+                (true, false) => return O::Less,
+                (false, true) => return O::Greater,
+                _ => {}
+            }
+            // useful false is worse
+            match (a.useful, b.useful) {
+                (false, true) => return O::Less,
+                (true, false) => return O::Greater,
+                _ => {}
+            }
+            // older (smaller) last_helpful is worse; None is oldest
+            match (a.last_helpful, b.last_helpful) {
+                (None, Some(_)) => return O::Less,
+                (Some(_), None) => return O::Greater,
+                (Some(la), Some(lb)) => {
+                    if la != lb {
+                        return la.cmp(&lb); // earlier = worse = Less
+                    }
+                }
+                (None, None) => {}
+            }
+            // older handshake is worse
+            match a.completed_handshake.cmp(&b.completed_handshake) {
+                O::Equal => {}
+                o => return o,
+            }
+            match a.peer_prio.cmp(&b.peer_prio) {
+                O::Equal => {}
+                o => return o,
+            }
+            // stable tie-break on addr bytes
+            a.addr.to_string().cmp(&b.addr.to_string())
+        });
+
+        let total = cands.len();
+        for (idx, c) in cands.iter().enumerate() {
+            if c.bad_direction {
+                return Some(c.addr);
+            }
+            if c.wasted >= 6 && c.wasted > c.useful_chunks {
+                return Some(c.addr);
+            }
+            // Remaining after this pop would be total-1-idx; Go checks
+            // `wcs.Len() >= (max+1)/2` AFTER popping, i.e. remaining >= half.
+            let remaining_after = total - 1 - idx;
+            if remaining_after >= (max + 1) / 2
+                && c.completed_handshake.elapsed() > Duration::from_secs(60)
+            {
+                return Some(c.addr);
+            }
+        }
+        None
+    }
+
+    /// Absolute worst connection by Go worseConn ordering (for SetMaxEstablishedConns).
+    pub(crate) fn worst_conn_addr(&self) -> Option<SocketAddr> {
+        let handles = self.conn_handles.read();
+        if handles.is_empty() {
+            return None;
+        }
+        let conns = self.conns.read();
+        let mut best: Option<(SocketAddr, bool, bool, Option<Instant>, Instant, u32)> = None;
+        for (addr, handle) in handles.iter() {
+            if handle.is_closed() {
+                continue;
+            }
+            let useful = self.conn_is_useful(*addr);
+            let last_helpful = conns
+                .get(addr)
+                .and_then(|c| c.inner.read().last_useful_chunk_received);
+            let completed = handle.connected_at();
+            let prio = self.peer_priority(*addr);
+            let cand = (*addr, false, useful, last_helpful, completed, prio);
+            let replace = match &best {
+                None => true,
+                Some((_, _, bu, blh, bc, bp)) => {
+                    // worse-first vs current best (which holds the worst so far)
+                    match (useful, bu) {
+                        (false, true) => true,
+                        (true, false) => false,
+                        _ => match (last_helpful, blh) {
+                            (None, Some(_)) => true,
+                            (Some(_), None) => false,
+                            (Some(la), Some(lb)) if la != *lb => la < *lb,
+                            _ => {
+                                completed < *bc
+                                    || (completed == *bc && prio < *bp)
+                            }
+                        },
+                    }
+                }
+            };
+            if replace {
+                best = Some(cand);
+            }
+        }
+        best.map(|c| c.0)
+    }
+
+    /// Close and detach a connection (Go `dropConnection` / deletePeerConn).
+    /// Frees the established slot immediately; records the close reason.
+    pub(crate) fn drop_conn_addr(&self, addr: SocketAddr, reason: &str) {
+        if let Some(handle) = self.conn_handles.write().remove(&addr) {
+            handle.close(reason);
+            *self
+                .swarm_diagnostics
+                .lock()
+                .closes
+                .entry(crate::stats::failure_kind(reason).into())
+                .or_default() += 1;
+            eprintln!(
+                "peer_closed addr={} out={} src={:?} reason={}",
+                addr,
+                handle.is_outgoing(),
+                handle.source(),
+                reason.chars().take(120).collect::<String>()
+            );
+        }
+        self.conns.write().remove(&addr);
+        self.peer_pieces
+            .write()
+            .remove(&crate::torrent_impls::peer_key_from_addr(addr));
+        self.peer_snapshots.write().remove(&addr);
+        self.choked_since.write().remove(&addr);
+        self.bump_change();
     }
 
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
@@ -1209,6 +1465,26 @@ mod dial_parity_tests {
             "192.0.2.1:6881".parse::<SocketAddr>().unwrap(), "192.0.2.2:6881".parse::<SocketAddr>().unwrap(),
         ]);
         assert_eq!(t.wants_conns(), 2, "Go wantAnyConns counts established peers only");
+    }
+
+    #[test]
+    fn wants_conns_at_max_without_bad_conn_is_zero() {
+        let t = torrent();
+        t.max_established_conns.store(0, Ordering::Relaxed);
+        assert_eq!(
+            t.wants_conns(),
+            0,
+            "at max with no replaceable bad conn, Go wantOutgoingConns is false"
+        );
+        t.max_established_conns.store(3, Ordering::Relaxed);
+        assert_eq!(t.wants_conns(), 3);
+    }
+
+    #[test]
+    fn worst_bad_conn_none_when_empty() {
+        let t = torrent();
+        assert!(t.worst_bad_conn_addr(false, false).is_none());
+        assert!(t.worst_conn_addr().is_none());
     }
 
     #[test]

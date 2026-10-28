@@ -524,6 +524,7 @@ pub fn peer_counts<P: PeerView>(peers: &[P]) -> (usize, usize) {
 #[cfg(test)]
 mod unit {
     use super::*;
+    use crate::webtor::clock::ManualClock;
 
     #[test]
     fn encode_focus_matches_go() {
@@ -559,5 +560,95 @@ mod unit {
             next_peak_requests(PeakMode::KeepOnTopUp, 16, 20, 4, true),
             20
         );
+    }
+
+    /// Go WebtorDropChokers: with free established slots, dial-pool pressure
+    /// must exceed `2 * free` before any long-choking peer is eligible.
+    #[test]
+    fn drop_chokers_gate_spares_peers_when_free_slots() {
+        let mut clock = ManualClock::new();
+        let t0 = clock.now();
+        clock.advance(Duration::from_secs(10));
+        let choker = MockChoker {
+            choking: true,
+            interested: true,
+            choked_since: Some(t0),
+            last_interested: Some(t0),
+            closed: false,
+        };
+        let peers = [choker];
+        // free = 55 - 17 = 38; 2*free = 76; waiting 40 <= 76 → no drop
+        assert!(
+            chokers_to_drop(&clock, &peers, Duration::from_secs(5), 40, 55, 17).is_empty(),
+            "must not kill live downloaders while established slots remain free"
+        );
+        // waiting 77 > 76 → gate opens
+        assert_eq!(
+            chokers_to_drop(&clock, &peers, Duration::from_secs(5), 77, 55, 17).len(),
+            1
+        );
+        // At capacity (free=0) any waiting peer opens the gate
+        assert_eq!(
+            chokers_to_drop(&clock, &peers, Duration::from_secs(5), 1, 17, 17).len(),
+            1
+        );
+        assert!(
+            chokers_to_drop(&clock, &peers, Duration::from_secs(5), 0, 17, 17).is_empty(),
+            "no waiting peers → never drop"
+        );
+    }
+
+    struct MockChoker {
+        choking: bool,
+        interested: bool,
+        choked_since: Option<std::time::Instant>,
+        last_interested: Option<std::time::Instant>,
+        closed: bool,
+    }
+
+    impl PeerView for MockChoker {
+        type Id = u32;
+        fn id(&self) -> u32 {
+            1
+        }
+        fn download_rate_bps(&self) -> f64 {
+            0.0
+        }
+        fn rtt(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn queued_requests(&self) -> u32 {
+            0
+        }
+        fn cancelled_requests(&self) -> u32 {
+            0
+        }
+        fn nominal_max_requests(&self) -> u32 {
+            1
+        }
+        fn last_useful_data(&self) -> Option<std::time::Instant> {
+            None
+        }
+        fn has_piece(&self, _: PieceIndex) -> bool {
+            false
+        }
+        fn peer_choking(&self) -> bool {
+            self.choking
+        }
+        fn closed(&self) -> bool {
+            self.closed
+        }
+        fn interested(&self) -> bool {
+            self.interested
+        }
+        fn choked_since(&self) -> Option<std::time::Instant> {
+            self.choked_since
+        }
+        fn last_became_interested(&self) -> Option<std::time::Instant> {
+            self.last_interested
+        }
+        fn valid_receive_count(&self, _: RequestIndex) -> u32 {
+            0
+        }
     }
 }

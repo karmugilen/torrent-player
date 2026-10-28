@@ -301,7 +301,20 @@ pub(crate) fn failure_kind(reason: &str) -> &'static str {
     else if reason.contains("handshake") { "handshake" }
     else if reason.contains("eof") { "eof" }
     else if reason.contains("decode") { "decode" }
-    else if reason.contains("choker") { "choker" }
+    // Go/Webtor closes with "choked too long"; also accept "choker".
+    else if reason.contains("choked") || reason.contains("choker") { "choker" }
     else if reason.contains("reset") { "reset" }
     else { "other" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failure_kind;
+
+    #[test]
+    fn choked_too_long_is_choker_bucket() {
+        assert_eq!(failure_kind("choked too long"), "choker");
+        assert_eq!(failure_kind("frame decode error: reset"), "decode");
+        assert_eq!(failure_kind("connection closed by peer (EOF)"), "eof");
+    }
 }

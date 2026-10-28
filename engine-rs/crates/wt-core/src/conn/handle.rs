@@ -181,6 +181,11 @@ impl ConnHandle {
         self.inner.outgoing
     }
 
+    /// Instant the connection completed its BitTorrent handshake.
+    pub fn connected_at(&self) -> Instant {
+        self.inner.connected_at
+    }
+
     /// Whether Message Stream Encryption (MSE) is active.
     pub fn is_encrypted(&self) -> bool {
         self.inner.encrypted

@@ -677,8 +677,18 @@ impl Torrent {
 
     pub fn announce_to_dht(&self) {}
 
+    /// Go `SetMaxEstablishedConns`: store the new cap and drop worst
+    /// connections until under the limit (worseConn heap order).
     pub fn set_max_established_conns(&self, n: usize) -> usize {
-        self.inner.max_established_conns.swap(n, Ordering::Relaxed)
+        let old = self.inner.max_established_conns.swap(n, Ordering::Relaxed);
+        while self.inner.conn_handles.read().len() > n {
+            let Some(victim) = self.inner.worst_conn_addr() else {
+                break;
+            };
+            self.inner
+                .drop_conn_addr(victim, "max established conns reduced");
+        }
+        old
     }
 
     pub fn swarm_diagnostics(&self) -> stats::SwarmDiagnostics {
@@ -972,11 +982,12 @@ impl Torrent {
         if to_drop.is_empty() {
             return 0;
         }
-        let handles = self.inner.conn_handles.read();
+        // Go `c.drop()` + deletePeerConn: free the established slot immediately
+        // so openNewConns / wants_conns can dial a replacement this tick.
         let mut dropped = 0usize;
-        for addr in &to_drop {
-            if let Some(handle) = handles.get(addr) {
-                handle.close("choked too long");
+        for addr in to_drop {
+            if self.inner.conn_handles.read().contains_key(&addr) {
+                self.inner.drop_conn_addr(addr, "choked too long");
                 dropped += 1;
             }
         }
