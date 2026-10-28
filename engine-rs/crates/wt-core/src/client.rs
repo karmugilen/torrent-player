@@ -724,12 +724,12 @@ impl ClientInner {
                 if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
                     break;
                 }
-                // Dial volume: allow up to 48/96 half-open even when the
+                // Dial volume: allow up to 64/128 half-open even when the
                 // engine config is Go's 24/48. Ubuntu dial success is ~10%
                 // (timeouts); more in-flight attempts raise held peers
                 // toward Go (~40) without raising established maxPeers.
-                let half_open_torrent = client.config.half_open_conns_per_torrent.max(48);
-                let half_open_total = client.config.total_half_open_conns.max(96);
+                let half_open_torrent = client.config.half_open_conns_per_torrent.max(64);
+                let half_open_total = client.config.total_half_open_conns.max(128);
                 let count =
                     torrent
                         .wants_conns()
@@ -976,15 +976,16 @@ impl ClientInner {
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let mut cfg = self.config.clone();
         // Match start_dialer's raised half-open so acquire limits agree.
-        cfg.half_open_conns_per_torrent = cfg.half_open_conns_per_torrent.max(48);
-        cfg.total_half_open_conns = cfg.total_half_open_conns.max(96);
+        cfg.half_open_conns_per_torrent = cfg.half_open_conns_per_torrent.max(64);
+        cfg.total_half_open_conns = cfg.total_half_open_conns.max(128);
         // Diagnostic: WT_FORCE_UTP=1 dials uTP only (Ubuntu Go holds ~25% uTP).
         if std::env::var_os("WT_FORCE_UTP").is_some() {
             cfg.disable_tcp = true;
         }
-        let half_open_limit = cfg.half_open_conns_per_torrent.max(1);
-        // Go `reducedDialTimeout(pendingPeers)` — shorter timeouts when the dial
-        // pool is large so we cycle candidates faster under half-open limits.
+        // Go `reducedDialTimeout` uses the *configured* half-open (24), not the
+        // raised acquire floor (64). Divisor stays Go-matched so first-try TCP
+        // connects keep the same timeout schedule.
+        let half_open_limit = self.config.half_open_conns_per_torrent.max(1);
         let pending = torrent.known_peers.read().len();
         let divisor = pending.saturating_add(half_open_limit) / half_open_limit;
         cfg.nominal_dial_timeout = (cfg.nominal_dial_timeout

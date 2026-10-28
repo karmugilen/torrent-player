@@ -901,16 +901,14 @@ impl TorrentInner {
                 continue;
             }
 
-            // WebTorrent slow peer yield
+            // SlowPeerYield: skip only non-urgent Next pieces, and only after
+            // this peer has already delivered useful data (matches peer_conn).
+            // `>= Next` previously starved new peers on Now at rate=0.
             if tuning.slow_peer_yield
+                && priority == PiecePriority::Next
+                && c_inner.last_useful_chunk_received.is_some()
                 && c_inner.download_rate.rate() < SLOW_PEER_BYTES_PER_SEC
-                && priority >= PiecePriority::Next
             {
-                // Yield to faster peers if available
-                let speed = c_inner.download_rate.rate().max(1.0);
-                let _needed_secs = (c_inner.outstanding_requests.len().max(1) as f64)
-                    * (BLOCK_SIZE as f64)
-                    / speed;
                 let conns_lock = self.conns.read();
                 let faster_exists = conns_lock.values().any(|other| {
                     if other.inner.read().remote_addr == c_inner.remote_addr || other.is_closed() {

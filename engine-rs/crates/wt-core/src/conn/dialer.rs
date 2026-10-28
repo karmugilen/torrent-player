@@ -96,10 +96,16 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
     let (raw_stream, winning_transport, mut spare) =
         dial_first_raw(&params, dial_timeout).await?;
 
-    // Full handshake timeout for all transports. A 2s uTP MSE abort was
-    // added when public uTP was broken; with BEP29 fixed it only cut off
-    // slow-but-valid libtorrent handshakes.
-    let prefer_hs_timeout = cfg.handshakes_timeout;
+    // Fast-fail the *preferred* MSE attempt (2s). Ubuntu sees ~20+ MSE
+    // early-EOF/timeouts per minute when Preferred=true; waiting the full
+    // 5s handshakes_timeout before plaintext fallback burned half-open
+    // slots and left dial_ok ~14 vs Go ~32. Fallback below still uses the
+    // full handshake timeout for plaintext / other-transport retries.
+    let prefer_hs_timeout = if prefer_obfuscated && allow_fallback {
+        Duration::from_secs(2).min(cfg.handshakes_timeout)
+    } else {
+        cfg.handshakes_timeout
+    };
 
     match complete_bt_handshake(
         &params,

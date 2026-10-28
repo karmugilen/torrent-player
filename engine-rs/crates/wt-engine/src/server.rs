@@ -390,7 +390,21 @@ impl EngineServer {
                 if let Some(server) = weak.upgrade() { server.refresh_torrent_trackers(); }
             }));
         Self::start_policy_sampler(&server);
+        // Match Go: defaults (hedge/slowPeerYield/learnedArrival) must reach
+        // wt-core SeekTuning before the first torrent, not only after POST /settings.
+        server.apply_seek_tuning();
         Ok(server)
+    }
+
+    /// Go `baseSeekTuning` + `torrent.SetSeekTuning`.
+    fn apply_seek_tuning(&self) {
+        let mut tuning = wt_core::SeekTuning::default();
+        tuning.hedge = self.hedge_requests.load(Ordering::SeqCst);
+        tuning.slow_peer_yield = self.slow_peer_yield.load(Ordering::SeqCst);
+        tuning.learned_arrival = self.learned_arrival.load(Ordering::SeqCst);
+        // Hedge uses HOLAfterMs timing; enable the HOL/hedge path when Hedge is on.
+        tuning.hol_rescue = false;
+        wt_core::set_seek_tuning(tuning);
     }
 
     pub fn close_preview_for(&self, id: &str) {
@@ -1654,17 +1668,34 @@ impl EngineServer {
                 *self.seek_stats.lock() = SeekStats::default();
             }
         }
+        let mut retune = false;
         if let Some(h) = req.hedge_requests {
-            self.hedge_requests.store(h, Ordering::SeqCst);
+            if self.hedge_requests.swap(h, Ordering::SeqCst) != h {
+                retune = true;
+            }
         }
         if let Some(s) = req.slow_peer_yield {
-            self.slow_peer_yield.store(s, Ordering::SeqCst);
+            if self.slow_peer_yield.swap(s, Ordering::SeqCst) != s {
+                retune = true;
+            }
         }
         if let Some(d) = req.drop_chokers {
             self.drop_chokers.store(d, Ordering::SeqCst);
         }
         if let Some(la) = req.learned_arrival {
-            self.learned_arrival.store(la, Ordering::SeqCst);
+            if self.learned_arrival.swap(la, Ordering::SeqCst) != la {
+                retune = true;
+            }
+        }
+        // Go `torrent.SetSeekTuning(s.baseSeekTuning())` — without this,
+        // peers_compare's hedgeRequests/slowPeerYield/learnedArrival only
+        // flipped AtomicBools and never reached wt-core's request path.
+        if retune
+            || req.hedge_requests.is_some()
+            || req.slow_peer_yield.is_some()
+            || req.learned_arrival.is_some()
+        {
+            self.apply_seek_tuning();
         }
         if let Some(idle) = req.idle_drop_minutes {
             self.idle_drop_minutes

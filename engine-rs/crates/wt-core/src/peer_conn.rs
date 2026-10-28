@@ -101,7 +101,9 @@ use crate::choking::{upload_allowed, ChokeConfig, PeerChokeInput};
 use crate::conn::{ConnHandle, ConnHandler};
 use crate::metadata::{PeerMetadataState, METADATA_REQUEST_TIMEOUT};
 use crate::pex::{PexCursor, PEX_INTERVAL};
-use crate::picker::{block_coord_from_req_index, req_index_from_piece_and_offset};
+use crate::picker::{
+    block_coord_from_req_index, compute_playback_pipeline_limit, req_index_from_piece_and_offset,
+};
 use crate::stats::{AtomicConnStats, PeerConnInfo, RateEstimator};
 use crate::strategy::{
     compute_desired_requests, sort_requests_for_peer, DesiredPeerSnapshot, PieceRequestOrder,
@@ -977,16 +979,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             &desired.piece_states,
         );
 
-        // Interest
-        if desired.interested != self.state.am_interested {
-            self.state.am_interested = desired.interested;
-            if desired.interested {
-                self.state.last_became_interested = Some(Instant::now());
-                self.send(handle, Message::Interested);
-            } else {
-                self.send(handle, Message::NotInterested);
-            }
-        }
+        // Go `webtorPipelineLimit`: fix pipeline for this refill (BDP + floor).
+        self.state.webtor_pipeline_limit = compute_playback_pipeline_limit(
+            self.state.download_rate.rate(),
+            self.state.rtt.estimate,
+            self.torrent.request_focus_index().is_some(),
+        );
 
         let was_empty = self.state.outstanding_requests.is_empty();
         let before = self.state.outstanding_requests.len() as u32;
@@ -997,6 +995,61 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let chunk = self.torrent.chunk_size();
         let plen = self.torrent.piece_length();
         let total = self.torrent.total_length();
+
+        // Interest — sticky like Go `allowSendNotInterested` +
+        // `webtorHasPlayingPieceWeLack`. qBittorrent punishes NotInterested
+        // while we are still streaming incomplete data (same peer 107.175
+        // historically dropped to ~49 KiB on Rust after brief NotInterested).
+        let mut interested = desired.interested;
+        if !interested && self.state.am_interested {
+            let have_all = (0..num_pieces).all(|i| self.torrent.piece_complete(i));
+            if !have_all {
+                if self.state.peer_sent_have_all || self.state.peer_pieces.is_empty() {
+                    // Have-all or bitfield not yet known → keep interested.
+                    interested = true;
+                } else {
+                    let peer_only_done = self
+                        .state
+                        .peer_pieces
+                        .iter()
+                        .all(|&p| self.torrent.piece_complete(p));
+                    if !peer_only_done {
+                        interested = true;
+                    }
+                }
+            }
+        }
+        if !interested && !self.torrent.data_download_disallowed() {
+            // Go `webtorHasPlayingPieceWeLack`: stay interested while the
+            // playhead window still needs pieces this peer can serve.
+            if let Some(f) = focus {
+                let begin = block_coord_from_req_index(f, plen, total).piece;
+                let end = begin.saturating_add(64).min(num_pieces);
+                let peer_has_all = self.state.peer_sent_have_all;
+                let lacks = |p: u32| !self.torrent.piece_complete(p);
+                let playing = if peer_has_all {
+                    (begin..end).any(lacks)
+                } else {
+                    self.state
+                        .peer_pieces
+                        .iter()
+                        .any(|&p| p >= begin && p < end && lacks(p))
+                };
+                if playing {
+                    interested = true;
+                }
+            }
+        }
+        if interested != self.state.am_interested {
+            self.state.am_interested = interested;
+            if interested {
+                self.state.last_became_interested = Some(Instant::now());
+                self.send(handle, Message::Interested);
+            } else {
+                self.send(handle, Message::NotInterested);
+            }
+        }
+
         let mut added = 0u32;
         let mut yields_left = 10u32;
 
@@ -1131,24 +1184,39 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
 
         let after = self.state.outstanding_requests.len() as u32;
-        let peak = next_peak_requests(
+        let computed = next_peak_requests(
             tuning.peak_mode,
             self.state.peak_requests as u32,
             after,
             added,
             was_empty,
-        );
-        self.state.peak_requests = (peak as usize).max(1).min(self.state.max_requests.max(1));
+        ) as usize;
+        // WholeQueue would set peak=0 when a 100ms wake runs while choked
+        // (no requests can be added). That collapsed nominal_max to 2 and
+        // left qBittorrent peers at tens of KiB. Preserve capacity on choked
+        // / empty top-ups; floor so slow-start never falls below a useful
+        // pipeline (pairs with PLAYBACK_PIPELINE_FLOOR).
+        const PEAK_REQUESTS_FLOOR: usize = 32;
+        let peak = if self.state.peer_choking && added == 0 {
+            self.state.peak_requests
+        } else if added == 0 && !was_empty {
+            self.state.peak_requests.max(computed)
+        } else {
+            computed
+        };
+        self.state.peak_requests = peak
+            .max(PEAK_REQUESTS_FLOOR)
+            .max(1)
+            .min(self.state.max_requests.max(1));
         let _ = before;
     }
 
     fn nominal_max(&self) -> usize {
         let tuning = self.torrent.seek_tuning();
         let base = (self.state.peak_requests.max(1) * 2).max(1);
-        if let Some(pipe) = self.state.webtor_pipeline_limit.checked_mul(1) {
-            if pipe > 0 && self.torrent.request_focus_index().is_some() {
-                return base.min(pipe).max(1);
-            }
+        let pipe = self.state.webtor_pipeline_limit;
+        if pipe > 0 && self.torrent.request_focus_index().is_some() {
+            return base.min(pipe).max(1);
         }
         let _ = tuning;
         base.min(self.state.max_requests).max(1)

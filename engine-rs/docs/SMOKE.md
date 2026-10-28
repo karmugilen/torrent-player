@@ -176,7 +176,11 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 - **Retention:** ignore malformed ut_metadata (`missing msg_type`) and soft-discard PEX Cooldown/TooFrequent instead of closing the peerconn — was dropping ~40 dial_ok down to ~4 live peers
 - **Dial race:** prefer **uTP** when both TCP+uTP raw-connect within 200ms grace (TCP kept as handshake spare); fast-fail preferred MSE (2s) only when uTP won; other-transport plaintext-then-MSE fallback after same-transport Go fallback
 - **Dial order:** among eligible peers, never-failed before retries, then trusted, then source rank — stops burning half-open on firewalled tracker contacts while DHT waits
-- **Half-open:** dial path raises torrent/global half-open to at least 48/96 (engine config may still say 24/48) so timeout-heavy Ubuntu can keep more dials in flight
+- **SeekTuning wire:** EngineServer now `set_seek_tuning` on new()+settings (Go `baseSeekTuning`); hedge/slowPeerYield/learnedArrival were AtomicBool-only and never reached wt-core
+- **Sticky Interested:** do not send NotInterested while incomplete and peer still has pieces we lack (qBittorrent punishment)
+- **Peak floor:** preserve `peak_requests` while choked; floor at 32 so WholeQueue wakes cannot collapse nominal_max to 2
+- **MSE preferred fast-fail:** 2s on preferred obfuscation then plaintext/other-transport fallback (was burning 5s × MSE fails)
+- **Half-open:** dial path raises torrent/global half-open to at least 64/128 (engine config may still say 24/48) so timeout-heavy Ubuntu can keep more dials in flight
 - **uTP BEP 29 (wt-wire):** fixed swapped send/recv connection_ids; SYN-ACK `ack_nr = seq-1` (libtorrent ignores DATA with `ack_nr > seq-1`); wall-clock timestamps; ACK every DATA; retransmit while blocked on read. Public qBittorrent HS ok; `WT_FORCE_UTP` now holds 15–16 uTP peers (was 0 dial_ok)
 
 ### Numbers (latest same-machine runs after uTP BEP29 fix)
@@ -186,6 +190,10 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | go-ubuntu-r17 | 11.0 | 10→37 | **7.15** | TCP 30 + uTP 5; **34/35** downloaded>0; 297 MiB |
 | go-ubuntu-r16 | 4.0 | 11→41 | 5.59 | TCP 30 + uTP 11; 38/41 active; 228 MiB |
 | go-ubuntu-r18 | 14.0 | 16→32 | **10.55** | TCP 23 + uTP 9; 29/32 active; **452 MiB** |
+| go-ubuntu-r19 | 10.0 | 14→33 | **12.02** | TCP 23 + uTP 9; **31/32** active; **496 MiB** |
+| rust-ubuntu-r46 | 3.5 | 8→15 | **1.78** | TCP 12 + uTP 3; **13/15** active; **45 MiB**; SeekTuning wired |
+| rust-ubuntu-r45 | 4.5 | 9→19 | 0.96 | TCP 17 + uTP 2; 12/19 active; 24 MiB; MSE fast-fail |
+| rust-ubuntu-r44 | 4.0 | 4→13 | 1.28 | TCP 13; 10/13 active; 30 MiB; sticky interest (107.175 3MB) |
 | rust-ubuntu-r43 | 4.5 | 13→14 | 1.46 | TCP 12 + uTP 2; 9/14 active; 27 MiB; pipeline floor |
 | rust-ubuntu-r41 | 4.0 | 8→18 | 1.58 | TCP 15 + uTP 3; 7/18 active; 22 MiB; SlowPeerYield fix |
 | rust-ubuntu-r38 | 5.5 | **10→33** | 0.75 | TCP 26 + **uTP 7**; 13/33 active; 15 MiB — peer count peak |
@@ -193,5 +201,5 @@ Measured with `tools/smoke/peers_compare.py` (60 s, max-peers 55), same machine.
 | rust-sintel-r7 | 1.5 | **21→39** | **34.8** | TCP 32 + **uTP 5**; **30/37** active; **855 MiB** |
 | rust-sintel-r6 | 2.5 | 13→24 | 10.53 | TCP 20 + uTP 3; 17/23 active; 164 MiB |
 
-**Status:** uTP unblocked (BEP29). Ubuntu peer counts reach **18–33** with live uTP. Same-day Go **35–41** peers / **5–7** MiB/s / ~95% downloading / ~300 MiB. Rust speed **~1–1.6 MiB/s**, ~40% peers active, tens of MiB — SlowPeerYield no longer starves new Now requests; still chasing per-peer TCP throughput. Sintel healthy with uTP. Not full Ubuntu speed acceptance yet.
+**Status:** SeekTuning now applied from EngineServer (hedge/slowPeerYield were AtomicBool-only before). Best Ubuntu r46: **1.78 MiB/s / 45 MiB / 13/15 active** vs Go r19 **12 MiB/s / 496 MiB / 31/32**. Sticky interest + peak floor raised same-peer 107.175 from ~49 KiB to 2–3 MiB (Go ~27 MiB). Peer count still ~15–19 vs Go ~32; dial_ok~16 with many timeouts/MSE. Sintel previously 34.8 MiB/s. Not Ubuntu speed parity yet.
 
