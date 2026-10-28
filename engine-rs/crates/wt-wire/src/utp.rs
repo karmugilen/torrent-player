@@ -10,7 +10,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub const UTP_VERSION: u8 = 1;
 
@@ -531,7 +531,27 @@ impl AsyncWrite for UtpStream {
 }
 
 pub type StreamMap = Arc<Mutex<HashMap<(SocketAddr, u16), Arc<UtpStreamInner>>>>;
-pub type SynMap = Arc<Mutex<HashMap<(SocketAddr, u16), oneshot::Sender<Arc<UtpStreamInner>>>>>;
+pub type SynMap =
+    Arc<Mutex<HashMap<(SocketAddr, u16), oneshot::Sender<io::Result<Arc<UtpStreamInner>>>>>>;
+
+/// Removing an in-flight connect future (timeout or losing dial) must also
+/// remove its SYN registration. Keep the same lock order as the receive pump
+/// so cancellation cannot race a late SYN-ACK into leaving an orphan stream.
+struct PendingConnect<'a> {
+    socket: &'a UtpSocket,
+    key: (SocketAddr, u16),
+    armed: bool,
+}
+
+impl Drop for PendingConnect<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut pending = self.socket.syn_senders.lock();
+            pending.remove(&self.key);
+            self.socket.streams.lock().remove(&self.key);
+        }
+    }
+}
 
 /// Shared uTP socket managing multiplexing of uTP streams and non-uTP packets.
 pub struct UtpSocket {
@@ -542,6 +562,8 @@ pub struct UtpSocket {
     non_utp_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<(Bytes, SocketAddr)>>>,
     out_tx: mpsc::UnboundedSender<(Bytes, SocketAddr)>,
     closed: Arc<AtomicBool>,
+    shutdown: watch::Sender<bool>,
+    recv_task: tokio::task::JoinHandle<()>,
 }
 
 impl UtpSocket {
@@ -559,13 +581,30 @@ impl UtpSocket {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(Bytes, SocketAddr)>();
         let closed = Arc::new(AtomicBool::new(false));
 
+        let (shutdown, mut send_shutdown) = watch::channel(false);
+
         // Outgoing pump
         let udp_out = udp.clone();
-        let closed_out = closed.clone();
         tokio::spawn(async move {
             let mut batch = Vec::with_capacity(64);
-            while out_rx.recv_many(&mut batch, 64).await > 0 {
-                if closed_out.load(Ordering::Relaxed) {
+            let mut draining = false;
+            loop {
+                let count = if draining {
+                    out_rx.recv_many(&mut batch, 64).await
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = send_shutdown.changed() => {
+                            // Stop new writes, but flush datagrams already
+                            // queued by Write/Shutdown before dropping UDP.
+                            out_rx.close();
+                            draining = true;
+                            continue;
+                        }
+                        count = out_rx.recv_many(&mut batch, 64) => count,
+                    }
+                };
+                if count == 0 {
                     break;
                 }
                 for (buf, target) in batch.drain(..) {
@@ -591,7 +630,7 @@ impl UtpSocket {
         let out_tx_in = out_tx.clone();
         let closed_in = closed.clone();
 
-        tokio::spawn(async move {
+        let recv_task = tokio::spawn(async move {
             let mut buf = [0u8; 65535];
             let start_time = Instant::now();
 
@@ -694,6 +733,20 @@ impl UtpSocket {
                         // SYN connection_id (= our recv_id A). Initiator
                         // send_id = A+1, recv_id = A (BEP 29 diagram).
                         let mut syn_map = syn_senders_in.lock();
+                        if pkt_type == ST_RESET {
+                            if let Some(sender) = syn_map.remove(&(peer, hdr.connection_id)) {
+                                let _ = sender.send(Err(Error::new(
+                                    ErrorKind::ConnectionRefused,
+                                    "uTP connect reset by peer",
+                                )));
+                            }
+                            // Go/libutp ignores unknown RESETs. Replying with
+                            // RESET creates a reset loop between closed peers.
+                            continue;
+                        }
+                        if pkt_type != ST_STATE || hdr.ack_nr != 1 {
+                            continue;
+                        }
                         if let Some(sender) = syn_map.remove(&(peer, hdr.connection_id)) {
                             let recv_id = hdr.connection_id;
                             let send_id = recv_id.wrapping_add(1);
@@ -713,7 +766,7 @@ impl UtpSocket {
                                 _closed: AtomicBool::new(false),
                             });
                             streams_in.lock().insert((peer, recv_id), inner.clone());
-                            let _ = sender.send(inner.clone());
+                            let _ = sender.send(Ok(inner.clone()));
                             continue;
                         }
 
@@ -913,6 +966,8 @@ impl UtpSocket {
             non_utp_rx: Arc::new(tokio::sync::Mutex::new(non_utp_rx)),
             out_tx,
             closed,
+            shutdown,
+            recv_task,
         })
     }
 
@@ -922,6 +977,19 @@ impl UtpSocket {
 
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
+        self.recv_task.abort();
+        self.shutdown.send_replace(true);
+        self.syn_senders.lock().clear();
+        for (_, inner) in self.streams.lock().drain() {
+            let mut state = inner.state.lock();
+            state.is_reset = true;
+            if let Some(waker) = state.read_waker.take() {
+                waker.wake();
+            }
+            if let Some(waker) = state.write_waker.take() {
+                waker.wake();
+            }
+        }
     }
 
     pub fn active_streams_count(&self) -> usize {
@@ -936,10 +1004,21 @@ impl UtpSocket {
     }
 
     pub async fn connect(&self, remote: SocketAddr) -> io::Result<UtpStream> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(Error::new(
+                ErrorKind::ConnectionAborted,
+                "uTP socket closed",
+            ));
+        }
         // BEP 29: SYN carries conn_id_recv; subsequent packets use recv+1.
         let conn_id: u16 = rand::random();
         let (tx, rx) = oneshot::channel();
         self.syn_senders.lock().insert((remote, conn_id), tx);
+        let mut pending = PendingConnect {
+            socket: self,
+            key: (remote, conn_id),
+            armed: true,
+        };
 
         let syn = PacketHeader {
             type_ver: (ST_SYN << 4) | UTP_VERSION,
@@ -961,14 +1040,19 @@ impl UtpSocket {
             .map_err(|_| Error::new(ErrorKind::BrokenPipe, "socket closed"))?;
 
         match tokio::time::timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(inner)) => Ok(UtpStream {
-                inner,
-                _socket: None,
-            }),
-            _ => {
-                self.syn_senders.lock().remove(&(remote, conn_id));
-                Err(Error::new(ErrorKind::TimedOut, "uTP connect timed out"))
+            Ok(Ok(Ok(inner))) => {
+                pending.armed = false;
+                Ok(UtpStream {
+                    inner,
+                    _socket: None,
+                })
             }
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(_)) => Err(Error::new(
+                ErrorKind::ConnectionAborted,
+                "uTP socket closed",
+            )),
+            Err(_) => Err(Error::new(ErrorKind::TimedOut, "uTP connect timed out")),
         }
     }
 
@@ -983,5 +1067,11 @@ impl UtpSocket {
     /// Send raw non-uTP UDP packet through the shared socket.
     pub async fn send_non_utp(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
         self.udp.send_to(buf, target).await
+    }
+}
+
+impl Drop for UtpSocket {
+    fn drop(&mut self) {
+        self.close();
     }
 }

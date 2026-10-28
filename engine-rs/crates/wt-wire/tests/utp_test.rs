@@ -467,3 +467,132 @@ async fn test_utp_skips_selective_ack_extension_on_data() {
     a.unwrap();
     c.unwrap();
 }
+
+/// A rejecting uTP endpoint is a failed raw dial, not a connected transport
+/// that may win the race and occupy a half-open slot for a full BT handshake.
+#[tokio::test]
+async fn test_utp_connect_reset_is_refused() {
+    use wt_wire::utp::ST_RESET;
+    let raw = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let remote = raw.local_addr().unwrap();
+    let client = UtpSocket::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let peer = tokio::spawn(async move {
+        let mut buf = [0; 2048];
+        let (n, addr) = raw.recv_from(&mut buf).await.unwrap();
+        let mut packet = bytes::Bytes::copy_from_slice(&buf[..n]);
+        let mut syn = PacketHeader::decode(&mut packet).unwrap();
+        syn.type_ver = (ST_RESET << 4) | 1;
+        let mut response = BytesMut::new();
+        syn.encode(&mut response);
+        raw.send_to(&response, addr).await.unwrap();
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), client.connect(remote))
+        .await
+        .expect("RST must fail the dial promptly");
+    assert!(
+        matches!(result, Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionRefused),
+        "RST must be ConnectionRefused, never a successful connect"
+    );
+    assert_eq!(client.active_streams_count(), 0);
+    peer.await.unwrap();
+}
+
+/// Cancellation by a reduced dial timeout or a winning TCP handshake must
+/// remove the pending SYN so a late SYN-ACK cannot create an orphan stream.
+#[tokio::test]
+async fn test_utp_cancelled_connect_ignores_late_syn_ack() {
+    let raw = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let remote = raw.local_addr().unwrap();
+    let client = UtpSocket::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (mut syn, addr) = {
+        let connect = client.connect(remote);
+        tokio::pin!(connect);
+        let mut buf = [0; 2048];
+        tokio::select! {
+            _ = &mut connect => panic!("silent peer cannot connect"),
+            received = raw.recv_from(&mut buf) => {
+                let (n, addr) = received.unwrap();
+                let mut packet = bytes::Bytes::copy_from_slice(&buf[..n]);
+                (PacketHeader::decode(&mut packet).unwrap(), addr)
+            }
+        }
+        // Drop the in-flight connect future, just as dial_utp's timeout does.
+    };
+    syn.type_ver = (ST_STATE << 4) | 1;
+    syn.ack_nr = syn.seq_nr;
+    let mut response = BytesMut::new();
+    syn.encode(&mut response);
+    raw.send_to(&response, addr).await.unwrap();
+    // In-order datagram barrier: observe that the late response was processed.
+    raw.send_to(b"barrier", addr).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), client.recv_non_utp())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        client.active_streams_count(),
+        0,
+        "cancelled dials must not resurrect streams"
+    );
+}
+
+#[tokio::test]
+async fn test_utp_dropped_socket_releases_udp_port() {
+    let socket = UtpSocket::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr = socket.local_addr().unwrap();
+    drop(socket);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if UdpSocket::bind(addr).await.is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropped uTP socket must stop its pumps and release its UDP port");
+}
+
+#[tokio::test]
+async fn test_utp_unknown_reset_is_not_echoed() {
+    use wt_wire::utp::ST_RESET;
+    let raw = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let client = UtpSocket::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let reset = PacketHeader {
+        type_ver: (ST_RESET << 4) | 1,
+        extension: EXT_NONE,
+        connection_id: 456,
+        timestamp_micros: 0,
+        timestamp_diff_micros: 0,
+        wnd_size: 0,
+        seq_nr: 1,
+        ack_nr: 0,
+    };
+    let mut response = BytesMut::new();
+    reset.encode(&mut response);
+    raw.send_to(&response, client.local_addr().unwrap())
+        .await
+        .unwrap();
+    raw.send_to(b"barrier", client.local_addr().unwrap())
+        .await
+        .unwrap();
+    client.recv_non_utp().await.unwrap();
+    let mut buf = [0; 2048];
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            raw.recv_from(&mut buf)
+        )
+        .await
+        .is_err(),
+        "echoing an unknown RST creates a reset loop"
+    );
+}
