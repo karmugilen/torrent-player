@@ -292,7 +292,10 @@ pub struct SwarmDiagnostics {
 
 pub(crate) fn failure_kind(reason: &str) -> &'static str {
     let reason = reason.to_ascii_lowercase();
-    if reason.contains("refused") { "refused" }
+    // Go dialAndCompleteHandshake reports race failure as "all initial dials failed"
+    // (dialFailures=other); per-dialer timeouts go to transportFailures.
+    if reason.contains("all initial dials failed") { "other" }
+    else if reason.contains("refused") { "refused" }
     else if reason.contains("timeout") || reason.contains("timed out") || reason.contains("deadline") { "timeout" }
     else if reason.contains("mse") || reason.contains("obfuscation") { "mse" }
     else if reason.contains("handshake") { "handshake" }

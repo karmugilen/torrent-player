@@ -772,14 +772,17 @@ impl ClientInner {
                             // Temporary dial-failure taxonomy for peers_compare
                             // (stderr → engine-host log). Remove once Ubuntu
                             // peer-count matches Go.
-                            let kind = if msg.contains("MSE") {
+                            // Align with Go webtorFailureKind: race failures are
+                            // "other" ("all initial dials failed"); timeouts in
+                            // that message must not dominate dialFailures.
+                            let kind = if msg.contains("all initial dials failed") {
+                                "other"
+                            } else if msg.contains("MSE") {
                                 "mse"
-                            } else if msg.contains("BitTorrent handshake") {
-                                "bt_hs"
-                            } else if msg.contains("all initial dials failed") {
-                                "dial_tcp_utp"
-                            } else if msg.contains("fallback redial") || msg.contains("handshake failed") {
-                                "hs_fallback"
+                            } else if msg.contains("BitTorrent handshake")
+                                || msg.contains("handshake failed")
+                            {
+                                "handshake"
                             } else if msg.contains("timeout") || msg.contains("timed out") {
                                 "timeout"
                             } else {
@@ -974,13 +977,14 @@ impl ClientInner {
         if std::env::var_os("WT_FORCE_UTP").is_some() {
             cfg.disable_tcp = true;
         }
-        // Go reducedDialTimeout uses the configured half-open budget.
-        let half_open_limit = self.config.half_open_conns_per_torrent.max(1);
+        // Go reducedDialTimeout(min, nominal, HalfOpenConnsPerTorrent, peers.Len()).
         let pending = torrent.known_peers.read().len();
-        let divisor = pending.saturating_add(half_open_limit) / half_open_limit;
-        cfg.nominal_dial_timeout = (cfg.nominal_dial_timeout
-            / divisor.min(u32::MAX as usize) as u32)
-            .max(cfg.min_dial_timeout);
+        cfg.nominal_dial_timeout = crate::conn::reduced_dial_timeout(
+            cfg.min_dial_timeout,
+            cfg.nominal_dial_timeout,
+            self.config.half_open_conns_per_torrent,
+            pending,
+        );
         let utp = self
             .listener
             .read()

@@ -412,6 +412,75 @@ async fn test_utp_dial_and_accept_roundtrip() {
     listener.close();
 }
 
+/// Go dialPool.getFirst returns on the first success and drains losers. A prior
+/// Rust spare-wait (250–750ms) held half-open slots after TCP already connected.
+#[tokio::test]
+async fn dial_race_returns_first_success_without_spare_wait() {
+    let mut cfg = test_config();
+    cfg.disable_tcp = false;
+    cfg.disable_utp = false; // race both; uTP to a TCP-only peer fails slowly
+    cfg.header_obfuscation_policy.preferred = false; // plaintext HS
+    cfg.handshakes_timeout = Duration::from_secs(4);
+    cfg.nominal_dial_timeout = Duration::from_secs(2);
+    cfg.min_dial_timeout = Duration::from_millis(500);
+
+    let our_ih = InfoHash([0x43; 20]);
+    let server_peer_id: PeerId = [0x31; 20];
+    let client_peer_id: PeerId = [0x32; 20];
+
+    let listener = PeerListener::bind(&cfg).await.expect("bind");
+    let listen_port = listener.listen_port();
+    let (accepted_tx, mut accepted_rx) = mpsc::channel(4);
+    let server_tracker = HalfOpenTracker::new();
+    let skey_ih = our_ih;
+    let skey_provider = Arc::new(move || vec![skey_ih.0]);
+    let lk_ih = our_ih;
+    let lookup = Arc::new(move |ih: &InfoHash| *ih == lk_ih);
+    listener.spawn_accept_loop(
+        cfg.clone(),
+        server_peer_id,
+        server_tracker,
+        skey_provider,
+        lookup,
+        accepted_tx,
+    );
+
+    let client_tracker = HalfOpenTracker::new();
+    let dial_addr: SocketAddr = format!("127.0.0.1:{listen_port}").parse().unwrap();
+    let utp = listener.utp_socket().cloned();
+    let t0 = Instant::now();
+    let outcome = dial_peer(DialParams {
+        remote_addr: dial_addr,
+        info_hash: our_ih,
+        our_peer_id: client_peer_id,
+        transport: None, // race TCP+uTP
+        source: PeerSource::Direct,
+        metadata_size: None,
+        cfg: &cfg,
+        tracker: &client_tracker,
+        dial_limiter: None,
+        tcp_conn_hook: None,
+        utp_socket: utp.as_ref(),
+        require_plain: true,
+    })
+    .await
+    .expect("dial_peer");
+    let elapsed = t0.elapsed();
+    // Localhost TCP+HS is a few ms. The old spare-wait added ≥250ms after TCP won.
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "first success must not wait for the race loser (elapsed {elapsed:?})"
+    );
+    assert_eq!(outcome.handle.transport(), Transport::Tcp);
+
+    let _server = tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv())
+        .await
+        .expect("accept")
+        .expect("conn");
+    outcome.handle.close("done");
+    listener.close();
+}
+
 #[tokio::test]
 async fn test_half_open_limits_enforced() {
     let tracker = HalfOpenTracker::new();
