@@ -1533,7 +1533,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.last_useful_chunk_received = Some(Instant::now());
         self.state.download_rate.add_bytes(data.len());
         self.state.stats.add_bytes_read_useful(data.len() as i64);
-        handle.stats().add_bytes_read_useful(data.len() as i64);
+        // The I/O driver accounts wire bytes; the handler owns useful bytes.
+        handle.stats().bytes_read_useful_data.fetch_add(data.len() as i64, Ordering::Relaxed);
         self.torrent.on_chunk_received(self.key(), req, data.len());
 
         if self.torrent.piece_all_dirty(index) {
@@ -1598,7 +1599,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
         self.state.upload_rate.add_bytes(len);
         self.state.stats.add_bytes_written(len as i64);
-        handle.stats().add_bytes_written(len as i64);
         Ok(())
     }
 

@@ -680,3 +680,34 @@ fn ltep_reqq_preserves_advertised_capacity_above_250() {
         assert_eq!(peer.peer_conn_info().peer_max_requests, expected as usize, "reqq={advertised}");
     }
 }
+
+#[tokio::test]
+async fn payload_upload_account_counts_written_bytes_once() {
+    use wt_core::conn::spawn_connection_driver;
+    use wt_wire::codec::{FramedReader, FramedWriter};
+    let tor = FakeTorrent::new();
+    let (handle, rx) = make_handle("127.0.0.1:4998".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor, &handle);
+    peer.start(&handle);
+    let (local, remote) = tokio::io::duplex(128 << 10);
+    let (reader_task, writer_task) = spawn_connection_driver(
+        local, peer, handle.clone(), rx, Arc::new(Notify::new()), None, None,
+        Duration::from_secs(120), Duration::from_secs(150),
+    );
+    let (read, write) = tokio::io::split(remote);
+    let mut writer = FramedWriter::new(write);
+    writer.write_msg(&Message::Interested);
+    writer.write_msg(&Message::Request { index: 0, begin: 0, length: CHUNK });
+    writer.flush().await.unwrap();
+    let mut reader = FramedReader::new(read);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(reader.read_msg().await.unwrap(), Some(Message::Piece { .. })) { break; }
+        }
+    }).await.unwrap();
+    let written = handle.stats().snapshot().bytes_written_data;
+    handle.close("test complete");
+    reader_task.abort();
+    writer_task.abort();
+    assert_eq!(written, i64::from(CHUNK), "seeding policy must see actual uploaded bytes");
+}
