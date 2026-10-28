@@ -25,18 +25,6 @@ use crate::tuning::current_seek_tuning;
 use crate::wire::Message;
 use crate::{CoreError, PieceState, Result};
 
-/// Higher = dial sooner (Go prioritizedPeers: Trusted then peerPriority).
-fn source_dial_rank(source: PeerSource) -> u8 {
-    match source {
-        PeerSource::Tracker | PeerSource::Direct => 5,
-        PeerSource::Pex => 4,
-        PeerSource::Incoming => 3,
-        PeerSource::DhtGetPeers | PeerSource::DhtAnnouncePeer => 2,
-        PeerSource::UtHolepunch | PeerSource::WebRtc => 1,
-        PeerSource::WebSeed => 0,
-    }
-}
-
 pub struct PieceEntry {
     pub index: PieceIndex,
     pub priority: PiecePriority,
@@ -119,7 +107,6 @@ pub struct TorrentInner {
     pub known_peers: RwLock<HashSet<PeerInfo>>,
     pub client: RwLock<Weak<crate::client::ClientInner>>,
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
-    pub dial_backoff: Mutex<HashMap<SocketAddr, Instant>>,
     /// Consecutive failed dials per addr; drives exponential re-queue backoff.
     pub swarm_diagnostics: Mutex<crate::stats::SwarmDiagnostics>,
     pub dial_fail_counts: Mutex<HashMap<SocketAddr, u8>>,
@@ -193,7 +180,6 @@ impl TorrentInner {
             known_peers: RwLock::new(HashSet::new()),
             client: RwLock::new(Weak::new()),
             dialing_peers: Mutex::new(HashSet::new()),
-            dial_backoff: Mutex::new(HashMap::new()),
             swarm_diagnostics: Mutex::new(Default::default()),
             dial_fail_counts: Mutex::new(HashMap::new()),
             conn_handles: RwLock::new(HashMap::new()),
@@ -258,8 +244,7 @@ impl TorrentInner {
             while known.len() > high_water {
                 let victim = known
                     .iter()
-                    .filter(|p| !p.trusted)
-                    .min_by_key(|p| source_dial_rank(p.source))
+                    .min_by_key(|p| (p.trusted, self.peer_priority(p.addr)))
                     .cloned()
                     .or_else(|| known.iter().next().cloned());
                 match victim {
@@ -387,42 +372,49 @@ impl TorrentInner {
         self.bump_change();
     }
 
+    fn peer_priority(&self, remote: SocketAddr) -> u32 {
+        let client = self.client.read().upgrade();
+        let local = client.as_ref().and_then(|c| c.listen_addrs.read().iter()
+            .copied().find(|addr| addr.is_ipv4() == remote.is_ipv4()))
+            .unwrap_or_else(|| if remote.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }.parse().unwrap());
+        wt_discovery::bep40_priority(local, remote)
+    }
+
+    /// Go maxHalfOpen: five exploratory slots beyond established headroom.
+    pub(crate) fn max_half_open(&self, configured: usize) -> usize {
+        let handles = self.conn_handles.read();
+        let maximum = self.max_established_conns.load(Ordering::Relaxed) as i64;
+        let incoming = handles.values().filter(|h| !h.is_outgoing()).count() as i64;
+        (maximum - handles.len() as i64 + 5.max(incoming - maximum / 2))
+            .max(0).min(configured as i64) as usize
+    }
+
     pub(crate) fn wants_conns(&self) -> usize {
         if self.closed.load(Ordering::Relaxed) {
             return 0;
         }
         self.max_established_conns
             .load(Ordering::Relaxed)
-            .saturating_sub(self.conn_handles.read().len() + self.dialing_peers.lock().len())
+            .saturating_sub(self.conn_handles.read().len())
     }
 
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
-        // Go `openNewConns` / `peers.PopMax`: remove from the dial pool when
-        // initiating. Trusted first among never-tried peers; after failures,
-        // prefer fresh DHT/PEX over re-dialing firewalled tracker contacts
-        // (Ubuntu: trusted-first alone burned half-open on ~200 timeouts/min
-        // while dialable DHT peers waited).
+        // Go prioritizedPeers.PopMax: trust, then BEP 40 priority.
         let handles = self.conn_handles.read();
         let mut dialing = self.dialing_peers.lock();
-        let backoff = self.dial_backoff.lock();
-        let fail_counts = self.dial_fail_counts.lock();
-        let now = Instant::now();
         let mut known = self.known_peers.write();
         let mut eligible: Vec<PeerInfo> = known
             .iter()
             .filter(|p| {
                 !handles.contains_key(&p.addr)
                     && !dialing.contains(&p.addr)
-                    && backoff.get(&p.addr).is_none_or(|until| *until <= now)
             })
             .cloned()
             .collect();
         eligible.sort_by(|a, b| {
-            let fa = fail_counts.get(&a.addr).copied().unwrap_or(0);
-            let fb = fail_counts.get(&b.addr).copied().unwrap_or(0);
-            fa.cmp(&fb)
-                .then_with(|| b.trusted.cmp(&a.trusted))
-                .then_with(|| source_dial_rank(b.source).cmp(&source_dial_rank(a.source)))
+            b.trusted.cmp(&a.trusted)
+                .then_with(|| self.peer_priority(b.addr).cmp(&self.peer_priority(a.addr)))
+                .then_with(|| b.addr.cmp(&a.addr))
         });
         eligible.truncate(max);
         for p in &eligible {
@@ -435,36 +427,15 @@ impl TorrentInner {
     pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {
         self.dialing_peers.lock().remove(&addr);
         if ok {
-            self.dial_backoff.lock().remove(&addr);
             self.dial_fail_counts.lock().remove(&addr);
         } else {
-            // Exponential backoff: 2s, 4s, 8s, … capped at 60s (was 5s…120s).
-            // Faster first retry cycles dead contacts out of the half-open
-            // budget sooner on timeout-heavy Ubuntu.
-            let n = {
-                let mut counts = self.dial_fail_counts.lock();
-                let e = counts.entry(addr).or_insert(0);
-                *e = e.saturating_add(1);
-                *e
-            };
-            let shift = n.saturating_sub(1).min(5);
-            let secs = (2u64 << shift).min(60);
-            self.dial_backoff
-                .lock()
-                .insert(addr, Instant::now() + Duration::from_secs(secs));
+            let mut counts = self.dial_fail_counts.lock();
+            let count = counts.entry(addr).or_insert(0);
+            *count = count.saturating_add(1);
         }
         self.bump_change();
     }
 
-    /// Whether a failed dial should be re-queued for another attempt.
-    pub(crate) fn should_requeue_failed_dial(&self, addr: SocketAddr) -> bool {
-        self.dial_fail_counts
-            .lock()
-            .get(&addr)
-            .copied()
-            .unwrap_or(0)
-            < 8
-    }
     pub(crate) fn peers_changed(&self) -> &tokio::sync::Notify {
         &self.peer_notify
     }
@@ -1127,5 +1098,45 @@ impl TorrentInner {
         }
 
         self.bump_change();
+    }
+}
+
+#[cfg(test)]
+mod dial_parity_tests {
+    use super::*;
+
+    fn torrent() -> TorrentInner {
+        TorrentInner::new(InfoHash([7; 20]), None, "dial-parity".into(),
+            Arc::new(crate::storage_adapter::MemoryClientStorage::new()),
+            Arc::new(RwLock::new(crate::arrival::ArrivalModel::default())))
+    }
+
+    #[test]
+    fn half_open_attempts_do_not_hide_demand_for_established_peers() {
+        let t = torrent();
+        t.max_established_conns.store(2, Ordering::Relaxed);
+        t.dialing_peers.lock().extend([
+            "192.0.2.1:6881".parse::<SocketAddr>().unwrap(), "192.0.2.2:6881".parse::<SocketAddr>().unwrap(),
+        ]);
+        assert_eq!(t.wants_conns(), 2, "Go wantAnyConns counts established peers only");
+    }
+
+    #[test]
+    fn dial_pool_uses_trust_then_bep40_priority_even_after_failures() {
+        let t = torrent();
+        let local = "0.0.0.0:0".parse().unwrap();
+        let mut peers: Vec<PeerInfo> = (1..=8).map(|n| PeerInfo {
+            id: None, addr: format!("192.0.2.{n}:6881").parse().unwrap(),
+            source: wt_types::PeerSource::Direct, supports_encryption: false,
+            pex: Default::default(), trusted: true,
+        }).collect();
+        peers.sort_by_key(|p| std::cmp::Reverse(wt_discovery::bep40_priority(local, p.addr)));
+        let expected: Vec<_> = peers.iter().map(|p| p.addr).collect();
+        // Go does not lower the priority of a rediscovered peer after a dial failure.
+        t.dial_fail_counts.lock().insert(expected[0], 7);
+        t.add_peers(peers);
+        let got: Vec<_> = t.take_dial_candidates(8).iter().map(|p| p.addr).collect();
+        assert_eq!(got.iter().map(|addr| wt_discovery::bep40_priority(local, *addr)).collect::<Vec<_>>(),
+            expected.iter().map(|addr| wt_discovery::bep40_priority(local, *addr)).collect::<Vec<_>>());
     }
 }

@@ -731,22 +731,12 @@ impl ClientInner {
                 if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
                     break;
                 }
-                // Dial volume: allow up to 64/128 half-open even when the
-                // engine config is Go's 24/48. Ubuntu dial success is ~10%
-                // (timeouts); more in-flight attempts raise held peers
-                // toward Go (~40) without raising established maxPeers.
-                let half_open_torrent = client.config.half_open_conns_per_torrent.max(64);
-                let half_open_total = client.config.total_half_open_conns.max(128);
-                let count =
-                    torrent
-                        .wants_conns()
-                        .min(half_open_torrent.saturating_sub(
-                            client.half_open.current_for_torrent(&torrent.info_hash),
-                        ))
-                        .min(
-                            half_open_total
-                                .saturating_sub(client.half_open.current_total()),
-                        );
+                let count = if torrent.wants_conns() > 0 {
+                    torrent.max_half_open(client.config.half_open_conns_per_torrent)
+                        .saturating_sub(torrent.dialing_peers.lock().len())
+                        .min(client.config.total_half_open_conns
+                            .saturating_sub(client.half_open.current_total()))
+                } else { 0 };
                 // Refresh want_peers snapshot every 5s while under low-water so
                 // tracker slots can be nudged (see AnnounceDispatcher::update_torrent).
                 if torrent.known_peers.read().len() <= client.config.torrent_peers_low_water
@@ -809,11 +799,6 @@ impl ClientInner {
                         // for rediscovery — needed while dial success << Go.
                         if !ok {
                             tor.dial_finished(peer.addr, false);
-                            if peer.source != PeerSource::WebSeed
-                                && tor.should_requeue_failed_dial(peer.addr)
-                            {
-                                tor.add_peers(vec![peer.clone()]);
-                            }
                         } else {
                             tor.swarm_diagnostics.lock().dial_ok += 1;
                             let transport = tor
@@ -988,16 +973,11 @@ impl ClientInner {
             .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let mut cfg = self.config.clone();
-        // Match start_dialer's raised half-open so acquire limits agree.
-        cfg.half_open_conns_per_torrent = cfg.half_open_conns_per_torrent.max(64);
-        cfg.total_half_open_conns = cfg.total_half_open_conns.max(128);
         // Diagnostic: WT_FORCE_UTP=1 dials uTP only (Ubuntu Go holds ~25% uTP).
         if std::env::var_os("WT_FORCE_UTP").is_some() {
             cfg.disable_tcp = true;
         }
-        // Go `reducedDialTimeout` uses the *configured* half-open (24), not the
-        // raised acquire floor (64). Divisor stays Go-matched so first-try TCP
-        // connects keep the same timeout schedule.
+        // Go reducedDialTimeout uses the configured half-open budget.
         let half_open_limit = self.config.half_open_conns_per_torrent.max(1);
         let pending = torrent.known_peers.read().len();
         let divisor = pending.saturating_add(half_open_limit) / half_open_limit;

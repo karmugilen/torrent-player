@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use wt_types::{PeerInfo, PeerSource, PieceIndex, PiecePriority, RequestIndex, BLOCK_SIZE};
+use wt_types::{PieceIndex, PiecePriority, RequestIndex, BLOCK_SIZE};
 use wt_wire::ext::PexMsg;
 
 use crate::choking::ChokeConfig;
@@ -227,29 +227,7 @@ impl PeerTorrent for TorrentInner {
                 handle.source(),
                 reason.chars().take(120).collect::<String>()
             );
-            if handle.is_outgoing() {
-                // PopMax removed this addr on dial; re-queue so we redial after
-                // backoff (local swarm + public churn). Failed dials for
-                // Tracker/Direct/PEX are also re-queued in the dialer.
-                self.dial_backoff
-                    .lock()
-                    .insert(addr, Instant::now() + Duration::from_secs(5));
-                let source = handle.source();
-                self.known_peers.write().insert(PeerInfo {
-                    id: handle.peer_id(),
-                    addr,
-                    source,
-                    supports_encryption: handle.is_encrypted(),
-                    pex: Default::default(),
-                    trusted: matches!(
-                        source,
-                        PeerSource::Tracker
-                            | PeerSource::Direct
-                            | PeerSource::Pex
-                            | PeerSource::Incoming
-                    ),
-                });
-            }
+
         }
         self.peer_pieces.write().remove(&peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);
