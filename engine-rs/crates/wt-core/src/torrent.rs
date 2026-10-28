@@ -121,6 +121,7 @@ pub struct TorrentInner {
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
     pub dial_backoff: Mutex<HashMap<SocketAddr, Instant>>,
     /// Consecutive failed dials per addr; drives exponential re-queue backoff.
+    pub swarm_diagnostics: Mutex<crate::stats::SwarmDiagnostics>,
     pub dial_fail_counts: Mutex<HashMap<SocketAddr, u8>>,
     pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
     pub peer_snapshots: RwLock<HashMap<SocketAddr, crate::stats::PeerConnInfo>>,
@@ -193,6 +194,7 @@ impl TorrentInner {
             client: RwLock::new(Weak::new()),
             dialing_peers: Mutex::new(HashSet::new()),
             dial_backoff: Mutex::new(HashMap::new()),
+            swarm_diagnostics: Mutex::new(Default::default()),
             dial_fail_counts: Mutex::new(HashMap::new()),
             conn_handles: RwLock::new(HashMap::new()),
             peer_snapshots: RwLock::new(HashMap::new()),

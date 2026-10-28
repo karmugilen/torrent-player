@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 // Connections are read only on demand by the visible details screen. Candidate
 // addresses from DHT/trackers are deliberately excluded: they are not connected.
 type PeerConnectionView struct {
+	*torrent.WebtorPipelineDiagnostics
 	Address    string `json:"address"`
 	Transport  string `json:"transport"`
 	Client     string `json:"client"`
@@ -21,9 +23,10 @@ type PeerConnectionView struct {
 }
 
 type ConnectionsResponse struct {
-	ID     string               `json:"id"`
-	Paused bool                 `json:"paused"`
-	Peers  []PeerConnectionView `json:"peers"`
+	ID          string                          `json:"id"`
+	Paused      bool                            `json:"paused"`
+	Peers       []PeerConnectionView            `json:"peers"`
+	Diagnostics *torrent.WebtorSwarmDiagnostics `json:"diagnostics,omitempty"`
 }
 
 func peerConnectionView(peer *torrent.PeerConn) PeerConnectionView {
@@ -42,8 +45,10 @@ func peerConnectionView(peer *torrent.PeerConn) PeerConnectionView {
 	}
 	stats := peer.Stats()
 	client, _ := peer.PeerClientName.Load().(string)
+	diagnostics := peer.WebtorPipelineDiagnostics()
 	return PeerConnectionView{
-		Address: address, Transport: transport, Client: client,
+		WebtorPipelineDiagnostics: &diagnostics,
+		Address:                   address, Transport: transport, Client: client,
 		Downloaded: stats.BytesReadData.Int64(), Uploaded: stats.BytesWrittenData.Int64(),
 	}
 }
@@ -72,6 +77,10 @@ func (s *EngineServer) handleConnections(w http.ResponseWriter, r *http.Request,
 		}
 		return view.Peers[i].Address < view.Peers[j].Address
 	})
+	if os.Getenv("WT_SWARM_DIAGNOSTICS") != "" {
+		diagnostics := rec.Torrent.WebtorSwarmDiagnostics()
+		view.Diagnostics = &diagnostics
+	}
 	writeJSON(w, http.StatusOK, view)
 }
 

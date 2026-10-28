@@ -145,6 +145,7 @@ func (s *pexConnState) Recv(payload []byte) error {
 		s.logger.Printf("in cooldown period, incoming PEX discarded")
 		return nil
 	}
+	s.torrent.webtorDiagnostics.PexReceived += uint64(len(peers))
 	added := s.torrent.addPeers(peers)
 	s.logger.Printf("got %v peers over pex, added %v", len(peers), added)
 

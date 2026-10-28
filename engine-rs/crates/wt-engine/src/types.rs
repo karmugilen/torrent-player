@@ -429,6 +429,18 @@ pub struct PeerConnectionView {
     /// Estimated peer completion 0.0–1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_completion: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nominal_max_requests: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_max_requests: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_requests: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -437,6 +449,8 @@ pub struct ConnectionsResponse {
     pub id: String,
     pub paused: bool,
     pub peers: Vec<PeerConnectionView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<wt_core::stats::SwarmDiagnostics>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

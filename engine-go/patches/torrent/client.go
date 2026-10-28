@@ -1002,6 +1002,11 @@ func (cl *Client) outgoingConnection(
 	defer cl.unlock()
 	// Don't release lock between here and addPeerConn, unless it's for failure.
 	cl.noLongerHalfOpen(opts.t, opts.peerInfo.Addr.String(), attemptKey)
+	if err == nil {
+		opts.t.webtorDiagnostics.DialOK++
+	} else {
+		webtorCountReason(&opts.t.webtorDiagnostics.DialFailures, err)
+	}
 	if err != nil {
 		if cl.config.Debug {
 			cl.logger.Levelf(

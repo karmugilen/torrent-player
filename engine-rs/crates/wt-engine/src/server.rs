@@ -1506,6 +1506,12 @@ impl EngineServer {
                     am_interested: Some(peer.am_interested),
                     pending_requests: Some(peer.pending_requests),
                     peer_completion: Some(peer.peer_completion),
+                    download_rate: Some(peer.download_rate),
+                    rtt_ms: Some(peer.rtt.as_secs_f64() * 1000.0),
+                    pipeline_limit: Some(peer.pipeline_limit),
+                    nominal_max_requests: Some(peer.nominal_max_requests),
+                    peer_max_requests: Some(peer.peer_max_requests),
+                    peak_requests: Some(peer.peak_requests),
                 });
             }
         }
@@ -1515,6 +1521,7 @@ impl EngineServer {
             id: rec.id.clone(),
             paused: rec.paused,
             peers,
+            diagnostics: std::env::var_os("WT_SWARM_DIAGNOSTICS").map(|_| rec.torrent.swarm_diagnostics()),
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }

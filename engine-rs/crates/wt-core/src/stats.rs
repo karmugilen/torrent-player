@@ -275,3 +275,30 @@ impl TokenBucket {
         }
     }
 }
+
+/// Cumulative swarm diagnostics. Counters are per torrent; gauges are sampled.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmDiagnostics {
+    pub pool_size: usize,
+    pub dialing: usize,
+    pub established: usize,
+    pub dial_ok: u64,
+    pub dial_failures: std::collections::BTreeMap<String, u64>,
+    pub closes: std::collections::BTreeMap<String, u64>,
+    pub pex_received: u64,
+    pub pex_dialed: u64,
+}
+
+pub(crate) fn failure_kind(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("refused") { "refused" }
+    else if reason.contains("timeout") || reason.contains("timed out") || reason.contains("deadline") { "timeout" }
+    else if reason.contains("mse") || reason.contains("obfuscation") { "mse" }
+    else if reason.contains("handshake") { "handshake" }
+    else if reason.contains("eof") { "eof" }
+    else if reason.contains("decode") { "decode" }
+    else if reason.contains("choker") { "choker" }
+    else if reason.contains("reset") { "reset" }
+    else { "other" }
+}

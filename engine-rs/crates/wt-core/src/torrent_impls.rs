@@ -218,6 +218,8 @@ impl PeerTorrent for TorrentInner {
             let reason = handle
                 .close_reason()
                 .unwrap_or_else(|| "unspecified".into());
+            *self.swarm_diagnostics.lock().closes
+                .entry(crate::stats::failure_kind(&reason).into()).or_default() += 1;
             eprintln!(
                 "peer_closed addr={} out={} src={:?} reason={}",
                 addr,
@@ -734,6 +736,7 @@ impl PeerTorrent for TorrentInner {
             last.insert(from, time);
         }
         drop(last);
+        self.swarm_diagnostics.lock().pex_received += peers.len() as u64;
         // Route through add_peers for high-water trim + dialer wake.
         let _ = self.add_peers(peers);
         Ok(())

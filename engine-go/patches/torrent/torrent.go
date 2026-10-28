@@ -71,6 +71,7 @@ type torrentSlogGroupInput struct {
 // Maintains state of torrent within a Client. Many methods should not be called before the info is
 // available, see .Info and .GotInfo.
 type Torrent struct {
+	webtorDiagnostics WebtorSwarmDiagnostics
 	// Torrent-level aggregate statistics. First in struct to ensure 64-bit
 	// alignment. See #262.
 	connStats AllConnStats
@@ -2152,6 +2153,7 @@ func (t *Torrent) onWebRtcConn(
 
 func (t *Torrent) logRunHandshookConn(pc *PeerConn, logAll bool, level log.Level) {
 	err := t.runHandshookConn(pc)
+	webtorCountReason(&t.webtorDiagnostics.Closes, err)
 	if err != nil || logAll {
 		t.logger.WithDefaultLevel(level).Levelf(log.ErrorLevel(err), "error running handshook conn: %v", err)
 	}
@@ -3048,6 +3050,9 @@ func initiateConn(
 		return
 	}
 	attemptKey := &peer
+	if peer.Source == PeerSourcePex {
+		t.webtorDiagnostics.PexDialed++
+	}
 	t.addHalfOpen(addrStr, attemptKey)
 	go t.cl.outgoingConnection(
 		opts,

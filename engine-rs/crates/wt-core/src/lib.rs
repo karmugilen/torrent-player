@@ -656,6 +656,14 @@ impl Torrent {
         self.inner.max_established_conns.swap(n, Ordering::Relaxed)
     }
 
+    pub fn swarm_diagnostics(&self) -> stats::SwarmDiagnostics {
+        let mut snap = self.inner.swarm_diagnostics.lock().clone();
+        snap.pool_size = self.inner.known_peers.read().len();
+        snap.dialing = self.inner.dialing_peers.lock().len();
+        snap.established = self.inner.conn_handles.read().len();
+        snap
+    }
+
     pub fn peer_conns(&self) -> Vec<PeerConnInfo> {
         let snapshots = self.inner.peer_snapshots.read();
         if !snapshots.is_empty() {

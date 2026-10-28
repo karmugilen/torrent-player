@@ -758,6 +758,9 @@ impl ClientInner {
                     }
                 }
                 for peer in torrent.take_dial_candidates(count) {
+                    if peer.source == PeerSource::Pex {
+                        torrent.swarm_diagnostics.lock().pex_dialed += 1;
+                    }
                     let cl = Arc::clone(&client);
                     let tor = Arc::clone(&torrent);
                     let task = client.tokio_handle.spawn(async move {
@@ -774,6 +777,8 @@ impl ClientInner {
                                 tor.dial_finished(peer.addr, true); // clear backoff
                                 return;
                             }
+                            *tor.swarm_diagnostics.lock().dial_failures
+                                .entry(crate::stats::failure_kind(&msg).into()).or_default() += 1;
                             // Temporary dial-failure taxonomy for peers_compare
                             // (stderr → engine-host log). Remove once Ubuntu
                             // peer-count matches Go.
@@ -810,6 +815,7 @@ impl ClientInner {
                                 tor.add_peers(vec![peer.clone()]);
                             }
                         } else {
+                            tor.swarm_diagnostics.lock().dial_ok += 1;
                             let transport = tor
                                 .conn_handles
                                 .read()
