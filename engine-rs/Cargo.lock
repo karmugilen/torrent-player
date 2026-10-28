@@ -3863,7 +3863,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wt-discovery",
  "wt-meta",
  "wt-types",

@@ -427,7 +427,8 @@ fn choke_cancels_outstanding_except_allowed_fast() {
 
     peer.on_message(&handle, Message::HaveAll).unwrap();
     peer.on_message(&handle, Message::Unchoke).unwrap();
-    let _ = drain(&mut rx);
+    // The first unchoke fills the pipeline; count those requests too.
+    let mut sent = drain(&mut rx);
 
     // Force an outstanding request
     peer.on_message(&handle, Message::AllowedFast { index: 0 })
@@ -436,7 +437,7 @@ fn choke_cancels_outstanding_except_allowed_fast() {
 
     // Manually mark outstanding for piece 1 (not allowed fast)
     peer.on_message(&handle, Message::Unchoke).unwrap();
-    let sent = drain(&mut rx);
+    sent.extend(drain(&mut rx));
     let req_count_before = sent
         .iter()
         .filter(|m| matches!(m, Message::Request { .. }))

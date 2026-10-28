@@ -291,6 +291,12 @@ impl PeerTorrent for TorrentInner {
         Ok(())
     }
 
+    fn report_write_chunk_error(&self, err: &CoreError) {
+        if let Some(cb) = &*self.on_write_chunk_error.read() {
+            cb(err);
+        }
+    }
+
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes> {
         let info = self.info.read().clone().ok_or(CoreError::NoInfo)?;
         if piece >= info.num_pieces()
@@ -483,8 +489,13 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn urgent_steal_after(&self) -> Duration {
-        let t = current_seek_tuning();
-        Duration::from_secs_f64((t.hol_after_ms / 1000.0).max(0.0))
+        // Go `Client.urgentStealAge` from SetUrgentRequestStealing (claudeSeek).
+        // Do not map HOLAfterMs here — that times HOL rescue/hedge only.
+        self.client
+            .read()
+            .upgrade()
+            .map(|c| *c.urgent_steal_after.read())
+            .unwrap_or(Duration::ZERO)
     }
 
     fn seek_tuning(&self) -> SeekTuning {

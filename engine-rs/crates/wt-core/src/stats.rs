@@ -183,6 +183,56 @@ impl RateEstimator {
     }
 }
 
+/// Go `Peer.downloadRate`: useful bytes over the time spent expecting chunks
+/// (requests outstanding, interested, not choked), summed over the whole
+/// connection. Idle gaps do not count, so a peer that briefly runs out of
+/// requests keeps its rate instead of collapsing to zero.
+#[derive(Clone, Debug, Default)]
+pub struct ExpectingRate {
+    useful_bytes: u64,
+    expecting_total: Duration,
+    expecting_since: Option<Instant>,
+}
+
+impl ExpectingRate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Go `updateExpectingChunks`.
+    pub fn set_expecting(&mut self, expecting: bool) {
+        match (expecting, self.expecting_since) {
+            (true, None) => self.expecting_since = Some(Instant::now()),
+            (false, Some(since)) => {
+                self.expecting_total += since.elapsed();
+                self.expecting_since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Go `BytesReadUsefulData`.
+    pub fn add_bytes(&mut self, n: usize) {
+        self.useful_bytes += n as u64;
+    }
+
+    /// Go `totalExpectingTime`.
+    pub fn expecting_time(&self) -> Duration {
+        self.expecting_total + self.expecting_since.map_or(Duration::ZERO, |s| s.elapsed())
+    }
+
+    pub fn rate(&self) -> f64 {
+        if self.useful_bytes == 0 {
+            return 0.0;
+        }
+        let secs = self.expecting_time().as_secs_f64();
+        if secs <= 0.0 {
+            return 0.0;
+        }
+        self.useful_bytes as f64 / secs
+    }
+}
+
 /// Token bucket rate limiter for dialing and bandwidth limiting.
 pub struct TokenBucket {
     rate: f64,

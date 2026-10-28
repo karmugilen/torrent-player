@@ -721,8 +721,25 @@ impl Torrent {
         self.inner.known_peers.write().clear();
     }
 
+    /// Go `Torrent.KnownSwarm`: pending peers plus active connections (a
+    /// dialled peer leaves the pending pool, so it must come from its conn).
     pub fn known_swarm(&self) -> Vec<PeerInfo> {
-        self.inner.known_peers.read().iter().cloned().collect()
+        let mut swarm: Vec<PeerInfo> = self.inner.known_peers.read().iter().cloned().collect();
+        for conn in self.inner.peer_snapshots.read().values() {
+            let addr = conn.dial_addr.unwrap_or(conn.remote_addr);
+            if swarm.iter().any(|p| p.addr == addr) {
+                continue;
+            }
+            swarm.push(PeerInfo {
+                id: conn.peer_id,
+                addr,
+                source: conn.source,
+                supports_encryption: conn.encrypted,
+                pex: Default::default(),
+                trusted: false,
+            });
+        }
+        swarm
     }
 
     pub fn verify_data(&self, cancel: CancelToken) -> Result<()> {

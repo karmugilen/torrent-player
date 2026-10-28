@@ -36,6 +36,7 @@
 //!     fn note_availability(&self, piece: PieceIndex, delta: i32);
 //!
 //!     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
+//!     fn report_write_chunk_error(&self, err: &CoreError);
 //!     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes>;
 //!     fn queue_piece_hash(&self, piece: PieceIndex);
 //!
@@ -104,7 +105,12 @@ use crate::pex::{PexCursor, PEX_INTERVAL};
 use crate::picker::{
     block_coord_from_req_index, compute_playback_pipeline_limit, req_index_from_piece_and_offset,
 };
-use crate::stats::{AtomicConnStats, PeerConnInfo, RateEstimator};
+use crate::stats::{AtomicConnStats, ExpectingRate, PeerConnInfo, RateEstimator};
+
+/// Go `maxLocalToRemoteRequests`: (writeBufferHighWaterLen -
+/// writeBufferLowWaterLen - interestedMsgLen) / requestMsgLen with 1 MiB / 512 KiB
+/// buffers, 5-byte interested and 17-byte request messages.
+pub(crate) const MAX_LOCAL_TO_REMOTE_REQUESTS: usize = ((1 << 20) - (1 << 19) - 5) / 17;
 use crate::strategy::{
     compute_desired_requests, sort_requests_for_peer, DesiredPeerSnapshot, PieceRequestOrder,
     RequestTorrentSnapshot, RequestTuning,
@@ -167,6 +173,8 @@ pub trait PeerTorrent: Send + Sync {
     fn update_peer_snapshot(&self, _info: PeerConnInfo) {}
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
+    /// Go `Torrent.onWriteChunkErr` — storage/cache write failures while receiving.
+    fn report_write_chunk_error(&self, _err: &CoreError) {}
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes>;
     fn queue_piece_hash(&self, piece: PieceIndex);
 
@@ -266,7 +274,8 @@ impl Default for RttEstimator {
         Self {
             probe: None,
             probe_at: None,
-            estimate: Duration::from_millis(200),
+            // Go starts at 0: no playback pipeline cap until a real sample.
+            estimate: Duration::ZERO,
         }
     }
 }
@@ -331,7 +340,8 @@ pub struct PeerConnInner {
     pub cancelled_requests: HashSet<RequestIndex>,
 
     pub rtt: RttEstimator,
-    pub download_rate: RateEstimator,
+    /// Go `downloadRate`: useful bytes / time expecting chunks.
+    pub download_rate: ExpectingRate,
     pub upload_rate: RateEstimator,
     pub stats: AtomicConnStats,
 
@@ -394,11 +404,11 @@ impl PeerConn {
                 // Start at a full pipeline floor. Go ramps from 0; our wake
                 // path needs a floor or public seeds stay at tens of KiB
                 // (r44–r48). Flooding is capped in nominal_max / refill.
-                peak_requests: 64,
+                peak_requests: 8,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),
-                download_rate: RateEstimator::new(),
+                download_rate: ExpectingRate::new(),
                 upload_rate: RateEstimator::new(),
                 stats: AtomicConnStats::default(),
                 last_useful_chunk_received: None,
@@ -533,6 +543,8 @@ impl PeerConn {
         inner.outstanding_requests.insert(req);
         inner.cancelled_requests.remove(&req);
         inner.rtt.on_request_sent(req);
+        let expecting = inner.am_interested && !inner.peer_choking;
+        inner.download_rate.set_expecting(expecting);
 
         if let Some(net) = arrival_net {
             if let Some(x) =
@@ -559,6 +571,9 @@ impl PeerConn {
         let mut inner = self.inner.write();
         inner.outstanding_requests.remove(&req);
         inner.rtt.on_request_received(req);
+        let expecting =
+            !inner.outstanding_requests.is_empty() && inner.am_interested && !inner.peer_choking;
+        inner.download_rate.set_expecting(expecting);
         inner.last_useful_chunk_received = Some(Instant::now());
 
         if let Some(sample) = inner.arrival_samples.remove(&req) {
@@ -666,11 +681,11 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 // Start at a full pipeline floor. Go ramps from 0; our wake
                 // path needs a floor or public seeds stay at tens of KiB
                 // (r44–r48). Flooding is capped in nominal_max / refill.
-                peak_requests: 64,
+                peak_requests: 8,
                 outstanding_requests: HashSet::new(),
                 cancelled_requests: HashSet::new(),
                 rtt: RttEstimator::default(),
-                download_rate: RateEstimator::new(),
+                download_rate: ExpectingRate::new(),
                 upload_rate: RateEstimator::new(),
                 stats: AtomicConnStats::default(),
                 last_useful_chunk_received: None,
@@ -1192,11 +1207,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             was_empty,
         ) as usize;
         // WholeQueue would set peak=0 when a 100ms wake runs while choked.
-        // Preserve capacity on choked/empty top-ups; floor so slow-start
-        // never falls below a useful pipeline. Cap growth so WholeQueue
-        // cannot walk peak to LTEP reqq (250) after a stall.
-        const PEAK_REQUESTS_FLOOR: usize = 64;
-        const PEAK_REQUESTS_CEILING: usize = 128;
+        // Preserve capacity on choked/empty top-ups; modest floor for
+        // slow-start (Go has no peak floor — 8 ≈ 128 KiB avoids the r58
+        // peak=0 stall without the r59/r60 HOL of floor 64). Like Go, growth
+        // is bounded by the peer's reqq and the local write buffer only.
+        const PEAK_REQUESTS_FLOOR: usize = 8;
+        const PEAK_REQUESTS_CEILING: usize = MAX_LOCAL_TO_REMOTE_REQUESTS;
         let peak = if self.state.peer_choking && added == 0 {
             self.state.peak_requests
         } else if added == 0 && !was_empty {
@@ -1205,18 +1221,36 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             computed
         };
         self.state.peak_requests = peak
-            .max(PEAK_REQUESTS_FLOOR)
-            .max(1)
-            .min(PEAK_REQUESTS_CEILING)
+            .clamp(PEAK_REQUESTS_FLOOR, PEAK_REQUESTS_CEILING)
             .min(self.state.max_requests.max(1));
         let _ = before;
     }
 
+    /// Go `PeerConn.expectingChunks` + `Peer.updateExpectingChunks`: the
+    /// download rate only counts time with requests outstanding while we are
+    /// interested and the peer lets them through.
+    fn update_expecting(&mut self) {
+        let expecting = !self.state.outstanding_requests.is_empty()
+            && self.state.am_interested
+            && (!self.state.peer_choking
+                || self.state.outstanding_requests.iter().any(|&r| {
+                    let piece = block_coord_from_req_index(
+                        r,
+                        self.torrent.piece_length(),
+                        self.torrent.total_length(),
+                    )
+                    .piece;
+                    self.state.peer_allowed_fast.contains(&piece)
+                }));
+        self.state.download_rate.set_expecting(expecting);
+    }
+
     fn nominal_max(&self) -> usize {
-        // Go `nominalMaxRequests`: min(PeerMaxRequests, peak*2), then min with
-        // playback pipeline when set. Always honor LTEP reqq. Hard ceiling
-        // stops WholeQueue+stall from opening 200+ outstanding.
-        const NOMINAL_CEILING: usize = 128;
+        // Go `nominalMaxRequests`: min(PeerMaxRequests, peak*2,
+        // maxLocalToRemoteRequests), then min with the playback pipeline when
+        // set. The former 128 cap compensated for the wall-clock rate
+        // estimator; with Go's expecting-time rate it only throttled fast peers.
+        const NOMINAL_CEILING: usize = MAX_LOCAL_TO_REMOTE_REQUESTS;
         let base = (self.state.peak_requests.max(1) * 2).max(1);
         let pipe = self.state.webtor_pipeline_limit;
         let capped = if pipe > 0 && self.torrent.request_focus_index().is_some() {
@@ -1460,18 +1494,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return Ok(());
         }
 
-        self.torrent.write_chunk(index, begin, &data)?;
-        self.torrent.mark_chunk_dirty(req);
-        self.torrent.clear_chunk_requested(req);
+        // Drop local outstanding before write so a failed write can be
+        // re-requested (Go unpends before WriteAt, then pendRequest on error).
         self.state.outstanding_requests.remove(&req);
         self.state.cancelled_requests.remove(&req);
-        self.state.rtt.on_request_received(req);
-        self.state.last_useful_chunk_received = Some(Instant::now());
-        self.state.download_rate.add_bytes(data.len());
-        self.state.stats.add_bytes_read_useful(data.len() as i64);
-        handle.stats().add_bytes_read_useful(data.len() as i64);
-        self.torrent.on_chunk_received(self.key(), req, data.len());
-
+        self.torrent.clear_chunk_requested(req);
+        self.torrent.clear_assignment(req);
         {
             let mut hedges = HashMap::new();
             if let Some(h) = self.torrent.hedge_peer(req) {
@@ -1484,6 +1512,26 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if let Some(c) = self.state.valid_receive_chunks.get_mut(&req) {
             *c = c.saturating_sub(1);
         }
+
+        if let Err(err) = self.torrent.write_chunk(index, begin, &data) {
+            // Go Peer.receiveChunk: log, pendRequest, onNeedUpdateRequests,
+            // onWriteChunkErr; return nil — never kill the peer for a
+            // transient storage/cache failure (e.g. stream cache busy).
+            tracing::debug!("writing received chunk piece={index} begin={begin}: {err}");
+            self.torrent.report_write_chunk_error(&err);
+            self.state.need_request_update = true;
+            self.torrent.bump_change();
+            let _ = handle;
+            return Ok(());
+        }
+
+        self.torrent.mark_chunk_dirty(req);
+        self.state.rtt.on_request_received(req);
+        self.state.last_useful_chunk_received = Some(Instant::now());
+        self.state.download_rate.add_bytes(data.len());
+        self.state.stats.add_bytes_read_useful(data.len() as i64);
+        handle.stats().add_bytes_read_useful(data.len() as i64);
+        self.torrent.on_chunk_received(self.key(), req, data.len());
 
         if self.torrent.piece_all_dirty(index) {
             self.torrent.queue_piece_hash(index);
@@ -1665,6 +1713,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         }
         self.request_metadata_pieces(handle);
         self.maybe_send_pex(handle);
+        self.update_expecting();
         self.torrent.update_peer_snapshot(self.peer_conn_info());
     }
 
@@ -1805,6 +1854,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         if self.state.need_request_update {
             self.update_requests(handle);
         }
+        self.update_expecting();
         self.torrent.update_peer_snapshot(self.peer_conn_info());
         Ok(())
     }

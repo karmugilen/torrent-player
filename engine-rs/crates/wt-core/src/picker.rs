@@ -137,11 +137,12 @@ pub fn compute_playback_pipeline_limit(
     has_focus: bool,
 ) -> usize {
     let tuning = current_seek_tuning();
-    // Floor keeps slow-start peers from collapsing to 2–3 outstanding
-    // blocks (BDP with low rate × default 200ms RTT). 64 ≈ 1 MiB outstanding
-    // — matched best Ubuntu runs (r48). Growth beyond this is capped in
-    // nominal_max / peak ceiling so WholeQueue cannot walk to reqq=250.
-    const PLAYBACK_PIPELINE_FLOOR: usize = 64;
+    // Go `webtorPipelineLimit`: BDP×PipelineRTT + max(MinPipeline, 2).
+    // An artificial floor of 64 previously kept ~1 MiB outstanding on every
+    // focused peer and left no headroom for HOL hedge/steal — Ubuntu mid-run
+    // speed then decayed while pending sat at 47–65 on one slow seed. Match
+    // Go's small floor; peak_requests still provides slow-start capacity.
+    const PLAYBACK_PIPELINE_FLOOR: usize = 2;
     if tuning.pipeline_rtt > 0.0 {
         if rtt.is_zero() || download_rate <= 0.0 || !has_focus {
             return 0;
