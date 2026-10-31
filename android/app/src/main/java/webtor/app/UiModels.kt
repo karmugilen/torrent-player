@@ -38,7 +38,7 @@ data class UiState(
     val freeBytes: Long = 0,
     val managedBytes: Long = 0,
     val cacheBytes: Long = 0,
-    val legacyBytes: Long = 0,
+    val engineBytes: Long = 0,
     val clearAllConfirm: Boolean = false,
     val restoring: Boolean = false,
     val maxPeers: Int = 55,

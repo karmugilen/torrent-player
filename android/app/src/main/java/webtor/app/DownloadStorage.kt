@@ -166,7 +166,7 @@ class DownloadStorage(private val context: Context) {
         StatFs(Environment.getExternalStorageDirectory().absolutePath).availableBytes
     }.getOrDefault(-1L)
     private val engineDir get() = engineDownloadDir(context)
-    val legacyBytes get() = engineDir.walkTopDown().filter { it.isFile }.sumOf {
+    val engineBytes get() = engineDir.walkTopDown().filter { it.isFile }.sumOf {
         runCatching { Os.stat(it.absolutePath).st_blocks * 512L }.getOrDefault(it.length())
     }
     val cacheBytes get() = context.cacheDir.takeIf { it.exists() }?.walkTopDown()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
@@ -461,7 +461,6 @@ class DownloadStorage(private val context: Context) {
         } ?: error("Downloaded file is unavailable")
         if (Build.VERSION.SDK_INT >= 29 && uri.authority == MediaStore.AUTHORITY && uri.toString() !in publishedPlaybackUris) {
             // Ask MediaStore to refresh metadata after native descriptor writes.
-            // Older builds could leave an empty-file scan in its database.
             runCatching {
                 resolver.update(uri, ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
@@ -538,8 +537,7 @@ class DownloadStorage(private val context: Context) {
         val tree = folder
         if (tree != null) {
             val treeUri = Uri.parse(tree)
-            // Reuse the exact generated group when available. Older records
-            // have no group URI and fall back to the selected SAF root.
+            // Reuse the exact generated group when there is one.
             val root = entry.downloadGroupUri?.takeIf { it.isNotBlank() }?.let(Uri::parse)
                 ?: DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
             val created = mutableListOf<Uri>()
@@ -604,15 +602,7 @@ class DownloadStorage(private val context: Context) {
     }
 
     fun deleteFiles(files: List<SavedFile>) {
-        // Query before deleting so downloads saved by older versions are covered too.
-        val paths = files.mapNotNull { file ->
-            file.relativePath ?: file.uri?.let { value ->
-                val uri = Uri.parse(value)
-                if (Build.VERSION.SDK_INT < 29 || uri.authority != MediaStore.AUTHORITY) null
-                else resolver.query(uri, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)
-                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
-            }
-        }
+        val paths = files.mapNotNull { it.relativePath }
         val targetUris = files.mapNotNull { it.uri }.distinct()
         val failed = targetUris.filter { uriString ->
             runCatching { deleteUri(Uri.parse(uriString)) }.isFailure
@@ -689,40 +679,27 @@ class DownloadStorage(private val context: Context) {
             val savedState = EntryLifecycleState.entries.find { it.name == stateName }
             val isDeleting = e.optBoolean("isDeleting", false)
             val directPlay = e.optBoolean("directPlay", false)
-            // Legacy Watch/stream library rows are treated as ordinary stopped downloads
-            // (Watch UI was removed; keep Download + RAM write-back only).
-            val legacyStream = e.optString("storageMode", "") == "STREAM" || e.optBoolean("watchOnly", false)
-            val paused = e.optBoolean("paused", false) || legacyStream || directPlay
+            val paused = e.optBoolean("paused", false) || directPlay
             val lifecycleState = when {
                 isDeleting -> EntryLifecycleState.ERROR
                 directPlay -> EntryLifecycleState.PAUSED
-                legacyStream -> EntryLifecycleState.STOPPED
                 savedState == EntryLifecycleState.PAUSING -> EntryLifecycleState.PAUSED
                 savedState == EntryLifecycleState.STOPPING || savedState == EntryLifecycleState.PREPARING -> EntryLifecycleState.STOPPED
                 savedState != null -> savedState
                 paused -> EntryLifecycleState.PAUSED
                 else -> EntryLifecycleState.STOPPED
             }
-            val destination = if (legacyStream) {
-                "Downloads/Webtor"
-            } else {
-                e.getString("destination")
-            }
+            val destination = e.getString("destination")
             val entry = DownloadEntry(
                 e.getString("key"), e.getString("title"), e.getString("source"), metadata,
-                if (legacyStream || directPlay || e.isNull("engineId")) null else e.getString("engineId"),
+                if (directPlay || e.isNull("engineId")) null else e.getString("engineId"),
                 destination,
                 (0 until files.length()).map { n -> files.getJSONObject(n).let { f ->
                     val length = f.getLong("length")
                     val progress = f.optDouble("progress", 0.0).let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
-                    // Older saves only stored verified-based progress; migrate into verifiedBytes.
-                    val verifiedBytes = when {
-                        f.has("verifiedBytes") && !f.isNull("verifiedBytes") -> f.optLong("verifiedBytes", 0L)
-                        length <= 0L -> 0L
-                        else -> (length * progress).toLong().coerceIn(0L, length)
-                    }
+                    val verifiedBytes = f.optLong("verifiedBytes", 0L)
                     SavedFile(f.getInt("index"), f.getString("name"), f.getString("path"), length,
-                        if (legacyStream || f.isNull("uri")) null else f.getString("uri"),
+                        if (f.isNull("uri")) null else f.getString("uri"),
                         if (directPlay) 0.0 else progress,
                         if (f.isNull("relativePath")) null else f.getString("relativePath"),
                         verifiedBytes = if (directPlay) 0L else verifiedBytes,

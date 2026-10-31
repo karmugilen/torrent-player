@@ -740,7 +740,7 @@ impl TorrentInner {
     }
 
     /// Go `PeerConn.useful()` and `lastHelpful()` for each live connection.
-    /// Live handlers are not in the legacy `conns` map; ranking through that
+    /// Ranking through that
     /// map alone made every peer look useless and never helpful, so the
     /// longest-connected (usually most productive) peers were replaced first.
     /// Locks are taken one at a time, never nested.

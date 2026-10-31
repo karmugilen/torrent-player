@@ -1990,7 +1990,7 @@ class LibrarySession(
         storageStatsJob = scope.launch {
             val free = withContext(io) { storage.freeBytes }
             val cache = withContext(io) { storage.cacheBytes }
-            val legacy = withContext(io) { storage.legacyBytes }
+            val engine = withContext(io) { storage.engineBytes }
             val folderName = withContext(io) { if (storage.folder == null) "Downloads/Webtor" else storage.folderName }
             val hasCustom = withContext(io) { storage.folder != null }
             val warning = withContext(io) { storage.storageAccessWarning() }
@@ -1999,7 +1999,7 @@ class LibrarySession(
                     freeBytes = free,
                     managedBytes = storage.managedBytes(it.library),
                     cacheBytes = cache,
-                    legacyBytes = legacy,
+                    engineBytes = engine,
                     storageFolderName = folderName,
                     hasCustomFolder = hasCustom,
                     storageAccessWarning = warning,

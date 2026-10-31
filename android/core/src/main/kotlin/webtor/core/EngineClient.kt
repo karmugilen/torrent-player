@@ -136,15 +136,6 @@ data class SeekStats(
     val lastMs: Long,
     val medianMs: Long,
     val stalls: Int,
-    /** How well the engine predicts block arrival; null from older engines. */
-    val arrival: ArrivalStats? = null,
-)
-
-/** Block arrival prediction learned on the device: the network's mean error. */
-data class ArrivalStats(
-    val samples: Long,
-    val networkErrMs: Long,
-    val using: Boolean,
 )
 
 data class PieceTelemetry(
@@ -394,7 +385,6 @@ class EngineClient(
     fun seekStats(): SeekStats? {
         val settings = get("/settings")
         return settings.optJSONObject("seekStats")?.let(::parseSeekStats)
-            ?.copy(arrival = settings.optJSONObject("arrival")?.let(::parseArrivalStats))
     }
 
     /**
@@ -477,12 +467,6 @@ class EngineClient(
             lastMs = json.optLong("lastMs").coerceAtLeast(0L),
             medianMs = json.optLong("medianMs").coerceAtLeast(0L),
             stalls = json.optInt("stalls").coerceAtLeast(0),
-        )
-
-        fun parseArrivalStats(json: JSONObject): ArrivalStats = ArrivalStats(
-            samples = json.optLong("samples").coerceAtLeast(0L),
-            networkErrMs = json.optDouble("networkErrMs", 0.0).toLong().coerceAtLeast(0L),
-            using = json.optBoolean("using"),
         )
 
         fun parsePieces(json: JSONObject): PieceTelemetry {

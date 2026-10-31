@@ -487,9 +487,6 @@ impl PlaybackPriorityCoordinator {
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Legacy constructor callback used by the current EngineServer stub.
-pub type ReadAtFn = Arc<dyn Fn(&mut [u8], i64) -> io::Result<usize> + Send + Sync>;
-
 pub struct PlaybackReader {
     pub id: String,
     pub file_index: usize,
@@ -501,9 +498,6 @@ pub struct PlaybackReader {
     pub next_file_index: Option<usize>,
     display_name: String,
     closed: AtomicBool,
-    /// Simple callback path (server stub / tests).
-    simple_reader: Mutex<Option<ReadAtFn>>,
-    /// Full orchestration path.
     session: Mutex<Option<PlaybackSession>>,
     read_cancel: Mutex<Option<wt_core::CancelToken>>,
     read_generation: AtomicU64,
@@ -516,39 +510,6 @@ pub struct PlaybackReader {
 }
 
 impl PlaybackReader {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: String,
-        file_index: usize,
-        length: i64,
-        read_fn: ReadAtFn,
-        boost: bool,
-        adaptive_buffer: bool,
-        burst_aware_buffer: bool,
-        next_file_index: Option<usize>,
-    ) -> Self {
-        Self {
-            id,
-            file_index,
-            length,
-            current_offset: AtomicI64::new(0),
-            boost,
-            adaptive_buffer,
-            burst_aware_buffer,
-            next_file_index,
-            display_name: "file.bin".into(),
-            closed: AtomicBool::new(false),
-            simple_reader: Mutex::new(Some(read_fn)),
-            session: Mutex::new(None),
-            read_cancel: Mutex::new(None),
-            read_generation: AtomicU64::new(0),
-            published_window: Mutex::new(None),
-            in_flight: AtomicUsize::new(0),
-            last_activity: Mutex::new(Instant::now()),
-            parked: AtomicBool::new(false),
-        }
-    }
-
     pub fn from_session(session: PlaybackSession) -> Arc<Self> {
         Arc::new(Self {
             id: session.torrent_id.clone(),
@@ -565,7 +526,6 @@ impl PlaybackReader {
             next_file_index: None,
             display_name: session.file_name.clone(),
             closed: AtomicBool::new(false),
-            simple_reader: Mutex::new(None),
             published_window: Mutex::new(Some(session.window)),
             in_flight: AtomicUsize::new(0),
             last_activity: Mutex::new(Instant::now()),
@@ -665,8 +625,6 @@ impl PlaybackReader {
             let result = sess.read(&mut buf[..want], offset, partial);
             *self.published_window.lock() = Some(sess.window);
             result
-        } else if let Some(reader) = self.simple_reader.lock().as_ref() {
-            reader(&mut buf[..want], offset)
         } else {
             Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -777,7 +735,6 @@ impl PlaybackReader {
                 host
             })
         };
-        *self.simple_reader.lock() = None;
         if let Some(host) = host {
             host.on_playback_closed(&self.id, self.file_index);
             host.playback_readers_changed(&self.id);
@@ -1630,25 +1587,6 @@ impl Drop for PlaybackSession {
 // Stream server wiring
 // -------------------------------------------------------------------------------------------------
 
-pub type PlaybackResolver = Arc<dyn Fn(&str, usize) -> Option<Arc<PlaybackReader>> + Send + Sync>;
-
-struct ResolverSource(PlaybackResolver);
-
-impl StreamSource for ResolverSource {
-    fn open(&self, id: &str, file_index: usize) -> io::Result<Arc<dyn StreamReader>> {
-        (self.0)(id, file_index)
-            .map(|r| r as Arc<dyn StreamReader>)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "torrent or file not found"))
-    }
-}
-
-pub async fn start_stream_server(
-    port: u16,
-    resolver: PlaybackResolver,
-) -> io::Result<Arc<StreamServer>> {
-    stream_http::start_stream_server(port, Arc::new(ResolverSource(resolver))).await
-}
-
 /// `(id, file_index, range_start)`; the start is `-1` when the request has none.
 pub type SeekablePlaybackResolver =
     Arc<dyn Fn(&str, usize, i64) -> io::Result<Arc<PlaybackReader>> + Send + Sync>;
@@ -1771,33 +1709,6 @@ mod tests {
         assert_eq!(coordinator.effective().get(&14), Some(&PiecePriority::High));
         assert!(coordinator.expire_resume(second).unwrap().is_empty());
         assert!(!coordinator.has_resume_demand());
-    }
-
-    #[test]
-    fn playback_reader_stream_trait_and_close() {
-        let data = Arc::new(vec![1u8, 2, 3, 4, 5, 6, 7, 8]);
-        let data2 = data.clone();
-        let reader = PlaybackReader::new(
-            "id".into(),
-            0,
-            8,
-            Arc::new(move |buf, off| {
-                let off = off as usize;
-                let n = buf.len().min(data2.len().saturating_sub(off));
-                buf[..n].copy_from_slice(&data2[off..off + n]);
-                Ok(n)
-            }),
-            false,
-            false,
-            false,
-            None,
-        );
-        let mut buf = [0u8; 4];
-        assert_eq!(StreamReader::read_at(&reader, &mut buf, 2).unwrap(), 4);
-        assert_eq!(&buf, &[3, 4, 5, 6]);
-        reader.close();
-        assert!(reader.is_closed());
-        assert!(StreamReader::read_at(&reader, &mut buf, 0).is_err());
     }
 
     #[test]

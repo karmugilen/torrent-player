@@ -237,7 +237,7 @@ pub trait PeerTorrent: Send + Sync + 'static {
     }
 }
 
-// ---------------------------------------------------------------- RTT / legacy PeerConn
+// ---------------------------------------------------------------- RTT and peer state
 
 pub struct RttEstimator {
     pub probe: Option<RequestIndex>,

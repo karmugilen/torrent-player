@@ -47,10 +47,9 @@ fn types_match_go_json() {
             .unwrap(),
         ),
         (6, serde_json::to_value(SettingsRequest::default()).unwrap()),
-        (7, serde_json::to_value(ArrivalStats::default()).unwrap()),
-        (8, serde_json::to_value(SeekStats::default()).unwrap()),
+        (7, serde_json::to_value(SeekStats::default()).unwrap()),
         (
-            9,
+            8,
             serde_json::to_value(TrackerView {
                 url: String::new(),
                 tier: 0,
@@ -61,7 +60,7 @@ fn types_match_go_json() {
             .unwrap(),
         ),
         (
-            10,
+            9,
             serde_json::to_value(OkResponse {
                 ok: false,
                 id: Some(String::new()),

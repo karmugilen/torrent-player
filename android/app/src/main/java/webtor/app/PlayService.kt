@@ -27,7 +27,7 @@ class PlayService : Service() {
     private var paused: Boolean = false
     private var isMultiple: Boolean = false
     private var playbackOnly: Boolean = false
-    // Live playback stats (seek time, arrival estimates), shown expanded.
+    // Live playback stats (seek time), shown expanded.
     private var stats: String = ""
     // Off once nothing has moved for a while, so a stalled download sleeps.
     private var holdLocks: Boolean = true

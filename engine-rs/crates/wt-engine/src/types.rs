@@ -286,15 +286,6 @@ pub struct MetadataResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct ArrivalStats {
-    pub samples: i64,
-    #[serde(serialize_with = "serialize_go_float")]
-    pub network_err_ms: f64,
-    pub using: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct SeekStats {
     pub count: usize,
     pub last_ms: i64,
@@ -314,8 +305,6 @@ pub struct SettingsResponse {
     pub hedge_requests: bool,
     pub slow_peer_yield: bool,
     pub drop_chokers: bool,
-    pub learned_arrival: bool,
-    pub arrival: ArrivalStats,
     pub idle_drop_minutes: i64,
     pub ram_cache_bytes: i64,
     pub seeding_enabled: bool,
@@ -345,8 +334,6 @@ pub struct SettingsRequest {
     pub slow_peer_yield: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drop_chokers: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub learned_arrival: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_drop_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

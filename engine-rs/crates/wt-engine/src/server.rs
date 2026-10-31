@@ -1865,8 +1865,6 @@ impl EngineServer {
             hedge_requests: self.hedge_requests.load(Ordering::SeqCst),
             slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
             drop_chokers: self.drop_chokers.load(Ordering::SeqCst),
-            learned_arrival: false,
-            arrival: Default::default(),
             idle_drop_minutes: self.idle_drop_minutes.load(Ordering::SeqCst),
             ram_cache_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
             seeding_enabled: self.seeding_enabled.load(Ordering::SeqCst),

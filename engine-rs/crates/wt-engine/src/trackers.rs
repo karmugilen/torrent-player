@@ -117,26 +117,8 @@ mod cache_time {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Value {
-            Text(String),
-            Legacy {
-                secs_since_epoch: u64,
-                nanos_since_epoch: u32,
-            },
-        }
-        match Value::deserialize(deserializer)? {
-            Value::Legacy {
-                secs_since_epoch,
-                nanos_since_epoch,
-            } => SystemTime::UNIX_EPOCH
-                .checked_add(Duration::new(secs_since_epoch, nanos_since_epoch))
-                .ok_or_else(|| serde::de::Error::custom("tracker timestamp overflow")),
-            Value::Text(text) => {
-                parse(&text).ok_or_else(|| serde::de::Error::custom("invalid tracker timestamp"))
-            }
-        }
+        let text = String::deserialize(deserializer)?;
+        parse(&text).ok_or_else(|| serde::de::Error::custom("invalid tracker timestamp"))
     }
 
     fn parse(text: &str) -> Option<SystemTime> {

@@ -26,10 +26,6 @@ use crate::ratelimit::Limiter;
 use crate::stats::AtomicConnStats;
 use crate::{ClientConfig, CoreError, PeerStream, Result, TcpConnHook};
 
-/// Capacity for the outbound message queue. Sized for Go `localClientReqq` (1024).
-/// Legacy size constant (writer is unbounded).
-pub const OUTBOUND_MSG_QUEUE: usize = 1024;
-
 /// First-attempt handshakes that worked and failed: encrypted, then plain.
 static FIRST_TRY: [[AtomicU32; 2]; 2] =
     [[AtomicU32::new(0), AtomicU32::new(0)], [AtomicU32::new(0), AtomicU32::new(0)]];
