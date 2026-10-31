@@ -13,6 +13,7 @@ wt-types.workspace = true
 wt-meta.workspace = true
 wt-policy.workspace = true
 wt-core.workspace = true
+wt-wire.workspace = true
 wt-storage.workspace = true
 tokio.workspace = true
 serde.workspace = true

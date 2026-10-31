@@ -3964,6 +3964,7 @@ dependencies = [
  "wt-policy",
  "wt-storage",
  "wt-types",
+ "wt-wire",
 ]
 
 [[package]]

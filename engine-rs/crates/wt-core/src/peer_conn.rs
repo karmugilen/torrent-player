@@ -6,6 +6,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use wt_types::events::seek_trace;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -956,7 +957,18 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         *self.state.valid_receive_chunks.entry(req).or_default() += 1;
         self.state.cancelled_requests.remove(&req);
         self.cancelled_at.remove(&req);
+        self.mark_seek_stage(seek_trace::Stage::Request, req);
         true
+    }
+
+    fn mark_seek_stage(&self, stage: seek_trace::Stage, req: RequestIndex) {
+        if seek_trace::armed()
+            && self.torrent.request_focus_index().is_some_and(|focus| {
+                (focus..focus.saturating_add(crate::sched::PLAYHEAD_WINDOW_BLOCKS)).contains(&req)
+            })
+        {
+            seek_trace::mark(stage);
+        }
     }
 
     /// Interest is sticky. qBittorrent punishes NotInterested while we are still
@@ -1266,6 +1278,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if !expected {
             return Ok(());
         }
+        self.mark_seek_stage(seek_trace::Stage::Block, req);
         let me = self.key();
         // Other holders of this block, captured before receipt clears them.
         // Go cancels them synchronously; here they reconcile on their wake.

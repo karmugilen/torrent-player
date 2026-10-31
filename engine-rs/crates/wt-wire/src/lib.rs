@@ -3,6 +3,7 @@
 pub use wt_meta::bencode;
 pub mod codec;
 pub mod ext;
+pub mod fast_core;
 pub mod handshake;
 pub mod message;
 pub mod mse;

@@ -833,6 +833,7 @@ pub struct PlaybackSession {
     first_byte_logged: bool,
     /// Since the last seek: when it began, and bytes delivered so far.
     seek_sprint: Option<(Instant, usize)>,
+    _fast_core: wt_wire::fast_core::PlaybackHold,
     /// Window and keyframe count last published, and when.
     last_applied: Option<(PlaybackWindow, usize, Instant)>,
 }
@@ -976,6 +977,7 @@ impl PlaybackSession {
             opened_at: Instant::now(),
             first_byte_logged: false,
             seek_sprint: None,
+            _fast_core: wt_wire::fast_core::PlaybackHold::new(),
             last_applied: None,
         };
 
@@ -992,6 +994,7 @@ impl PlaybackSession {
         {
             let now = Instant::now();
             sess.seek_started = Some(now);
+            wt_types::events::seek_trace::begin();
             sess.scrubbing = true;
             sess.last_scrub = Some(now);
         }
@@ -1078,6 +1081,7 @@ impl PlaybackSession {
             opened_at: Instant::now(),
             first_byte_logged: false,
             seek_sprint: None,
+            _fast_core: wt_wire::fast_core::PlaybackHold::new(),
             last_applied: None,
         };
         let off = if start >= 0 && start < sess.length {
@@ -1161,6 +1165,8 @@ impl PlaybackSession {
                 *bytes += n;
                 if *bytes >= SEEK_SPRINT_BYTES {
                     wt_types::events::record("seek_2mib", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));
+                    let stages = wt_types::events::seek_trace::finish(started.elapsed().as_millis());
+                    crate::jni::log_info(&format!("seek_stages {stages}"));
                     self.seek_sprint = None;
                 }
             }
@@ -1194,6 +1200,7 @@ impl PlaybackSession {
         if let Some(started) = self.seek_started.take() {
             if let Some(host) = &self.host {
                 host.record_seek(started.elapsed());
+                wt_types::events::seek_trace::mark(wt_types::events::seek_trace::Stage::Player);
                 wt_types::events::record("seek", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));
                 self.seek_sprint = Some((started, 0));
             }
@@ -1264,6 +1271,7 @@ impl PlaybackSession {
             if !self.open_phase && (!(0..PLAYBACK_SCRUB_JUMP_BYTES).contains(&delta) || on_keyframe) {
                 self.focus_pending = true;
                 self.seek_started = Some(now);
+                wt_types::events::seek_trace::begin();
                 self.scrubbing = true;
                 self.last_scrub = Some(now);
                 refocus = true;

@@ -658,6 +658,12 @@ impl TorrentInner {
             && ps.mark_complete().is_ok();
         if valid {
             self.failed_pieces.lock().remove(&piece);
+            if wt_types::events::seek_trace::armed() {
+                let (begin, end) = piece_req_index_range(piece, info.piece_length, info.total_length());
+                if self.request_focus_index().is_some_and(|focus| (begin..end).contains(&focus)) {
+                    wt_types::events::seek_trace::mark(wt_types::events::seek_trace::Stage::Verified);
+                }
+            }
         } else {
             let _ = ps.mark_not_complete();
             self.failed_pieces.lock().insert(piece);

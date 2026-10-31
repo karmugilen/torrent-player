@@ -390,4 +390,73 @@ pub mod events {
     pub fn snapshot() -> Vec<(u64, &'static str, String)> {
         EVENTS.lock().map_or_else(|_| Vec::new(), |events| events.iter().cloned().collect())
     }
+
+    /// Where the latest seek spent its time, in ms since it began.
+    pub mod seek_trace {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        #[derive(Clone, Copy)]
+        pub enum Stage {
+            /// First request sent for a block at the playhead.
+            Request,
+            /// First block at the playhead arrived from a peer.
+            Block,
+            /// The piece at the playhead passed its hash.
+            Verified,
+            /// The player got its first bytes.
+            Player,
+        }
+
+        const STAGES: usize = 4;
+        static ARMED: AtomicBool = AtomicBool::new(false);
+        static START: Mutex<Option<Instant>> = Mutex::new(None);
+        static AT: [AtomicU32; STAGES] = [const { AtomicU32::new(0) }; STAGES];
+
+        pub fn begin() {
+            if let Ok(mut start) = START.lock() {
+                *start = Some(Instant::now());
+                for stage in &AT {
+                    stage.store(0, Ordering::Relaxed);
+                }
+                ARMED.store(true, Ordering::Relaxed);
+            }
+        }
+
+        /// Cheap when no seek is being timed, so hot paths can ask first.
+        #[inline]
+        pub fn armed() -> bool {
+            ARMED.load(Ordering::Relaxed)
+        }
+
+        /// Note a stage's first arrival; later ones are ignored.
+        pub fn mark(stage: Stage) {
+            if !armed() {
+                return;
+            }
+            let Some(started) = START.lock().ok().and_then(|start| *start) else { return };
+            let ms = (started.elapsed().as_millis() as u32).max(1);
+            let _ = AT[stage as usize].compare_exchange(0, ms, Ordering::Relaxed, Ordering::Relaxed);
+            if AT.iter().all(|at| at.load(Ordering::Relaxed) != 0) {
+                ARMED.store(false, Ordering::Relaxed);
+            }
+        }
+
+        /// End the trace and record it as a `seek_stages` event. `-` means the
+        /// stage had not happened yet.
+        pub fn finish(sprint_ms: u128) -> String {
+            ARMED.store(false, Ordering::Relaxed);
+            let show = |stage: Stage| match AT[stage as usize].load(Ordering::Relaxed) {
+                0 => "-".to_string(),
+                ms => format!("{ms}ms"),
+            };
+            let line = format!(
+                "request={} block={} verified={} player={} 2mib={sprint_ms}ms",
+                show(Stage::Request), show(Stage::Block), show(Stage::Verified), show(Stage::Player),
+            );
+            super::record("seek_stages", line.clone());
+            line
+        }
+    }
 }

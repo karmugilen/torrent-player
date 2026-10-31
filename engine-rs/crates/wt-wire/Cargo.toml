@@ -20,7 +20,7 @@ hex.workspace = true
 socket2 = "0.5"
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["socket", "net", "uio"] }
+nix = { version = "0.31", default-features = false, features = ["socket", "net", "uio", "sched", "process"] }
 
 [dev-dependencies]
 sha2.workspace = true

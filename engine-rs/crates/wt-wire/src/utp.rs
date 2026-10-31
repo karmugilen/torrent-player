@@ -681,7 +681,7 @@ pub struct UtpSocket {
     out_tx: mpsc::UnboundedSender<(Bytes, SocketAddr)>,
     closed: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
-    recv_task: tokio::task::JoinHandle<()>,
+    recv_task: tokio::task::AbortHandle,
 }
 
 impl UtpSocket {
@@ -749,41 +749,31 @@ impl UtpSocket {
         let out_tx_in = out_tx.clone();
         let closed_in = closed.clone();
 
-        let recv_task = tokio::spawn(async move {
-            let mut buf = [0u8; 65535];
+        // Its own thread, so it can sit on a fast core during playback without
+        // taking the Tokio workers with it. `udp` stays on the caller's reactor.
+        let recv_runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
+        let recv_task = recv_runtime.spawn(async move {
             let start_time = Instant::now();
-            let mut drained = 0u32;
+            let mut reader = crate::udp_batch::DatagramReader::new();
+            let mut queued = std::collections::VecDeque::new();
+            let mut cores = crate::fast_core::CorePin::new();
 
             while !closed_in.load(Ordering::Relaxed) {
-                // Take what is already queued without a trip through the
-                // scheduler, yielding now and then so other tasks still run.
-                let received = match udp_in.try_recv_from(&mut buf) {
-                    Ok(res) if drained < 64 => {
-                        drained += 1;
-                        Ok(res)
-                    }
-                    Ok(res) => {
-                        drained = 0;
-                        tokio::task::yield_now().await;
-                        Ok(res)
-                    }
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                        drained = 0;
-                        udp_in.recv_from(&mut buf).await
-                    }
-                    Err(err) => Err(err),
-                };
-                let (len, peer) = match received {
-                    Ok(res) => res,
-                    // A network switch can fail a read. Every uTP peer shares
-                    // this socket for the app's life, so keep reading it.
-                    Err(_) => {
+                if queued.is_empty() {
+                    cores.follow_playback();
+                    if reader.read(&udp_in, &mut queued).await.is_err() {
+                        // The runtime that owns the socket has gone.
+                        if out_tx_in.is_closed() {
+                            break;
+                        }
+                        // A network switch can fail a read. Every uTP peer shares
+                        // this socket for the app's life, so keep reading it.
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
-                };
-
-                let mut raw = Bytes::copy_from_slice(&buf[..len]);
+                }
+                let Some((mut raw, peer)) = queued.pop_front() else { continue };
+                let len = raw.len();
                 if len < HEADER_SIZE {
                     let _ = non_utp_tx.send((raw, peer));
                     continue;
@@ -1100,6 +1090,10 @@ impl UtpSocket {
                 }
             }
         });
+        let abort_recv = recv_task.abort_handle();
+        std::thread::Builder::new().name("wt-utp-recv".into()).spawn(move || {
+            let _ = recv_runtime.block_on(recv_task);
+        })?;
 
         Ok(Self {
             udp,
@@ -1110,7 +1104,7 @@ impl UtpSocket {
             out_tx,
             closed,
             shutdown,
-            recv_task,
+            recv_task: abort_recv,
         })
     }
 
