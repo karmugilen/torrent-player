@@ -261,9 +261,10 @@ impl Client {
         self.inner.dht_contacts()
     }
 
-    /// Redo router port mapping and LSD announces after a network change.
-    pub fn refresh_local_network(&self) {
-        self.inner.refresh_local_network();
+    /// Reset what depended on the old network: tracker connections, handshake
+    /// stats, router port mapping and LSD announces.
+    pub fn network_changed(&self) {
+        self.inner.network_changed();
     }
 
     pub fn set_outgoing_tcp_conn_hook(&self, hook: Option<TcpConnHook>) {
@@ -738,6 +739,11 @@ impl Torrent {
         if let Some(client) = self.inner.client.read().upgrade() {
             client.rediscover_torrent(&self.inner);
         }
+    }
+
+    /// See [`TorrentInner::route_changed`].
+    pub fn route_changed(&self) {
+        self.inner.route_changed();
     }
 
     /// Close every peer connection (Go network recovery closes the old

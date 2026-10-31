@@ -5,7 +5,7 @@
 //! generation state and the dialer that tears down stale HTTP/WebSocket
 //! tracker transports when the route changes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -37,7 +37,9 @@ struct NetworkDialerInner {
     connections: HashSet<usize>,
     next_id: usize,
     #[cfg(unix)]
-    fds: HashSet<std::os::fd::RawFd>,
+    /// Tracker sockets by fd, with the kernel's cookie for the socket. The fd
+    /// number alone is reused once the tracker closes the socket.
+    fds: HashMap<std::os::fd::RawFd, u64>,
 }
 
 impl Default for NetworkDialer {
@@ -55,7 +57,7 @@ impl NetworkDialer {
                 connections: HashSet::new(),
                 next_id: 1,
                 #[cfg(unix)]
-                fds: HashSet::new(),
+                fds: HashMap::new(),
             }),
         }
     }
@@ -79,9 +81,11 @@ impl NetworkDialer {
         let mut g = self.inner.lock();
         g.epoch = g.epoch.wrapping_add(1);
         #[cfg(unix)]
-        for fd in g.fds.drain() {
-            unsafe {
-                libc::shutdown(fd, libc::SHUT_RDWR);
+        for (fd, cookie) in g.fds.drain() {
+            if socket_cookie(fd) == Some(cookie) {
+                unsafe {
+                    libc::shutdown(fd, libc::SHUT_RDWR);
+                }
             }
         }
         g.connections.clear();
@@ -89,7 +93,11 @@ impl NetworkDialer {
 
     #[cfg(unix)]
     pub fn track_fd(&self, fd: std::os::fd::RawFd) {
-        self.inner.lock().fds.insert(fd);
+        let mut g = self.inner.lock();
+        g.fds.retain(|fd, cookie| socket_cookie(*fd) == Some(*cookie));
+        if let Some(cookie) = socket_cookie(fd) {
+            g.fds.insert(fd, cookie);
+        }
     }
 
     /// Register a live connection id (tests / custom dials).
@@ -132,6 +140,26 @@ impl NetworkDialer {
             dialer: Arc::clone(self),
         })
     }
+}
+
+/// The kernel's id for the socket behind `fd`. Unlike the fd number it is never
+/// reused, so a closed tracker socket cannot be mistaken for whatever got its
+/// number next (a peer, or the player's stream). `None` if the kernel has none.
+#[cfg(unix)]
+fn socket_cookie(fd: std::os::fd::RawFd) -> Option<u64> {
+    const SO_COOKIE: libc::c_int = 57;
+    let mut cookie = 0u64;
+    let mut len = std::mem::size_of::<u64>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            SO_COOKIE,
+            &mut cookie as *mut u64 as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(cookie)
 }
 
 /// TcpStream owned by a [`NetworkDialer`]; forgets itself on drop.
@@ -259,6 +287,29 @@ mod tests {
         assert_eq!(n.on_network_change(2, true), Some(true));
         assert_eq!(n.generation(), 2);
         assert!(n.episode() >= 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_cuts_live_tracker_sockets_but_not_a_reused_fd_number() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dialer = NetworkDialer::new();
+
+        let mut live = TcpStream::connect(addr).unwrap();
+        dialer.track_fd(live.as_raw_fd());
+        dialer.reset();
+        assert!(live.write_all(b"x").is_err(), "reset left a tracker socket open");
+
+        // dup2 puts another socket on the tracked number, as fd reuse would.
+        let closed = TcpStream::connect(addr).unwrap();
+        let mut other = TcpStream::connect(addr).unwrap();
+        dialer.track_fd(closed.as_raw_fd());
+        assert_ne!(unsafe { libc::dup2(other.as_raw_fd(), closed.as_raw_fd()) }, -1);
+        dialer.reset();
+        other.write_all(b"x").expect("reset shut down an unrelated socket");
     }
 
     #[test]

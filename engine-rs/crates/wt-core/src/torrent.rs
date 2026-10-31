@@ -133,6 +133,8 @@ pub struct TorrentInner {
     /// and dial-candidate ordering (fresh before recirculated dead contacts).
     pub swarm_diagnostics: Mutex<crate::stats::SwarmDiagnostics>,
     pub dial_fail_counts: Mutex<HashMap<SocketAddr, u8>>,
+    /// Bumped when the network route changes; cancels dials on the old route.
+    pub(crate) route_epoch: tokio::sync::watch::Sender<u64>,
     pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
     /// Lifetime totals survive connection churn, like Go torrent.ConnStats.
     pub(crate) retired_conn_stats: Mutex<crate::stats::ConnStats>,
@@ -274,6 +276,7 @@ impl TorrentInner {
             dial_backoff: Mutex::new(HashMap::new()),
             swarm_diagnostics: Mutex::new(Default::default()),
             dial_fail_counts: Mutex::new(HashMap::new()),
+            route_epoch: tokio::sync::watch::channel(0).0,
             conn_handles: RwLock::new(HashMap::new()),
             retired_conn_stats: Mutex::new(crate::stats::ConnStats::default()),
             peer_snapshots: RwLock::new(HashMap::new()),
@@ -1046,6 +1049,16 @@ impl TorrentInner {
                     && backoff.get(&p.addr).is_none_or(|until| *until <= now)
             })
             .count()
+    }
+
+    /// The network route changed: stop dials still running on the old route,
+    /// which would hold half-open slots until they time out, and forget the
+    /// backoff from dials that failed because there was no route.
+    pub(crate) fn route_changed(&self) {
+        self.route_epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        self.dial_backoff.lock().clear();
+        self.dial_fail_counts.lock().clear();
+        self.peer_notify.notify_one();
     }
 
     pub(crate) fn dial_finished(&self, addr: SocketAddr, ok: bool) {

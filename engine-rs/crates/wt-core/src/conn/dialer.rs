@@ -39,6 +39,13 @@ fn first_try_rate(plain: bool) -> (f64, u32) {
     (f64::from(ok + 1) / f64::from(ok + failed + 2), ok + failed)
 }
 
+/// What worked on one network says nothing about the next.
+pub(crate) fn forget_first_try_stats() {
+    for slot in FIRST_TRY.iter().flatten() {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Encrypted first unless plain has clearly worked better on this network. An
 /// encrypted first try costs round trips; on some networks plain is what gets
 /// blocked. One dial in eight tries the other order, to keep learning.

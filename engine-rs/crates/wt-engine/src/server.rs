@@ -431,7 +431,11 @@ impl EngineServer {
         let records: Vec<_> = self.records.read().values().cloned().collect();
         for rec_arc in &records {
             let mut rec = rec_arc.write();
-            if !current() || rec.paused || rec.torrent.closed() {
+            if !current() || rec.torrent.closed() {
+                continue;
+            }
+            rec.torrent.route_changed();
+            if rec.paused {
                 continue;
             }
             let mut seen = HashSet::new();
@@ -457,8 +461,7 @@ impl EngineServer {
             rec.torrent.start_peer_burst();
             rec.reconnect_peers = cached;
         }
-        // New network: map the port on its router and announce to its LAN.
-        self.client.refresh_local_network();
+        self.client.network_changed();
         self.notify_change();
         for delay in [0u64, 3, 10, 30] {
             let until = Instant::now() + Duration::from_secs(delay);

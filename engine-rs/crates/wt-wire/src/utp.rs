@@ -775,7 +775,12 @@ impl UtpSocket {
                 };
                 let (len, peer) = match received {
                     Ok(res) => res,
-                    Err(_) => break,
+                    // A network switch can fail a read. Every uTP peer shares
+                    // this socket for the app's life, so keep reading it.
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                 };
 
                 let mut raw = Bytes::copy_from_slice(&buf[..len]);

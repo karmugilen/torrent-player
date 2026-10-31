@@ -188,6 +188,12 @@ impl AnnounceDispatcher {
         self.wake.notify_one();
     }
 
+    /// Network change: forget the tracker clients. A UDP connection id belongs
+    /// to the old address, so a tracker would ignore it for up to a minute.
+    pub fn reset_clients(&self) {
+        self.inner.lock().clients.clear();
+    }
+
     /// Network change: announce every tracker of `info_hash` now and drop
     /// the old route's error backoff (Go announces with fresh sockets).
     pub fn announce_now(&self, info_hash: InfoHash) {

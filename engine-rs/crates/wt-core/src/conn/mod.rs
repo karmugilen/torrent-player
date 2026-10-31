@@ -6,6 +6,7 @@ pub mod handle;
 pub mod listener;
 pub mod shared_udp;
 
+pub(crate) use dialer::forget_first_try_stats;
 pub use dialer::{dial_peer, reduced_dial_timeout, DialOutcome, DialParams};
 pub use driver::{spawn_connection_driver, DEFAULT_KEEPALIVE_TIMEOUT, DEFAULT_READ_DEADLINE};
 pub use half_open::{GlobalHalfOpenGuard, HalfOpenTracker, TorrentHalfOpenGuard};

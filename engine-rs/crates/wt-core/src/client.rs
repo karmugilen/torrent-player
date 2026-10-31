@@ -756,9 +756,14 @@ impl ClientInner {
         *self.urgent_steal_after.write() = after;
     }
 
-    /// The network changed: map the port on the new router and announce to
-    /// the new local network.
-    pub fn refresh_local_network(&self) {
+    /// The network changed: start trackers on fresh connection state, drop what
+    /// was learned about handshakes on the old network, map the port on the new
+    /// router and announce to the new local network.
+    pub fn network_changed(&self) {
+        crate::conn::forget_first_try_stats();
+        if let Some(sources) = self.sources.read().clone() {
+            sources.reset_tracker_clients();
+        }
         self.port_map_wake.notify_one();
         self.lsd_wake.notify_one();
     }
@@ -949,9 +954,16 @@ impl ClientInner {
                     let cl = Arc::clone(&client);
                     let tor = Arc::clone(&torrent);
                     let task = client.tokio_handle.spawn(async move {
-                        let result = cl
-                            .dial_peer(Arc::clone(&tor), peer.addr, peer.source)
-                            .await;
+                        let mut route = tor.route_epoch.subscribe();
+                        let result = tokio::select! {
+                            result = cl.dial_peer(Arc::clone(&tor), peer.addr, peer.source) => result,
+                            _ = route.changed() => {
+                                // Not this peer's fault: back in the pool, no penalty.
+                                tor.add_peers(vec![peer.clone()]);
+                                tor.dial_finished(peer.addr, true);
+                                return;
+                            }
+                        };
                         let ok = result.is_ok();
                         if let Err(ref e) = result {
                             let msg = e.to_string();

@@ -341,6 +341,11 @@ impl Sources {
         self.spawn_dht_announcer(entry);
     }
 
+    /// Network change: the next announces build fresh tracker clients.
+    pub fn reset_tracker_clients(&self) {
+        self.dispatcher.reset_clients();
+    }
+
     /// Add tracker tiers. URLs for short hashes that are not registered are ignored.
     pub fn add_trackers(&self, keys: &TorrentKeys, tiers: Vec<Vec<String>>) -> Result<()> {
         let g = self.inner.lock();
