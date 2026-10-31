@@ -167,9 +167,6 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn hedge_peer(&self, req: RequestIndex) -> Option<PeerKey>;
     /// Becomes the block's one second copy.
     fn claim_hedge(&self, req: RequestIndex, peer: PeerKey) -> bool;
-    fn replace_hedge(&self, _req: RequestIndex, _old: PeerKey, _peer: PeerKey) -> bool {
-        false
-    }
     fn clear_hedge(&self, req: RequestIndex);
     fn release_hedge(&self, req: RequestIndex, peer: PeerKey) {
         if self.hedge_peer(req) == Some(peer) { self.clear_hedge(req); }
@@ -895,7 +892,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                     self.torrent.release_request(req, holder);
                     self.torrent.claim_request(req, me, now)
                 }
-                Take::ReplaceCopy(old) => self.torrent.replace_hedge(req, old, me),
                 Take::Copy { eager } => {
                     if eager && !self.torrent.take_seek_hedge() {
                         false
@@ -912,7 +908,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
             if !self.send_request(handle, req) {
                 match take {
-                    Take::ReplaceCopy(_) => self.torrent.clear_hedge(req),
                     Take::Copy { eager } => {
                         self.torrent.clear_hedge(req);
                         if eager { self.torrent.refund_seek_hedge(); }
@@ -932,11 +927,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                     self.torrent.wake_peer(holder);
                 }
                 Take::Copy { .. } => self.torrent.record_hedge(),
-                // The old copy's peer cancels it on waking: see `displaced_requests`.
-                Take::ReplaceCopy(old) => {
-                    self.torrent.record_hedge();
-                    self.torrent.wake_peer(old);
-                }
             }
             self.state.outstanding_requests.insert(req);
         }

@@ -30,8 +30,6 @@ const QUICKER_RATIO: f64 = 1.5;
 const SEEK_COPY_BLOCKS: u32 = 64;
 /// A playhead block is overdue after this, or two holder round trips if longer.
 const OVERDUE_AFTER: Duration = Duration::from_millis(150);
-/// A second copy gets this long before a much quicker peer may replace it.
-const COPY_REPLACE_AFTER: Duration = Duration::from_millis(300);
 /// Unmeasured round trip when estimating arrivals.
 const DEFAULT_RTT: f64 = 0.2;
 /// An idle peer takes a block held this long from a holder under half its rate.
@@ -97,7 +95,6 @@ pub fn expected_arrival(rate: f64, rtt: Duration, queued: u32) -> f64 {
 struct Hold {
     owner: Option<(PeerKey, Instant)>,
     second: Option<PeerKey>,
-    second_at: Option<Instant>,
 }
 
 /// Blocks on their way: their owner, when it was asked, and any second copy.
@@ -208,26 +205,6 @@ impl BlockTable {
             return false;
         }
         hold.second = Some(peer);
-        hold.second_at = Some(Instant::now());
-        true
-    }
-
-    /// Who holds the second copy, and since when.
-    pub fn second_since(&self, req: RequestIndex) -> Option<(PeerKey, Instant)> {
-        let shard = self.shard(req).lock();
-        let hold = shard.get(&req)?;
-        Some((hold.second?, hold.second_at?))
-    }
-
-    /// Hand the second copy from `old` to `peer`, if `old` still holds it.
-    pub fn replace_second(&self, req: RequestIndex, old: PeerKey, peer: PeerKey) -> bool {
-        let mut shard = self.shard(req).lock();
-        let Some(hold) = shard.get_mut(&req) else { return false };
-        if hold.second != Some(old) {
-            return false;
-        }
-        hold.second = Some(peer);
-        hold.second_at = Some(Instant::now());
         true
     }
 
@@ -404,8 +381,6 @@ pub enum Take {
     Copy { eager: bool },
     /// The holder is stuck and loses it.
     From(PeerKey),
-    /// This peer takes over a second copy from a much slower one.
-    ReplaceCopy(PeerKey),
 }
 
 #[derive(Default)]
@@ -480,12 +455,8 @@ impl TorrentInner {
         let steal_after = self.client.read().upgrade()
             .map_or(Duration::ZERO, |c| *c.urgent_steal_after.read());
         let tuning = crate::tuning::current_seek_tuning();
-        let (after_seek, eager) = self.seek_hedge.lock().map_or((false, false), |(at, left)| {
-            let recent = at.elapsed() < crate::torrent::SEEK_HEDGE_WINDOW;
-            (recent, recent && left > 0)
-        });
-        // Right after a seek the player waits on the whole window, not only its start.
-        let picky_blocks = if after_seek { PLAYHEAD_WINDOW_BLOCKS } else { FOCUS_BLOCKS };
+        let eager = self.seek_hedge.lock()
+            .is_some_and(|(at, left)| left > 0 && at.elapsed() < crate::torrent::SEEK_HEDGE_WINDOW);
         let peers = self.live_peers.read();
         let pieces = self.pieces.read();
         let mine = peer.arrival();
@@ -513,7 +484,7 @@ impl TorrentInner {
             }
             let holder = self.blocks.owner(req).filter(|&(owner, _)| owner != peer.key);
             let Some((holder, asked)) = holder else {
-                let leave_it = req < focus + picky_blocks
+                let leave_it = req < focus + FOCUS_BLOCKS
                     && !steal_after.is_zero()
                     && peers.iter().any(|other| other.key != peer.key
                         && can_serve(other, piece)
@@ -535,40 +506,19 @@ impl TorrentInner {
                 pick.blocks.push((req, Take::From(holder)));
                 continue;
             }
-            if !tuning.hedge || mine == f64::MAX {
+            if !tuning.hedge || self.blocks.second(req).is_some() || mine == f64::MAX {
                 continue;
             }
-            // Roughly how much longer a peer still needs for a block asked `age` ago.
-            let left = |arrival: Option<f64>, age: Duration| {
-                arrival.map_or(f64::MAX, |arrival| arrival - age.as_secs_f64())
-            };
+            let rtt = holder_live.map_or(Duration::ZERO, |h| h.rtt());
+            let overdue = age >= OVERDUE_AFTER.max(rtt.saturating_mul(2));
+            if !overdue && !(eager && req < focus + SEEK_COPY_BLOCKS) {
+                continue;
+            }
             // The quickest other peer sends the copy; the rest stay out of it.
             let quickest = !peers.iter().any(|other| other.key != peer.key
                 && other.key != holder
                 && can_serve(other, piece)
                 && other.arrival() < mine);
-            let holder_left = left(holder_live.map(|h| h.arrival()), age);
-            if let Some((second, since)) = self.blocks.second_since(req) {
-                // A copy with a slow peer helps nobody. One copy at a time, still.
-                let copy_age = now.saturating_duration_since(since);
-                let second_arrival = peers.iter().find(|other| other.key == second).map(|s| s.arrival());
-                if quickest
-                    && copy_age >= COPY_REPLACE_AFTER
-                    && mine < holder_left
-                    && mine < left(second_arrival, copy_age) / QUICKER_RATIO
-                {
-                    pick.blocks.push((req, Take::ReplaceCopy(second)));
-                }
-                continue;
-            }
-            // Late by the clock, or some peer can simply beat what the holder
-            // has left: queue and rate count, not only its round trip.
-            let rtt = holder_live.map_or(Duration::ZERO, |h| h.rtt());
-            let overdue = age >= OVERDUE_AFTER.max(rtt.saturating_mul(2))
-                || (age >= OVERDUE_AFTER && mine < holder_left);
-            if !overdue && !(eager && req < focus + SEEK_COPY_BLOCKS) {
-                continue;
-            }
             if quickest {
                 pick.blocks.push((req, Take::Copy { eager: !overdue }));
             }

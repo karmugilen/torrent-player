@@ -566,10 +566,6 @@ impl PeerTorrent for TorrentInner {
 
 
 
-    fn replace_hedge(&self, req: RequestIndex, old: PeerKey, peer: PeerKey) -> bool {
-        !self.dirty_chunks.contains(req) && self.blocks.replace_second(req, old, peer)
-    }
-
     fn claim_hedge(&self, req: RequestIndex, peer: PeerKey) -> bool {
         !self.dirty_chunks.contains(req) && self.blocks.claim_second(req, peer)
     }
