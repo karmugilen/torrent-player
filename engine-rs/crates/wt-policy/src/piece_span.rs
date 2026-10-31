@@ -30,9 +30,6 @@ impl PieceSpan {
         i >= self.begin && i < self.end
     }
 
-    pub fn overlaps(self, o: Self) -> bool {
-        !self.empty() && !o.empty() && self.begin < o.end && o.begin < self.end
-    }
 
     pub fn len(self) -> u32 {
         self.end.saturating_sub(self.begin)

@@ -1,48 +1,4 @@
 //! Direct Play storage facade: bounded RAM video cache + durable startup metadata.
-//!
-//! # Behaviour (ports `engine-go/direct_storage.go` + Auto RAM policy)
-//!
-//! Direct Play keeps video in a bounded RAM cache and saves only video metadata
-//! to disk: the head and tail of every selected video (MP4 moov / MKV cues),
-//! under `.startup/<infohash>/<piece>.piece`. Opening/container pieces are
-//! prioritised; the startup cache is validated on restore (first
-//! [`DIRECT_STARTUP_BUDGET`] at attach, the rest when an episode opens).
-//! Preview tasks use a separate [`PREVIEW_BUDGET_BYTES`] budget via
-//! [`DocumentTorrentStorage::attach_preview_temp`].
-//!
-//! # Constructor and knobs (agy-3 owns the storage body)
-//!
-//! | Knob | Where | Notes |
-//! |------|--------|-------|
-//! | `DocumentStorageClient::new(base_dir)` | agy-3 | Client that opens torrents |
-//! | `open_torrent(info, hash)` | `ClientStorage` | Creates [`DocumentTorrentStorage`] |
-//! | `attach_descriptors_mode(..., stream=true)` / `attach_direct_play` | agy-3 | Enter Direct Play; rejects external FDs |
-//! | `set_cache_limit` / `set_memory_limit` | client + torrent | Runtime; shrink takes effect as pieces are replaced; Direct Play raises to [`DIRECT_PLAY_MIN_PIECES`] × piece length |
-//! | `set_startup_file` / `set_preload_file` | agy-3 | Episode plan / Play-next warm start |
-//! | `startup_fetch_pieces(playing)` | agy-3 | Batches for metadata download |
-//! | `read_verified_stream` / `inject_verified_bytes` | agy-3 | Playback reads |
-//! | `set_stream_demand` | agy-3 | Playback window pieces protected from eviction |
-//! | `attach_preview_temp` / `release_preview_temp` | agy-3 | Preview memory budget |
-//! | [`auto_ram_cache_mib`] | **this module** | 64–512 MiB from available memory + active transfers |
-//! | [`clamp_ram_cache_bytes`] | **this module** | Clamp to [`MIN_RAM_CACHE_BYTES`]..=[`MAX_RAM_CACHE_BYTES`] |
-//! | [`register_startup_cache`] / [`unregister_startup_cache`] / [`prune_startup_caches`] | **this module** | `.startup` registry + overall disk budget |
-//!
-//! Constants re-exported from `storage`: [`DIRECT_STARTUP_HEAD`],
-//! [`DIRECT_STARTUP_TAIL`], [`DIRECT_STARTUP_BUDGET`],
-//! [`DIRECT_STARTUP_TOTAL_BUDGET`], [`DIRECT_PRELOAD_BUDGET`],
-//! [`DIRECT_PLAY_MIN_PIECES`], [`PREVIEW_BUDGET_BYTES`],
-//! [`MIN_RAM_CACHE_BYTES`], [`MAX_RAM_CACHE_BYTES`].
-//!
-//! Trait impls: [`DocumentStorageClient`] / [`DocumentTorrentStorage`] /
-//! [`DocumentPiece`] already implement `ClientStorage` / `TorrentStorage` /
-//! `PieceStorage` (agy-3). This module does not duplicate them.
-//!
-//! # Auto RAM
-//!
-//! The Android app computes Auto RAM (`RamCachePolicy.kt`) and pushes the
-//! result through `SetCacheLimit`. [`auto_ram_cache_mib`] is the same formula
-//! for engine-host / tests so wt-engine can size without the Kotlin layer.
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -299,7 +255,7 @@ pub fn open_direct_play(
     Ok(st)
 }
 
-/// Head/tail piece list for a file (re-export of agy-3 helper for facade users).
+/// Head/tail piece list for a file (re-export for facade users).
 pub use crate::storage::startup_file_pieces as startup_pieces_for_file;
 
 /// Convenience: piece indices that Direct Play persists for the selected videos.

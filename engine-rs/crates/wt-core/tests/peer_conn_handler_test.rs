@@ -184,7 +184,7 @@ impl PeerTorrent for FakeTorrent {
         let dirty = self.dirty.lock();
         let assignments = self.assignments.lock();
         for piece in 0..NUM_PIECES {
-            if !peer.have_all && !peer.pieces.contains(&piece) {
+            if !peer.have_all && !peer.pieces.contains(piece) {
                 continue;
             }
             pick.interested = true;

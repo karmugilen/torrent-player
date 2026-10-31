@@ -9,8 +9,6 @@ use futures::StreamExt;
 use tokio::sync::Semaphore;
 use wt_types::{FileInfo, Info};
 
-/// Default max concurrent HTTP requests per webseed URL.
-pub const DEFAULT_MAX_CONCURRENT: usize = 4;
 
 /// Discard at most this many leading bytes when a server ignores Range
 /// (Go `MaxDiscardBytes` = 48 KiB).
@@ -171,19 +169,7 @@ impl WebSeedClient {
         self.info = Some(info);
     }
 
-    pub fn set_path_escaper(&mut self, escaper: PathEscaper) {
-        self.escaper = Some(escaper);
-    }
 
-    pub fn url_for_file(&self, file_index: usize) -> Option<String> {
-        let info = self.info.as_ref()?;
-        Some(url_for_file_index(
-            &self.url,
-            file_index,
-            info,
-            self.escaper.as_ref(),
-        ))
-    }
 
     /// Fetch `extent` (torrent-relative) and return concatenated bytes.
     pub async fn fetch_extent(&self, extent: Extent) -> Result<bytes::Bytes> {

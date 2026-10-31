@@ -99,13 +99,6 @@ impl BypassController {
         self.error = None;
     }
 
-    /// Shared flag so wrapped streams can stop splitting after deactivate.
-    pub fn policy_flag(
-        epoch: Arc<AtomicU64>,
-        expected: u64,
-    ) -> Arc<dyn Fn() -> bool + Send + Sync> {
-        Arc::new(move || epoch.load(Ordering::SeqCst) == expected)
-    }
 }
 
 /// True for localhost / loopback dial targets that must stay untreated.
@@ -157,20 +150,8 @@ impl<S> BypassStream<S> {
         self
     }
 
-    pub fn with_policy(mut self, policy: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        self.policy_active = Some(policy);
-        self
-    }
 
-    /// Test hook: replace `sleep` with a no-op or counter.
-    pub fn with_delay_fn(mut self, f: Arc<dyn Fn(Duration) + Send + Sync>) -> Self {
-        self.delay_fn = Some(f);
-        self
-    }
 
-    pub fn disable_split(&self) {
-        self.disabled.store(true, Ordering::SeqCst);
-    }
 
     pub fn into_inner(self) -> S {
         self.inner

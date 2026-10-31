@@ -148,10 +148,6 @@ impl RateEstimator {
         }
     }
 
-    pub fn set_rate(&mut self, rate_bps: f64) {
-        self.rate_bps = rate_bps;
-        self.last_update = Instant::now();
-    }
 
     pub fn add_bytes(&mut self, n: usize) {
         self.bytes_accum += n as u64;

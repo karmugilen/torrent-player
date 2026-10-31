@@ -1,8 +1,4 @@
 //! Metainfo, bencode, magnets, and BEP 52 merkle trees.
-//!
-//! Pure Rust port of `engine-go/patches/torrent/{bencode,metainfo,merkle}` plus
-//! infohash v1/v2 helpers. See `PORT_NOTES.md` and `engine-rs/docs/PORT_MAP.md`.
-
 #![deny(unsafe_code)]
 
 pub mod bencode;

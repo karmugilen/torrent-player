@@ -473,38 +473,7 @@ impl LocalLtepProtocolMap {
         }
     }
 
-    pub fn to_supported_extension_dict(&self) -> BTreeMap<String, u8> {
-        let mut map = BTreeMap::new();
-        for (i, name) in self.index.iter().enumerate() {
-            map.insert(name.clone(), (i + 1) as u8);
-        }
-        map
-    }
 
-    pub fn lookup_id(&self, id: u8) -> io::Result<(String, bool)> {
-        if id == 0 {
-            return Ok(("handshake".to_string(), true));
-        }
-        let protocol_idx = (id - 1) as usize;
-        if protocol_idx >= self.index.len() {
-            return Err(Error::new(
-                ErrorKind::NotFound,
-                format!("unexpected extended message ID: {id}"),
-            ));
-        }
-        let builtin = protocol_idx < self.num_builtin;
-        let name = self.index[protocol_idx].clone();
-        Ok((name, builtin))
-    }
 
-    pub fn add_user_protocol(&mut self, name: &str) {
-        self.index.retain(|n| n != name);
-        self.index.push(name.to_string());
-    }
 
-    pub fn add_builtin_protocol(&mut self, name: &str) {
-        self.index.retain(|n| n != name);
-        self.index.insert(self.num_builtin, name.to_string());
-        self.num_builtin += 1;
-    }
 }

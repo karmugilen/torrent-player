@@ -1,48 +1,4 @@
 //! Seekable, responsive torrent reader (Go `reader.go` + Webtor responsive).
-//!
-//! # `ReaderHost`
-//!
-//! The reader talks to the torrent only through [`ReaderHost`], so this module
-//! is not blocked on `torrent.rs` internals. `TorrentInner` implements the
-//! trait; unit tests supply a fake.
-//!
-//! ```ignore
-//! /// Piece index range [begin, end) a reader wants downloaded.
-//! pub struct PieceRange { pub begin: u32, pub end: u32 }
-//!
-//! /// Host that backs a [`Reader`].
-//! ///
-//! /// - `have(offset, len, responsive)` — contiguous available bytes at
-//! ///   torrent-absolute `offset` (≤ `len`). Non-responsive: completed pieces
-//! ///   only. Responsive: dirty chunks count too (Go `available` / `haveChunk`).
-//! /// - `wait_change(after, timeout)` — condvar wait until change_version >
-//! ///   `after` or timeout; returns current version (no busy loop).
-//! /// - `set_reader_positions(id, range)` — register this reader's piece range
-//! ///   so priorities recompute like Go `readerPiecePriorities`
-//! ///   (Now = begin, Readahead = begin+1..end).
-//! /// - `clear_reader(id)` — on Close; Go `deleteReader` / `readersChanged`.
-//! /// - `read_at(buf, torrent_offset)` — read from piece storage.
-//! pub trait ReaderHost: Send + Sync {
-//!     fn have(&self, offset: i64, len: i64, responsive: bool) -> i64;
-//!     fn wait_change(&self, after: u64, timeout: Duration) -> u64;
-//!     fn change_version(&self) -> u64;
-//!     fn set_reader_positions(&self, reader_id: u64, range: PieceRange);
-//!     fn clear_reader(&self, reader_id: u64);
-//!     fn read_at(&self, buf: &mut [u8], torrent_offset: i64) -> io::Result<usize>;
-//!     fn piece_length(&self) -> Option<i64>;
-//!     fn torrent_length(&self) -> i64;
-//!     fn num_pieces(&self) -> u32;
-//!     fn is_closed(&self) -> bool;
-//!     fn has_info(&self) -> bool;
-//!     fn on_read_waiting(&self, torrent_offset: i64) {}
-//! }
-//! ```
-//!
-//! Stopgap: `raise_reader_piece_priorities_stopgap` Raises `piece.priority`
-//! to Now/Readahead (priorities do not drop on seek-away). Full Go bitmaps
-//! (`_readerNowPieces` / `_readerReadaheadPieces`) belong on the torrent once
-//! agy-2 adds `reader_ranges` storage; switch by replacing that one function.
-
 use std::collections::HashSet;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};

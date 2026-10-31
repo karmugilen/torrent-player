@@ -1,9 +1,4 @@
 //! Host-facing engine API consumed by the JNI exports.
-//!
-//! Mirrors the behaviour of `engine-go/main.go` (android/jnitest build) so that
-//! `EngineHost.kt` can load `libengine.so` unchanged. agy-4 implements this
-//! trait over `EngineServer`; the JNI layer holds a single global instance.
-
 /// Engine operations exposed to Android via JNI.
 ///
 /// Every method documents the Go semantics from `engine-go/main.go`. Return

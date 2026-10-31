@@ -27,8 +27,7 @@ use crate::{ClientConfig, CoreError, Result, TcpConnHook, TorrentSpec};
 use tokio::sync::Notify;
 use wt_wire::handshake::{default_peer_extension_bytes, handshake, handshake_incoming};
 
-/// Thin Sources sink / announce adapter over [`TorrentInner`] (agy-2 owns the
-/// eventual first-class impls; Client registers torrents immediately).
+/// Thin Sources sink / announce adapter over [`TorrentInner`].
 struct TorrentSourcesAdapter {
     torrent: Arc<TorrentInner>,
     peer_id: PeerId,

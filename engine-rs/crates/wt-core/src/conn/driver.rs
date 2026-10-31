@@ -268,6 +268,7 @@ async fn run_writer_loop(
         while let Ok(msg) = write_rx.try_recv() {
             drained += 1;
             if let Message::Piece { index, begin, ref piece } = msg {
+                handle.release_upload();
                 // Go onPeerSentCancel: an unsent cancelled block is not
                 // uploaded; Fast peers get a Reject instead (BEP 6).
                 if handle.take_peer_cancel(index, begin, piece.len() as u32) {

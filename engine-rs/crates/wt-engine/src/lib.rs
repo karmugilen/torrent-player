@@ -1,7 +1,4 @@
 //! Torrent engine coordinator, JNI layer, HTTP streaming server, and control API.
-//!
-//! Pure Rust port of `engine-go`. See `engine-rs/docs/PORT_MAP.md` for crate scope.
-
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

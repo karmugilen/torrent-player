@@ -1,5 +1,3 @@
-//! Traits agy-2 implements so `Sources` never locks torrent internals.
-
 use std::sync::Arc;
 
 use wt_discovery::webtorrent::DataChannelStream;
@@ -30,7 +28,7 @@ impl TorrentKeys {
     }
 }
 
-/// Live announce stats for one torrent (agy-2 reads from `TorrentInner`).
+/// Live announce stats for one torrent.
 pub trait TorrentAnnounceInfo: Send + Sync {
     fn peer_id(&self) -> PeerId;
     fn downloaded(&self) -> i64;
@@ -73,7 +71,7 @@ pub trait PeerSink: Send + Sync {
         let _ = (info_hash, peer);
     }
 
-    /// BEP 19 URLs; grok-6/`webseed_peer` dials them. Default no-op.
+    /// BEP 19 URLs. Default no-op.
     fn add_web_seeds(&self, info_hash: InfoHash, urls: Vec<String>) {
         let _ = (info_hash, urls);
     }

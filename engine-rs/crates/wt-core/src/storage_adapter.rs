@@ -1,9 +1,4 @@
 //! Storage test doubles and piece I/O glue over `wt_types::PieceStorage`.
-//!
-//! Keeps agy-2's in-memory doubles + `verify_piece_hash`. Adds [`StorageGlue`]
-//! for write/read/mark/completion refresh and write-error callbacks (Go
-//! `Torrent.writeChunk`, `updatePieceCompletion`, `SetOnWriteChunkError`).
-
 use parking_lot::RwLock;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -13,7 +8,6 @@ use wt_types::{
     TorrentStorage,
 };
 
-use crate::piece_state::PieceBook;
 
 /// An in-memory piece storage double.
 pub struct MemoryPieceStorage {
@@ -181,141 +175,3 @@ pub fn verify_piece_hash(
     digest == expected
 }
 
-type WriteErrCb = Arc<dyn Fn(&StorageError) + Send + Sync>;
-
-/// Glue over [`TorrentStorage`] for chunk write/read, mark, completion refresh,
-/// and write-error callback (Go torrent storage helpers).
-pub struct StorageGlue {
-    storage: Arc<dyn TorrentStorage>,
-    on_write_error: RwLock<Option<WriteErrCb>>,
-}
-
-impl StorageGlue {
-    pub fn new(storage: Arc<dyn TorrentStorage>) -> Self {
-        Self {
-            storage,
-            on_write_error: RwLock::new(None),
-        }
-    }
-
-    pub fn set_on_write_chunk_error(&self, f: Option<WriteErrCb>) {
-        *self.on_write_error.write() = f;
-    }
-
-    pub fn piece_storage(&self, piece: Piece, hash: Option<[u8; 20]>) -> Arc<dyn PieceStorage> {
-        self.storage.piece(piece, hash)
-    }
-
-    /// Go `Torrent.writeChunk` — write full buffer or error (incl. short write).
-    pub fn write_chunk(
-        &self,
-        piece: Piece,
-        hash: Option<[u8; 20]>,
-        begin: i64,
-        data: &[u8],
-    ) -> StorageResult<()> {
-        let ps = self.storage.piece(piece, hash);
-        match ps.write_at(data, begin) {
-            Ok(n) if n == data.len() => Ok(()),
-            Ok(n) => {
-                let err =
-                    StorageError::Other(format!("short write: wrote {n} of {} bytes", data.len()));
-                self.fire_write_error(&err);
-                Err(err)
-            }
-            Err(err) => {
-                self.fire_write_error(&err);
-                Err(err)
-            }
-        }
-    }
-
-    pub fn read_at(
-        &self,
-        piece: Piece,
-        hash: Option<[u8; 20]>,
-        buf: &mut [u8],
-        off: i64,
-    ) -> StorageResult<usize> {
-        self.storage.piece(piece, hash).read_at(buf, off)
-    }
-
-    pub fn mark_complete(&self, piece: Piece, hash: Option<[u8; 20]>) -> StorageResult<()> {
-        self.storage.piece(piece, hash).mark_complete()
-    }
-
-    pub fn mark_not_complete(&self, piece: Piece, hash: Option<[u8; 20]>) -> StorageResult<()> {
-        self.storage.piece(piece, hash).mark_not_complete()
-    }
-
-    pub fn completion(&self, piece: Piece, hash: Option<[u8; 20]>) -> Completion {
-        self.storage.piece(piece, hash).completion()
-    }
-
-    /// Pull completion from storage into the book. Returns whether the cache changed.
-    pub fn update_piece_completion(
-        &self,
-        book: &mut PieceBook,
-        piece: Piece,
-        hash: Option<[u8; 20]>,
-    ) -> bool {
-        let c = self.completion(piece, hash);
-        book.update_completion(piece.index, c)
-    }
-
-    fn fire_write_error(&self, err: &StorageError) {
-        if let Some(cb) = &*self.on_write_error.read() {
-            cb(err);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn glue_write_read_mark_completion() {
-        let tor = Arc::new(MemoryTorrentStorage::new());
-        let glue = StorageGlue::new(tor);
-        let piece = Piece {
-            index: 0,
-            offset: 0,
-            length: 32,
-        };
-        let data = b"abcdefghijklmnopqrstuvwxyz012345";
-        glue.write_chunk(piece, None, 0, data).unwrap();
-        let mut buf = [0u8; 32];
-        assert_eq!(glue.read_at(piece, None, &mut buf, 0).unwrap(), 32);
-        assert_eq!(&buf, data);
-
-        assert!(!glue.completion(piece, None).complete);
-        glue.mark_complete(piece, None).unwrap();
-        let c = glue.completion(piece, None);
-        assert!(c.ok && c.complete);
-
-        let mut book = PieceBook::new(1, 32, 32, 16);
-        assert!(glue.update_piece_completion(&mut book, piece, None));
-        assert!(book.piece_complete(0));
-    }
-
-    #[test]
-    fn write_error_callback() {
-        let tor = Arc::new(MemoryTorrentStorage::new());
-        let glue = StorageGlue::new(tor);
-        let hit = Arc::new(AtomicBool::new(false));
-        let hit2 = hit.clone();
-        glue.set_on_write_chunk_error(Some(Arc::new(move |_e| {
-            hit2.store(true, Ordering::SeqCst);
-        })));
-        // Force error via negative offset on an existing piece length 1.
-        let piece = Piece {
-            index: 0,
-            offset: 0,
-            length: 1,
-        };
-        let _ = glue.write_chunk(piece, None, -1, b"x");
-        assert!(hit.load(Ordering::SeqCst));
-    }
-}

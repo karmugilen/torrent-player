@@ -35,8 +35,6 @@ pub const DIRECT_STARTUP_TAIL: i64 = 2 << 20;
 
 /// Resume hold TTL (90 s).
 pub const PLAYBACK_RESUME_TTL: Duration = Duration::from_secs(90);
-/// Debounced resume persist delay (2 s).
-pub const RESUME_PERSIST_DELAY: Duration = Duration::from_secs(2);
 /// Max verified resume window bytes (4 MiB).
 pub const RESUME_WINDOW_MAX_BYTES: i64 = 4 << 20;
 
@@ -63,8 +61,6 @@ pub const CLAUDE_SEEK_NUDGE_EVERY: Duration = Duration::from_millis(100);
 /// shorter wait drops peers before they ever had a turn to unchoke us.
 pub const CHOKE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Arrival model save cadence.
-pub const ARRIVAL_SAVE_EVERY: Duration = Duration::from_secs(60);
 
 /// Bypass: first N payload bytes are write-split one byte at a time.
 pub const BYPASS_SPLIT_FIRST_BYTES: usize = 8;

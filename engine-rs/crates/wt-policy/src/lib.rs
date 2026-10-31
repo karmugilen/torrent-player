@@ -1,13 +1,4 @@
 //! Playback and peer policy for the Webtor Rust engine.
-//!
-//! Pure decision logic ported from `engine-go` adaptive buffer, video startup
-//! hints, playback grid/resume/preload, peer exploration, Ghost Mode / Ghost
-//! Pro, bypass write-split, transfer rates, idle Direct Play, and seek
-//! latency helpers. `wt-engine` calls these with explicit inputs (time, sizes,
-//! rates, peer snapshots, settings) and applies the returned decisions.
-//!
-//! See `engine-rs/docs/PORT_MAP.md` and `PORT_NOTES.md` in this crate.
-
 // Module and type docs explain engine call sites; field docs are optional.
 
 pub mod adaptive_buffer;

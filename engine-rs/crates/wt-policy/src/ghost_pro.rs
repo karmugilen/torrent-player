@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use wt_types::PieceIndex;
 
 use crate::peer_exploration::PeerKey;
-use crate::piece_span::{span_from_file, FileLayout, PieceSpan, PlaybackWindow};
+use crate::piece_span::{span_from_file, FileLayout, PlaybackWindow};
+#[cfg(test)]
+use crate::piece_span::PieceSpan;
 
 #[derive(Clone, Debug)]
 struct Progress {
@@ -212,12 +214,6 @@ pub fn peer_overlap(wanted: &HashSet<PieceIndex>, peer_has: impl Fn(PieceIndex) 
     n
 }
 
-/// Raise pieces in a span into a set (helper for tests / engine).
-pub fn collect_span(dst: &mut HashSet<PieceIndex>, span: PieceSpan) {
-    for i in span.begin..span.end {
-        dst.insert(i);
-    }
-}
 
 #[cfg(test)]
 mod tests {

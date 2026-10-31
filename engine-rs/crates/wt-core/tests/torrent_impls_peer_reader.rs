@@ -1,7 +1,4 @@
 //! Trait method-group tests for `PeerTorrent` + `ReaderHost` on `TorrentInner`.
-//!
-//! Requires agy-2 `pub(crate)` fields on `TorrentInner` (see `torrent_impls.rs`).
-
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -9,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use wt_core::peer_conn::PeerTorrent;
 use wt_core::reader::{PieceRange, ReaderHost};
-use wt_core::sched::{PickPeer, Take};
+use wt_core::piece_state::Bitset;
+use wt_core::sched::{PeerLive, PickPeer, Take};
 use wt_core::storage_adapter::MemoryClientStorage;
 use wt_core::torrent::TorrentInner;
-use wt_core::torrent_impls::{note_peer_piece, peer_key_from_addr};
+use wt_core::torrent_impls::peer_key_from_addr;
 use wt_types::{FileInfo, Info, InfoHash, PiecePriority, BLOCK_SIZE};
 
 fn test_info(num_pieces: u32, piece_len: i64) -> Info {
@@ -76,8 +74,10 @@ fn peer_torrent_chunk_io_assignment_hedge_meta_flags() {
     assert_eq!(&got[..], &chunk[..]);
 
     let pk = PeerTorrent::peer_key(t.as_ref(), SocketAddr::from((Ipv4Addr::LOCALHOST, 1)));
-    note_peer_piece(&t, pk, 0, true);
-    assert!(t.peer_pieces.read().get(&pk).is_some_and(|pieces| pieces.contains(&0)));
+    let live = Arc::new(PeerLive::new(pk));
+    live.pieces.write().insert(0);
+    PeerTorrent::register_live(t.as_ref(), live);
+    assert!(t.peer_has_piece(pk, 0));
     PeerTorrent::note_availability(t.as_ref(), 1, 2);
 
     assert!(PeerTorrent::claim_request(t.as_ref(), 2, pk, Instant::now()));
@@ -140,7 +140,7 @@ fn reader_host_have_wait_read_positions() {
 
 fn pick_peer<'a>(
     key: u64,
-    pieces: &'a HashSet<u32>,
+    pieces: &'a Bitset,
     none: &'a HashSet<u32>,
     choking: bool,
 ) -> PickPeer<'a> {
@@ -171,7 +171,9 @@ fn wanting(num_pieces: u32, priority: PiecePriority) -> Arc<TorrentInner> {
 #[test]
 fn refills_share_one_queue_without_overlap() {
     let t = wanting(64, PiecePriority::Normal);
-    let (all, none): (HashSet<u32>, _) = ((0..64).collect(), HashSet::new());
+    let mut all = Bitset::new();
+    all.insert_range(0, 64);
+    let none = HashSet::new();
     let first = t.pick_blocks(&pick_peer(1, &all, &none, false), 8);
     let second = t.pick_blocks(&pick_peer(2, &all, &none, false), 8);
     assert!(first.interested);
@@ -184,7 +186,9 @@ fn refills_share_one_queue_without_overlap() {
 #[test]
 fn a_choked_peer_is_interested_but_gets_nothing() {
     let t = wanting(64, PiecePriority::Normal);
-    let (all, none): (HashSet<u32>, _) = ((0..64).collect(), HashSet::new());
+    let mut all = Bitset::new();
+    all.insert_range(0, 64);
+    let none = HashSet::new();
     let pick = t.pick_blocks(&pick_peer(1, &all, &none, true), 8);
     assert!(pick.interested);
     assert!(pick.blocks.is_empty());
@@ -193,8 +197,8 @@ fn a_choked_peer_is_interested_but_gets_nothing() {
 #[test]
 fn a_peer_without_the_pieces_gets_nothing() {
     let t = wanting(64, PiecePriority::Normal);
-    let none = HashSet::new();
-    let pick = t.pick_blocks(&pick_peer(1, &none, &none, false), 8);
+    let (nothing, none) = (Bitset::new(), HashSet::new());
+    let pick = t.pick_blocks(&pick_peer(1, &nothing, &none, false), 8);
     assert!(!pick.interested);
     assert!(pick.blocks.is_empty());
 }
@@ -202,7 +206,9 @@ fn a_peer_without_the_pieces_gets_nothing() {
 #[test]
 fn the_end_of_a_selection_gets_second_copies() {
     let t = wanting(4, PiecePriority::Normal);
-    let (all, none): (HashSet<u32>, _) = ((0..4).collect(), HashSet::new());
+    let mut all = Bitset::new();
+    all.insert_range(0, 4);
+    let none = HashSet::new();
     for req in 0..16 {
         assert!(PeerTorrent::claim_request(t.as_ref(), req, 1, Instant::now()));
     }

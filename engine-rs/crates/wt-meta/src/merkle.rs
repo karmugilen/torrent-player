@@ -154,18 +154,6 @@ pub fn hash_for_piece_pad(piece_length: i64) -> [u8; 32] {
     root(&block_hashes).unwrap_or([0u8; 32])
 }
 
-/// Verify a single piece's leaf hashes against a pieces-root using the piece
-/// layer pad hash.
-pub fn verify_piece_layer(
-    piece_layer_hash: [u8; 32],
-    pieces_root: [u8; 32],
-    all_layer_hashes: &[[u8; 32]],
-    piece_length: i64,
-) -> Result<bool> {
-    let _ = piece_layer_hash;
-    let root_hash = root_with_pad_hash(all_layer_hashes, hash_for_piece_pad(piece_length))?;
-    Ok(root_hash == pieces_root)
-}
 
 /// Validate `piece_layers` against a v2 file tree already flattened into `files`.
 ///

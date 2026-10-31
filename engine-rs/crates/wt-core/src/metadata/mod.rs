@@ -1,44 +1,4 @@
-//! # Magnet metadata / BEP 9 ut_metadata (agy-2 integration guide)
-//!
-//! Pure state machine for negotiating metadata size, requesting 16 KiB
-//! pieces from peers, assembling + verifying the info dict, and serving
-//! pieces once complete. Wire encode/decode uses `wt_wire::ext::MetadataMsg`.
-//!
-//! ## What agy-2 should call
-//!
-//! ```ignore
-//! use wt_core::metadata::{MetadataExchange, PeerMetadataState, MetadataError, MAX_METADATA_SIZE};
-//! use wt_wire::ext::{MetadataMsg, MetadataMsgType, EXTENSION_NAME_METADATA};
-//!
-//! // On magnet add:
-//! let mut meta = MetadataExchange::new(Some(infohash_v1), infohash_v2);
-//!
-//! // From extended handshake metadata_size:
-//! meta.set_size(size)?;
-//! // Then for each peer supporting ut_metadata:
-//! for piece in meta.pieces_to_request(&peer_req) {
-//!     send MetadataMsg::request(piece).to_message(peer_ext_id);
-//!     peer_req.mark_requested(piece);
-//! }
-//!
-//! // On inbound ut_metadata:
-//! match msg.msg_type {
-//!     MetadataMsgType::Data => {
-//!         peer_req.clear_requested(msg.piece);
-//!         if let Some(info) = meta.on_data(msg.piece, msg.data.as_ref().unwrap())? {
-//!             // have info — open storage, etc.
-//!         }
-//!     }
-//!     MetadataMsgType::Request => {
-//!         match meta.serve(msg.piece) {
-//!             Serve::Data(bytes) => send MetadataMsg::data(piece, meta.size(), bytes),
-//!             Serve::Reject => send MetadataMsg::reject(piece),
-//!         }
-//!     }
-//!     MetadataMsgType::Reject => { peer_req.clear_requested(msg.piece); }
-//! }
-//! ```
-
+//! # Magnet metadata / BEP 9 ut_metadata
 use bytes::Bytes;
 use rand::seq::SliceRandom;
 use thiserror::Error;
@@ -399,13 +359,6 @@ impl PeerMetadataState {
         expired
     }
 
-    pub fn expect_data(&self, piece: u32) -> Result<(), MetadataError> {
-        if self.is_requested(piece) {
-            Ok(())
-        } else {
-            Err(MetadataError::UnexpectedPiece(piece))
-        }
-    }
 }
 
 #[cfg(test)]

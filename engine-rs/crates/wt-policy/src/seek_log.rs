@@ -6,7 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-pub const SEEK_LOG_MAX_BYTES: u64 = 2 << 20;
 pub const SEEK_LOG_HEADER: &str = "time,build,torrent,file,kind,offset_mib,position_pct,first_ms,mib1_ms,mib2_ms,total_ms,bytes,in_ram,peers,unchoked_us,down_kib_s,variant,rescues,mode,piece_kib\n";
 
 /// One seek / range-request measurement.
@@ -48,14 +47,7 @@ impl SeekLog {
         SEEK_LOG_HEADER
     }
 
-    pub fn should_rotate(file_size: u64) -> bool {
-        file_size > SEEK_LOG_MAX_BYTES
-    }
 
-    /// True when an existing file's first line is not the current header.
-    pub fn header_mismatch(existing_header: &str) -> bool {
-        existing_header != SEEK_LOG_HEADER
-    }
 
     pub fn format_line(&self, r: &SeekRecord) -> String {
         let ms = |d: Duration| {

@@ -10,11 +10,7 @@ pub const HANDSHAKE_LEN: usize = 68;
 pub const EXTENSION_BIT_DHT: u8 = 0;
 pub const EXTENSION_BIT_FAST: u8 = 2;
 pub const EXTENSION_BIT_V2_UPGRADE: u8 = 4;
-pub const EXTENSION_BIT_AZUREUS_NEGOTIATION_1: u8 = 16;
-pub const EXTENSION_BIT_AZUREUS_NEGOTIATION_2: u8 = 17;
 pub const EXTENSION_BIT_LTEP: u8 = 20;
-pub const EXTENSION_BIT_LOCATION_AWARE: u8 = 43;
-pub const EXTENSION_BIT_AZUREUS_MESSAGING: u8 = 63;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct PeerExtensionBits(pub [u8; 8]);
@@ -66,9 +62,6 @@ impl PeerExtensionBits {
         self.get_bit(EXTENSION_BIT_FAST)
     }
 
-    pub fn supports_v2_upgrade(&self) -> bool {
-        self.get_bit(EXTENSION_BIT_V2_UPGRADE)
-    }
 }
 
 pub fn default_peer_extension_bytes() -> PeerExtensionBits {

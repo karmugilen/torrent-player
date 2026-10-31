@@ -14,9 +14,6 @@ impl Bitset {
         Self::default()
     }
 
-    pub fn with_capacity_hint(_n: u32) -> Self {
-        Self::new()
-    }
 
     #[inline]
     pub fn insert(&mut self, v: u32) -> bool {
@@ -54,7 +51,8 @@ impl Bitset {
         self.inner.insert_range(begin..end);
     }
 
-    pub fn cardinality(&self) -> u64 {
+
+    pub fn len(&self) -> u64 {
         self.inner.len()
     }
 

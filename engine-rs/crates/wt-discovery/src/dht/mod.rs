@@ -12,7 +12,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use wt_types::InfoHash;
 
-use crate::datagram::{DatagramIo, StandaloneDatagram};
+use crate::datagram::DatagramIo;
+#[cfg(test)]
+use crate::datagram::StandaloneDatagram;
 
 /// Anacrolix / Go default bootstrap host:ports.
 pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &[
@@ -234,14 +236,6 @@ impl DhtNode {
         self.inner.lock().clone()
     }
 
-    /// Construct against shared datagram IO (core wraps wt-wire non-uTP demux).
-    ///
-    /// Full KRPC iterative routing still uses a dedicated `mainline` socket
-    /// (that crate owns its bind). The `io` handle is retained for demuxed
-    /// non-uTP send/recv (tests + future in-crate KRPC over the shared socket).
-    pub async fn with_packet_io(io: Arc<dyn DatagramIo>, cfg: DhtConfig) -> Result<Self> {
-        Self::with_datagram_io(io, cfg).await
-    }
 
     /// Same as [`Self::with_packet_io`].
     pub async fn with_datagram_io(io: Arc<dyn DatagramIo>, cfg: DhtConfig) -> Result<Self> {
@@ -270,21 +264,7 @@ impl DhtNode {
         }
     }
 
-    /// Receive a raw datagram from the shared IO (errors if dedicated-only).
-    pub async fn shared_recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
-        match &self.shared_io {
-            Some(io) => io.recv_from(buf).await,
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "no shared datagram io",
-            )),
-        }
-    }
 
-    /// Bind a standalone datagram socket implementing [`DatagramIo`].
-    pub async fn standalone_datagram(bind: &str) -> std::io::Result<StandaloneDatagram> {
-        StandaloneDatagram::bind(bind).await
-    }
 
     pub fn id(&self) -> [u8; 20] {
         *self.id.lock()
@@ -389,30 +369,6 @@ impl DhtNode {
         })
     }
 
-    /// Periodically re-announce torrents (Go `periodically_announce_torrents_to_dht`).
-    pub fn start_periodic_announce(
-        self: &Arc<Self>,
-        torrents: Arc<dyn Fn() -> Vec<(InfoHash, u16)> + Send + Sync>,
-        interval: Duration,
-    ) {
-        let this = Arc::clone(self);
-        let handle = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            loop {
-                tick.tick().await;
-                for (ih, port) in torrents() {
-                    if let Ok(mut h) = this.announce(ih, port, true).await {
-                        // Drain briefly then close.
-                        let _ = tokio::time::timeout(Duration::from_secs(10), async {
-                            while h.next().await.is_some() {}
-                        })
-                        .await;
-                    }
-                }
-            }
-        });
-        self.periodic.lock().push(handle);
-    }
 
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);

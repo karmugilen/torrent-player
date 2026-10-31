@@ -1,4 +1,0 @@
-grok-swarm|wt-core discovery/dialing/metadata/PEX|metadata now faster than Go; Ubuntu peers 15-21 vs Go 28-41; fixing mid-run decay|running
-grok-wire|wt-core peer wire/data flow|uTP BEP29 fixed, wake interval and pipeline fixes; Ubuntu speed still behind Go|running
-codex-engine|wt-engine (all src + tests)|round 3 done: waiting tests 70 -> 38, 170 pass / 0 fail, API 30/0/0|idle (weekly limit 18 %)
-codex-smoke|real-world testing|held until the Ubuntu speed fix lands|paused

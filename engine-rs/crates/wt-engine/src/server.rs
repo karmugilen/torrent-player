@@ -2334,8 +2334,7 @@ impl crate::playback::PlaybackHost for EngineServer {
                         self.client.inner.tokio_handle.spawn(async move {
                             tokio::time::sleep(Duration::from_secs(90)).await;
                             if let (Some(server), Some(demand)) = (weak.upgrade(), coordinator.expire_resume(generation)) {
-                                server.set_playback_storage_demand(&id, &demand);
-                                server.apply_piece_priorities(&id, &demand);
+                                server.publish_demand(&id, &demand);
                             }
                         });
                     }
@@ -2343,8 +2342,7 @@ impl crate::playback::PlaybackHost for EngineServer {
             }
             let effective = rec.playback_coordinator.effective();
             drop(rec);
-            self.set_playback_storage_demand(id, &effective);
-            self.apply_piece_priorities(id, &effective);
+            self.publish_demand(id, &effective);
             self.schedule_resume_persist(id, file_index, offset);
         }
     }

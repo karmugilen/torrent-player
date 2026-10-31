@@ -24,13 +24,15 @@ use wt_wire::message::{unmarshal_bitfield, Message};
 
 /// Go `PeerMaxRequests` default before the peer's LTEP `reqq` arrives.
 pub const DEFAULT_PEER_MAX_REQUESTS: usize = 250;
-/// Go `localClientReqq` — how many requests we advertise we can accept.
-pub const LOCAL_CLIENT_REQQ: u32 = 1024;
+/// How many requests we advertise we can accept. Each queued answer holds a
+/// block in RAM, so a peer past this is rejected.
+pub const LOCAL_CLIENT_REQQ: u32 = 512;
 
 use crate::choking::{upload_allowed, ChokeConfig, PeerChokeInput};
 use crate::conn::{ConnHandle, ConnHandler};
 use crate::metadata::{PeerMetadataState, METADATA_REQUEST_TIMEOUT};
 use crate::pex::{PexCursor, PEX_INTERVAL, PEX_RETRY_DELAY};
+use crate::piece_state::Bitset;
 use crate::picker::{block_coord_from_req_index, req_index_from_piece_and_offset};
 use crate::stats::{AtomicConnStats, ExpectingRate, PeerConnInfo, RateEstimator};
 
@@ -47,7 +49,7 @@ use crate::{CoreError, Result};
 /// Opaque peer identity in torrent assignment maps.
 pub type PeerKey = u64;
 
-/// Torrent-wide surface the peer state machine needs. Implemented by agy-2 on
+/// Torrent-wide surface the peer state machine needs. Implemented on
 /// `TorrentInner` (or a test double).
 pub trait PeerTorrent: Send + Sync + 'static {
     fn peer_key(&self, addr: SocketAddr) -> PeerKey;
@@ -82,13 +84,6 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn note_have_all_availability(&self, delta: i32) {
         for piece in 0..self.num_pieces() {
             self.note_availability(piece, delta);
-        }
-    }
-    fn note_peer_piece(&self, _peer: PeerKey, _piece: PieceIndex, _has: bool) {}
-    /// [`Self::note_peer_piece`] for many pieces at once.
-    fn note_peer_pieces(&self, peer: PeerKey, pieces: &mut dyn Iterator<Item = PieceIndex>) {
-        for piece in pieces {
-            self.note_peer_piece(peer, piece, true);
         }
     }
     /// Those of `requests` that neither `peer` nor its hedge holds any more.
@@ -145,8 +140,8 @@ pub trait PeerTorrent: Send + Sync + 'static {
         })
     }
     /// Whether any of `pieces` is wanted and incomplete.
-    fn any_wanted_among(&self, pieces: &HashSet<PieceIndex>) -> bool {
-        pieces.iter().any(|&p| self.piece_priority(p) > PiecePriority::None && !self.piece_complete(p))
+    fn any_wanted_among(&self, pieces: &Bitset) -> bool {
+        pieces.iter().any(|piece| self.piece_priority(piece) > PiecePriority::None && !self.piece_complete(piece))
     }
     /// Go `Torrent.onWriteChunkErr` — storage/cache write failures while receiving.
     fn report_write_chunk_error(&self, _err: &CoreError) {}
@@ -321,7 +316,6 @@ pub struct PeerConnInner {
     pub peer_interested: bool,
     pub am_interested: bool,
 
-    pub peer_pieces: HashSet<PieceIndex>,
     pub peer_sent_have_all: bool,
     pub peer_allowed_fast: HashSet<PieceIndex>,
     /// Peer's reserved handshake bits (Fast / LTEP / DHT).
@@ -462,7 +456,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 am_choking: true,
                 peer_interested: false,
                 am_interested: false,
-                peer_pieces: HashSet::new(),
                 peer_sent_have_all: false,
                 peer_allowed_fast: HashSet::new(),
                 peer_extension_bits: handle.peer_extension_bits(),
@@ -642,7 +635,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     /// and wake, so the torrent scan is reused for a short interval.
     fn peer_has_wanted_pieces(&self) -> bool {
         if !self.torrent.have_info() {
-            return !self.state.peer_pieces.is_empty();
+            return !self.live.pieces.read().is_empty();
         }
         let now = Instant::now();
         if let Some((at, wanted)) = self.wanted_cache.get() {
@@ -653,7 +646,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let wanted = if self.state.peer_sent_have_all {
             self.torrent.num_pieces() > 0 && self.torrent.any_wanted_incomplete()
         } else {
-            self.torrent.any_wanted_among(&self.state.peer_pieces)
+            self.torrent.any_wanted_among(&self.live.pieces.read())
         };
         self.wanted_cache.set(Some((now, wanted)));
         wanted
@@ -740,7 +733,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if n == 0 {
             return 0.0;
         }
-        self.state.peer_pieces.len() as f64 / f64::from(n)
+        self.live.pieces.read().len() as f64 / f64::from(n)
     }
 
     fn send(&self, handle: &ConnHandle, msg: Message) {
@@ -847,11 +840,10 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let num_pieces = self.torrent.num_pieces();
         if self.state.peer_sent_have_all
             && num_pieces > 0
-            && self.state.peer_pieces.len() < num_pieces as usize
+            && self.live.pieces.read().len() < u64::from(num_pieces)
         {
             // HaveAll before info: its availability was counted back then.
-            self.state.peer_pieces.extend(0..num_pieces);
-            self.torrent.note_peer_pieces(self.key(), &mut (0..num_pieces));
+            self.live.pieces.write().insert_range(0, num_pieces);
         }
 
         let saving = self.torrent.background_only();
@@ -864,11 +856,13 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.publish_live();
         let me = self.key();
         let room = self.nominal_max().saturating_sub(self.state.outstanding_requests.len());
+        let live = self.live.clone();
+        let pieces = live.pieces.read();
         let pick: Pick = self.torrent.pick_blocks(
             &PickPeer {
                 key: me,
                 have_all: self.state.peer_sent_have_all,
-                pieces: &self.state.peer_pieces,
+                pieces: &pieces,
                 allowed_fast: &self.state.peer_allowed_fast,
                 choking: self.state.peer_choking,
                 outstanding: &self.state.outstanding_requests,
@@ -880,6 +874,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             },
             room,
         );
+        drop(pieces);
         self.update_interest(handle, pick.interested, saving, focus);
 
         let was_empty = self.state.outstanding_requests.is_empty();
@@ -972,14 +967,15 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             interested = if self.state.peer_sent_have_all {
                 self.torrent.any_wanted_incomplete()
             } else {
-                self.torrent.any_wanted_among(&self.state.peer_pieces)
+                self.torrent.any_wanted_among(&self.live.pieces.read())
             };
             if !interested && !saving {
                 let num_pieces = self.torrent.num_pieces();
+                let pieces = self.live.pieces.read();
                 interested = !(0..num_pieces).all(|p| self.torrent.piece_complete(p))
                     && (self.state.peer_sent_have_all
-                        || self.state.peer_pieces.is_empty()
-                        || !self.state.peer_pieces.iter().all(|&p| self.torrent.piece_complete(p)));
+                        || pieces.is_empty()
+                        || !pieces.iter().all(|p| self.torrent.piece_complete(p)));
             }
         }
         if !interested && !self.torrent.data_download_disallowed() {
@@ -989,7 +985,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 let begin = block_coord_from_req_index(focus, plen, total).piece;
                 let end = begin.saturating_add(PLAYING_INTEREST_PIECES).min(self.torrent.num_pieces());
                 interested = (begin..end).any(|p| !self.torrent.piece_complete(p)
-                    && (self.state.peer_sent_have_all || self.state.peer_pieces.contains(&p)));
+                    && (self.state.peer_sent_have_all || self.live.pieces.read().contains(p)));
             }
         }
         if interested != self.state.am_interested {
@@ -1062,8 +1058,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let piece = if self.state.peer_sent_have_all {
             focus_piece.or(Some(0))
         } else {
-            focus_piece.filter(|p| self.state.peer_pieces.contains(p))
-                .or_else(|| self.state.peer_pieces.iter().next().copied())
+            let pieces = self.live.pieces.read();
+            focus_piece.filter(|&p| pieces.contains(p)).or_else(|| pieces.iter().next())
         };
         let Some(piece) = piece else { return };
         if piece >= self.torrent.num_pieces() {
@@ -1094,7 +1090,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         let Some(focus) = self.torrent.request_focus_index() else { return };
         let coord = block_coord_from_req_index(focus, self.torrent.piece_length(), self.torrent.total_length());
         if coord.length == 0
-            || !(self.state.peer_sent_have_all || self.state.peer_pieces.contains(&coord.piece))
+            || !(self.state.peer_sent_have_all || self.live.pieces.read().contains(coord.piece))
             || !self.torrent.may_warm()
         {
             return;
@@ -1172,9 +1168,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     }
 
     fn handle_have(&mut self, index: u32) {
-        if self.state.peer_pieces.insert(index) {
+        if self.live.pieces.write().insert(index) {
             self.torrent.note_availability(index, 1);
-            self.torrent.note_peer_piece(self.key(), index, true);
             // Go peerSentHave only schedules requests for new wanted pieces.
             // Announcements of completed/unselected pieces change availability,
             // but do not justify rebuilding every candidate block and queue.
@@ -1191,24 +1186,23 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         // Back to counting this peer piece by piece, as the code below expects.
         if self.state.peer_sent_have_all {
             self.torrent.note_have_all_availability(-1);
-            for &index in &self.state.peer_pieces {
+            for index in self.live.pieces.read().iter() {
                 self.torrent.note_availability(index, 1);
             }
         }
-        let next: HashSet<_> = unmarshal_bitfield(bf)
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, has)| {
-                let index = i as u32;
-                (has && (n == 0 || index < n)).then_some(index)
-            })
-            .collect();
-        let removed: HashSet<_> = self.state.peer_pieces.difference(&next).copied().collect();
+        let mut next = Bitset::new();
+        for (i, has) in unmarshal_bitfield(bf).into_iter().enumerate() {
+            if has && (n == 0 || (i as u32) < n) {
+                next.insert(i as u32);
+            }
+        }
+        let old = std::mem::replace(&mut *self.live.pieces.write(), next);
+        let pieces = self.live.pieces.read();
+        let removed: HashSet<_> = old.iter().filter(|&index| !pieces.contains(index)).collect();
         for &index in &removed {
             self.torrent.note_availability(index, -1);
-            self.torrent.note_peer_piece(self.key(), index, false);
         }
-        for &index in next.difference(&self.state.peer_pieces) {
+        for index in pieces.iter().filter(|&index| !old.contains(index)) {
             self.torrent.note_availability(index, 1);
             if self.torrent.piece_priority(index) > PiecePriority::None
                 && !self.torrent.piece_complete(index)
@@ -1216,10 +1210,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 self.state.need_request_update = true;
             }
         }
-        let mut added = next.difference(&self.state.peer_pieces).copied();
-        self.torrent.note_peer_pieces(self.key(), &mut added);
+        drop(pieces);
         self.state.peer_sent_have_all = false;
-        self.state.peer_pieces = next;
         // A replacement bitfield / HaveNone retracts old availability. Do not
         // keep waiting for blocks the peer no longer claims it can serve.
         let unavailable: Vec<_> = self
@@ -1405,26 +1397,36 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
         // A new request supersedes an earlier cancel of the same block.
         handle.clear_peer_cancel(index, begin, length);
+        if !handle.reserve_upload(LOCAL_CLIENT_REQQ as usize) {
+            self.send(handle, Message::Reject { index, begin, length });
+            return Ok(());
+        }
         // In RAM it is a copy. On disk it must not hold up this task, which also
         // receives this peer's blocks, nor a runtime worker. Peers may be served
         // out of order, so the block is sent when the read finishes.
         let data = match self.torrent.read_chunk_in_memory(index, begin, length) {
-            Some(data) => data?,
+            Some(data) => data.inspect_err(|_| handle.release_upload())?,
             None => match tokio::runtime::Handle::try_current() {
                 Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                     let torrent = Arc::clone(&self.torrent);
                     let handle = handle.clone();
                     rt.spawn_blocking(move || match torrent.read_chunk(index, begin, length) {
                         Ok(piece) => {
-                            handle.send_message(Message::Piece { index, begin, piece });
+                            if !handle.send_message(Message::Piece { index, begin, piece }) {
+                                handle.release_upload();
+                            }
                         }
-                        Err(err) => handle.close(format!("handler error: {err}")),
+                        Err(err) => {
+                            handle.release_upload();
+                            handle.close(format!("handler error: {err}"));
+                        }
                     });
                     self.state.upload_rate.add_bytes(length as usize);
                     self.state.stats.add_bytes_written(i64::from(length));
                     return Ok(());
                 }
-                _ => self.torrent.read_chunk(index, begin, length)?,
+                _ => self.torrent.read_chunk(index, begin, length)
+                    .inspect_err(|_| handle.release_upload())?,
             },
         };
         let len = data.len();
@@ -1433,6 +1435,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             begin,
             piece: data,
         }) {
+            handle.release_upload();
             return Ok(());
         }
         self.state.upload_rate.add_bytes(len);
@@ -1566,7 +1569,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 && if self.state.peer_sent_have_all {
                     self.torrent.any_wanted_incomplete()
                 } else {
-                    self.torrent.any_wanted_among(&self.state.peer_pieces)
+                    self.torrent.any_wanted_among(&self.live.pieces.read())
                 };
             // Go only runs updateRequests when low on requests / needRequestUpdate /
             // refocus — NOT on every wake merely because request_focus is set.
@@ -1713,12 +1716,11 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             Message::HaveAll => {
                 if !self.state.peer_sent_have_all {
                     let n = self.torrent.num_pieces();
-                    for &piece in &self.state.peer_pieces {
+                    for piece in self.live.pieces.read().iter() {
                         self.torrent.note_availability(piece, -1);
                     }
                     self.torrent.note_have_all_availability(1);
-                    self.state.peer_pieces.extend(0..n);
-                    self.torrent.note_peer_pieces(self.key(), &mut (0..n));
+                    self.live.pieces.write().insert_range(0, n);
                     self.state.peer_sent_have_all = true;
                     self.state.need_request_update = true;
                     self.torrent.bump_change();
@@ -1796,7 +1798,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         if self.state.peer_sent_have_all {
             self.torrent.note_have_all_availability(-1);
         } else {
-            for &p in &self.state.peer_pieces {
+            for p in self.live.pieces.read().iter() {
                 self.torrent.note_availability(p, -1);
             }
         }

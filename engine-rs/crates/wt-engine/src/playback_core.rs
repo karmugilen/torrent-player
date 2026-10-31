@@ -1,9 +1,4 @@
 //! [`ReaderBackend`] adapter over `wt_core::reader::Reader`.
-//!
-//! Kept in a sibling module so playback orchestration stays free of wire/conn
-//! details. agy-4's `PlaybackHost::open_file_reader` typically returns
-//! `Box::new(CoreReaderBackend::from_file(&file))`.
-
 use std::io;
 use std::sync::Arc;
 
@@ -71,16 +66,6 @@ impl CoreReaderBackend {
         }
     }
 
-    pub fn from_reader(inner: Reader) -> Self {
-        Self {
-            inner,
-            stream: None,
-            torrent: None,
-            on_stall: None,
-            served_unverified: Default::default(),
-            seen_hash_failures: 0,
-        }
-    }
 
     pub fn from_file_with_storage(
         file: &File,

@@ -5,7 +5,7 @@
 //! [`NextPreload::activate`] and merge [`NextPreload::pieces`] into startup
 //! hints at High.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use wt_types::PieceIndex;
 
@@ -166,22 +166,6 @@ impl NextPreload {
         Some(view)
     }
 
-    /// Raise active preload pieces into a demand map at High.
-    pub fn raise_into(&self, demand: &mut HashMap<PieceIndex, wt_types::PiecePriority>) {
-        if !self.active {
-            return;
-        }
-        for &p in &self.pieces {
-            demand
-                .entry(p)
-                .and_modify(|cur| {
-                    if *cur < wt_types::PiecePriority::High {
-                        *cur = wt_types::PiecePriority::High;
-                    }
-                })
-                .or_insert(wt_types::PiecePriority::High);
-        }
-    }
 }
 
 #[cfg(test)]

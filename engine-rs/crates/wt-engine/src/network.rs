@@ -22,14 +22,8 @@ pub const NETWORK_RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(30),
 ];
 
-/// Cap on peers remembered across a network handoff (Go: 80).
-pub const NETWORK_RECONNECT_PEER_CAP: usize = 80;
 
-/// Concurrent announce permits during recovery (Go: 4).
-pub const NETWORK_ANNOUNCE_PERMITS: usize = 4;
 
-/// Max tracker URLs announced per torrent per recovery wave (Go: 64).
-pub const NETWORK_ANNOUNCE_URL_CAP: usize = 64;
 
 /// Tracks HTTP/WebSocket tracker transports so an old route cannot leave a
 /// tracker apparently connected after a network change.
@@ -70,9 +64,6 @@ impl NetworkDialer {
         self.inner.lock().epoch
     }
 
-    pub fn set_split(&self, enabled: bool) {
-        self.inner.lock().split = enabled;
-    }
 
     pub fn split(&self) -> bool {
         self.inner.lock().split
@@ -205,14 +196,6 @@ impl NetworkManager {
         }
     }
 
-    pub fn with_dialer(dialer: Arc<NetworkDialer>) -> Self {
-        Self {
-            generation: AtomicI64::new(-1),
-            known: AtomicBool::new(false),
-            episode: AtomicU64::new(0),
-            dialer,
-        }
-    }
 
     pub fn dialer(&self) -> Arc<NetworkDialer> {
         self.dialer.clone()

@@ -85,9 +85,6 @@ impl PacketHeader {
         self.type_ver >> 4
     }
 
-    pub fn get_version(&self) -> u8 {
-        self.type_ver & 0x0f
-    }
 
     pub fn encode(&self, dst: &mut BytesMut) {
         dst.put_u8(self.type_ver);
@@ -129,9 +126,6 @@ impl PacketHeader {
     }
 }
 
-pub fn now_micros(start: Instant) -> u32 {
-    (start.elapsed().as_micros() & 0xffff_ffff) as u32
-}
 
 /// Wall-clock microseconds for uTP header timestamps (libtorrent gettimeofday).
 /// Relative elapsed timestamps make peer delay samples ~unix-epoch-sized and

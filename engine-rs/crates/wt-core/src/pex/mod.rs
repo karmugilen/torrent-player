@@ -1,39 +1,4 @@
-//! # Peer exchange / BEP 11 (agy-2 integration guide)
-//!
-//! Per-torrent PEX event feed + per-connection send/receive gating, ported
-//! from `pex.go` / `pexconn.go`.
-//!
-//! ## What agy-2 should call
-//!
-//! ```ignore
-//! use wt_core::pex::{PexState, PexConnView, PEX_INTERVAL, PEX_RETRY_DELAY};
-//! use wt_types::{PeerInfo, PeerSource, PexFlags};
-//! use wt_wire::ext::PexMsg;
-//!
-//! let mut torrent_pex = PexState::new();
-//! // On conn established / closed:
-//! torrent_pex.add(addr, flags);
-//! torrent_pex.drop_listed(addr, flags); // only if previously added
-//!
-//! // Writer wake: build incremental message from this conn's cursor
-//! if let Some((msg, new_cursor)) = torrent_pex.genmsg(conn.pex_cursor.as_ref()) {
-//!     if !msg.is_empty() {
-//!         send PexMsg encoded as Extended(ut_pex id);
-//!         conn.pex_cursor = Some(new_cursor);
-//!         schedule PEX_INTERVAL;
-//!     } else {
-//!         schedule PEX_RETRY_DELAY;
-//!     }
-//! }
-//!
-//! // Reader: ingest with rate limits; returns PeerInfo with PeerSource::Pex
-//! match torrent_pex.ingest(&msg, Instant::now(), &mut conn.last_pex_recv) {
-//!     Ok(peers) => add_peers(peers),
-//!     Err(PexIngestError::TooFrequent { .. }) => disconnect,
-//!     Err(PexIngestError::Cooldown) => { /* discard */ }
-//! }
-//! ```
-
+//! # Peer exchange / BEP 11
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, Instant};
@@ -186,19 +151,6 @@ impl PexState {
         }
     }
 
-    pub fn num_pending(&self, cursor: Option<PexCursor>) -> usize {
-        match cursor {
-            None => self.initial_msg().len(),
-            Some(start) => {
-                let begin = if start.index == usize::MAX {
-                    0
-                } else {
-                    start.index.saturating_add(1)
-                };
-                self.events.len().saturating_sub(begin)
-            }
-        }
-    }
 
     /// Ingest a received PEX message.
     ///
@@ -394,22 +346,6 @@ impl PexConnView {
         self.cursor = None;
     }
 
-    pub fn update_remote_live(&mut self, msg: &PexMsg) {
-        for a in &msg.dropped {
-            self.remote_live.remove(&SocketAddr::V4(*a));
-        }
-        for a in &msg.dropped6 {
-            self.remote_live.remove(&SocketAddr::V6(*a));
-        }
-        for (i, a) in msg.added.iter().enumerate() {
-            let f = msg.added_flags.get(i).copied().unwrap_or_default();
-            self.remote_live.insert(SocketAddr::V4(*a), f);
-        }
-        for (i, a) in msg.added6.iter().enumerate() {
-            let f = msg.added6_flags.get(i).copied().unwrap_or_default();
-            self.remote_live.insert(SocketAddr::V6(*a), f);
-        }
-    }
 }
 
 #[cfg(test)]

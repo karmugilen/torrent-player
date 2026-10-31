@@ -1,52 +1,4 @@
-//! # Peer sources glue (agy-2 integration guide)
-//!
-//! Drives per-torrent discovery on top of `wt-discovery`: HTTP/UDP trackers
-//! ([`AnnounceDispatcher`]), DHT (dedicated or shared [`DatagramIo`]), and
-//! WebTorrent WebSocket/WebRTC trackers. Ports the discovery half of
-//! `engine-go/patches/torrent/{client.go,torrent.go,client-tracker-announcer.go,dht.go}`
-//! plus the hybrid-magnet fix in `WEBTOR_PATCH.md`.
-//!
-//! ## What agy-2 should call
-//!
-//! Build once per [`crate::Client`] (after listen / shared UDP are ready):
-//!
-//! ```ignore
-//! use wt_core::sources::{Sources, SourcesConfig, TorrentKeys, TorrentAnnounceInfo, PeerSink};
-//! use wt_core::conn::SharedDatagramAdapter; // when conn is wired
-//!
-//! let mut sc = SourcesConfig::from_client_config(&client.config());
-//! sc.peer_id = client.peer_id();
-//! sc.datagram = Some(Arc::new(SharedDatagramAdapter::new(utp_sock))); // or None
-//! sc.dialer = tracker_dialer; // Option<DialerHook>
-//! let sources = Sources::start(sc).await?;
-//! ```
-//!
-//! On `add_torrent_spec` / drop / pause / `add_trackers` / stats change:
-//!
-//! ```ignore
-//! let keys = TorrentKeys::from_spec(&spec); // registers BOTH v1 and v2.to_short()
-//! sources.register_torrent(RegisterTorrent {
-//!     keys: keys.clone(),
-//!     trackers: spec.trackers.clone(),
-//!     web_seeds: spec.web_seeds.clone(),
-//!     info: torrent_announce_info, // Arc<dyn TorrentAnnounceInfo>
-//!     sink: torrent_peer_sink,     // Arc<dyn PeerSink>
-//! })?;
-//! sources.refresh_torrent(&keys);           // after downloaded/left/want_peers change
-//! sources.add_trackers(&keys, tiers)?;      // no-op for unregistered short hashes
-//! sources.set_paused(&keys, true);          // Stopped + stop DHT/WS
-//! sources.unregister_torrent(&keys);        // Drop: Stopped then forget
-//! let contacts = sources.dht_contacts().await;
-//! sources.add_dht_nodes(&["1.2.3.4:6881".into()]);
-//! sources.close().await;
-//! ```
-//!
-//! Implement [`TorrentAnnounceInfo`] on the torrent (stats + `want_peers` from
-//! peer low/high water) and [`PeerSink`] to feed `Torrent::add_peers` /
-//! WebRTC streams. Status events are mapped to [`crate::StatusEvent`] and
-//! delivered through `SourcesConfig::status_callbacks` (wire
-//! `ClientConfig.callbacks.status_updated`).
-
+//! # Peer sources glue
 mod status_map;
 mod traits;
 
@@ -101,7 +53,7 @@ pub struct SourcesConfig {
     pub torrent_peers_low_water: usize,
     pub torrent_peers_high_water: usize,
     pub dht_announce_interval: Duration,
-    /// Shared UDP from agy-1 (`SharedDatagramAdapter`); `None` = dedicated DHT socket.
+    /// Shared UDP (`SharedDatagramAdapter`); `None` = dedicated DHT socket.
     pub datagram: Option<Arc<dyn DatagramIo>>,
     /// Go `trackerSockets.DialContext` for HTTP(S)/WS trackers.
     pub dialer: Option<DialerHook>,
@@ -310,7 +262,7 @@ impl Sources {
             self.dispatcher.add_trackers(*ih, http_udp.clone());
         }
 
-        // Web seeds → sink (grok-6 / webseed_peer dials).
+        // Web seeds → sink.
         if !reg.web_seeds.is_empty() {
             entry.lock().web_seeds = reg.web_seeds.clone();
             reg.sink.add_web_seeds(shorts[0], reg.web_seeds.clone());

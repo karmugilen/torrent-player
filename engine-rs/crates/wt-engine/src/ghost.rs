@@ -137,14 +137,13 @@ impl EngineServer {
             let windows = self.playback_windows(&rec.id);
             let contiguous = contiguous_wanted_pieces(&windows, &wanted);
             let peers = live_peers(&rec.torrent);
-            let bitfields = rec.torrent.inner.peer_pieces.read();
             let observations = peers
                 .iter()
                 .map(|peer| {
                     let key = wt_core::torrent_impls::peer_key_from_addr(peer.remote_addr);
                     let has = |p| {
                         peer.peer_completion >= 1.0
-                            || bitfields.get(&key).is_some_and(|b| b.contains(&p))
+                            || rec.torrent.inner.peer_has_piece(key, p)
                     };
                     GhostProPeerObservation {
                         peer: peer_identity(&rec.torrent, peer.remote_addr),
@@ -156,7 +155,6 @@ impl EngineServer {
                     }
                 })
                 .collect::<Vec<_>>();
-            drop(bitfields);
             let mut state = self.ghost_state.inner.lock();
             if generation != state.generation || !enabled() {
                 return;

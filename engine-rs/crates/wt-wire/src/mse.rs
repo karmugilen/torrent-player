@@ -186,9 +186,6 @@ impl<S> MseStream<S> {
         }
     }
 
-    pub fn is_rc4(&self) -> bool {
-        self.decrypt.is_some()
-    }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for MseStream<S> {

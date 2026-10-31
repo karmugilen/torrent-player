@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use wt_types::{PieceIndex, PiecePriority};
 
-use crate::constants::{PLAYBACK_RESUME_TTL, PLAYBACK_URGENT_BYTES, RESUME_WINDOW_MAX_BYTES};
+use crate::constants::{PLAYBACK_RESUME_TTL, PLAYBACK_URGENT_BYTES};
 use crate::piece_span::{file_piece_range, FileLayout};
 
 /// One warm resume hold within the storage budget.
@@ -148,65 +148,7 @@ impl ResumeRange {
         }
     }
 
-    /// On reader close: hold High if this reader owned the position and no
-    /// sibling reader for the same file is still open.
-    pub fn hold_on_close(
-        &mut self,
-        reader_id: u64,
-        file_index: usize,
-        other_readers_same_file: bool,
-        layout: &FileLayout,
-        piece_length: i64,
-        now: Instant,
-    ) -> ResumeHold {
-        if other_readers_same_file {
-            return ResumeHold {
-                generation: self.generation,
-                demand: self.demand.clone(),
-            };
-        }
-        if self.resume_reader == Some(reader_id) {
-            return self.hold(file_index, layout, piece_length, PiecePriority::High, now);
-        }
-        ResumeHold {
-            generation: self.generation,
-            demand: self.demand.clone(),
-        }
-    }
 
-    /// Align and bound a verified persist window (engine copies bytes).
-    pub fn aligned_persist_window(
-        file: &FileLayout,
-        piece_length: i64,
-        offset: i64,
-        piece_complete: impl Fn(PieceIndex) -> bool,
-    ) -> Option<(i64, i64)> {
-        if piece_length <= 0 {
-            return None;
-        }
-        let mut abs = ((file.torrent_offset + offset.max(0)) / piece_length) * piece_length;
-        if abs < file.torrent_offset {
-            abs += piece_length;
-        }
-        let aligned = abs - file.torrent_offset;
-        let end = (file.torrent_offset + file.length).min(abs + RESUME_WINDOW_MAX_BYTES);
-        let mut length = 0i64;
-        let mut at = abs;
-        while at < end {
-            let piece = (at / piece_length) as PieceIndex;
-            let piece_len = piece_length.min(file.torrent_offset + file.length - at);
-            if at + piece_len > end || !piece_complete(piece) {
-                break;
-            }
-            length += piece_len;
-            at += piece_len;
-        }
-        if length <= 0 {
-            None
-        } else {
-            Some((aligned, length))
-        }
-    }
 }
 
 #[cfg(test)]

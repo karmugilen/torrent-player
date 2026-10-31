@@ -13,7 +13,7 @@ use wt_wire::message::Message;
 use crate::stats::{AtomicConnStats, PeerConnInfo};
 use crate::{CoreError, Result};
 
-/// Callback interface implemented by the peer state machine (e.g. `agy-2`).
+/// Callback interface implemented by the peer state machine.
 pub trait ConnHandler: Send + 'static {
     /// Invoked whenever a new BitTorrent message arrives from the peer.
     fn on_message(&mut self, handle: &ConnHandle, msg: Message) -> Result<()>;
@@ -62,6 +62,8 @@ pub struct ConnHandleInner {
     wake_pending: AtomicBool,
     /// Blocks the peer cancelled before we sent them (Go `peerRequests`).
     peer_cancels: parking_lot::Mutex<std::collections::HashSet<(u32, u32, u32)>>,
+    /// Blocks being read or queued for this peer.
+    queued_uploads: std::sync::atomic::AtomicUsize,
 }
 
 impl ConnHandle {
@@ -102,6 +104,7 @@ impl ConnHandle {
                 update_requested: AtomicBool::new(false),
                 wake_pending: AtomicBool::new(false),
                 peer_cancels: parking_lot::Mutex::new(std::collections::HashSet::new()),
+                queued_uploads: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -151,6 +154,21 @@ impl ConnHandle {
 
     pub(crate) fn take_refocus(&self) -> bool {
         self.inner.refocus_requested.swap(false, Ordering::Relaxed)
+    }
+
+    /// Reserve room for one more queued block; false when `limit` are queued.
+    pub(crate) fn reserve_upload(&self, limit: usize) -> bool {
+        let queued = &self.inner.queued_uploads;
+        if queued.fetch_add(1, Ordering::Relaxed) >= limit {
+            queued.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// A reserved block left the queue, or never entered it.
+    pub(crate) fn release_upload(&self) {
+        self.inner.queued_uploads.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Go `onPeerSentCancel`: a queued, unsent block is dropped by the writer.

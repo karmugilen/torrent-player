@@ -210,9 +210,9 @@ impl PeerTorrent for TorrentInner {
         self.wanted_pieces().incomplete > 0
     }
 
-    fn any_wanted_among(&self, wanted: &std::collections::HashSet<PieceIndex>) -> bool {
+    fn any_wanted_among(&self, wanted: &crate::piece_state::Bitset) -> bool {
         let pieces = self.pieces.read();
-        wanted.iter().any(|&i| {
+        wanted.iter().any(|i| {
             pieces
                 .get(i as usize)
                 .is_some_and(|p| p.priority > PiecePriority::None && !p.complete)
@@ -317,9 +317,6 @@ impl PeerTorrent for TorrentInner {
         self.have_all_peers.fetch_add(delta, Ordering::Relaxed);
     }
 
-    fn note_peer_pieces(&self, peer: PeerKey, pieces: &mut dyn Iterator<Item = PieceIndex>) {
-        self.peer_pieces.write().entry(peer).or_default().extend(pieces);
-    }
 
     fn displaced_requests(
         &self,
@@ -336,15 +333,6 @@ impl PeerTorrent for TorrentInner {
     }
 
 
-    fn note_peer_piece(&self, peer: PeerKey, piece: PieceIndex, has: bool) {
-        let mut peers = self.peer_pieces.write();
-        let pieces = peers.entry(peer).or_default();
-        if has {
-            pieces.insert(piece);
-        } else {
-            pieces.remove(&piece);
-        }
-    }
 
     fn note_peer_helpful(&self, addr: SocketAddr) {
         self.clear_dial_penalty(addr);
@@ -407,7 +395,6 @@ impl PeerTorrent for TorrentInner {
                 }]);
             }
         }
-        self.peer_pieces.write().remove(&peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);
         self.forget_peer_playback_state(addr);
         self.choked_since.write().remove(&addr);
@@ -817,8 +804,8 @@ pub(crate) fn init_availability(t: &TorrentInner, num_pieces: u32) {
     let counts = t.piece_availability.get_or_init(|| {
         (0..num_pieces).map(|_| std::sync::atomic::AtomicI32::new(0)).collect()
     });
-    for pieces in t.peer_pieces.read().values() {
-        for &piece in pieces {
+    for peer in t.live_peers.read().iter() {
+        for piece in peer.pieces.read().iter() {
             if let Some(count) = counts.get(piece as usize) {
                 count.fetch_add(1, Ordering::Relaxed);
             }
@@ -826,25 +813,39 @@ pub(crate) fn init_availability(t: &TorrentInner, num_pieces: u32) {
     }
 }
 
-/// Placeholder for Have/Bitfield → availability once `peer_pieces`/`book` exist.
-pub fn note_peer_piece(t: &TorrentInner, peer: PeerKey, piece: PieceIndex, has: bool) {
-    let mut peers = t.peer_pieces.write();
-    let pieces = peers.entry(peer).or_default();
-    let changed = if has {
-        pieces.insert(piece)
-    } else {
-        pieces.remove(&piece)
-    };
-    drop(peers);
-    if changed {
-        t.note_availability(piece, if has { 1 } else { -1 });
-    }
-}
 
 impl TorrentInner {
 
-    pub fn as_reader_host(self: &Arc<Self>) -> Arc<dyn crate::reader::ReaderHost> {
-        Arc::clone(self) as Arc<dyn crate::reader::ReaderHost>
+}
+
+impl TorrentInner {
+    /// Rewrites `pieces` only if a priority changes, since that rescans them all.
+    fn apply_reader_priorities(&self) {
+        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
+        let (now, readahead) = reader_piece_priorities(&ranges);
+        let target = |piece: &crate::torrent::PieceEntry| {
+            piece.base_priority.max(if now.contains(&piece.index) {
+                PiecePriority::Now
+            } else if readahead.contains(&piece.index) {
+                PiecePriority::High
+            } else {
+                PiecePriority::None
+            })
+        };
+        if self.pieces.read().iter().all(|piece| piece.priority == target(piece)) {
+            return;
+        }
+        for piece in self.pieces_mut().iter_mut() {
+            piece.priority = target(piece);
+        }
+    }
+
+    pub fn peer_has_piece(&self, peer: PeerKey, piece: PieceIndex) -> bool {
+        self.live_peers.read().iter().any(|p| p.key == peer && p.pieces.read().contains(piece))
+    }
+
+    pub fn peer_piece_count(&self, peer: PeerKey) -> u64 {
+        self.live_peers.read().iter().find(|p| p.key == peer).map_or(0, |p| p.pieces.read().len())
     }
 }
 
@@ -910,41 +911,20 @@ impl ReaderHost for TorrentInner {
     }
 
     fn set_reader_positions(&self, reader_id: u64, range: PieceRange) {
-        self.reader_ranges.write().insert(reader_id, range);
-        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
-        let (now, readahead) = reader_piece_priorities(&ranges);
-        let mut pieces = self.pieces_mut();
-        for piece in pieces.iter_mut() {
-            let reader_priority = if now.contains(&piece.index) {
-                PiecePriority::Now
-            } else if readahead.contains(&piece.index) {
-                PiecePriority::High
-            } else {
-                PiecePriority::None
-            };
-            piece.priority = piece.base_priority.max(reader_priority);
+        // Called on every read. Readers need waking; peers only need to hear
+        // about a range that moved, and most reads do not move it.
+        if self.reader_ranges.write().insert(reader_id, range) == Some(range) {
+            self.notify_progress();
+            return;
         }
-        drop(pieces);
+        self.apply_reader_priorities();
         self.bump_change();
         self.nudge_urgent_requests();
     }
 
     fn clear_reader(&self, reader_id: u64) {
         self.reader_ranges.write().remove(&reader_id);
-        let ranges: Vec<PieceRange> = self.reader_ranges.read().values().copied().collect();
-        let (now, readahead) = reader_piece_priorities(&ranges);
-        let mut pieces = self.pieces_mut();
-        for piece in pieces.iter_mut() {
-            let reader_priority = if now.contains(&piece.index) {
-                PiecePriority::Now
-            } else if readahead.contains(&piece.index) {
-                PiecePriority::High
-            } else {
-                PiecePriority::None
-            };
-            piece.priority = piece.base_priority.max(reader_priority);
-        }
-        drop(pieces);
+        self.apply_reader_priorities();
         self.bump_change();
     }
 

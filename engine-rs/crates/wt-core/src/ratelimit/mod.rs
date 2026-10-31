@@ -1,29 +1,4 @@
-//! # Rate limiting (agy-2 integration guide)
-//!
-//! Token-bucket limiter matching `golang.org/x/time/rate` as used by
-//! anacrolix (`UploadRateLimiter` / `DownloadRateLimiter` / `DialRateLimiter`).
-//!
-//! ## What agy-2 should call
-//!
-//! ```ignore
-//! use wt_core::ratelimit::{Limiter, INF, DEFAULT_DOWNLOAD_BURST};
-//!
-//! // Unlimited download/upload (Go: rate.NewLimiter(rate.Inf, 0) then burst→1MiB):
-//! let download = Limiter::infinite();
-//! download.ensure_default_burst(DEFAULT_DOWNLOAD_BURST); // 1 MiB
-//!
-//! // Dial: rate == burst (Go: rate.NewLimiter(10, 10) or dial_rate):
-//! let dial = Limiter::new(100.0, 100);
-//!
-//! // Hot path (piece bytes / dials):
-//! if download.allow_n(chunk_len) { /* read */ }
-//! download.wait_n(chunk_len).await; // async backpressure
-//!
-//! // Runtime reconfigure (engine settings):
-//! download.set_limit(512.0 * 1024.0); // bytes/s
-//! download.set_burst(1 << 20);
-//! ```
-
+//! # Rate limiting
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

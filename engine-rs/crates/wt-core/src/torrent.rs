@@ -13,8 +13,8 @@ use wt_types::{
     PiecePriority, RequestIndex, TorrentStorage, Transport, BLOCK_SIZE,
 };
 
-use crate::picker::{block_coord_from_req_index, piece_req_index_range};
-use crate::sched::{BlockTable, PeerLive, SharedQueue, PLAYHEAD_WINDOW_BLOCKS};
+use crate::picker::piece_req_index_range;
+use crate::sched::{BlockTable, PeerLive, SharedQueue};
 use crate::reader::PieceRange;
 use crate::{CoreError, PieceState, Result};
 
@@ -91,7 +91,6 @@ pub struct TorrentInner {
     pub hasher: Mutex<Option<crate::hashing::PieceHasherPool>>,
     pub hash_seq: AtomicU64,
     pub dht_nodes: RwLock<Vec<SocketAddr>>,
-    pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
     pub dirty_chunks: crate::piece_state::ChunkBits,
     /// Blocks on their way and being written.
     pub blocks: BlockTable,
@@ -249,7 +248,6 @@ impl TorrentInner {
             hasher: Mutex::new(None),
             hash_seq: AtomicU64::new(0),
             dht_nodes: RwLock::new(Vec::new()),
-            peer_pieces: RwLock::new(HashMap::new()),
             dirty_chunks: Default::default(),
             blocks: BlockTable::default(),
             live_peers: RwLock::new(Vec::new()),
@@ -766,9 +764,9 @@ impl TorrentInner {
             } else if seeding && interested {
                 true
             } else {
-                self.peer_pieces.read()
-                    .get(&crate::torrent_impls::peer_key_from_addr(addr))
-                    .is_some_and(|ps| ps.iter().any(|&p| wanted.get(p as usize).copied().unwrap_or(false)))
+                let key = crate::torrent_impls::peer_key_from_addr(addr);
+                self.live_peers.read().iter().find(|p| p.key == key)
+                    .is_some_and(|p| p.pieces.read().iter().any(|i| wanted.get(i as usize).copied().unwrap_or(false)))
             };
             ranks.insert(addr, (useful, last));
         }
@@ -944,9 +942,6 @@ impl TorrentInner {
                 reason.chars().take(120).collect::<String>()
             );
         }
-        self.peer_pieces
-            .write()
-            .remove(&crate::torrent_impls::peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);
         self.forget_peer_playback_state(addr);
         self.choked_since.write().remove(&addr);
@@ -1188,20 +1183,6 @@ impl TorrentInner {
         Some(start + req_in_piece)
     }
 
-    pub fn is_block_arrived(&self, req: RequestIndex) -> bool {
-        if self.dirty_chunks.contains(req) {
-            return true;
-        }
-        let info_guard = self.info.read();
-        if let Some(info) = &*info_guard {
-            let coord = block_coord_from_req_index(req, info.piece_length, info.total_length());
-            let pieces = self.pieces.read();
-            if let Some(p) = pieces.get(coord.piece as usize) {
-                return p.complete;
-            }
-        }
-        false
-    }
 
     pub fn max_end_request(&self) -> RequestIndex {
         let info_guard = self.info.read();
@@ -1218,12 +1199,6 @@ impl TorrentInner {
         end_req
     }
 
-    pub fn head_of_line(&self) -> Option<RequestIndex> {
-        let focus = self.request_focus_index()?;
-        let total_reqs = self.max_end_request();
-        let end = (focus + PLAYHEAD_WINDOW_BLOCKS).min(total_reqs);
-        (focus..end).find(|&r| !self.is_block_arrived(r))
-    }
 
     /// Go `NudgeUrgentRequests`: wake every peer and have those with spare
     /// slots recompute requests now rather than when their queue runs low,

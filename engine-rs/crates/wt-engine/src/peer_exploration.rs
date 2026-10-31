@@ -64,14 +64,8 @@ pub(crate) fn release_unchanged(
     };
     let bitfield_key = wt_core::torrent_impls::peer_key_from_addr(peer.remote_addr);
     let is_seed = latest.peer_completion >= 1.0
-        || torrent
-            .inner
-            .peer_pieces
-            .read()
-            .get(&bitfield_key)
-            .is_some_and(|pieces| {
-                torrent.num_pieces() > 0 && pieces.len() >= torrent.num_pieces() as usize
-            });
+        || (torrent.num_pieces() > 0
+            && torrent.inner.peer_piece_count(bitfield_key) >= u64::from(torrent.num_pieces()));
     if latest.conn_stats.bytes_read_useful_data != peer.conn_stats.bytes_read_useful_data
         || latest.conn_stats.bytes_written_data != peer.conn_stats.bytes_written_data
         || (protect_seed && is_seed)

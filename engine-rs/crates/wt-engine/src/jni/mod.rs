@@ -24,8 +24,8 @@ use jni::JNIEnv;
 
 /// Factory that builds the [`EngineHostApi`] implementation used on Android.
 ///
-/// agy-4 registers this once from `lib.rs` (or an init hook) so `startEngine`
-/// can construct their `EngineServer`-backed host. When unset, an unwired stub
+/// Registered once from `lib.rs` so `startEngine` can construct the
+/// `EngineServer`-backed host. When unset, an unwired stub
 /// is used and `start_engine` returns `1`.
 pub type EngineHostFactory = fn() -> Arc<dyn EngineHostApi>;
 

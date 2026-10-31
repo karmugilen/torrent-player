@@ -29,7 +29,6 @@ pub mod torrent;
 pub mod torrent_impls;
 pub mod tuning;
 mod webseed_download;
-pub mod webseed_peer;
 pub mod wire;
 
 pub use client::ClientInner;
@@ -540,6 +539,13 @@ impl Torrent {
             // hasher. Reset both sides before requesting replacement blocks.
             let _ = piece_storage.mark_not_complete();
         }
+        // Playback refreshes on every read. Writing `pieces` when nothing changed
+        // would rescan them all and wake every peer each time.
+        let unchanged = !storage_lost && self.inner.pieces.read().get(piece as usize)
+            .is_none_or(|p| p.complete == complete && p.ok == comp.ok);
+        if unchanged {
+            return false;
+        }
         let evicted = {
             let mut pieces = self.inner.pieces_mut();
             if let Some(p) = pieces.get_mut(piece as usize) {
@@ -577,12 +583,6 @@ impl Torrent {
         completed
     }
 
-    pub fn bytes_missing(&self) -> i64 {
-        let Some(info) = self.inner.info.read().clone() else {
-            return 0;
-        };
-        info.total_length() - self.bytes_completed()
-    }
 
     pub fn stats(&self) -> TorrentStats {
         let mut cs = self.inner.webseed_stats.snapshot();
@@ -808,41 +808,6 @@ impl Torrent {
         swarm
     }
 
-    pub fn verify_data(&self, cancel: CancelToken) -> Result<()> {
-        let Some(info) = self.inner.info.read().clone() else {
-            return Err(CoreError::NoInfo);
-        };
-        let Some(storage) = self.inner.storage.read().clone() else {
-            return Err(CoreError::Other("no storage".to_string()));
-        };
-
-        for i in 0..info.num_pieces() {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            let piece_obj = info.piece(i);
-            let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(i));
-            let valid = verify_piece_hash(
-                &*piece_storage,
-                piece_obj.length as usize,
-                info.piece_hash_v1(i),
-            );
-            let mut pieces = self.inner.pieces_mut();
-            if let Some(p) = pieces.get_mut(i as usize) {
-                if valid {
-                    let _ = piece_storage.mark_complete();
-                    p.complete = true;
-                    p.ok = true;
-                } else {
-                    let _ = piece_storage.mark_not_complete();
-                    p.complete = false;
-                    p.ok = false;
-                }
-            }
-        }
-        self.inner.bump_change();
-        Ok(())
-    }
 
     pub fn set_on_write_chunk_error(&self, f: Option<Arc<dyn Fn(&CoreError) + Send + Sync>>) {
         *self.inner.on_write_chunk_error.write() = f;
@@ -979,16 +944,6 @@ impl Torrent {
         self.inner.bump_change();
     }
 
-    pub fn peer_counts(&self) -> (usize, usize) {
-        let snapshots = self.inner.peer_snapshots.read();
-        if !snapshots.is_empty() {
-            return (
-                snapshots.len(),
-                snapshots.values().filter(|s| !s.peer_choking).count(),
-            );
-        }
-        (0, 0)
-    }
 
     /// Go `WebtorDropChokers`: drop peers that keep us choked while interested,
     /// but only when the dial pool is backed up relative to free slots

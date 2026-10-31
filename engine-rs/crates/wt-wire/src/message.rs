@@ -52,12 +52,6 @@ impl MessageType {
         }
     }
 
-    pub fn is_fast_extension(&self) -> bool {
-        matches!(
-            self,
-            Self::Suggest | Self::HaveAll | Self::HaveNone | Self::Reject | Self::AllowedFast
-        )
-    }
 }
 
 impl fmt::Display for MessageType {
@@ -213,30 +207,6 @@ impl fmt::Debug for Message {
 }
 
 impl Message {
-    pub fn message_type(&self) -> Option<MessageType> {
-        match self {
-            Self::Keepalive => None,
-            Self::Choke => Some(MessageType::Choke),
-            Self::Unchoke => Some(MessageType::Unchoke),
-            Self::Interested => Some(MessageType::Interested),
-            Self::NotInterested => Some(MessageType::NotInterested),
-            Self::Have { .. } => Some(MessageType::Have),
-            Self::Bitfield(_) => Some(MessageType::Bitfield),
-            Self::Request { .. } => Some(MessageType::Request),
-            Self::Piece { .. } => Some(MessageType::Piece),
-            Self::Cancel { .. } => Some(MessageType::Cancel),
-            Self::Port(_) => Some(MessageType::Port),
-            Self::Suggest { .. } => Some(MessageType::Suggest),
-            Self::HaveAll => Some(MessageType::HaveAll),
-            Self::HaveNone => Some(MessageType::HaveNone),
-            Self::Reject { .. } => Some(MessageType::Reject),
-            Self::AllowedFast { .. } => Some(MessageType::AllowedFast),
-            Self::Extended { .. } => Some(MessageType::Extended),
-            Self::HashRequest { .. } => Some(MessageType::HashRequest),
-            Self::Hashes { .. } => Some(MessageType::Hashes),
-            Self::HashReject { .. } => Some(MessageType::HashReject),
-        }
-    }
 
     /// Calculate the length of the message payload (excluding the 4-byte length prefix).
     pub fn payload_len(&self) -> usize {

@@ -35,9 +35,6 @@ impl AdaptiveBuffer {
         self.burst_aware
     }
 
-    pub fn set_burst_aware(&mut self, on: bool) {
-        self.burst_aware = on;
-    }
 
     pub fn window(&self) -> i64 {
         self.window

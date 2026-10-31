@@ -147,9 +147,6 @@ impl PieceHasherPool {
         (Self::new(workers, tx), rx)
     }
 
-    pub fn set_smart_ban_cache(&self, cache: Arc<SmartBanCache>) {
-        *self.shared.smartban.lock() = Some(cache);
-    }
 
     pub fn set_cancel_token(&self, token: CancelToken) {
         *self.shared.cancel.lock() = token;
@@ -181,13 +178,7 @@ impl PieceHasherPool {
         Ok(())
     }
 
-    pub fn active_count(&self) -> usize {
-        self.shared.active.load(Ordering::SeqCst)
-    }
 
-    pub fn queued_count(&self) -> usize {
-        self.shared.queued.load(Ordering::SeqCst)
-    }
 
     pub fn shutdown(&self) {
         self.shared.shut_down.store(true, Ordering::SeqCst);

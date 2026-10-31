@@ -1,14 +1,4 @@
 //! Playback sessions, priority coordination, and reader handles.
-//!
-//! Port of `engine-go/playback.go` (orchestration) + glue for
-//! `playback_resume`, `next_preload`, `video_priority`, `direct_play_idle`,
-//! and Claude-seek latency. The HTTP Range server lives in [`crate::stream_http`];
-//! this module supplies [`PlaybackReader`] (implements [`StreamReader`]) and a
-//! temporary `start_stream_server` shim for agy-4's current imports.
-//!
-//! Byte I/O goes through [`ReaderBackend`]. agy-4 implements [`PlaybackHost`]
-//! on `EngineServer` and opens sessions via [`PlaybackSession::open`].
-
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -88,7 +78,7 @@ pub struct PlaybackTorrentSnapshot {
     pub open_reader_count: usize,
 }
 
-/// Implemented by `EngineServer` (agy-4). Isolates playback from server locks.
+/// Implemented by `EngineServer`. Isolates playback from server locks.
 pub trait PlaybackHost: Send + Sync {
     fn torrent_for_playback(&self, id: &str) -> Option<PlaybackTorrentSnapshot>;
     fn is_shutting_down(&self) -> bool;
@@ -115,6 +105,11 @@ pub trait PlaybackHost: Send + Sync {
         None
     }
     fn set_playback_storage_demand(&self, _id: &str, _demand: &HashMap<u32, PiecePriority>) {}
+    /// Publish one merged demand to storage and to the scheduler.
+    fn publish_demand(&self, id: &str, demand: &HashMap<u32, PiecePriority>) {
+        self.set_playback_storage_demand(id, demand);
+        self.apply_piece_priorities(id, demand);
+    }
     fn playback_readers_changed(&self, _id: &str) {}
     fn on_playback_closed(&self, _id: &str, _file_index: usize) {}
     /// Go `seekStats.recordSeek`: seek-to-first-byte latency.
@@ -353,11 +348,6 @@ impl PlaybackPriorityCoordinator {
         Self::apply_locked(&mut inner);
     }
 
-    pub fn set_resume_demand(&self, demand: HashMap<u32, PiecePriority>) {
-        let mut inner = self.inner.lock();
-        inner.resume_demand = demand;
-        Self::apply_locked(&mut inner);
-    }
 
     pub fn remember_resume(&self, file_index: usize, offset: i64) {
         self.inner.lock().resume_positions.entry(file_index).or_insert(offset);
@@ -486,8 +476,7 @@ impl PlaybackPriorityCoordinator {
             }
         }
 
-        let prev = std::mem::replace(&mut g.effective, next.clone());
-        let _ = prev;
+        g.effective = next.clone();
         next
     }
 }
@@ -764,8 +753,7 @@ impl PlaybackReader {
                 session.backend.set_readahead(0);
                 let effective = session.coordinator.remove(session.session_id);
                 if let Some(host) = &session.host {
-                    host.set_playback_storage_demand(&session.torrent_id, &effective);
-                    host.apply_piece_priorities(&session.torrent_id, &effective);
+                    host.publish_demand(&session.torrent_id, &effective);
                 }
                 session.window = PlaybackWindow::default();
                 *self.published_window.lock() = Some(session.window);
@@ -1622,8 +1610,7 @@ impl PlaybackSession {
         self.backend.close();
         let effective = self.coordinator.remove(self.session_id);
         if let Some(host) = &self.host {
-            host.set_playback_storage_demand(&self.torrent_id, &effective);
-            host.apply_piece_priorities(&self.torrent_id, &effective);
+            host.publish_demand(&self.torrent_id, &effective);
             // The playhead must not outlive playback: it kept a saved download
             // on playback queues long after the video was closed.
             if self.coordinator.inner.lock().owners.is_empty() {
@@ -1640,7 +1627,7 @@ impl Drop for PlaybackSession {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Stream server shim (agy-4 still imports these from playback)
+// Stream server wiring
 // -------------------------------------------------------------------------------------------------
 
 pub type PlaybackResolver = Arc<dyn Fn(&str, usize) -> Option<Arc<PlaybackReader>> + Send + Sync>;
@@ -1655,8 +1642,6 @@ impl StreamSource for ResolverSource {
     }
 }
 
-/// Compatibility wrapper: same name/signature agy-4 uses today, delegates to
-/// [`stream_http::start_stream_server`].
 pub async fn start_stream_server(
     port: u16,
     resolver: PlaybackResolver,
@@ -1664,14 +1649,6 @@ pub async fn start_stream_server(
     stream_http::start_stream_server(port, Arc::new(ResolverSource(resolver))).await
 }
 
-pub type FalliblePlaybackResolver =
-    Arc<dyn Fn(&str, usize) -> io::Result<Arc<PlaybackReader>> + Send + Sync>;
-struct FallibleResolverSource(FalliblePlaybackResolver);
-impl StreamSource for FallibleResolverSource {
-    fn open(&self, id: &str, index: usize) -> io::Result<Arc<dyn StreamReader>> {
-        (self.0)(id, index).map(|reader| reader as Arc<dyn StreamReader>)
-    }
-}
 /// `(id, file_index, range_start)`; the start is `-1` when the request has none.
 pub type SeekablePlaybackResolver =
     Arc<dyn Fn(&str, usize, i64) -> io::Result<Arc<PlaybackReader>> + Send + Sync>;
@@ -1693,12 +1670,6 @@ pub async fn start_stream_server_seekable(
     stream_http::start_stream_server(port, Arc::new(SeekableResolverSource(resolver))).await
 }
 
-pub async fn start_stream_server_fallible(
-    port: u16,
-    resolver: FalliblePlaybackResolver,
-) -> io::Result<Arc<StreamServer>> {
-    stream_http::start_stream_server(port, Arc::new(FallibleResolverSource(resolver))).await
-}
 
 pub use crate::stream_http::StreamServer;
 

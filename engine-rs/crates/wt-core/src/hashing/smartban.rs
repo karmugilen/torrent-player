@@ -103,9 +103,6 @@ impl SmartBanCache {
         (0..count).any(|i| g.get(&(begin + i)).is_some_and(|v| !v.is_empty()))
     }
 
-    pub fn has_blocks(&self) -> bool {
-        !self.blocks.read().is_empty()
-    }
 
     pub fn clear(&self) {
         self.blocks.write().clear();

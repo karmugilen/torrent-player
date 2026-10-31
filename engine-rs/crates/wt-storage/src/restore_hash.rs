@@ -1,28 +1,4 @@
 //! Restore SelfHash: skip hashing filesystem holes during saved-data checks.
-//!
-//! # Public API
-//!
-//! - [`RestoreVerifyPiece`] — piece wrapper returned while restore-verify is on.
-//!   Call [`RestoreVerifyPiece::self_hash`] to hash with hole skipping. Peer
-//!   hashing keeps a plain [`DocumentPiece`] so smart banning still works.
-//! - [`piece_for_hash`] — pick restore or plain piece from
-//!   [`DocumentTorrentStorage::restore_verify_enabled`].
-//! - [`hash_piece_contents`] — dense SHA-1 of a piece via `PieceStorage::read_at`.
-//!
-//! Hole path (mirrors `engine-go/restore_hash.go`):
-//! 1. If the piece is in the RAM cache, hash its contents (never treat as a hole).
-//! 2. Else try extent hashing (`hash_extents` / file spans); all-holes →
-//!    [`crate::zero_piece_hash`].
-//! 3. Else probe sparse holes via [`DocumentTorrentStorage::piece_extent_all_holes`].
-//! 4. Else fall back to [`hash_piece_contents`].
-//!
-//! Zero-hash interplay: all-hole pieces return the cached SHA-1 of `length`
-//! zero bytes from [`crate::zero_hash::zero_piece_hash`].
-//!
-//! Enable with [`DocumentTorrentStorage::set_restore_verify`]; agy-3 owns that
-//! flag and `DocumentPiece::self_hash`. This module is the gated wrapper and
-//! the documented SelfHash entry point for wt-engine / tests.
-
 use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
@@ -45,13 +21,7 @@ impl RestoreVerifyPiece {
         }
     }
 
-    pub fn from_document(piece: DocumentPiece) -> Self {
-        Self { inner: piece }
-    }
 
-    pub fn document(&self) -> &DocumentPiece {
-        &self.inner
-    }
 
     pub fn storage(&self) -> &Arc<DocumentTorrentStorage> {
         &self.inner.storage

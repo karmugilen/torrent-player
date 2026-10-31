@@ -12,13 +12,6 @@ pub struct Offer {
 }
 
 impl Offer {
-    pub fn from_parts(offer_id: String, sdp_type: String, sdp: String) -> Self {
-        Self {
-            offer_id,
-            sdp_type,
-            sdp,
-        }
-    }
 }
 
 /// Custom serialize for Offer nested under "offer" key as `{type, sdp}` plus offer_id.

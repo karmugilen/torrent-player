@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use wt_types::{PieceIndex, PiecePriority, RequestIndex, BLOCK_SIZE};
 
 use crate::peer_conn::PeerKey;
-use crate::piece_state::ChunkBits;
+use crate::piece_state::{Bitset, ChunkBits};
 use crate::picker::{block_coord_from_req_index, piece_req_index_range};
 use crate::torrent::TorrentInner;
 
@@ -272,6 +272,9 @@ pub struct PeerLive {
     have_all: AtomicBool,
     /// Milliseconds since [`EPOCH`] plus one; 0 means never.
     last_useful: AtomicU64,
+    /// The pieces this peer has. Only its own handler writes them, and that
+    /// handler never holds another peer's lock while it does.
+    pub pieces: RwLock<Bitset>,
 }
 
 impl PeerLive {
@@ -285,6 +288,7 @@ impl PeerLive {
             choking: AtomicBool::new(true),
             have_all: AtomicBool::new(false),
             last_useful: AtomicU64::new(0),
+            pieces: RwLock::new(Bitset::new()),
         }
     }
 
@@ -319,6 +323,10 @@ impl PeerLive {
         expected_arrival(self.rate(), self.rtt(), self.queued.load(Ordering::Relaxed))
     }
 
+    fn has_piece(&self, piece: PieceIndex) -> bool {
+        self.have_all.load(Ordering::Relaxed) || self.pieces.read().contains(piece)
+    }
+
     /// Could take a request right now.
     fn has_room(&self) -> bool {
         !self.choking.load(Ordering::Relaxed)
@@ -332,7 +340,7 @@ impl PeerLive {
 pub struct PickPeer<'a> {
     pub key: PeerKey,
     pub have_all: bool,
-    pub pieces: &'a HashSet<PieceIndex>,
+    pub pieces: &'a Bitset,
     pub allowed_fast: &'a HashSet<PieceIndex>,
     pub choking: bool,
     pub outstanding: &'a HashSet<RequestIndex>,
@@ -346,7 +354,7 @@ pub struct PickPeer<'a> {
 
 impl PickPeer<'_> {
     fn has(&self, piece: PieceIndex) -> bool {
-        self.have_all || self.pieces.contains(&piece)
+        self.have_all || self.pieces.contains(piece)
     }
 
     fn blocked(&self, piece: PieceIndex) -> bool {
@@ -450,13 +458,10 @@ impl TorrentInner {
         let eager = self.seek_hedge.lock()
             .is_some_and(|(at, left)| left > 0 && at.elapsed() < crate::torrent::SEEK_HEDGE_WINDOW);
         let peers = self.live_peers.read();
-        let bitfields = self.peer_pieces.read();
         let pieces = self.pieces.read();
         let mine = peer.arrival();
         let can_serve = |other: &PeerLive, piece: PieceIndex| {
-            other.has_room()
-                && (other.have_all.load(Ordering::Relaxed)
-                    || bitfields.get(&other.key).is_some_and(|b| b.contains(&piece)))
+            other.has_room() && other.has_piece(piece)
         };
         let now = Instant::now();
         for req in window {
@@ -610,15 +615,13 @@ impl TorrentInner {
         let speed = peer.rate.max(1.0);
         let secs = peer.outstanding.len().max(1) as f64 * f64::from(BLOCK_SIZE) / speed;
         let peers = self.live_peers.read();
-        let bitfields = self.peer_pieces.read();
         for other in peers.iter() {
             let rate = other.rate();
             if other.key == peer.key
                 || other.choking.load(Ordering::Relaxed)
                 || rate < SLOW_PEER_BYTES_PER_SEC
                 || rate <= speed
-                || !(other.have_all.load(Ordering::Relaxed)
-                    || bitfields.get(&other.key).is_some_and(|b| b.contains(&piece)))
+                || !other.has_piece(piece)
             {
                 continue;
             }
