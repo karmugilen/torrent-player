@@ -42,7 +42,23 @@
 - Torrents with no web seeds polled 40 times a second; now once a second.
 - Kotlin cleaned startup caches in `files/webtorrent`, not the engine's `files/webtorrent-rust`.
 
+### Engine changes that made things worse
+- Called a theory the cause and shipped `fullspeed` unmeasured; the user found it worse. Say what is unproven, and get one log before a rewrite.
+- `savequeue` switched pickers on the playhead, which any brief read sets, so the new picker almost never ran. After adding a code path, confirm it runs.
+- Removed block stealing although a code comment said slow holders lose blocks only that way. Read why old code exists before removing it.
+- Cut the peer queue to 2 s while RTTs on mobile data reach 2.4 s.
+- Called the disk "not the limit" from a sequential `dd` to `/sdcard`, which is not the app's MediaStore path. The log later showed it for one 70 s run.
+- Diagnostic logging ran forever: a 20 Hz timer and a file write every second, even idle. It was on the phone the night it overheated. Stop diagnostics when idle and remove them when done.
+- `savedirect` was built on `coldprobe`, which silently dropped the `savefix2` playhead fix. After a rollback, list which fixes went with it.
+
 ### Process
+- Gradle reported `49 up-to-date` and I installed an APK built 25 minutes earlier from someone else's uncommitted edits. Gradle builds the worktree, committed or not. Check `git status` first, and after a build compare the APK's time with `date`.
+- Wrote "installed" to the glossary in the same command as the install while the phone was unplugged. Record it only after `Success`.
+- First transfer log went to logcat, whose buffer here is 256 KiB and lasts minutes, so a whole download logged nothing readable. Log to a file adb can pull, with a heartbeat line, from the start.
+- A patch script wrote each file as it went, so a failed search string left half the edits in. Check every search string before writing any file.
+- Mixed `adb` with code reading in one call, so a declined phone check also lost the reading. Keep phone commands in their own call.
+- Ran `cargo test` after being told not to, and kept reading after "just see in code". Follow the latest instruction, and stop what is running.
+- `grep` here is `ugrep`, and `ls` rejects GNU flags such as `--time-style`. Use `command ls` and `stat`.
 - User's way of working: no testing, just fix, build and ship. Don't run `cargo test` or check the phone unless asked; if the user tests and reports back, read the log only when they say "check".
 - zsh does not split an unquoted variable into words, so a file list in one variable became one bad path. Use an array and `"${F[@]}"`.
 - Open: the branch has no upstream, so commits are local only.
@@ -68,6 +84,14 @@ Run these from `~/orca/workspaces/torrent-player/rust-engine`.
 - Install a saved build: `scripts/install-apk.sh seekbugs2` (name or part of it; no argument lists builds). It checks the hash and that one phone is connected, and keeps app data. Install: `adb install -r <apk>`. A signature error means the installed copy has another key; uninstalling fixes it but wipes the library, so only do it when the user says so.
 - Check: `unzip -l <apk> | grep libengine` must show only `libengine.so`.
 - Tests that discover peers through a stub tracker catch more than ones that call `add_peers`, which skips discovery.
+
+## Building and installing faster
+- Check first: `CARGO_TARGET_DIR=$HOME/.cache/wt-targets/host-check cargo check -p wt-core -p wt-engine` from `engine-rs` takes 2 to 30 s and finds compile errors before a build of 1 to 2 min.
+- Batch fixes into one build. Each APK costs about 1 to 2 min, plus the user's time to test it.
+- Run the steps as one command, in order: `git status`, build, compare the APK time with `date`, copy to `artifacts/` with its hash, `adb devices`, `scripts/install-apk.sh <name>`, then record it.
+- To build an exact commit with other edits around, use a clean `git worktree` and `--no-configuration-cache`. About 1 min 40 s, because the Android Rust target in `~/.cache/wt-targets` is shared. Compare `libengine.so` hashes with the last build to confirm the engine changed.
+- A long command can move to the background. Wait for its notice before editing that tree, especially if the command ends in `git add -A`.
+- Check `adb devices` before installing, and tell the user at once if the phone is unplugged. Don't rebuild for that.
 
 ## Directories
 - `android/`: Android app and core Kotlin module.
