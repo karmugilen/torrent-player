@@ -329,7 +329,6 @@ impl PeerTorrent for TorrentInner {
             queue.next.clear();
             queue.next.resize(wanted.num_pieces as usize, 0);
             queue.rewound_at = Some(Instant::now());
-            wt_types::probe::add(wt_types::probe::REWINDS, 1);
         }
         if rewind || queue.generation != wanted.generation {
             queue.generation = wanted.generation;
@@ -358,12 +357,8 @@ impl PeerTorrent for TorrentInner {
             // RAM is spoken for: finish what is open. A peer about to run dry
             // may still start a piece, so slow holders never idle a fast peer.
             let fresh = !partial && from == 0;
-            if fresh && queue.open >= open_limit {
-                if !peer.starving {
-                    wt_types::probe::add(wt_types::probe::OPEN_LIMIT, 1);
-                    break;
-                }
-                wt_types::probe::add(wt_types::probe::STARVE_OPEN, 1);
+            if fresh && queue.open >= open_limit && !peer.starving {
+                break;
             }
             let (begin, end) = crate::picker::piece_req_index_range(index, piece_length, total_length);
             let taken = pick.free.len();

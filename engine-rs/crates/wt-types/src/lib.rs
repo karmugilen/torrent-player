@@ -364,51 +364,6 @@ pub type IndexBuild = std::hash::BuildHasherDefault<IndexHasher>;
 pub type IndexMap<K, V> = std::collections::HashMap<K, V, IndexBuild>;
 pub type IndexSet<K> = std::collections::HashSet<K, IndexBuild>;
 
-/// Counters for the per-second transfer log. Reading them resets them.
-pub mod probe {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    macro_rules! counters {
-        ($($name:ident),* $(,)?) => {
-            #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
-            #[derive(Clone, Copy)]
-            enum Id { $($name),*, COUNT }
-            $(pub const $name: usize = Id::$name as usize;)*
-            const NAMES: [&str; Id::COUNT as usize] = [$(stringify!($name)),*];
-        };
-    }
-    counters!(
-        RECV, WASTED, LATE, SLOW_WRITE, REFILLS, REFILL_EMPTY, PICKED, ROOM, OLD_PICKER,
-        OPEN_LIMIT, STARVE_OPEN, REWINDS, CANCELS, CHOKES, STALE_RELEASED, UP_MEM, UP_DISK,
-        CONN_CLOSED, BURST_DROPS, HASH_OK, HASH_FAIL, DISK_WRITES, DISK_WRITE_KIB, DISK_WRITE_MS,
-        DISK_WRITE_MAX_MS, CACHE_FULL, WRITE_THROUGH, EVICT_UNVERIFIED, SYNCS, SYNC_MS,
-        DISK_READ_KIB, LOCK_WAIT_MAX_US, RT_LAG_MAX_MS,
-    );
-
-    static COUNTERS: [AtomicU64; Id::COUNT as usize] =
-        [const { AtomicU64::new(0) }; Id::COUNT as usize];
-
-    pub fn add(id: usize, n: u64) {
-        COUNTERS[id].fetch_add(n, Ordering::Relaxed);
-    }
-
-    pub fn max(id: usize, n: u64) {
-        COUNTERS[id].fetch_max(n, Ordering::Relaxed);
-    }
-
-    /// Non-zero counters since the last call, as `NAME=value`.
-    pub fn take_line() -> String {
-        let mut line = String::new();
-        for (counter, name) in COUNTERS.iter().zip(NAMES) {
-            let value = counter.swap(0, Ordering::Relaxed);
-            if value != 0 {
-                line.push_str(&format!("{name}={value} "));
-            }
-        }
-        line
-    }
-}
-
 /// Bounded log of engine events, kept in memory and shown in diagnostics.
 pub mod events {
     use std::collections::VecDeque;

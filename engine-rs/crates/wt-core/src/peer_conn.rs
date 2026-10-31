@@ -1158,7 +1158,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     /// Cancel the local request without erasing an assignment stolen by another peer.
     fn cancel_outstanding(&mut self, handle: &ConnHandle, req: RequestIndex) {
         if !self.state.outstanding_requests.remove(&req) { return; }
-        wt_types::probe::add(wt_types::probe::CANCELS, 1);
         let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
         self.send(handle, Message::Cancel { index: coord.piece, begin: coord.offset, length: coord.length.max(1) });
         let bits = PeerExtensionBits(self.state.peer_extension_bits);
@@ -1226,7 +1225,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
         // Go decrements peak per cancel: a peer that stopped delivering
         // restarts from a small queue.
-        wt_types::probe::add(wt_types::probe::STALE_RELEASED, stale.len() as u64);
         self.state.peak_requests = self.state.peak_requests.saturating_sub(stale.len());
         for req in stale {
             self.cancel_outstanding(handle, req);
@@ -1289,7 +1287,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.refill_background(handle, &tuning);
             return;
         }
-        wt_types::probe::add(wt_types::probe::OLD_PICKER, 1);
         let mut has_piece = vec![false; num_pieces as usize];
         let mut allowed = vec![false; num_pieces as usize];
         if self.state.peer_sent_have_all {
@@ -1680,11 +1677,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             was_empty,
         ) as usize;
         self.state.peak_requests = self.state.peak_requests.max(computed);
-        wt_types::probe::add(wt_types::probe::REFILLS, 1);
-        wt_types::probe::add(wt_types::probe::PICKED, u64::from(added));
-        wt_types::probe::add(wt_types::probe::ROOM, room as u64);
         if added == 0 && room > 0 {
-            wt_types::probe::add(wt_types::probe::REFILL_EMPTY, 1);
         }
         // A peer still receiving refills freely. One with nothing to do and nothing
         // on the way rests, or a stalled download polls every peer all night.
@@ -2040,7 +2033,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     }
 
     fn handle_choke(&mut self, handle: &ConnHandle) {
-        wt_types::probe::add(wt_types::probe::CHOKES, 1);
         self.state.peer_choking = true;
         self.arrival.write().unchoked_at = None;
         self.state.webtor_choked_since = Some(Instant::now());
@@ -2168,7 +2160,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
         }
         if !expected {
-            wt_types::probe::add(wt_types::probe::LATE, 1);
             return Ok(());
         }
         let me = self.key();
@@ -2201,7 +2192,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         // rewritten or counted as useful. The reservation is atomic, so two
         // peers delivering the same block together cannot both write it.
         if !self.torrent.begin_chunk_write(req) {
-            wt_types::probe::add(wt_types::probe::WASTED, 1);
             self.state.stats.chunks_read_wasted.fetch_add(1, Ordering::Relaxed);
             handle.stats().chunks_read_wasted.fetch_add(1, Ordering::Relaxed);
             // Give up any claim so a failed write by the winner can be retried.
@@ -2219,10 +2209,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         // copy, on every 16 KiB block.
         let written = match self.torrent.write_chunk_in_memory(index, begin, data) {
             Some(written) => written,
-            None => {
-                wt_types::probe::add(wt_types::probe::SLOW_WRITE, 1);
-                blocking_io(|| self.torrent.write_chunk(index, begin, data))
-            }
+            None => blocking_io(|| self.torrent.write_chunk(index, begin, data)),
         };
         // Marks the block dirty (readable) only after a successful write.
         self.torrent.finish_chunk_write(req, written.is_ok());
@@ -2239,7 +2226,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return Ok(());
         }
 
-        wt_types::probe::add(wt_types::probe::RECV, 1);
         self.state.rtt.on_request_received(req);
         self.state.last_useful_chunk_received = Some(Instant::now());
         self.state.download_rate.add_bytes(data.len());
@@ -2315,13 +2301,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         // receives this peer's blocks, nor a runtime worker. Peers may be served
         // out of order, so the block is sent when the read finishes.
         let data = match self.torrent.read_chunk_in_memory(index, begin, length) {
-            Some(data) => {
-                wt_types::probe::add(wt_types::probe::UP_MEM, 1);
-                data?
-            }
+            Some(data) => data?,
             None => match tokio::runtime::Handle::try_current() {
                 Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                    wt_types::probe::add(wt_types::probe::UP_DISK, 1);
                     let torrent = Arc::clone(&self.torrent);
                     let handle = handle.clone();
                     rt.spawn_blocking(move || match torrent.read_chunk(index, begin, length) {
@@ -2689,7 +2671,6 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
     }
 
     fn on_closed(&mut self, _handle: &ConnHandle, _reason: &str) {
-        wt_types::probe::add(wt_types::probe::CONN_CLOSED, 1);
         self.closed.store(true, Ordering::Relaxed);
         if self.pex_listed {
             let utp = matches!(self.state.transport, Transport::Utp);

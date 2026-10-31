@@ -631,7 +631,6 @@ impl DocumentTorrentStorage {
         };
 
         // Phase 2: sync without holding the storage lock.
-        let sync_started = std::time::Instant::now();
         let mut sync_err: Option<String> = None;
         let mut failed_fds: Vec<RawFd> = Vec::new();
         for (fd, file) in syncs {
@@ -651,11 +650,6 @@ impl DocumentTorrentStorage {
             }
         }
 
-        wt_types::probe::add(wt_types::probe::SYNCS, 1);
-        wt_types::probe::add(wt_types::probe::SYNC_MS, sync_started.elapsed().as_millis() as u64);
-        if sync_started.elapsed() >= Duration::from_millis(100) {
-            wt_types::events::record("disk_sync", format!("{}ms", sync_started.elapsed().as_millis()));
-        }
         if let Some(err) = sync_err {
             let mut inner = self.inner.lock();
             for fd in failed_fds {
@@ -1021,24 +1015,6 @@ impl DocumentTorrentStorage {
                 inner.max_cache_bytes = saved_download_cache_bytes(bytes, inner.chunk_length);
             }
         }
-    }
-
-    /// One line for the per-second transfer log.
-    pub fn probe_line(&self) -> String {
-        let inner = self.inner.lock();
-        format!(
-            "stream={} ram={}M/{}M slots={} dirty={} partial_slots={} flushing={} evicting={} sync_pending={} write_err={:?}",
-            inner.stream,
-            inner.cache_bytes >> 20,
-            inner.max_cache_bytes >> 20,
-            inner.cache.len(),
-            inner.cache_dirty.values().filter(|&&d| d).count(),
-            inner.partial_slots.len(),
-            inner.flushing.len(),
-            inner.evicting.len(),
-            inner.pending_sync_fds.len(),
-            inner.flush_err,
-        )
     }
 
     pub fn set_memory_limit(&self, bytes: i64) {
@@ -2201,7 +2177,6 @@ impl DocumentTorrentStorage {
                         return true;
                     }
                     if !verified_only {
-                        wt_types::probe::add(wt_types::probe::EVICT_UNVERIFIED, 1);
                     }
                     victim = Some(p_idx);
                     false
@@ -2517,7 +2492,6 @@ impl DocumentTorrentStorage {
         parking_lot::MutexGuard<'a, StorageInner>,
         StorageResult<usize>,
     ) {
-        wt_types::probe::add(wt_types::probe::WRITE_THROUGH, 1);
         inner.flushing.insert(index);
         let result = loop {
             if inner.closed {
@@ -2818,7 +2792,6 @@ impl DocumentTorrentStorage {
         // unlocked so playback and hashing do not stall peers' cache writes.
         let reads = plan_file_reads(&inner.files, abs, n)?;
         drop(inner);
-        wt_types::probe::add(wt_types::probe::DISK_READ_KIB, n as u64 / 1024);
         for (file, at, lo, hi) in reads {
             #[cfg(test)]
             writeback_tests::before_io(false);
@@ -3235,8 +3208,6 @@ impl DocumentPiece {
                 let evicted = match victim {
                     Some(victim) => {
                         // RAM is all unfinished pieces: a peer now waits on disk.
-                        wt_types::probe::add(wt_types::probe::CACHE_FULL, 1);
-                        wt_types::events::record("cache_full_wait", format!("piece={victim}"));
                         inner.evicting.insert(victim);
                         let (guard, flushed) = self.storage.flush_piece_until_clean(inner, victim);
                         inner = guard;
@@ -3378,9 +3349,7 @@ impl PieceStorage for DocumentPiece {
     }
 
     fn write_at_in_memory(&self, buf: &[u8], off: i64) -> Option<StorageResult<usize>> {
-        let waiting = std::time::Instant::now();
         let inner = self.storage.inner.lock();
-        wt_types::probe::max(wt_types::probe::LOCK_WAIT_MAX_US, waiting.elapsed().as_micros() as u64);
         if !self.write_stays_in_memory_locked(&inner) {
             return None;
         }
@@ -3421,19 +3390,9 @@ impl PieceStorage for DocumentPiece {
         // Download mode: the piece is whole and verified in RAM, so it goes to
         // disk in one write, without the lock, so peers keep filling RAM. A
         // piece that fails its hash never gets here and never reaches the disk.
-        let write_started = std::time::Instant::now();
         let (guard, flushed) = self.storage.flush_piece_until_clean(inner, index);
         inner = guard;
         flushed?;
-        let write_ms = write_started.elapsed().as_millis() as u64;
-        wt_types::probe::add(wt_types::probe::DISK_WRITES, 1);
-        wt_types::probe::add(wt_types::probe::DISK_WRITE_KIB, self.piece.length as u64 / 1024);
-        wt_types::probe::add(wt_types::probe::DISK_WRITE_MS, write_ms);
-        wt_types::probe::max(wt_types::probe::DISK_WRITE_MAX_MS, write_ms);
-        if write_started.elapsed() >= Duration::from_millis(100) {
-            wt_types::events::record("disk_write", format!(
-                "piece={index} {}KiB {}ms", self.piece.length / 1024, write_started.elapsed().as_millis()));
-        }
         inner.completed.insert(index, true);
         inner.saved_partial.remove(&index);
         self.storage

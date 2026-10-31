@@ -200,7 +200,6 @@ impl EngineServer {
 
     /// One weakly-owned task shares the existing one-second telemetry clock.
     pub(crate) fn start_policy_sampler(server: &Arc<Self>) {
-        Self::start_transfer_log(server);
         let weak = Arc::downgrade(server);
         server.client.inner.tokio_handle.spawn(async move {
             let mut previous = None;

@@ -334,97 +334,6 @@ impl TorrentInner {
         guard
     }
 
-    /// One line for the per-second transfer log: the picker's view, how old the
-    /// blocks in flight are, and what each of the fastest peers is doing.
-    pub fn probe_line(&self) -> String {
-        use crate::peer_conn::PeerTorrent;
-        let Some(info) = self.info.read().clone() else {
-            return "no-info".into();
-        };
-        let (piece_length, total_length) = (info.piece_length, info.total_length());
-        let wanted = self.wanted_pieces();
-        let open_limit = (crate::strategy::SAVED_MAX_UNVERIFIED_BYTES / piece_length.max(1))
-            .max(crate::strategy::SAVED_OPEN_MIN_PIECES);
-        let queue_open = self.saved_queue.lock().open;
-        let hash_queued = self.hasher.lock().as_ref().map_or(0, |pool| pool.queued_count());
-        let now = Instant::now();
-        let assignments = self.assignments.read();
-        let mut holders = HashMap::<u64, u32>::new();
-        let (mut over_2s, mut over_5s, mut over_15s, mut oldest) = (0u32, 0u32, 0u32, Duration::ZERO);
-        for &(owner, when) in assignments.values() {
-            let age = now.saturating_duration_since(when);
-            oldest = oldest.max(age);
-            over_2s += u32::from(age >= Duration::from_secs(2));
-            over_15s += u32::from(age >= Duration::from_secs(15));
-            if age >= Duration::from_secs(5) {
-                over_5s += 1;
-                *holders.entry(owner).or_default() += 1;
-            }
-        }
-        // Why open pieces are not finishing: blocks free to take, or held.
-        let (mut partial, mut near_done, mut missing_free, mut missing_held) = (0u32, 0u32, 0u32, 0u32);
-        let live = self.request_state.read();
-        for &(index, _, is_partial, _, _) in &wanted.candidates {
-            if !is_partial {
-                continue;
-            }
-            partial += 1;
-            let (begin, end) = crate::picker::piece_req_index_range(index, piece_length, total_length);
-            let mut missing = 0u32;
-            for req in begin..end {
-                if !self.dirty_chunks.contains(req) {
-                    missing += 1;
-                    if assignments.contains_key(&req) || live.contains_key(&req) {
-                        missing_held += 1;
-                    } else {
-                        missing_free += 1;
-                    }
-                }
-            }
-            near_done += u32::from(missing <= 8);
-        }
-        let inflight = assignments.len();
-        drop(live);
-        drop(assignments);
-        let snapshots = self.peer_snapshots.read();
-        let (mut unchoked, mut choked_wanting, mut idle, mut queued, mut capacity) = (0u32, 0u32, 0u32, 0usize, 0usize);
-        let mut peers: Vec<_> = snapshots.values().collect();
-        for peer in &peers {
-            unchoked += u32::from(!peer.peer_choking);
-            choked_wanting += u32::from(peer.peer_choking && peer.am_interested);
-            idle += u32::from(!peer.peer_choking && peer.am_interested && peer.queued == 0);
-            queued += peer.queued;
-            if !peer.peer_choking {
-                capacity += peer.nominal_max_requests;
-            }
-        }
-        peers.sort_by(|a, b| b.download_rate.total_cmp(&a.download_rate));
-        let mut top = String::new();
-        for peer in peers.iter().take(6) {
-            top.push_str(&format!(
-                "[{}K q{}/{} rtt{} last{}{}] ",
-                (peer.download_rate / 1024.0) as u64,
-                peer.queued,
-                peer.nominal_max_requests,
-                peer.rtt.as_millis(),
-                peer.last_useful_data.map_or(-1, |d| d.as_millis() as i64),
-                if peer.peer_choking { " choked" } else { "" },
-            ));
-        }
-        format!(
-            "focus={} bg={} plen={}K wanted={} checking={} hashq={} open={queue_open}/{open_limit} partial={partial} near_done={near_done} miss_free={missing_free} miss_held={missing_held} inflight={inflight} age2s={over_2s} age5s={over_5s} age15s={over_15s} oldest={}ms slow_holders={} conns={} unchoked={unchoked} choked_wanting={choked_wanting} idle={idle} queued={queued} capacity={capacity} top={top}",
-            self.request_focus_index().is_some(),
-            self.background_only(),
-            piece_length / 1024,
-            wanted.count,
-            wanted.checking,
-            hash_queued,
-            oldest.as_millis(),
-            holders.len(),
-            self.conn_handles.read().len(),
-        )
-    }
-
     /// The per-piece refill inputs, rebuilt only when `pieces` changed. Every
     /// peer refills at once after a seek; all of them share one scan.
     pub(crate) fn wanted_pieces(&self) -> Arc<WantedPieces> {
@@ -598,7 +507,6 @@ impl TorrentInner {
             .then(a.1.total_cmp(&b.1)).then(a.3.cmp(&b.3)).then(a.4.cmp(&b.4)));
         let excess = peers.len() - max;
         for (addr, ..) in peers.into_iter().take(excess) {
-            wt_types::probe::add(wt_types::probe::BURST_DROPS, 1);
             self.drop_conn_addr(addr, "peer burst ended");
         }
     }
@@ -767,7 +675,6 @@ impl TorrentInner {
             && !result.cancelled
             && result.error.is_none()
             && ps.mark_complete().is_ok();
-        wt_types::probe::add(if valid { wt_types::probe::HASH_OK } else { wt_types::probe::HASH_FAIL }, 1);
         if valid {
             self.failed_pieces.lock().remove(&piece);
         } else {
