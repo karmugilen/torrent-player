@@ -226,7 +226,7 @@ impl EngineServer {
                 (peer.download_rate / 1000.0) as u64, peer.rtt.as_millis(), peer.pending_requests,
             )).collect();
             let stats = rec.torrent.stats();
-            crate::jni::log_info(&format!(
+            crate::jni::log_trace(&format!(
                 "wt_second peers={} unchoked={} pending={} utp={utp}/{:.1}MB/s tcp={tcp}/{:.1}MB/s top={} wasted_chunks={} read_mb={} useful_mb={} half_open={} known={} piece={}KiB previews={new_previews}",
                 peers.len(),
                 peers.iter().filter(|peer| !peer.peer_choking).count(),

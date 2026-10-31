@@ -1182,7 +1182,7 @@ impl PlaybackSession {
                 if *bytes >= SEEK_SPRINT_BYTES {
                     wt_types::events::record("seek_2mib", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));
                     let stages = wt_types::events::seek_trace::finish(started.elapsed().as_millis());
-                    crate::jni::log_info(&format!("seek_stages {stages}"));
+                    crate::jni::log_trace(&format!("seek_stages {stages}"));
                     self.seek_sprint = None;
                 }
             }
