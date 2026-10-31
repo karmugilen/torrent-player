@@ -833,6 +833,9 @@ pub struct PlaybackSession {
     first_byte_logged: bool,
     /// Since the last seek: when it began, and bytes delivered so far.
     seek_sprint: Option<(Instant, usize)>,
+    /// When this read began and the previous one returned, for seek timing.
+    read_began: Instant,
+    last_read_end: Instant,
     _fast_core: wt_wire::fast_core::PlaybackHold,
     /// Window and keyframe count last published, and when.
     last_applied: Option<(PlaybackWindow, usize, Instant)>,
@@ -977,6 +980,8 @@ impl PlaybackSession {
             opened_at: Instant::now(),
             first_byte_logged: false,
             seek_sprint: None,
+            read_began: Instant::now(),
+            last_read_end: Instant::now(),
             _fast_core: wt_wire::fast_core::PlaybackHold::new(),
             last_applied: None,
         };
@@ -1081,6 +1086,8 @@ impl PlaybackSession {
             opened_at: Instant::now(),
             first_byte_logged: false,
             seek_sprint: None,
+            read_began: Instant::now(),
+            last_read_end: Instant::now(),
             _fast_core: wt_wire::fast_core::PlaybackHold::new(),
             last_applied: None,
         };
@@ -1104,6 +1111,7 @@ impl PlaybackSession {
     /// Go `defer srv.beginPlaybackRead(rec)()`: idle Direct Play sees the
     /// read as activity for its whole duration, including the wait.
     fn read(&mut self, buf: &mut [u8], offset: i64, partial: bool) -> io::Result<usize> {
+        self.read_began = Instant::now();
         let host = self.host.clone();
         if let Some(host) = &host {
             host.begin_playback_read(&self.torrent_id);
@@ -1112,6 +1120,7 @@ impl PlaybackSession {
         if let Some(host) = &host {
             host.end_playback_read(&self.torrent_id);
         }
+        self.last_read_end = Instant::now();
         result
     }
 
@@ -1162,6 +1171,10 @@ impl PlaybackSession {
             }
             self.cursor = offset + n as i64;
             if let Some((started, bytes)) = &mut self.seek_sprint {
+                wt_types::events::seek_trace::note_read(
+                    self.read_began.elapsed().as_micros() as u64,
+                    self.read_began.saturating_duration_since(self.last_read_end).as_micros() as u64,
+                );
                 *bytes += n;
                 if *bytes >= SEEK_SPRINT_BYTES {
                     wt_types::events::record("seek_2mib", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));

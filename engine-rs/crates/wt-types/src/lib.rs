@@ -393,7 +393,7 @@ pub mod events {
 
     /// Where the latest seek spent its time, in ms since it began.
     pub mod seek_trace {
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
         use std::sync::Mutex;
         use std::time::Instant;
 
@@ -414,12 +414,97 @@ pub mod events {
         static START: Mutex<Option<Instant>> = Mutex::new(None);
         static AT: [AtomicU32; STAGES] = [const { AtomicU32::new(0) }; STAGES];
 
+        /// What the block a read is waiting for was doing.
+        #[derive(Clone, Copy)]
+        pub enum Wait {
+            /// No peer had been asked for it.
+            Free,
+            /// A peer had been asked and had not answered.
+            Held,
+            /// It had arrived and was being written.
+            Writing,
+        }
+
+        const WAITS: usize = 3;
+        /// A gap longer than this between polls is not one continuous wait.
+        const WAIT_POLL_US: u64 = 50_000;
+        static SPRINT: AtomicBool = AtomicBool::new(false);
+        /// Wait time per kind, before and after the player's first bytes.
+        static WAITED_US: [[AtomicU64; WAITS]; 2] =
+            [const { [const { AtomicU64::new(0) }; WAITS] }; 2];
+        static LAST_POLL_US: AtomicU64 = AtomicU64::new(0);
+        static ENGINE_US: AtomicU64 = AtomicU64::new(0);
+        static PLAYER_US: AtomicU64 = AtomicU64::new(0);
+        static READS: AtomicU32 = AtomicU32::new(0);
+        static LONGEST_US: AtomicU64 = AtomicU64::new(0);
+        static WORST_AGE_MS: AtomicU64 = AtomicU64::new(0);
+        static WORST_HOLDER: Mutex<String> = Mutex::new(String::new());
+        static PREVIEW_READS: AtomicU64 = AtomicU64::new(0);
+        static PREVIEWS_AT_BEGIN: AtomicU64 = AtomicU64::new(0);
+
+        /// A read is waiting for a block, between `begin` and `finish`.
+        pub fn sprint_active() -> bool {
+            SPRINT.load(Ordering::Relaxed)
+        }
+
+        /// One poll of a waiting read. The time since the last poll goes to `kind`.
+        pub fn note_wait(kind: Wait) {
+            let Some(started) = START.lock().ok().and_then(|start| *start) else { return };
+            let now = started.elapsed().as_micros() as u64;
+            let since = now.saturating_sub(LAST_POLL_US.swap(now, Ordering::Relaxed));
+            if since < WAIT_POLL_US {
+                let after_first = AT[Stage::Player as usize].load(Ordering::Relaxed) != 0;
+                WAITED_US[usize::from(after_first)][kind as usize].fetch_add(since, Ordering::Relaxed);
+            }
+        }
+
+        /// Longest any waiting read has seen one peer hold its block.
+        pub fn worst_hold_ms() -> u64 {
+            WORST_AGE_MS.load(Ordering::Relaxed)
+        }
+
+        pub fn note_worst_hold(age_ms: u64, holder: String) {
+            WORST_AGE_MS.store(age_ms, Ordering::Relaxed);
+            if let Ok(mut worst) = WORST_HOLDER.lock() {
+                *worst = holder;
+            }
+        }
+
+        /// One read after the first bytes: time inside the engine, and time
+        /// since the last read returned, when the player had what it asked for.
+        pub fn note_read(engine_us: u64, player_us: u64) {
+            ENGINE_US.fetch_add(engine_us, Ordering::Relaxed);
+            PLAYER_US.fetch_add(player_us, Ordering::Relaxed);
+            READS.fetch_add(1, Ordering::Relaxed);
+            LONGEST_US.fetch_max(engine_us, Ordering::Relaxed);
+        }
+
+        pub fn note_preview_read() {
+            PREVIEW_READS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        pub fn preview_reads() -> u64 {
+            PREVIEW_READS.load(Ordering::Relaxed)
+        }
+
         pub fn begin() {
             if let Ok(mut start) = START.lock() {
                 *start = Some(Instant::now());
                 for stage in &AT {
                     stage.store(0, Ordering::Relaxed);
                 }
+                for waited in WAITED_US.iter().flatten() {
+                    waited.store(0, Ordering::Relaxed);
+                }
+                for total in [&LAST_POLL_US, &ENGINE_US, &PLAYER_US, &LONGEST_US, &WORST_AGE_MS] {
+                    total.store(0, Ordering::Relaxed);
+                }
+                READS.store(0, Ordering::Relaxed);
+                PREVIEWS_AT_BEGIN.store(preview_reads(), Ordering::Relaxed);
+                if let Ok(mut worst) = WORST_HOLDER.lock() {
+                    worst.clear();
+                }
+                SPRINT.store(true, Ordering::Relaxed);
                 ARMED.store(true, Ordering::Relaxed);
             }
         }
@@ -447,13 +532,25 @@ pub mod events {
         /// stage had not happened yet.
         pub fn finish(sprint_ms: u128) -> String {
             ARMED.store(false, Ordering::Relaxed);
+            SPRINT.store(false, Ordering::Relaxed);
             let show = |stage: Stage| match AT[stage as usize].load(Ordering::Relaxed) {
                 0 => "-".to_string(),
                 ms => format!("{ms}ms"),
             };
+            let ms = |us: &AtomicU64| us.load(Ordering::Relaxed) / 1000;
+            let waits = |part: usize| {
+                let [free, held, writing] = &WAITED_US[part];
+                format!("free={}ms held={}ms writing={}ms", ms(free), ms(held), ms(writing))
+            };
             let line = format!(
-                "request={} block={} verified={} player={} 2mib={sprint_ms}ms",
+                "request={} block={} verified={} player={} 2mib={sprint_ms}ms | before_first {} | after_first engine={}ms player_idle={}ms reads={} longest={}ms {} | worst_hold={}ms {} | previews={}",
                 show(Stage::Request), show(Stage::Block), show(Stage::Verified), show(Stage::Player),
+                waits(0),
+                ms(&ENGINE_US), ms(&PLAYER_US), READS.load(Ordering::Relaxed), ms(&LONGEST_US),
+                waits(1),
+                WORST_AGE_MS.load(Ordering::Relaxed),
+                WORST_HOLDER.lock().map(|worst| worst.clone()).unwrap_or_default(),
+                preview_reads().saturating_sub(PREVIEWS_AT_BEGIN.load(Ordering::Relaxed)),
             );
             super::record("seek_stages", line.clone());
             line

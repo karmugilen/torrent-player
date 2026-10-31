@@ -196,11 +196,56 @@ impl EngineServer {
         self.apply_ghost_observation(&mut state, now, observation, pro);
     }
 
+    /// One line a second while a video is open: the swarm behind a slow moment.
+    fn log_playback_second(&self, previous_previews: &mut u64) {
+        let previews = wt_types::events::seek_trace::preview_reads();
+        let new_previews = previews.saturating_sub(*previous_previews);
+        *previous_previews = previews;
+        for rec in self.records.read().values() {
+            let rec = rec.read();
+            if rec.paused || rec.torrent.closed() {
+                continue;
+            }
+            let mut peers = rec.torrent.peer_conns();
+            if peers.is_empty() {
+                continue;
+            }
+            peers.sort_by(|a, b| b.download_rate.total_cmp(&a.download_rate));
+            let (mut utp, mut utp_rate, mut tcp, mut tcp_rate) = (0, 0.0, 0, 0.0);
+            for peer in &peers {
+                if matches!(peer.transport, wt_types::Transport::Utp) {
+                    utp += 1;
+                    utp_rate += peer.download_rate;
+                } else {
+                    tcp += 1;
+                    tcp_rate += peer.download_rate;
+                }
+            }
+            let top: Vec<_> = peers.iter().take(4).map(|peer| format!(
+                "{}KB/s@{}ms/{}",
+                (peer.download_rate / 1000.0) as u64, peer.rtt.as_millis(), peer.pending_requests,
+            )).collect();
+            let stats = rec.torrent.stats();
+            crate::jni::log_info(&format!(
+                "wt_second peers={} unchoked={} pending={} utp={utp}/{:.1}MB/s tcp={tcp}/{:.1}MB/s top={} wasted_chunks={} useful_chunks={} half_open={} known={} piece={}KiB previews={new_previews}",
+                peers.len(),
+                peers.iter().filter(|peer| !peer.peer_choking).count(),
+                peers.iter().map(|peer| peer.pending_requests).sum::<usize>(),
+                utp_rate / 1e6, tcp_rate / 1e6,
+                top.join(","),
+                stats.conn_stats.chunks_read_wasted, stats.conn_stats.chunks_read_useful,
+                stats.half_open_peers, stats.pending_peers,
+                rec.torrent.info().map_or(0, |info| info.piece_length / 1024),
+            ));
+        }
+    }
+
     /// One weakly-owned task shares the existing one-second telemetry clock.
     pub(crate) fn start_policy_sampler(server: &Arc<Self>) {
         let weak = Arc::downgrade(server);
         server.client.inner.tokio_handle.spawn(async move {
             let mut previous = None;
+            let mut previous_previews = 0;
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let Some(server) = weak.upgrade() else {
@@ -210,6 +255,9 @@ impl EngineServer {
                     break;
                 }
                 let now = Instant::now();
+                if wt_wire::fast_core::playback_streams() > 0 {
+                    server.log_playback_second(&mut previous_previews);
+                }
                 server.sample_transfer_rates(now);
                 server.ghost_mode_tick(now);
                 server.ghost_pro_mode_tick(now);

@@ -160,6 +160,7 @@ impl PreviewReader {
     /// `piece_length == 0`, skips admission and only enforces the soft
     /// remaining-budget counter used by the stub reader path.
     pub fn read_at(&self, buf: &mut [u8], offset: i64) -> std::io::Result<usize> {
+        wt_types::events::seek_trace::note_preview_read();
         if self.closed.load(Ordering::SeqCst) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
