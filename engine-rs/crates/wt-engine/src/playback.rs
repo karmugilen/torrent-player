@@ -1000,6 +1000,7 @@ impl PlaybackSession {
             let now = Instant::now();
             sess.seek_started = Some(now);
             wt_types::events::seek_trace::begin();
+            sess.trace_seek_target(resume_offset, resume_offset - resumed_at);
             sess.scrubbing = true;
             sess.last_scrub = Some(now);
         }
@@ -1288,6 +1289,7 @@ impl PlaybackSession {
                 self.focus_pending = true;
                 self.seek_started = Some(now);
                 wt_types::events::seek_trace::begin();
+                self.trace_seek_target(offset, delta);
                 self.scrubbing = true;
                 self.last_scrub = Some(now);
                 refocus = true;
@@ -1528,6 +1530,48 @@ impl PlaybackSession {
                 host.refocus_requests(&self.torrent_id);
             }
         }
+    }
+
+    /// Seek timing: was the place this seek landed already fetched, and if not,
+    /// was the keyframe prefetch going to fetch it?
+    fn trace_seek_target(&self, offset: i64, jump: i64) {
+        let Some(host) = &self.host else { return };
+        if self.piece_length <= 0 {
+            return;
+        }
+        let piece = ((self.torrent_offset + offset) / self.piece_length) as u32;
+        let plan = self.coordinator.inner.lock().seek_pieces.get(&self.file_index).cloned();
+        let plan = plan.as_ref().and_then(|pieces| pieces.get());
+        let cached = host.piece_complete(&self.torrent_id, piece);
+        let planned = plan.is_some_and(|plan| plan.pieces.contains(&piece));
+        let state = match (cached, planned) {
+            (true, true) => "cached_keyframe",
+            (true, false) => "cached",
+            (false, true) => "planned_not_fetched",
+            (false, false) => "not_planned",
+        };
+        let window = if self.window.urgent.contains(piece) {
+            "urgent"
+        } else if self.window.readahead.contains(piece) {
+            "readahead"
+        } else if self.window.lookahead.contains(piece) {
+            "lookahead"
+        } else {
+            "none"
+        };
+        let prefetch = plan.map_or_else(|| "no_index".to_string(), |plan| {
+            let fetched = plan.pieces.iter().filter(|&&p| host.piece_complete(&self.torrent_id, p)).count();
+            let on_keyframe = plan.offsets.binary_search(&offset).is_ok();
+            format!(
+                "fetched={fetched}/{} keyframes={} on_keyframe={on_keyframe}",
+                plan.pieces.len(), plan.offsets.len(),
+            )
+        });
+        let ram_mib = host.playback_cache_budget(&self.torrent_id).map_or(0, |bytes| bytes >> 20);
+        wt_types::events::seek_trace::note_target(format!(
+            "target={state} window={window} jump={}MiB {prefetch} ram={ram_mib}MiB",
+            jump >> 20,
+        ));
     }
 
     /// Once per file, after opening: read the video's index in the background

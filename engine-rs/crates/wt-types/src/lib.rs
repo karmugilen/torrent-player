@@ -441,6 +441,14 @@ pub mod events {
         static WORST_HOLDER: Mutex<String> = Mutex::new(String::new());
         static PREVIEW_READS: AtomicU64 = AtomicU64::new(0);
         static PREVIEWS_AT_BEGIN: AtomicU64 = AtomicU64::new(0);
+        static TARGET: Mutex<String> = Mutex::new(String::new());
+
+        /// What the seek was aiming at when it began.
+        pub fn note_target(target: String) {
+            if let Ok(mut current) = TARGET.lock() {
+                *current = target;
+            }
+        }
 
         /// A read is waiting for a block, between `begin` and `finish`.
         pub fn sprint_active() -> bool {
@@ -504,6 +512,9 @@ pub mod events {
                 if let Ok(mut worst) = WORST_HOLDER.lock() {
                     worst.clear();
                 }
+                if let Ok(mut target) = TARGET.lock() {
+                    target.clear();
+                }
                 SPRINT.store(true, Ordering::Relaxed);
                 ARMED.store(true, Ordering::Relaxed);
             }
@@ -543,7 +554,7 @@ pub mod events {
                 format!("free={}ms held={}ms writing={}ms", ms(free), ms(held), ms(writing))
             };
             let line = format!(
-                "request={} block={} verified={} player={} 2mib={sprint_ms}ms | before_first {} | after_first engine={}ms player_idle={}ms reads={} longest={}ms {} | worst_hold={}ms {} | previews={}",
+                "request={} block={} verified={} player={} 2mib={sprint_ms}ms | before_first {} | after_first engine={}ms player_idle={}ms reads={} longest={}ms {} | worst_hold={}ms {} | previews={} | {}",
                 show(Stage::Request), show(Stage::Block), show(Stage::Verified), show(Stage::Player),
                 waits(0),
                 ms(&ENGINE_US), ms(&PLAYER_US), READS.load(Ordering::Relaxed), ms(&LONGEST_US),
@@ -551,6 +562,7 @@ pub mod events {
                 WORST_AGE_MS.load(Ordering::Relaxed),
                 WORST_HOLDER.lock().map(|worst| worst.clone()).unwrap_or_default(),
                 preview_reads().saturating_sub(PREVIEWS_AT_BEGIN.load(Ordering::Relaxed)),
+                TARGET.lock().map(|target| target.clone()).unwrap_or_default(),
             );
             super::record("seek_stages", line.clone());
             line
