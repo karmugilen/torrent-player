@@ -224,7 +224,7 @@ const WANTED_MAX_AGE: Duration = Duration::from_secs(1);
 /// share one count instead of each walking the swarm's outstanding requests.
 pub(crate) const REQUEST_COUNTS_MAX_AGE: Duration = Duration::from_millis(25);
 /// How long a peer start burst lasts before trimming to the configured limit.
-pub const PEER_BURST_FOR: Duration = Duration::from_secs(40);
+pub const PEER_BURST_FOR: Duration = Duration::from_secs(10);
 /// After a seek, the first blocks are hedged without waiting this long.
 pub const SEEK_HEDGE_WINDOW: Duration = Duration::from_secs(2);
 /// Least time between swarm wakes caused by peers claiming playhead blocks.
