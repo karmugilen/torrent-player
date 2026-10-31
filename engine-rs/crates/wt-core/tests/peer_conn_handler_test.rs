@@ -11,12 +11,8 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, Notify};
 use wt_core::choking::ChokeConfig;
 use wt_core::conn::{ConnHandle, ConnHandler};
-use wt_core::peer_conn::{PeerConnHandler, PeerKey, PeerTorrent, WebtorPeerSnap};
-use wt_core::strategy::{
-    PieceRequestOrder, PieceRequestOrderKey, PieceRequestOrderState, RequestTorrentSnapshot,
-    StrategyLimits,
-};
-use wt_core::tuning::SeekTuning;
+use wt_core::peer_conn::{PeerConnHandler, PeerKey, PeerTorrent};
+use wt_core::sched::{Pick, PickPeer, Take};
 use wt_core::{PiecePriority, RequestIndex, Result};
 use wt_types::{InfoHash, PeerSource, Transport};
 use wt_wire::handshake::default_peer_extension_bytes;
@@ -32,7 +28,6 @@ const CHUNK: u32 = 16 * 1024;
 
 struct FakeTorrent {
     dirty: Mutex<HashSet<RequestIndex>>,
-    requested: Mutex<HashSet<RequestIndex>>,
     complete: Mutex<HashSet<u32>>,
     written: Mutex<HashMap<(u32, u32), Vec<u8>>>,
     assignments: Mutex<HashMap<RequestIndex, (PeerKey, Instant)>>,
@@ -46,7 +41,6 @@ struct FakeTorrent {
     pex_connected: Mutex<Vec<SocketAddr>>,
     dht_nodes: Mutex<Vec<SocketAddr>>,
     listen_ports: Mutex<Vec<(SocketAddr, u16)>>,
-    peer_pieces: Mutex<HashMap<PeerKey, HashSet<u32>>>,
     bumps: AtomicU32,
     request_contexts: AtomicU32,
     wanted: AtomicBool,
@@ -60,7 +54,6 @@ impl FakeTorrent {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             dirty: Mutex::new(HashSet::new()),
-            requested: Mutex::new(HashSet::new()),
             complete: Mutex::new(HashSet::new()),
             written: Mutex::new(HashMap::new()),
             assignments: Mutex::new(HashMap::new()),
@@ -74,7 +67,6 @@ impl FakeTorrent {
             pex_connected: Mutex::new(Vec::new()),
             dht_nodes: Mutex::new(Vec::new()),
             listen_ports: Mutex::new(Vec::new()),
-            peer_pieces: Mutex::new(HashMap::new()),
             bumps: AtomicU32::new(0),
             request_contexts: AtomicU32::new(0),
             wanted: AtomicBool::new(true),
@@ -139,12 +131,6 @@ impl PeerTorrent for FakeTorrent {
     fn mark_chunk_dirty(&self, req: RequestIndex) {
         self.dirty.lock().insert(req);
     }
-    fn clear_chunk_requested(&self, req: RequestIndex) {
-        self.requested.lock().remove(&req);
-    }
-    fn mark_chunk_requested(&self, req: RequestIndex) {
-        self.requested.lock().insert(req);
-    }
     fn piece_all_dirty(&self, piece: u32) -> bool {
         let begin = (piece as u64 * PIECE_LEN as u64 / CHUNK as u64) as u32;
         let end = begin + (PIECE_LEN as u32 / CHUNK);
@@ -177,111 +163,64 @@ impl PeerTorrent for FakeTorrent {
     fn request_when(&self, req: RequestIndex) -> Option<Instant> {
         self.assignments.lock().get(&req).map(|(_, t)| *t)
     }
-    fn assign_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) {
-        self.assignments.lock().insert(req, (peer, when));
-    }
     fn clear_assignment(&self, req: RequestIndex) {
         self.assignments.lock().remove(&req);
     }
-    fn desired_request_context(&self) -> (RequestTorrentSnapshot, PieceRequestOrder) {
+    fn claim_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) -> bool {
+        let mut assignments = self.assignments.lock();
+        if assignments.get(&req).is_some_and(|&(owner, _)| owner != peer) {
+            return false;
+        }
+        assignments.insert(req, (peer, when));
+        true
+    }
+    fn pick_blocks(&self, peer: &PickPeer<'_>, want: usize) -> Pick {
         self.request_contexts.fetch_add(1, Ordering::Relaxed);
+        let mut pick = Pick::default();
+        if !self.wanted.load(Ordering::Relaxed) {
+            return pick;
+        }
         let chunks_per = (PIECE_LEN as u32) / CHUNK;
-        let mut undirtied = HashMap::new();
-        let mut piece_of = HashMap::new();
         let dirty = self.dirty.lock();
-        for p in 0..NUM_PIECES {
-            let mut reqs = Vec::new();
-            let begin = p * chunks_per;
-            for r in begin..begin + chunks_per {
-                piece_of.insert(r, p);
-                if !dirty.contains(&r) {
-                    reqs.push(r);
+        let assignments = self.assignments.lock();
+        for piece in 0..NUM_PIECES {
+            if !peer.have_all && !peer.pieces.contains(&piece) {
+                continue;
+            }
+            pick.interested = true;
+            if peer.choking && !peer.allowed_fast.contains(&piece) {
+                continue;
+            }
+            for req in piece * chunks_per..(piece + 1) * chunks_per {
+                if pick.blocks.len() < want
+                    && !dirty.contains(&req)
+                    && !peer.outstanding.contains(&req)
+                    && !peer.cancelled.contains(&req)
+                    && assignments.get(&req).is_none_or(|&(owner, _)| owner == peer.key)
+                {
+                    pick.blocks.push((req, Take::Free));
                 }
             }
-            undirtied.insert(p, reqs);
         }
-        let mut assignments = HashMap::new();
-        for (r, (peer, when)) in self.assignments.lock().iter() {
-            assignments.insert(
-                *r,
-                wt_core::strategy::PeerRequestAssignment {
-                    peer: *peer,
-                    when: *when,
-                    peer_outstanding: 1,
-                },
-            );
-        }
-        let snap = RequestTorrentSnapshot {
-            info_hash: self.info_hash,
-            piece_length: PIECE_LEN,
-            num_pieces: NUM_PIECES,
-            piece_requestable: vec![self.wanted.load(Ordering::Relaxed); NUM_PIECES as usize],
-            piece_count_unverified: vec![true; NUM_PIECES as usize],
-            undirtied_by_piece: undirtied,
-            piece_of_request: piece_of,
-            assignments,
-            focus_request: Some(0),
-            has_active_webseed_requests: false,
-            limits: StrategyLimits::default(),
-            wanted_pieces: NUM_PIECES,
-        };
-        let mut order = PieceRequestOrder::with_capacity(NUM_PIECES as usize);
-        for i in 0..NUM_PIECES {
-            order.add(
-                PieceRequestOrderKey {
-                    info_hash: self.info_hash,
-                    index: i,
-                },
-                PieceRequestOrderState {
-                    priority: PiecePriority::Now,
-                    availability: 1,
-                    partial: false,
-                },
-            );
-        }
-        (snap, order)
+        pick
     }
 
     fn request_focus_index(&self) -> Option<RequestIndex> {
         self.focused.load(Ordering::Relaxed).then_some(0)
     }
-    fn urgent_steal_after(&self) -> Duration {
-        Duration::ZERO
-    }
-    fn seek_tuning(&self) -> SeekTuning {
-        SeekTuning::default()
-    }
     fn hedge_peer(&self, req: RequestIndex) -> Option<PeerKey> {
         self.hedges.lock().get(&req).copied()
     }
-    fn set_hedge_peer(&self, req: RequestIndex, peer: PeerKey) {
-        self.hedges.lock().insert(req, peer);
+    fn claim_hedge(&self, req: RequestIndex, peer: PeerKey) -> bool {
+        let mut hedges = self.hedges.lock();
+        if hedges.contains_key(&req) {
+            return false;
+        }
+        hedges.insert(req, peer);
+        true
     }
     fn clear_hedge(&self, req: RequestIndex) {
         self.hedges.lock().remove(&req);
-    }
-    fn peer_has_piece(&self, peer: PeerKey, piece: u32) -> bool {
-        self.peer_pieces
-            .lock()
-            .get(&peer)
-            .map(|s| s.contains(&piece))
-            .unwrap_or(false)
-    }
-    fn webtor_peer_snap(&self, peer: PeerKey) -> Option<WebtorPeerSnap> {
-        Some(WebtorPeerSnap {
-            key: peer,
-            download_rate_bps: 0.0,
-            rtt: Duration::from_millis(200),
-            queued: 0,
-            cancelled: 0,
-            nominal_max: 64,
-            peer_choking: false,
-            closed: false,
-            last_useful: None,
-        })
-    }
-    fn connected_peer_keys(&self) -> Vec<PeerKey> {
-        self.peer_pieces.lock().keys().copied().collect()
     }
 
     fn on_metadata_data(&self, piece: u32, total_size: u32, data: Bytes) -> Result<bool> {
@@ -866,7 +805,7 @@ fn stolen_request_is_cancelled_on_the_previous_peer_without_erasing_new_owner() 
     }).unwrap();
     let request = index * 2 + begin / CHUNK;
     let new_owner = tor.peer_key("127.0.0.1:4994".parse().unwrap());
-    tor.assign_request(request, new_owner, Instant::now());
+    tor.assignments.lock().insert(request, (new_owner, Instant::now()));
     peer.on_wake(&handle);
     assert!(drain(&mut rx).iter().any(|m| matches!(m,
         Message::Cancel { index: i, begin: b, .. } if *i == index && *b == begin)),

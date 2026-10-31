@@ -1,33 +1,5 @@
-//! `PeerTorrent` for [`TorrentInner`] (and ReaderHost ownership note).
-//!
-//! ## Status (pause checkpoint)
-//!
-//! Implements [`PeerTorrent`] against **currently available** `TorrentInner`
-//! fields so `wt-core` compiles. Full `PieceBook` / `StorageGlue` / hasher /
-//! metadata / PEX wiring is sketched in comments and helpers; enable once
-//! agy-2 adds the `pub(crate)` fields listed in `HANDOFF-grok-9.md`.
-//!
-//! `impl ReaderHost for TorrentInner` currently lives in `torrent.rs` (agy-2).
-//! On resume, delete that impl and restore the book-backed ReaderHost from
-//! git history / HANDOFF — ownership belongs here.
-//!
-//! ## Method coverage (PeerTorrent)
-//!
-//! | Group | Status |
-//! |---|---|
-//! | Info / lengths / flags | full |
-//! | Chunk dirty via `dirty_chunks` | full |
-//! | write/read via `storage` | full |
-//! | Assignments via `request_state` | full (PeerKey ↔ addr) |
-//! | Hedges via `hedges` | full |
-//! | desired_request_context | full (ephemeral order) |
-//! | peer_has_piece / webtor snap | full (via `conns`) |
-//! | queue_piece_hash | TODO no pool field — sets `checking` on PieceEntry |
-//! | metadata / PEX / DHT lists | TODO stubs (compile-safe) |
-//! | choke_config | default + live disallow/seed flags |
-//! | ReaderHost | deferred — see `torrent.rs` until fields land |
+//! `PeerTorrent` for [`TorrentInner`], and its `ReaderHost`.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -38,15 +10,10 @@ use wt_types::{PieceIndex, PiecePriority, RequestIndex, BLOCK_SIZE};
 use wt_wire::ext::PexMsg;
 
 use crate::choking::ChokeConfig;
-use crate::peer_conn::{PeerKey, PeerTorrent, WebtorPeerSnap};
+use crate::peer_conn::{PeerKey, PeerTorrent};
 use crate::picker::req_index_from_piece_and_offset;
 use crate::reader::{reader_piece_priorities, PieceRange, ReaderHost};
-use crate::strategy::{
-    PeerRequestAssignment, PieceRequestOrder, PieceRequestOrderKey, PieceRequestOrderState,
-    RequestTorrentSnapshot, StrategyLimits,
-};
 use crate::torrent::TorrentInner;
-use crate::tuning::{current_seek_tuning, SeekTuning};
 use crate::{CoreError, Result};
 
 /// Stable PeerKey derived from a socket address.
@@ -207,8 +174,6 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn begin_chunk_write(&self, req: RequestIndex) -> bool {
-        // Complete/hashing pieces have every block dirty; checked unlocked
-        // first so only `pending → dirty` locks nest below.
         let piece = self.info.read().as_ref().map(|info| {
             crate::picker::block_coord_from_req_index(req, info.piece_length, info.total_length())
                 .piece
@@ -221,11 +186,15 @@ impl PeerTorrent for TorrentInner {
         }) {
             return false;
         }
-        let mut pending = self.pending_chunk_writes.lock();
-        if pending.contains(&req) || self.dirty_chunks.contains(req) {
+        if self.dirty_chunks.contains(req) || !self.blocks.begin_write(req) {
             return false;
         }
-        pending.insert(req)
+        // The writer may have finished between the two checks above.
+        if self.dirty_chunks.contains(req) {
+            self.blocks.end_write(req);
+            return false;
+        }
+        true
     }
 
     fn finish_chunk_write(&self, req: RequestIndex, written: bool) {
@@ -234,7 +203,7 @@ impl PeerTorrent for TorrentInner {
         if written {
             self.mark_chunk_dirty(req);
         }
-        self.pending_chunk_writes.lock().remove(&req);
+        self.blocks.end_write(req);
     }
 
     fn any_wanted_incomplete(&self) -> bool {
@@ -260,130 +229,6 @@ impl PeerTorrent for TorrentInner {
                 .is_none_or(|c| c.1 < PiecePriority::Readahead)
     }
 
-    fn background_pick(
-        &self,
-        peer: &crate::peer_conn::BackgroundPeer<'_>,
-        want: usize,
-    ) -> crate::peer_conn::BackgroundPick {
-        /// How soon a block handed back by a choke or a dropped peer is seen.
-        const REWIND_EVERY: Duration = Duration::from_millis(250);
-        let mut pick = crate::peer_conn::BackgroundPick::default();
-        let Some(info) = self.info.read().clone() else {
-            return pick;
-        };
-        let (piece_length, total_length) = (info.piece_length, info.total_length());
-        let wanted = self.wanted_pieces();
-        pick.wanted_bytes = i64::from(wanted.count).saturating_mul(piece_length);
-        let writing = self.pending_chunk_writes.lock().clone();
-        let assignments = self.assignments.read();
-        let live = self.request_state.read();
-        let holder = |req: RequestIndex| {
-            assignments
-                .get(&req)
-                .map(|&(owner, _)| owner)
-                .or_else(|| live.get(&req).map(|a| peer_key_from_addr(a.peer)))
-        };
-
-        // The very end is small enough to read whole, and idle peers need to
-        // know what the others hold to take a second copy.
-        if pick.wanted_bytes <= crate::peer_conn::ENDGAME_BYTES {
-            'endgame: for &(index, _, _, _, _) in &wanted.candidates {
-                if !peer.have_all && !peer.pieces.contains(&index) {
-                    continue;
-                }
-                pick.interested = true;
-                if peer.choking && !peer.allowed_fast.contains(&index) {
-                    continue;
-                }
-                let (begin, end) = crate::picker::piece_req_index_range(index, piece_length, total_length);
-                for req in begin..end {
-                    if self.dirty_chunks.contains(req) || writing.contains(&req) || peer.cancelled.contains(&req) {
-                        continue;
-                    }
-                    match holder(req) {
-                        Some(owner) if owner == peer.key => {}
-                        Some(_) => {
-                            if pick.held.len() < want {
-                                pick.held.push(req);
-                            }
-                        }
-                        None => {
-                            pick.free.push(req);
-                            if pick.free.len() >= want.max(1) {
-                                break 'endgame;
-                            }
-                        }
-                    }
-                }
-            }
-            return pick;
-        }
-
-        let open_limit = (crate::strategy::SAVED_MAX_UNVERIFIED_BYTES / piece_length.max(1))
-            .max(crate::strategy::SAVED_OPEN_MIN_PIECES) as usize;
-        let mut queue = self.saved_queue.lock();
-        let queue = &mut *queue;
-        let rewind = queue.next.len() != wanted.num_pieces as usize
-            || queue.rewound_at.is_none_or(|at| at.elapsed() >= REWIND_EVERY);
-        if rewind {
-            queue.next.clear();
-            queue.next.resize(wanted.num_pieces as usize, 0);
-            queue.rewound_at = Some(Instant::now());
-        }
-        if rewind || queue.generation != wanted.generation {
-            queue.generation = wanted.generation;
-            queue.open = wanted.checking
-                + wanted.candidates.iter()
-                    .filter(|c| c.2 || queue.next.get(c.0 as usize).is_some_and(|&n| n > 0))
-                    .count();
-        }
-        'pieces: for &(index, _, partial, _, _) in &wanted.candidates {
-            if !peer.have_all && !peer.pieces.contains(&index) {
-                continue;
-            }
-            pick.interested = true;
-            if want == 0 {
-                break;
-            }
-            if peer.choking && !peer.allowed_fast.contains(&index) {
-                if peer.allowed_fast.is_empty() {
-                    break;
-                }
-                continue;
-            }
-            let Some(&from) = queue.next.get(index as usize) else {
-                continue;
-            };
-            // RAM is spoken for: finish what is open. A peer about to run dry
-            // may still start a piece, so slow holders never idle a fast peer.
-            let fresh = !partial && from == 0;
-            if fresh && queue.open >= open_limit && !peer.starving {
-                break;
-            }
-            let (begin, end) = crate::picker::piece_req_index_range(index, piece_length, total_length);
-            let taken = pick.free.len();
-            let mut at = begin + from;
-            while at < end && pick.free.len() < want {
-                let req = at;
-                at += 1;
-                if !peer.cancelled.contains(&req)
-                    && !self.dirty_chunks.contains(req)
-                    && !writing.contains(&req)
-                    && holder(req).is_none()
-                {
-                    pick.free.push(req);
-                }
-            }
-            queue.next[index as usize] = at - begin;
-            if fresh && pick.free.len() > taken {
-                queue.open += 1;
-            }
-            if pick.free.len() >= want {
-                break 'pieces;
-            }
-        }
-        pick
-    }
 
     fn read_chunk_in_memory(&self, piece: PieceIndex, begin: u32, length: u32) -> Option<Result<Bytes>> {
         let info = self.info.read().clone()?;
@@ -406,9 +251,7 @@ impl PeerTorrent for TorrentInner {
         })
     }
 
-    fn clear_chunk_requested(&self, _req: RequestIndex) {}
 
-    fn mark_chunk_requested(&self, _req: RequestIndex) {}
 
     fn piece_all_dirty(&self, piece: PieceIndex) -> bool {
         let info = self.info.read();
@@ -426,8 +269,22 @@ impl PeerTorrent for TorrentInner {
         }
     }
 
+    fn pick_blocks(&self, peer: &crate::sched::PickPeer<'_>, want: usize) -> crate::sched::Pick {
+        TorrentInner::pick_blocks(self, peer, want)
+    }
+
+    fn register_live(&self, live: Arc<crate::sched::PeerLive>) {
+        self.live_peers.write().push(live);
+    }
+
+    fn unregister_live(&self, live: &Arc<crate::sched::PeerLive>) {
+        self.live_peers.write().retain(|other| !Arc::ptr_eq(other, live));
+    }
+
     fn focus_block_claimed(&self) {
-        if !self.seek_hedge_open() {
+        if !self.seek_hedge.lock()
+            .is_some_and(|(at, left)| left > 0 && at.elapsed() < crate::torrent::SEEK_HEDGE_WINDOW)
+        {
             return;
         }
         let now = self.warm_epoch.elapsed().as_millis() as u64;
@@ -441,6 +298,7 @@ impl PeerTorrent for TorrentInner {
             self.nudge_urgent_requests();
         }
     }
+
 
     fn may_warm(&self) -> bool {
         if TorrentInner::request_focus_index(self).is_none() {
@@ -468,33 +326,15 @@ impl PeerTorrent for TorrentInner {
         requests: &std::collections::HashSet<RequestIndex>,
         peer: PeerKey,
     ) -> Vec<RequestIndex> {
-        // Same lock order as claim_request and claim_hedge, one pass per table
-        // rather than a round of locks per request.
-        let mut displaced: Vec<_> = {
-            let assignments = self.assignments.read();
-            let live = self.request_state.read();
-            requests
-                .iter()
-                .copied()
-                .filter(|req| match assignments.get(req) {
-                    Some(&(owner, _)) => owner != peer,
-                    None => live.get(req).map(|a| peer_key_from_addr(a.peer)) != Some(peer),
-                })
-                .collect()
-        };
-        if !displaced.is_empty() {
-            let hedge_peers = self.hedge_peers.read();
-            let hedges = self.hedges.read();
-            displaced.retain(|req| {
-                hedge_peers
-                    .get(req)
-                    .copied()
-                    .or_else(|| hedges.get(req).map(|a| peer_key_from_addr(*a)))
-                    != Some(peer)
-            });
-        }
-        displaced
+        // A block someone else delivered is displaced too: cancelling it saves
+        // the duplicate on its way.
+        requests
+            .iter()
+            .copied()
+            .filter(|&req| self.dirty_chunks.contains(req) || !self.blocks.holds(req, peer))
+            .collect()
     }
+
 
     fn note_peer_piece(&self, peer: PeerKey, piece: PieceIndex, has: bool) {
         let mut peers = self.peer_pieces.write();
@@ -680,99 +520,39 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn requesting_peer(&self, req: RequestIndex) -> Option<PeerKey> {
-        if let Some((peer, _)) = self.assignments.read().get(&req) {
-            return Some(*peer);
-        }
-        self.request_state
-            .read()
-            .get(&req)
-            .map(|a| peer_key_from_addr(a.peer))
+        self.blocks.owner(req).map(|(peer, _)| peer)
     }
+
 
     fn request_when(&self, req: RequestIndex) -> Option<Instant> {
-        if let Some((_, when)) = self.assignments.read().get(&req) {
-            return Some(*when);
-        }
-        self.request_state.read().get(&req).map(|a| a.when)
+        self.blocks.owner(req).map(|(_, when)| when)
     }
 
-    fn assign_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) {
-        self.assignments.write().insert(req, (peer, when));
-        if let Some(addr) = addr_for_key(self, peer) {
-            self.request_state.write().insert(
-                req,
-                crate::picker::ActiveRequest {
-                    peer: addr,
-                    when,
-                    cancelled: false,
-                },
-            );
-        }
-    }
+
 
     fn clear_assignment(&self, req: RequestIndex) {
-        let mut assignments = self.assignments.write();
-        assignments.remove(&req);
-        self.request_state.write().remove(&req);
+        self.blocks.clear_owner(req);
     }
+
 
     fn claim_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) -> bool {
-        let addr = addr_for_key(self, peer);
-        let mut assignments = self.assignments.write();
-        let writing = self.pending_chunk_writes.lock().contains(&req);
-        if writing
-            || assignments
-                .get(&req)
-                .is_some_and(|&(owner, _)| owner != peer)
-            || self.dirty_chunks.contains(req)
-        {
-            return false;
-        }
-        assignments.insert(req, (peer, when));
-        if let Some(addr) = addr {
-            self.request_state.write().insert(
-                req,
-                crate::picker::ActiveRequest {
-                    peer: addr,
-                    when,
-                    cancelled: false,
-                },
-            );
-        }
-        true
+        !self.blocks.is_writing(req)
+            && !self.dirty_chunks.contains(req)
+            && self.blocks.claim(req, peer, when)
     }
+
 
     fn release_request(&self, req: RequestIndex, peer: PeerKey) {
-        let mut assignments = self.assignments.write();
-        if assignments
-            .get(&req)
-            .is_some_and(|&(owner, _)| owner == peer)
-        {
-            assignments.remove(&req);
-            self.request_state.write().remove(&req);
-        }
+        self.blocks.release(req, peer);
     }
 
-    fn desired_request_context(&self) -> (RequestTorrentSnapshot, PieceRequestOrder) {
-        self.build_request_context(None)
-    }
 
-    fn desired_request_context_for_peer(
-        &self,
-        peer: &crate::strategy::DesiredPeerSnapshot,
-    ) -> (RequestTorrentSnapshot, PieceRequestOrder) {
-        self.build_request_context(Some(peer))
-    }
+
 
     fn request_focus_index(&self) -> Option<RequestIndex> {
         TorrentInner::request_focus_index(self)
     }
 
-    fn seek_hedge_open(&self) -> bool {
-        self.seek_hedge
-            .lock()
-            .is_some_and(|(at, left)| left > 0 && at.elapsed() < crate::torrent::SEEK_HEDGE_WINDOW)
-    }
 
     fn take_seek_hedge(&self) -> bool {
         match &mut *self.seek_hedge.lock() {
@@ -784,16 +564,6 @@ impl PeerTorrent for TorrentInner {
         }
     }
 
-    fn request_times(&self, peer: PeerKey) -> Vec<Instant> {
-        let mut times: Vec<Instant> = self.assignments
-            .read()
-            .values()
-            .filter(|&&(owner, _)| owner == peer)
-            .map(|&(_, at)| at)
-            .collect();
-        times.sort_unstable();
-        times
-    }
 
     fn refund_seek_hedge(&self) {
         if let Some((_, left)) = &mut *self.seek_hedge.lock() {
@@ -801,62 +571,28 @@ impl PeerTorrent for TorrentInner {
         }
     }
 
-    fn urgent_steal_after(&self) -> Duration {
-        // Go `Client.urgentStealAge` from SetUrgentRequestStealing (claudeSeek).
-        // Do not map HOLAfterMs here — that times HOL rescue/hedge only.
-        self.client
-            .read()
-            .upgrade()
-            .map(|c| *c.urgent_steal_after.read())
-            .unwrap_or(Duration::ZERO)
-    }
 
-    fn seek_tuning(&self) -> SeekTuning {
-        current_seek_tuning()
-    }
 
     fn hedge_peer(&self, req: RequestIndex) -> Option<PeerKey> {
-        if let Some(peer) = self.hedge_peers.read().get(&req) {
-            return Some(*peer);
-        }
-        self.hedges.read().get(&req).map(|a| peer_key_from_addr(*a))
+        self.blocks.second(req)
     }
 
-    fn set_hedge_peer(&self, req: RequestIndex, peer: PeerKey) {
-        let addr = addr_for_key(self, peer);
-        let mut peers = self.hedge_peers.write();
-        peers.insert(req, peer);
-        if let Some(addr) = addr {
-            self.hedges.write().insert(req, addr);
-        }
-    }
+
 
     fn claim_hedge(&self, req: RequestIndex, peer: PeerKey) -> bool {
-        let addr = addr_for_key(self, peer);
-        let mut hedges = self.hedge_peers.write();
-        if hedges.contains_key(&req) || self.dirty_chunks.contains(req) {
-            return false;
-        }
-        hedges.insert(req, peer);
-        if let Some(addr) = addr {
-            self.hedges.write().insert(req, addr);
-        }
-        true
+        !self.dirty_chunks.contains(req) && self.blocks.claim_second(req, peer)
     }
+
 
     fn clear_hedge(&self, req: RequestIndex) {
-        let mut peers = self.hedge_peers.write();
-        peers.remove(&req);
-        self.hedges.write().remove(&req);
+        self.blocks.clear_second(req);
     }
 
+
     fn release_hedge(&self, req: RequestIndex, peer: PeerKey) {
-        let mut peers = self.hedge_peers.write();
-        if peers.get(&req) == Some(&peer) {
-            peers.remove(&req);
-            self.hedges.write().remove(&req);
-        }
+        self.blocks.release_second(req, peer);
     }
+
 
     fn record_rescue(&self) {
         self.rescues.fetch_add(1, Ordering::Relaxed);
@@ -866,79 +602,12 @@ impl PeerTorrent for TorrentInner {
         self.hedges_sent.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn peer_has_piece(&self, peer: PeerKey, piece: PieceIndex) -> bool {
-        if self
-            .peer_pieces
-            .read()
-            .get(&peer)
-            .is_some_and(|pieces| pieces.contains(&piece))
-        {
-            return true;
-        }
-        if let Some(snap) = self
-            .peer_snapshots
-            .read()
-            .values()
-            .find(|p| peer_key_from_addr(p.remote_addr) == peer)
-        {
-            if snap.peer_completion >= 1.0 {
-                return true;
-            }
-        }
-        false
-    }
 
-    fn webtor_peer_snap(&self, peer: PeerKey) -> Option<WebtorPeerSnap> {
-        let addr = addr_for_key(self, peer)?;
-        let snapshots = self.peer_snapshots.read();
-        let info = snapshots.get(&addr)?;
-        Some(WebtorPeerSnap {
-            key: peer,
-            download_rate_bps: info.download_rate,
-            rtt: info.rtt,
-            queued: info.queued as u32,
-            cancelled: info.cancelled as u32,
-            nominal_max: info.nominal_max_requests as u32,
-            peer_choking: info.peer_choking,
-            closed: false,
-            last_useful: info
-                .last_useful_data
-                .and_then(|d| Instant::now().checked_sub(d)),
-        })
-    }
 
-    fn connected_peer_keys(&self) -> Vec<PeerKey> {
-        self.conn_handles
-            .read()
-            .keys()
-            .map(|&addr| peer_key_from_addr(addr))
-            .collect()
-    }
 
-    fn arrival_net(&self) -> Option<crate::arrival::ArrivalNet> {
-        Some(self.arrival_model.read().net.clone())
-    }
 
-    fn learn_arrival(&self, sample: crate::arrival::ArrivalSample, actual: f64) {
-        self.arrival_model
-            .write()
-            .on_block_learned(sample.x, sample.estimate, actual);
-    }
 
-    fn register_peer_arrival(
-        &self,
-        peer: PeerKey,
-        state: Arc<parking_lot::RwLock<crate::arrival::PeerArrivalState>>,
-    ) {
-        self.peer_arrivals.write().insert(peer, state);
-    }
 
-    fn peer_arrival(
-        &self,
-        peer: PeerKey,
-    ) -> Option<Arc<parking_lot::RwLock<crate::arrival::PeerArrivalState>>> {
-        self.peer_arrivals.read().get(&peer).cloned()
-    }
 
     fn on_metadata_data(&self, piece: u32, total_size: u32, data: Bytes) -> Result<bool> {
         let verified = {
@@ -1138,9 +807,9 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn on_chunk_received(&self, _peer: PeerKey, req: RequestIndex, _len: usize) {
-        self.clear_assignment(req);
-        self.clear_hedge(req);
+        self.blocks.clear(req);
     }
+
 }
 
 /// Size the availability counters, counting bitfields that arrived before info.
@@ -1173,183 +842,6 @@ pub fn note_peer_piece(t: &TorrentInner, peer: PeerKey, piece: PieceIndex, has: 
 }
 
 impl TorrentInner {
-    fn build_request_context(
-        &self,
-        peer: Option<&crate::strategy::DesiredPeerSnapshot>,
-    ) -> (RequestTorrentSnapshot, PieceRequestOrder) {
-        let info = self.info.read().clone();
-        let piece_length = info.as_ref().map_or(0, |i| i.piece_length);
-        let total_length = info.as_ref().map_or(0, |i| i.total_length());
-        let wanted = self.wanted_pieces();
-        let num_pieces = wanted.num_pieces;
-        let wanted_pieces = wanted.count;
-        let mut requestable = wanted.requestable.clone();
-        let unverified = wanted.unverified.clone();
-        let budget = peer.map_or(0, |peer| {
-            crate::strategy::candidate_budget(
-                peer.nominal_max_requests,
-                current_seek_tuning().bound_candidates,
-            )
-        });
-        let mut usable = 0usize;
-        let mut selected = Vec::new();
-        let mut held = Vec::new();
-        // Blocks mid-write are neither readable nor requestable (Go unpends
-        // them before WriteAt). The set is bounded by concurrent writers.
-        let writing = self.pending_chunk_writes.lock().clone();
-        // Match claim/release lock order. Read the live tables without cloning
-        // the swarm's full outstanding queues into every peer's snapshot.
-        let live_assignments = self.assignments.read();
-        let live_requests = self.request_state.read();
-        // Preserve each holder's full queue length for steal ranking, but
-        // allocate assignment records only for this peer's candidate blocks.
-        let counts = {
-            let mut cached = self.request_counts.lock();
-            match cached.as_ref().filter(|(at, _)| at.elapsed() < crate::torrent::REQUEST_COUNTS_MAX_AGE) {
-                Some((_, counts)) => counts.clone(),
-                None => {
-                    let mut counts = HashMap::<u64, u64>::new();
-                    for request in live_requests.values() {
-                        *counts.entry(peer_key_from_addr(request.peer)).or_default() += 1;
-                    }
-                    let counts = Arc::new(counts);
-                    *cached = Some((Instant::now(), counts.clone()));
-                    counts
-                }
-            }
-        };
-        let dirty = &self.dirty_chunks;
-        let mut interest_hint = false;
-        for &(index, priority, partial, chunks, availability) in &wanted.candidates {
-            if budget > 0 && usable >= budget && priority < PiecePriority::Now {
-                break;
-            }
-            if peer.is_some_and(|peer| !peer.has_piece.get(index as usize).copied().unwrap_or(false)) {
-                continue;
-            }
-            let choked_nonfast = peer.is_some_and(|peer| {
-                peer.peer_choking
-                    && !peer
-                        .peer_allowed_fast
-                        .get(index as usize)
-                        .copied()
-                        .unwrap_or(false)
-            });
-            // One missing non-Fast block is enough to express interest while
-            // choked. Scan allowed-Fast pieces without expanding the rest of
-            // the torrent into blocks on every idle peer's wake.
-            if choked_nonfast && interest_hint {
-                continue;
-            }
-            let (begin, end) =
-                crate::picker::piece_req_index_range(index, piece_length, total_length);
-            let mut requests = Vec::with_capacity(if choked_nonfast { 1 } else { chunks });
-            for req in begin..end {
-                if dirty.contains(req) || writing.contains(&req) {
-                    continue;
-                }
-                let assignment = live_requests
-                    .get(&req)
-                    .map(|request| {
-                        let owner = peer_key_from_addr(request.peer);
-                        PeerRequestAssignment {
-                            peer: owner,
-                            when: request.when,
-                            peer_outstanding: counts.get(&owner).copied().unwrap_or(1),
-                        }
-                    })
-                    .or_else(|| {
-                        live_assignments
-                            .get(&req)
-                            .map(|&(owner, when)| PeerRequestAssignment {
-                                peer: owner,
-                                when,
-                                peer_outstanding: 0,
-                            })
-                    });
-                if let Some(assignment) = assignment {
-                    held.push((req, assignment));
-                }
-                requests.push(req);
-                if let Some(peer) = peer {
-                    if !peer.has_cancelled(req)
-                        && (!peer.peer_choking
-                            || peer
-                                .peer_allowed_fast
-                                .get(index as usize)
-                                .copied()
-                                .unwrap_or(false)
-                            || peer.has_outstanding(req))
-                        && assignment.is_none_or(|a| a.peer == peer.peer_id)
-                    {
-                        usable += 1;
-                    }
-                }
-                if choked_nonfast {
-                    interest_hint = true;
-                    break;
-                }
-            }
-            if requests.is_empty() {
-                requestable[index as usize] = false;
-                continue;
-            }
-            selected.push((index, priority, partial, availability, requests));
-        }
-        drop(live_assignments);
-        drop(live_requests);
-
-        // Hash-table growth and piece-order construction belong to this
-        // peer's snapshot. Do that work after releasing shared request locks
-        // so other peers can claim blocks and finish received writes.
-        let assignments = held.into_iter().collect();
-        let mut undirtied = HashMap::with_capacity(selected.len());
-        let mut piece_of_request = HashMap::with_capacity(
-            selected
-                .iter()
-                .map(|(_, _, _, _, requests)| requests.len())
-                .sum(),
-        );
-        let mut order = PieceRequestOrder::with_capacity(selected.len());
-        for (index, priority, partial, availability, requests) in selected {
-            for &request in &requests {
-                piece_of_request.insert(request, index);
-            }
-            undirtied.insert(index, requests);
-            order.add(
-                PieceRequestOrderKey {
-                    info_hash: self.info_hash.0,
-                    index,
-                },
-                PieceRequestOrderState {
-                    availability,
-                    priority,
-                    partial,
-                },
-            );
-        }
-        (
-            RequestTorrentSnapshot {
-                info_hash: self.info_hash.0,
-                piece_length,
-                num_pieces,
-                piece_requestable: requestable,
-                piece_count_unverified: unverified,
-                undirtied_by_piece: undirtied,
-                piece_of_request,
-                assignments,
-                focus_request: TorrentInner::request_focus_index(self),
-                has_active_webseed_requests: false,
-                limits: if TorrentInner::request_focus_index(self).is_some() {
-                    StrategyLimits::go_default()
-                } else {
-                    StrategyLimits::saved_download()
-                },
-                wanted_pieces,
-            },
-            order,
-        )
-    }
 
     pub fn as_reader_host(self: &Arc<Self>) -> Arc<dyn crate::reader::ReaderHost> {
         Arc::clone(self) as Arc<dyn crate::reader::ReaderHost>

@@ -1,87 +1,17 @@
 //! Peer connection state machine (`peerconn.go` / `peer.go` / `requesting.go`).
 //!
-//! # Integration (agy-2)
-//!
-//! Implement [`PeerTorrent`] on `TorrentInner`. Construct a [`PeerConnHandler`]
-//! and pass it to `conn::spawn_connection_driver` with a [`ConnHandle`].
-//!
-//! Legacy [`PeerConn`] / [`PeerConnInner`] remain for the current client/torrent
-//! paths until they migrate onto [`PeerConnHandler`].
-//!
-//! ## `PeerTorrent` (agy-2 implements)
-//!
-//! ```ignore
-//! pub type PeerKey = u64;
-//!
-//! pub trait PeerTorrent: Send + Sync {
-//!     fn peer_key(&self, addr: SocketAddr) -> PeerKey;
-//!     fn have_info(&self) -> bool;
-//!     fn num_pieces(&self) -> u32;
-//!     fn piece_length(&self) -> i64;
-//!     fn total_length(&self) -> i64;
-//!     fn chunk_size(&self) -> u32;
-//!     fn info_hash_bytes(&self) -> [u8; 20];
-//!     fn data_download_disallowed(&self) -> bool;
-//!     fn data_upload_disallowed(&self) -> bool;
-//!     fn is_seeding(&self) -> bool;
-//!     fn closed(&self) -> bool;
-//!
-//!     fn piece_complete(&self, piece: PieceIndex) -> bool;
-//!     fn piece_priority(&self, piece: PieceIndex) -> PiecePriority;
-//!     fn chunk_dirty(&self, req: RequestIndex) -> bool;
-//!     fn mark_chunk_dirty(&self, req: RequestIndex);
-//!     fn clear_chunk_requested(&self, req: RequestIndex);
-//!     fn mark_chunk_requested(&self, req: RequestIndex);
-//!     fn piece_all_dirty(&self, piece: PieceIndex) -> bool;
-//!     fn note_availability(&self, piece: PieceIndex, delta: i32);
-//!
-//!     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
-//!     fn report_write_chunk_error(&self, err: &CoreError);
-//!     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes>;
-//!     fn queue_piece_hash(&self, piece: PieceIndex);
-//!
-//!     fn requesting_peer(&self, req: RequestIndex) -> Option<PeerKey>;
-//!     fn request_when(&self, req: RequestIndex) -> Option<Instant>;
-//!     fn assign_request(&self, req: RequestIndex, peer: PeerKey, when: Instant);
-//!     fn clear_assignment(&self, req: RequestIndex);
-//!     fn desired_request_context(&self) -> (RequestTorrentSnapshot, PieceRequestOrder);
-//!
-//!     fn request_focus_index(&self) -> Option<RequestIndex>;
-//!     fn urgent_steal_after(&self) -> Duration;
-//!     fn seek_tuning(&self) -> SeekTuning;
-//!     fn hedge_peer(&self, req: RequestIndex) -> Option<PeerKey>;
-//!     fn set_hedge_peer(&self, req: RequestIndex, peer: PeerKey);
-//!     fn clear_hedge(&self, req: RequestIndex);
-//!     fn record_rescue(&self);
-//!     fn record_hedge(&self);
-//!     fn peer_has_piece(&self, peer: PeerKey, piece: PieceIndex) -> bool;
-//!     fn webtor_peer_snap(&self, peer: PeerKey) -> Option<WebtorPeerSnap>;
-//!     fn connected_peer_keys(&self) -> Vec<PeerKey>;
-//!
-//!     fn on_metadata_data(&self, piece: u32, total_size: u32, data: Bytes) -> Result<bool>;
-//!     fn metadata_piece(&self, piece: u32) -> Option<(u32, Bytes)>; // (total_size, data)
-//!     fn metadata_size(&self) -> Option<u32>;
-//!     fn has_metadata(&self) -> bool;
-//!     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()>;
-//!     fn add_dht_node(&self, addr: SocketAddr);
-//!     fn on_peer_listen_port(&self, peer_addr: SocketAddr, port: u16);
-//!
-//!     fn choke_config(&self) -> ChokeConfig;
-//!     fn bump_change(&self);
-//!     fn on_chunk_received(&self, peer: PeerKey, req: RequestIndex, len: usize);
-//! }
-//! ```
+//! Implement [`PeerTorrent`] on `TorrentInner`, construct a [`PeerConnHandler`]
+//! and pass it to `conn::spawn_connection_driver`. What to request comes from
+//! [`crate::sched`].
 
 #![allow(clippy::too_many_arguments)]
 
 use bytes::Bytes;
-use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Notify};
 use wt_types::{
     PeerId, PeerSource, PieceIndex, PiecePriority, RequestIndex, Transport, BLOCK_SIZE,
 };
@@ -97,31 +27,18 @@ pub const DEFAULT_PEER_MAX_REQUESTS: usize = 250;
 /// Go `localClientReqq` — how many requests we advertise we can accept.
 pub const LOCAL_CLIENT_REQQ: u32 = 1024;
 
-use crate::arrival::{ArrivalNet, ArrivalPeer, ArrivalSample, PeerArrivalState, ARRIVAL_FEATURES};
 use crate::choking::{upload_allowed, ChokeConfig, PeerChokeInput};
 use crate::conn::{ConnHandle, ConnHandler};
 use crate::metadata::{PeerMetadataState, METADATA_REQUEST_TIMEOUT};
 use crate::pex::{PexCursor, PEX_INTERVAL, PEX_RETRY_DELAY};
-use crate::picker::{
-    block_coord_from_req_index, piece_req_index_range,
-    req_index_from_piece_and_offset,
-};
+use crate::picker::{block_coord_from_req_index, req_index_from_piece_and_offset};
 use crate::stats::{AtomicConnStats, ExpectingRate, PeerConnInfo, RateEstimator};
 
 /// Go `maxLocalToRemoteRequests`: (writeBufferHighWaterLen -
 /// writeBufferLowWaterLen - interestedMsgLen) / requestMsgLen with 1 MiB / 512 KiB
 /// buffers, 5-byte interested and 17-byte request messages.
 pub(crate) const MAX_LOCAL_TO_REMOTE_REQUESTS: usize = ((1 << 20) - (1 << 19) - 5) / 17;
-use crate::strategy::{
-    compute_desired_requests, sort_requests_for_peer, DesiredPeerSnapshot, PieceRequestOrder,
-    RequestTorrentSnapshot, RequestTuning,
-};
-use crate::tuning::{current_seek_tuning, SeekTuning};
-use crate::webtor::{
-    expected_arrival_secs, hedge_decisions, may_take_existing_request,
-    next_peak_requests, pending_requests, rescue_decisions, should_steal_urgent,
-    steal_lands_in_flight, PeerView, SystemClock, TorrentView,
-};
+use crate::sched::{peer_queue_limit, Pick, PeerLive, PickPeer, Take};
 use crate::wire::{DEFAULT_UT_METADATA_ID, DEFAULT_UT_PEX_ID, EXT_HANDSHAKE_ID};
 use crate::{CoreError, Result};
 
@@ -129,44 +46,6 @@ use crate::{CoreError, Result};
 
 /// Opaque peer identity in torrent assignment maps.
 pub type PeerKey = u64;
-
-/// What the saved-download picker needs to know about a peer.
-pub struct BackgroundPeer<'a> {
-    pub key: PeerKey,
-    pub have_all: bool,
-    pub pieces: &'a HashSet<PieceIndex>,
-    pub allowed_fast: &'a HashSet<PieceIndex>,
-    pub choking: bool,
-    pub cancelled: &'a HashSet<RequestIndex>,
-    /// About to run dry: may start a piece even when RAM is spoken for.
-    pub starving: bool,
-}
-
-/// Blocks a peer could fetch next for a saved download.
-#[derive(Default)]
-pub struct BackgroundPick {
-    /// Nobody holds these.
-    pub free: Vec<RequestIndex>,
-    /// Other peers hold these. Only filled at the very end.
-    pub held: Vec<RequestIndex>,
-    /// The peer has something we want.
-    pub interested: bool,
-    pub wanted_bytes: i64,
-}
-
-/// Snapshot of another peer for Webtor faster-focus / HOL decisions.
-#[derive(Clone, Debug)]
-pub struct WebtorPeerSnap {
-    pub key: PeerKey,
-    pub download_rate_bps: f64,
-    pub rtt: Duration,
-    pub queued: u32,
-    pub cancelled: u32,
-    pub nominal_max: u32,
-    pub peer_choking: bool,
-    pub closed: bool,
-    pub last_useful: Option<Instant>,
-}
 
 /// Torrent-wide surface the peer state machine needs. Implemented by agy-2 on
 /// `TorrentInner` (or a test double).
@@ -190,8 +69,6 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn piece_priority(&self, piece: PieceIndex) -> PiecePriority;
     fn chunk_dirty(&self, req: RequestIndex) -> bool;
     fn mark_chunk_dirty(&self, req: RequestIndex);
-    fn clear_chunk_requested(&self, req: RequestIndex);
-    fn mark_chunk_requested(&self, req: RequestIndex);
     fn piece_all_dirty(&self, piece: PieceIndex) -> bool;
     fn note_availability(&self, piece: PieceIndex, delta: i32);
     /// This peer just claimed a block at the playhead. Peers that refilled
@@ -228,13 +105,17 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn note_peer_helpful(&self, _addr: SocketAddr) {}
 
     fn write_chunk(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> Result<()>;
-    /// Nothing near a playhead is wanted: refills use the saved-download queue.
+    /// A saved download with nothing near a playhead wanted.
     fn background_only(&self) -> bool {
         false
     }
-    fn background_pick(&self, _peer: &BackgroundPeer<'_>, _want: usize) -> BackgroundPick {
-        BackgroundPick::default()
+    /// The next blocks this peer should fetch; see [`crate::sched`].
+    fn pick_blocks(&self, _peer: &PickPeer<'_>, _want: usize) -> Pick {
+        Pick::default()
     }
+    /// Show this peer to other peers' refills, until it is unregistered.
+    fn register_live(&self, _live: Arc<PeerLive>) {}
+    fn unregister_live(&self, _live: &Arc<PeerLive>) {}
     /// `read_chunk` when the block is in RAM; `None` when it needs the disk.
     fn read_chunk_in_memory(&self, _piece: PieceIndex, _begin: u32, _length: u32) -> Option<Result<Bytes>> {
         None
@@ -274,60 +155,28 @@ pub trait PeerTorrent: Send + Sync + 'static {
 
     fn requesting_peer(&self, req: RequestIndex) -> Option<PeerKey>;
     fn request_when(&self, req: RequestIndex) -> Option<Instant>;
-    fn assign_request(&self, req: RequestIndex, peer: PeerKey, when: Instant);
-    fn claim_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) -> bool {
-        if self.requesting_peer(req).is_some_and(|owner| owner != peer) { return false; }
-        self.assign_request(req, peer, when);
-        true
-    }
     fn release_request(&self, req: RequestIndex, peer: PeerKey) {
         if self.requesting_peer(req) == Some(peer) { self.clear_assignment(req); }
     }
     fn clear_assignment(&self, req: RequestIndex);
-    fn desired_request_context(&self) -> (RequestTorrentSnapshot, PieceRequestOrder);
-    fn desired_request_context_for_peer(&self, _peer: &DesiredPeerSnapshot) -> (RequestTorrentSnapshot, PieceRequestOrder) {
-        self.desired_request_context()
-    }
+    /// Becomes the block's owner unless another peer is, or it is done.
+    fn claim_request(&self, req: RequestIndex, peer: PeerKey, when: Instant) -> bool;
 
     fn request_focus_index(&self) -> Option<RequestIndex>;
-    /// A seek moved the playhead moments ago and eager hedges are left.
-    fn seek_hedge_open(&self) -> bool {
-        false
-    }
     /// Spend one of the seek's eager hedges.
     fn take_seek_hedge(&self) -> bool {
         false
     }
-    /// How many of `peer`'s outstanding requests were sent before `when`.
-    /// When each of this peer's current requests was assigned, oldest first.
-    fn request_times(&self, _peer: PeerKey) -> Vec<Instant> {
-        Vec::new()
-    }
     fn refund_seek_hedge(&self) {}
-    fn urgent_steal_after(&self) -> Duration;
-    fn seek_tuning(&self) -> SeekTuning {
-        current_seek_tuning()
-    }
     fn hedge_peer(&self, req: RequestIndex) -> Option<PeerKey>;
-    fn set_hedge_peer(&self, req: RequestIndex, peer: PeerKey);
-    fn claim_hedge(&self, req: RequestIndex, peer: PeerKey) -> bool {
-        if self.hedge_peer(req).is_some() { return false; }
-        self.set_hedge_peer(req, peer);
-        true
-    }
+    /// Becomes the block's one second copy.
+    fn claim_hedge(&self, req: RequestIndex, peer: PeerKey) -> bool;
     fn clear_hedge(&self, req: RequestIndex);
     fn release_hedge(&self, req: RequestIndex, peer: PeerKey) {
         if self.hedge_peer(req) == Some(peer) { self.clear_hedge(req); }
     }
     fn record_rescue(&self) {}
     fn record_hedge(&self) {}
-    fn peer_has_piece(&self, peer: PeerKey, piece: PieceIndex) -> bool;
-    fn webtor_peer_snap(&self, peer: PeerKey) -> Option<WebtorPeerSnap>;
-    fn connected_peer_keys(&self) -> Vec<PeerKey>;
-    fn arrival_net(&self) -> Option<ArrivalNet> { None }
-    fn learn_arrival(&self, _sample: ArrivalSample, _actual: f64) {}
-    fn register_peer_arrival(&self, _peer: PeerKey, _state: Arc<RwLock<PeerArrivalState>>) {}
-    fn peer_arrival(&self, _peer: PeerKey) -> Option<Arc<RwLock<PeerArrivalState>>> { None }
 
     fn on_metadata_data(&self, piece: u32, total_size: u32, data: Bytes) -> Result<bool>;
     fn metadata_piece(&self, piece: u32) -> Option<(u32, Bytes)>;
@@ -496,9 +345,6 @@ pub struct PeerConnInner {
     pub last_became_interested: Option<Instant>,
     pub webtor_pipeline_limit: usize,
 
-    pub arrival: ArrivalPeer,
-    pub arrival_samples: HashMap<RequestIndex, ArrivalSample>,
-
     pub peer_ext_ut_metadata: Option<u8>,
     pub peer_ext_ut_pex: Option<u8>,
     pub peer_metadata_size: Option<u32>,
@@ -525,259 +371,6 @@ impl PeerConnInner {
     }
 }
 
-#[derive(Clone)]
-pub struct PeerConn {
-    pub inner: Arc<RwLock<PeerConnInner>>,
-    pub closed: Arc<AtomicBool>,
-    pub write_tx: mpsc::UnboundedSender<Message>,
-    pub write_waker: Arc<Notify>,
-}
-
-impl PeerConn {
-    pub fn new(
-        remote_addr: SocketAddr,
-        outgoing: bool,
-        source: PeerSource,
-        write_tx: mpsc::UnboundedSender<Message>,
-        write_waker: Arc<Notify>,
-    ) -> Self {
-        let now = Instant::now();
-        Self {
-            inner: Arc::new(RwLock::new(PeerConnInner {
-                remote_addr,
-                outgoing,
-                peer_listen_port: 0,
-                peer_id: None,
-                client_name: String::new(),
-                transport: Transport::Tcp,
-                source,
-                encrypted: false,
-                connected_at: now,
-                peer_choking: true,
-                am_choking: true,
-                peer_interested: false,
-                am_interested: false,
-                peer_pieces: HashSet::new(),
-                peer_sent_have_all: false,
-                peer_allowed_fast: HashSet::new(),
-                peer_extension_bits: [0u8; 8],
-                max_requests: DEFAULT_PEER_MAX_REQUESTS,
-                // Go ramps from an empty queue (nominal capacity starts at one).
-                peak_requests: 0,
-                outstanding_requests: HashSet::new(),
-                cancelled_requests: HashSet::new(),
-                rtt: RttEstimator::default(),
-                download_rate: ExpectingRate::new(),
-                upload_rate: RateEstimator::new(),
-                stats: AtomicConnStats::default(),
-                last_useful_chunk_received: None,
-                webtor_unchoked_at: None,
-                webtor_choked_since: Some(now),
-                last_became_interested: None,
-                webtor_pipeline_limit: 0,
-                arrival: ArrivalPeer::default(),
-                arrival_samples: HashMap::new(),
-                peer_ext_ut_metadata: None,
-                peer_ext_ut_pex: None,
-                peer_metadata_size: None,
-                valid_receive_chunks: HashMap::new(),
-                is_snubbed: false,
-                need_request_update: false,
-            })),
-            closed: Arc::new(AtomicBool::new(false)),
-            write_tx,
-            write_waker,
-        }
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
-    }
-
-    pub fn close(&self) {
-        self.closed.store(true, Ordering::Relaxed);
-        self.write_waker.notify_waiters();
-    }
-
-    pub fn send_message(&self, msg: Message) {
-        if !self.is_closed() {
-            let _ = self.write_tx.send(msg);
-            self.write_waker.notify_one();
-        }
-    }
-
-    pub fn cache_dial_addr(&self) -> Option<SocketAddr> {
-        let inner = self.inner.read();
-        if inner.outgoing {
-            Some(inner.remote_addr)
-        } else if inner.peer_listen_port > 0 {
-            Some(SocketAddr::new(
-                inner.remote_addr.ip(),
-                inner.peer_listen_port,
-            ))
-        } else {
-            None
-        }
-    }
-
-    pub fn pending_requests_count(&self) -> usize {
-        let inner = self.inner.read();
-        let mut count = inner.outstanding_requests.len();
-        if !current_seek_tuning().full_pipeline {
-            count += inner.cancelled_requests.len();
-        }
-        count
-    }
-
-    pub fn expected_arrival(
-        &self,
-        chunk_size: usize,
-        use_learned: bool,
-        arrival_net: Option<&crate::arrival::ArrivalNet>,
-    ) -> f64 {
-        let inner = self.inner.read();
-        if use_learned {
-            if let Some(net) = arrival_net {
-                if let Some(x) =
-                    self.arrival_inputs_locked(&inner, inner.outstanding_requests.len(), chunk_size)
-                {
-                    return net.predict(x);
-                }
-            }
-        }
-        expected_arrival_secs(
-            inner.download_rate.rate(),
-            inner.rtt.estimate,
-            inner.outstanding_requests.len() as u32,
-            chunk_size as u32,
-        )
-    }
-
-    fn arrival_inputs_locked(
-        &self,
-        inner: &PeerConnInner,
-        queued: usize,
-        chunk_size: usize,
-    ) -> Option<[f64; ARRIVAL_FEATURES]> {
-        inner.arrival.inputs(inner.download_rate.rate(), inner.rtt.estimate,
-            queued, chunk_size, if inner.peer_choking { None } else { inner.webtor_unchoked_at })
-    }
-
-    pub fn note_request_sent(
-        &self,
-        req: RequestIndex,
-        chunk_size: usize,
-        arrival_net: Option<&crate::arrival::ArrivalNet>,
-    ) {
-        let mut inner = self.inner.write();
-        let queued = inner.outstanding_requests.len();
-        if queued == 0 {
-            // Nothing queued ahead of it: its block measures the round trip.
-            inner.rtt.on_request_sent(req);
-        }
-        inner.outstanding_requests.insert(req);
-        inner.cancelled_requests.remove(&req);
-        let expecting = inner.am_interested && !inner.peer_choking;
-        inner.download_rate.set_expecting(expecting);
-
-        if let Some(net) = arrival_net {
-            if let Some(x) =
-                self.arrival_inputs_locked(&inner, queued, chunk_size)
-            {
-                let est = net.predict(x);
-                inner.arrival_samples.insert(
-                    req,
-                    ArrivalSample {
-                        sent: Instant::now(),
-                        x,
-                        estimate: est,
-                    },
-                );
-            }
-        }
-    }
-
-    pub fn note_block_received(
-        &self,
-        req: RequestIndex,
-        arrival_model: Option<&mut crate::arrival::ArrivalModel>,
-    ) {
-        let mut inner = self.inner.write();
-        inner.outstanding_requests.remove(&req);
-        inner.rtt.on_request_received(req);
-        let expecting =
-            !inner.outstanding_requests.is_empty() && inner.am_interested && !inner.peer_choking;
-        inner.download_rate.set_expecting(expecting);
-        inner.last_useful_chunk_received = Some(Instant::now());
-        inner.arrival.note_block(BLOCK_SIZE as usize);
-
-        if let Some(sample) = inner.arrival_samples.remove(&req) {
-            let actual = sample.sent.elapsed().as_secs_f64();
-            let err = (sample.estimate - actual).abs();
-            inner.arrival.on_block_arrived(err);
-            if let Some(model) = arrival_model {
-                model.on_block_learned(sample.x, sample.estimate, actual);
-            }
-        }
-    }
-
-    pub fn block_overdue(
-        &self,
-        req: RequestIndex,
-        min_timeout: Duration,
-        use_learned: bool,
-    ) -> bool {
-        self.learned_block_overdue(req, min_timeout, use_learned).unwrap_or(false)
-    }
-
-    pub fn learned_block_overdue(&self, req: RequestIndex, min_timeout: Duration,
-        use_learned: bool) -> Option<bool> {
-        let inner = self.inner.read();
-        if use_learned {
-            if let Some(sample) = inner.arrival_samples.get(&req) {
-                let late = inner.arrival.overdue_duration(sample.estimate, min_timeout);
-                return Some(sample.sent.elapsed() >= late);
-            }
-        }
-        None
-    }
-
-    pub fn peer_conn_info(&self) -> PeerConnInfo {
-        let inner = self.inner.read();
-        PeerConnInfo {
-            remote_addr: inner.remote_addr,
-            dial_addr: if inner.outgoing {
-                Some(inner.remote_addr)
-            } else {
-                None
-            },
-            peer_id: inner.peer_id,
-            client_name: inner.client_name.clone(),
-            transport: inner.transport,
-            source: inner.source,
-            encrypted: inner.encrypted,
-            outgoing: inner.outgoing,
-            peer_choking: inner.peer_choking,
-            am_choking: inner.am_choking,
-            peer_interested: inner.peer_interested,
-            am_interested: inner.am_interested,
-            conn_stats: inner.stats.snapshot(),
-            download_rate: inner.download_rate.rate(),
-            upload_rate: inner.upload_rate.rate(),
-            peer_completion: 0.0,
-            pending_requests: inner.outstanding_requests.len(),
-            peer_max_requests: inner.max_requests,
-            peak_requests: inner.peak_requests,
-            pipeline_limit: inner.webtor_pipeline_limit,
-            nominal_max_requests: inner.nominal_max_requests(),
-            rtt: inner.rtt.estimate,
-            queued: inner.outstanding_requests.len(),
-            cancelled: inner.cancelled_requests.len(),
-            connected_for: inner.connected_at.elapsed(),
-            last_useful_data: inner.last_useful_chunk_received.map(|t| t.elapsed()),
-        }
-    }
-}
 
 // ---------------------------------------------------------------- ConnHandler
 
@@ -797,11 +390,13 @@ pub struct PeerConnHandler<T: PeerTorrent> {
     last_pex_sent: Option<Instant>,
     pex_listed: bool,
     cancelled_at: HashMap<RequestIndex, Instant>,
-    arrival: Arc<RwLock<PeerArrivalState>>,
+    live: Arc<PeerLive>,
     wanted_cache: std::cell::Cell<Option<(Instant, bool)>>,
     /// When a refill last found nothing to request.
     idle_refill_at: Option<Instant>,
     last_snapshot: Instant,
+    /// Choke state changed since the last snapshot: publish without waiting.
+    choke_changed: bool,
     last_warm: Instant,
     /// Block asked of a new peer to measure it, and when.
     speed_probe: Option<(RequestIndex, Instant)>,
@@ -821,28 +416,24 @@ fn blocking_io<R>(f: impl FnOnce() -> R) -> R {
     }
 }
 
-fn sorted_requests(set: &HashSet<RequestIndex>) -> Vec<RequestIndex> {
-    let mut v: Vec<_> = set.iter().copied().collect();
-    v.sort_unstable();
-    v
-}
-
 /// A peer with requests outstanding that delivered nothing for this long
 /// releases them (Go relies on balance stealing; this only catches dead peers).
 const DEAD_PEER_AFTER: Duration = Duration::from_secs(30);
-/// Endgame starts when at most this much of the selection is left.
 /// Below this many requests a peer counts as about to run dry.
-const BACKGROUND_STARVING_REQUESTS: usize = 16;
-pub(crate) const ENDGAME_BYTES: i64 = 16 * 1024 * 1024;
+const STARVING_REQUESTS: usize = 16;
 
 /// Reuse of [`PeerConnHandler::peer_has_wanted_pieces`]; below the 50 ms
 /// choke-reconcile wake interval.
 const WANTED_PIECES_CACHE: Duration = Duration::from_millis(25);
 /// A refill rescans every piece; one that found nothing retries at this pace.
 const IDLE_REFILL_EVERY: Duration = Duration::from_millis(250);
-/// Received blocks publish the peer's snapshot at this pace; each publish
-/// takes a torrent-wide write lock.
-const SNAPSHOT_EVERY: Duration = Duration::from_millis(100);
+/// A peer publishes its listing at this pace; each publish takes a torrent-wide
+/// write lock. Scheduling reads [`PeerLive`] instead.
+const SNAPSHOT_EVERY: Duration = Duration::from_millis(500);
+/// Claims this close to the playhead wake peers that had nothing to copy.
+const FOCUS_NUDGE_BLOCKS: u32 = 8;
+/// Pieces after the playhead that keep us interested in a peer holding them.
+const PLAYING_INTEREST_PIECES: u32 = 64;
 /// How long a useful unchoked peer may sit idle during playback before a
 /// warm-up request, so a seek can start on a connection already moving data.
 const WARM_PEER_IDLE: Duration = Duration::from_secs(30);
@@ -854,6 +445,7 @@ const IDLE_CHOKED_WAKE: Duration = Duration::from_secs(1);
 impl<T: PeerTorrent> PeerConnHandler<T> {
     pub fn new(torrent: Arc<T>, handle: &ConnHandle) -> Self {
         let now = Instant::now();
+        let torrent_key = torrent.peer_key(handle.remote_addr());
         Self {
             torrent,
             state: PeerConnInner {
@@ -888,8 +480,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 webtor_choked_since: Some(now),
                 last_became_interested: None,
                 webtor_pipeline_limit: 0,
-                arrival: ArrivalPeer::default(),
-                arrival_samples: HashMap::new(),
                 peer_ext_ut_metadata: None,
                 peer_ext_ut_pex: None,
                 peer_metadata_size: None,
@@ -905,10 +495,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             last_pex_sent: None,
             pex_listed: false,
             cancelled_at: HashMap::new(),
-            arrival: Arc::new(RwLock::new(PeerArrivalState::default())),
+            live: Arc::new(PeerLive::new(torrent_key)),
             wanted_cache: std::cell::Cell::new(None),
             idle_refill_at: None,
             last_snapshot: Instant::now(),
+            // The first message publishes, so a new peer is listed at once.
+            choke_changed: true,
             last_warm: now,
             speed_probe: None,
             speed_probed: false,
@@ -990,7 +582,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     /// Does **not** Unchoke or fill requests — Go leaves that to `upload` / peer-driven
     /// `updateRequests` after the remote's bitfield/unchoke.
     pub fn start(&mut self, handle: &ConnHandle) {
-        self.torrent.register_peer_arrival(self.key(), self.arrival.clone());
+        self.torrent.register_live(self.live.clone());
         let peer_bits = PeerExtensionBits(self.state.peer_extension_bits);
         if peer_bits.supports_extended() {
             let mut ext = ExtendedHandshake::default();
@@ -1172,9 +764,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if owner == Some(self.key()) {
             self.torrent.release_request(req, self.key());
         }
-        if (owner.is_none() || owner == Some(self.key())) && self.torrent.hedge_peer(req).is_none() {
-            self.torrent.clear_chunk_requested(req);
-        }
     }
 
     /// Drop outstanding requests that have waited too long so the pipeline can refill.
@@ -1192,7 +781,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.state.cancelled_requests.remove(&req);
             if !self.state.outstanding_requests.contains(&req) {
                 self.state.valid_receive_chunks.remove(&req);
-                self.arrival.write().samples.remove(&req);
             }
             self.state.need_request_update = true;
         }
@@ -1232,7 +820,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.need_request_update = true;
     }
 
-    /// Recompute and apply desired requests (Go `updateRequests`).
+    /// Recompute and apply this peer's requests. Called when its queue runs low
+    /// or anything it depends on changed.
     pub fn update_requests(&mut self, handle: &ConnHandle) {
         if self.torrent.closed()
             || self.torrent.data_download_disallowed()
@@ -1242,8 +831,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return;
         }
         self.state.need_request_update = false;
-        // Go cancels the previous owner synchronously when stealing. Our peer
-        // handlers own their queues, so reconcile that ownership on their wake.
+        // Peer handlers own their queues, so a block another peer took or
+        // finished is cancelled here, on this peer's wake.
         let refocus = handle.take_refocus();
         let mut displaced = self.torrent.displaced_requests(&self.state.outstanding_requests, self.key());
         if refocus {
@@ -1254,25 +843,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }));
         }
         for req in displaced { self.cancel_outstanding(handle, req); }
-        let tuning = self.torrent.seek_tuning();
-        let background = self.torrent.background_only();
-        // Go `webtorPipelineLimit` during playback; a few seconds of the
-        // peer's rate otherwise. Fixed for this refill.
-        self.state.webtor_pipeline_limit = crate::picker::compute_peer_pipeline_limit(
-            self.state.download_rate.rate(),
-            self.state.rtt.estimate,
-            !background && self.torrent.request_focus_index().is_some(),
-        );
-        if !background && self.torrent.request_focus_index().is_some() && (tuning.hol_rescue || tuning.hedge) {
-            self.apply_hol_and_hedge(handle, &tuning);
-        }
-        let req_tuning = RequestTuning::from_seek_tuning(
-            tuning.bound_candidates,
-            tuning.pipeline_seconds,
-            tuning.min_pipeline,
-            tuning.pipeline_rtt,
-            self.torrent.request_focus_index().is_some(),
-        );
 
         let num_pieces = self.torrent.num_pieces();
         if self.state.peer_sent_have_all
@@ -1283,333 +853,145 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.state.peer_pieces.extend(0..num_pieces);
             self.torrent.note_peer_pieces(self.key(), &mut (0..num_pieces));
         }
-        if background {
-            self.refill_background(handle, &tuning);
-            return;
-        }
-        let mut has_piece = vec![false; num_pieces as usize];
-        let mut allowed = vec![false; num_pieces as usize];
-        if self.state.peer_sent_have_all {
-            has_piece.fill(true);
-        } else {
-            for &p in &self.state.peer_pieces {
-                if (p as usize) < has_piece.len() {
-                    has_piece[p as usize] = true;
-                }
-            }
-        }
-        for &p in &self.state.peer_allowed_fast {
-            if (p as usize) < allowed.len() {
-                allowed[p as usize] = true;
-            }
-        }
 
-        let peer_snap = DesiredPeerSnapshot {
-            peer_id: self.key(),
-            has_piece,
-            peer_choking: self.state.peer_choking,
-            peer_allowed_fast: allowed,
-            outstanding: sorted_requests(&self.state.outstanding_requests),
-            cancelled: sorted_requests(&self.state.cancelled_requests),
-            nominal_max_requests: self.nominal_max() as u32,
-        };
-
-        let (snap, order) = self.torrent.desired_request_context_for_peer(&peer_snap);
-
-        let mut desired = compute_desired_requests(&snap, &peer_snap, &order, &req_tuning);
-        sort_requests_for_peer(
-            &mut desired.request_indexes,
-            &snap,
-            &peer_snap,
-            &desired.piece_states,
+        let saving = self.torrent.background_only();
+        let focus = if saving { None } else { self.torrent.request_focus_index() };
+        self.state.webtor_pipeline_limit = peer_queue_limit(
+            self.state.download_rate.rate(),
+            self.state.rtt.estimate,
+            focus.is_some(),
         );
-
-        let was_empty = self.state.outstanding_requests.is_empty();
-        let before = self.state.outstanding_requests.len() as u32;
-        let clock = SystemClock;
-        let steal_after = self.torrent.urgent_steal_after();
-        let focus = self.torrent.request_focus_index();
-        let focus_set = focus.is_some();
-        let chunk = self.torrent.chunk_size();
-        let plen = self.torrent.piece_length();
-        let total = self.torrent.total_length();
-
-        // Interest — sticky like Go `allowSendNotInterested` +
-        // `webtorHasPlayingPieceWeLack`. qBittorrent punishes NotInterested
-        // while we are still streaming incomplete data (same peer 107.175
-        // historically dropped to ~49 KiB on Rust after brief NotInterested).
-        let mut interested = desired.interested;
-        if !interested && self.state.am_interested {
-            let have_all = (0..num_pieces).all(|i| self.torrent.piece_complete(i));
-            if !have_all {
-                if self.state.peer_sent_have_all || self.state.peer_pieces.is_empty() {
-                    // Have-all or bitfield not yet known → keep interested.
-                    interested = true;
-                } else {
-                    let peer_only_done = self
-                        .state
-                        .peer_pieces
-                        .iter()
-                        .all(|&p| self.torrent.piece_complete(p));
-                    if !peer_only_done {
-                        interested = true;
-                    }
-                }
-            }
-        }
-        if !interested && !self.torrent.data_download_disallowed() {
-            // Go `webtorHasPlayingPieceWeLack`: stay interested while the
-            // playhead window still needs pieces this peer can serve.
-            if let Some(f) = focus {
-                let begin = block_coord_from_req_index(f, plen, total).piece;
-                let end = begin.saturating_add(64).min(num_pieces);
-                let peer_has_all = self.state.peer_sent_have_all;
-                let lacks = |p: u32| !self.torrent.piece_complete(p);
-                let playing = if peer_has_all {
-                    (begin..end).any(lacks)
-                } else {
-                    self.state
-                        .peer_pieces
-                        .iter()
-                        .any(|&p| p >= begin && p < end && lacks(p))
-                };
-                if playing {
-                    interested = true;
-                }
-            }
-        }
-        if interested != self.state.am_interested {
-            self.state.am_interested = interested;
-            if interested {
-                self.state.last_became_interested = Some(Instant::now());
-                self.send(handle, Message::Interested);
-            } else {
-                self.send(handle, Message::NotInterested);
-            }
-        }
-
-        let mut added = 0u32;
-        let mut claimed_focus = false;
-        let mut holder_request_times: HashMap<PeerKey, Vec<Instant>> = HashMap::new();
-        let mut yields_left = 10u32;
-        let mut yielded_pieces = HashSet::new();
-        let mut seek_peers = if focus.is_some() { self.seek_peer_snapshots() } else { Vec::new() };
-        let arrival_net = self.torrent.arrival_net();
-        let learned = arrival_net.as_ref().map(|net| net as &dyn crate::webtor::ArrivalPredictor);
-        // Endgame: little is left and every block this peer could fetch is
-        // already on its way from another peer. A second copy from this idle
-        // peer means one slow holder cannot hold up the end; the first copy
-        // wins and the other request is cancelled (hedge bookkeeping).
-        // Playback has its own head-of-line hedging.
+        self.publish_live();
         let me = self.key();
-        let endgame = focus.is_none()
-            && i64::from(snap.wanted_pieces).saturating_mul(snap.piece_length.max(1)) <= ENDGAME_BYTES
-            && !desired.request_indexes.is_empty()
-            && desired.request_indexes.iter().all(|r| self.state.outstanding_requests.contains(r)
-                || snap.assignments.get(r).is_some_and(|a| a.peer != me));
-
-        for r in desired.request_indexes {
-            let pending = pending_requests(
-                &tuning,
-                self.state.outstanding_requests.len() as u32,
-                self.state.cancelled_requests.len() as u32,
-            );
-            if pending >= self.nominal_max() as u32 {
-                break;
-            }
-            if self.state.outstanding_requests.contains(&r) {
-                continue;
-            }
-            let piece = snap
-                .piece_of_request
-                .get(&r)
-                .copied()
-                .unwrap_or_else(|| block_coord_from_req_index(r, plen, total).piece);
-            let prio = self.torrent.piece_priority(piece);
-
-            if let Some(me) = seek_peers.first_mut() {
-                me.queued = self.state.outstanding_requests.len() as u32;
-                me.cancelled = self.state.cancelled_requests.len() as u32;
-                me.arrival_inputs = self.arrival_inputs();
-            }
-            if yielded_pieces.contains(&piece) { continue; }
-            if tuning.slow_peer_yield && yields_left > 0 && prio == PiecePriority::Next
-                && self.state.last_useful_chunk_received.is_some()
-                && seek_peers.first().is_some_and(|me| crate::webtor::yield_to_faster_peers(
-                    me, &seek_peers, piece,
-                    PeerTorrentView(&*self.torrent).piece_bytes_left(piece), chunk)) {
-                yields_left -= 1;
-                yielded_pieces.insert(piece);
-                continue;
-            }
-
-            // Use the same learned decision as Go. Full peers cannot make us
-            // yield, and deciding to yield must not erase the current owner.
-            if seek_peers.first().is_some_and(|me| crate::webtor::faster_focus_peer(
-                &tuning, steal_after, me, &seek_peers, r, piece, prio, focus, chunk,
-                learned, &|peer| peer.arrival_inputs).is_some()) {
-                continue;
-            }
-
-            let mut stolen_from = None;
-            if let Some(holder) = self.torrent.requesting_peer(r) {
-                if holder != self.key() {
-                    if endgame {
-                        if (!self.state.peer_choking || self.state.peer_allowed_fast.contains(&piece))
-                            && (self.torrent.claim_hedge(r, me) || self.take_over_hedge(r))
-                        {
-                            let coord = block_coord_from_req_index(r, plen, total);
-                            if !handle.send_message(Message::Request {
-                                index: coord.piece,
-                                begin: coord.offset,
-                                length: coord.length.max(1),
-                            }) {
-                                self.torrent.clear_hedge(r);
-                                break;
-                            }
-                            self.note_arrival_request(r, arrival_net.as_ref());
-                            self.state.outstanding_requests.insert(r);
-                            *self.state.valid_receive_chunks.entry(r).or_default() += 1;
-                            self.state.cancelled_requests.remove(&r);
-                            self.cancelled_at.remove(&r);
-                            self.torrent.mark_chunk_requested(r);
-                            added += 1;
-                        }
-                        continue;
-                    }
-                    let holder_when = self.torrent.request_when(r).unwrap_or_else(Instant::now);
-                    let holder_snap = self.torrent.webtor_peer_snap(holder);
-                    let holder_uncancelled = holder_snap.as_ref().map(|s| s.queued).unwrap_or(1);
-                    let holder_useful = holder_snap.as_ref().and_then(|s| s.last_useful);
-                    if !may_take_existing_request(
-                        &clock,
-                        &tuning,
-                        focus_set,
-                        steal_after,
-                        r,
-                        prio,
-                        holder_when,
-                        self.state.outstanding_requests.len() as u32,
-                        self.state.last_useful_chunk_received,
-                        holder_uncancelled,
-                        holder_useful,
-                        focus,
-                        false,
-                    ) {
-                        continue;
-                    }
-                    // A balance steal of a block the holder has most likely
-                    // sent already only duplicates it: both copies arrive and
-                    // one is discarded (measured: ~80% of steals during
-                    // seeks, a fifth of all data received). Steals of stuck
-                    // blocks and of the few blocks the player needs next
-                    // still go ahead.
-                    let at_playhead = focus.is_some_and(|f| r >= f && r < f + tuning.focus_blocks as u32);
-                    if !at_playhead && holder_snap.as_ref().is_some_and(|s| steal_lands_in_flight(
-                            holder_request_times.entry(holder)
-                                .or_insert_with(|| self.torrent.request_times(holder))
-                                .partition_point(|at| *at < holder_when),
-                            s.download_rate_bps, s.rtt, chunk))
-                        && !should_steal_urgent(&clock, &tuning, steal_after, r, prio, holder_when,
-                            self.state.last_useful_chunk_received, holder_useful, focus)
-                    {
-                        continue;
-                    }
-                    // Steal: clear assignment; holder cancels on its own refill.
-                    self.torrent.release_request(r, holder);
-                    stolen_from = Some(holder);
-                }
-            }
-
-            if self.state.peer_choking && !self.state.peer_allowed_fast.contains(&piece) {
-                continue;
-            }
-
-            let coord = block_coord_from_req_index(r, plen, total);
-            // Peer handlers run concurrently. Reserve before sending so two
-            // refill snapshots cannot both overwrite the same block's owner.
-            if !self.torrent.claim_request(r, self.key(), Instant::now()) {
-                continue;
-            }
-            let queued = handle.send_message(Message::Request {
-                index: coord.piece,
-                begin: coord.offset,
-                length: coord.length.max(1),
-            });
-            if !queued {
-                self.torrent.release_request(r, self.key());
-                break;
-            }
-            self.note_arrival_request(r, arrival_net.as_ref());
-            // The queue ahead is subtracted so the estimate does not grow
-            // with it and inflate the playback pipeline sized from it.
-            self.probe_round_trip(r);
-            claimed_focus |= focus.is_some_and(|f| r >= f && r < f + tuning.focus_blocks as u32);
-            self.state.outstanding_requests.insert(r);
-            *self.state.valid_receive_chunks.entry(r).or_default() += 1;
-            self.state.cancelled_requests.remove(&r);
-            self.cancelled_at.remove(&r);
-            self.torrent.mark_chunk_requested(r);
-            added += 1;
-            if let Some(holder) = stolen_from {
-                self.torrent.wake_peer(holder);
-            }
-        }
-
-        if claimed_focus {
-            self.torrent.focus_block_claimed();
-        }
-
-        let after = self.state.outstanding_requests.len() as u32;
-        let computed = next_peak_requests(
-            tuning.peak_mode,
-            self.state.peak_requests as u32,
-            after,
-            added,
-            was_empty,
-        ) as usize;
-        // Choke, seek cancellation or a temporarily full hash queue must not
-        // restart a productive peer's slow start from a single request.
-        self.state.peak_requests = self.state.peak_requests.max(computed);
-        self.idle_refill_at = (added == 0).then(Instant::now);
-        let _ = before;
-    }
-
-    /// Refill for a saved download. Each peer takes the next free blocks it can
-    /// serve from the queue all peers share. Nobody takes blocks from anybody:
-    /// queues grow with speed, so taking from long queues robbed the fastest
-    /// peers. A peer that stops delivering hands its blocks back; the very end
-    /// takes second copies so one slow holder cannot hold it up.
-    fn refill_background(&mut self, handle: &ConnHandle, tuning: &SeekTuning) {
-        let me = self.key();
-        let pending = pending_requests(
-            tuning,
-            self.state.outstanding_requests.len() as u32,
-            self.state.cancelled_requests.len() as u32,
-        ) as usize;
-        let room = self.nominal_max().saturating_sub(pending);
-        let pick = self.torrent.background_pick(
-            &BackgroundPeer {
+        let room = self.nominal_max().saturating_sub(self.state.outstanding_requests.len());
+        let pick: Pick = self.torrent.pick_blocks(
+            &PickPeer {
                 key: me,
                 have_all: self.state.peer_sent_have_all,
                 pieces: &self.state.peer_pieces,
                 allowed_fast: &self.state.peer_allowed_fast,
                 choking: self.state.peer_choking,
+                outstanding: &self.state.outstanding_requests,
                 cancelled: &self.state.cancelled_requests,
-                starving: self.state.outstanding_requests.len() < BACKGROUND_STARVING_REQUESTS,
+                starving: self.state.outstanding_requests.len() < STARVING_REQUESTS,
+                rate: self.state.download_rate.rate(),
+                rtt: self.state.rtt.estimate,
+                last_useful: self.state.last_useful_chunk_received,
             },
             room,
         );
+        self.update_interest(handle, pick.interested, saving, focus);
 
-        // Interest stays while the peer has anything unfinished we want, even
-        // pieces being hashed: dropping it costs our place in its unchoke queue.
-        let interested = pick.interested
-            || (self.state.am_interested
-                && if self.state.peer_sent_have_all {
-                    self.torrent.any_wanted_incomplete()
-                } else {
-                    self.torrent.any_wanted_among(&self.state.peer_pieces)
-                });
+        let was_empty = self.state.outstanding_requests.is_empty();
+        let mut added = 0u32;
+        let mut claimed_focus = false;
+        for (req, take) in pick.blocks.into_iter().take(room) {
+            if self.state.outstanding_requests.contains(&req) {
+                continue;
+            }
+            let now = Instant::now();
+            let claimed = match take {
+                Take::Free => self.torrent.claim_request(req, me, now),
+                Take::From(holder) => {
+                    self.torrent.release_request(req, holder);
+                    self.torrent.claim_request(req, me, now)
+                }
+                Take::Copy { eager } => {
+                    if eager && !self.torrent.take_seek_hedge() {
+                        false
+                    } else if self.torrent.claim_hedge(req, me) {
+                        true
+                    } else {
+                        if eager { self.torrent.refund_seek_hedge(); }
+                        false
+                    }
+                }
+            };
+            if !claimed {
+                continue;
+            }
+            if !self.send_request(handle, req) {
+                match take {
+                    Take::Copy { eager } => {
+                        self.torrent.clear_hedge(req);
+                        if eager { self.torrent.refund_seek_hedge(); }
+                    }
+                    _ => self.torrent.release_request(req, me),
+                }
+                break;
+            }
+            added += 1;
+            match take {
+                Take::Free => {
+                    self.probe_round_trip(req);
+                    claimed_focus |= focus.is_some_and(|f| req >= f && req < f + FOCUS_NUDGE_BLOCKS);
+                }
+                Take::From(holder) => {
+                    self.torrent.record_rescue();
+                    self.torrent.wake_peer(holder);
+                }
+                Take::Copy { .. } => self.torrent.record_hedge(),
+            }
+            self.state.outstanding_requests.insert(req);
+        }
+        if claimed_focus {
+            self.torrent.focus_block_claimed();
+        }
+
+        // A choke, seek cancellation or full hash queue must not restart a
+        // productive peer's slow start from a single request.
+        let after = self.state.outstanding_requests.len();
+        self.state.peak_requests = self.state.peak_requests.max(after);
+        self.publish_live();
+        // A refill that found nothing rests; one with a queue refills as blocks
+        // arrive. A stalled download must not poll every peer all night.
+        self.idle_refill_at = (added == 0 && (was_empty || !saving)).then(Instant::now);
+    }
+
+    /// Send a request this peer has claimed, and expect its answer.
+    fn send_request(&mut self, handle: &ConnHandle, req: RequestIndex) -> bool {
+        let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
+        if !handle.send_message(Message::Request {
+            index: coord.piece,
+            begin: coord.offset,
+            length: coord.length.max(1),
+        }) {
+            return false;
+        }
+        *self.state.valid_receive_chunks.entry(req).or_default() += 1;
+        self.state.cancelled_requests.remove(&req);
+        self.cancelled_at.remove(&req);
+        true
+    }
+
+    /// Interest is sticky. qBittorrent punishes NotInterested while we are still
+    /// streaming, and dropping it costs our place in a peer's unchoke queue.
+    fn update_interest(&mut self, handle: &ConnHandle, wants: bool, saving: bool, focus: Option<RequestIndex>) {
+        let mut interested = wants;
+        if !interested && self.state.am_interested {
+            interested = if self.state.peer_sent_have_all {
+                self.torrent.any_wanted_incomplete()
+            } else {
+                self.torrent.any_wanted_among(&self.state.peer_pieces)
+            };
+            if !interested && !saving {
+                let num_pieces = self.torrent.num_pieces();
+                interested = !(0..num_pieces).all(|p| self.torrent.piece_complete(p))
+                    && (self.state.peer_sent_have_all
+                        || self.state.peer_pieces.is_empty()
+                        || !self.state.peer_pieces.iter().all(|&p| self.torrent.piece_complete(p)));
+            }
+        }
+        if !interested && !self.torrent.data_download_disallowed() {
+            // Stay interested while the playhead window needs what this peer has.
+            if let Some(focus) = focus {
+                let (plen, total) = (self.torrent.piece_length(), self.torrent.total_length());
+                let begin = block_coord_from_req_index(focus, plen, total).piece;
+                let end = begin.saturating_add(PLAYING_INTEREST_PIECES).min(self.torrent.num_pieces());
+                interested = (begin..end).any(|p| !self.torrent.piece_complete(p)
+                    && (self.state.peer_sent_have_all || self.state.peer_pieces.contains(&p)));
+            }
+        }
         if interested != self.state.am_interested {
             self.state.am_interested = interested;
             if interested {
@@ -1619,70 +1001,19 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 self.send(handle, Message::NotInterested);
             }
         }
+    }
 
-        let (plen, total) = (self.torrent.piece_length(), self.torrent.total_length());
-        let net = self.torrent.arrival_net();
-        let was_empty = self.state.outstanding_requests.is_empty();
-        let mut added = 0u32;
-        for r in pick.free.into_iter().take(room) {
-            if self.state.outstanding_requests.contains(&r) || !self.torrent.claim_request(r, me, Instant::now()) {
-                continue;
-            }
-            let coord = block_coord_from_req_index(r, plen, total);
-            if !handle.send_message(Message::Request {
-                index: coord.piece,
-                begin: coord.offset,
-                length: coord.length.max(1),
-            }) {
-                self.torrent.release_request(r, me);
-                break;
-            }
-            self.note_arrival_request(r, net.as_ref());
-            self.probe_round_trip(r);
-            self.state.outstanding_requests.insert(r);
-            *self.state.valid_receive_chunks.entry(r).or_default() += 1;
-            self.state.cancelled_requests.remove(&r);
-            self.cancelled_at.remove(&r);
-            added += 1;
-        }
-        if added == 0 && pick.wanted_bytes <= ENDGAME_BYTES {
-            for r in pick.held.into_iter().take(room) {
-                if self.state.outstanding_requests.contains(&r) || !self.torrent.claim_hedge(r, me) {
-                    continue;
-                }
-                let coord = block_coord_from_req_index(r, plen, total);
-                if !handle.send_message(Message::Request {
-                    index: coord.piece,
-                    begin: coord.offset,
-                    length: coord.length.max(1),
-                }) {
-                    self.torrent.clear_hedge(r);
-                    break;
-                }
-                self.note_arrival_request(r, net.as_ref());
-                self.state.outstanding_requests.insert(r);
-                *self.state.valid_receive_chunks.entry(r).or_default() += 1;
-                self.state.cancelled_requests.remove(&r);
-                self.cancelled_at.remove(&r);
-                added += 1;
-            }
-        }
-
-        let after = self.state.outstanding_requests.len() as u32;
-        let computed = next_peak_requests(
-            tuning.peak_mode,
-            self.state.peak_requests as u32,
-            after,
-            added,
-            was_empty,
-        ) as usize;
-        self.state.peak_requests = self.state.peak_requests.max(computed);
-        if added == 0 && room > 0 {
-        }
-        // A peer still receiving refills freely. One with nothing to do and nothing
-        // on the way rests, or a stalled download polls every peer all night.
-        self.idle_refill_at =
-            (added == 0 && self.state.outstanding_requests.is_empty()).then(Instant::now);
+    /// What other peers' refills read about this one.
+    fn publish_live(&self) {
+        self.live.publish(
+            self.state.download_rate.rate(),
+            self.state.rtt.estimate,
+            self.state.outstanding_requests.len(),
+            self.nominal_max(),
+            self.state.peer_choking,
+            self.state.peer_sent_have_all,
+            self.state.last_useful_chunk_received,
+        );
     }
 
     /// Go `PeerConn.expectingChunks` + `Peer.updateExpectingChunks`: the
@@ -1708,37 +1039,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.nominal_max_requests()
     }
 
-    fn arrival_inputs(&self) -> Option<[f64; ARRIVAL_FEATURES]> {
-        let arrival = self.arrival.read();
-        arrival.peer.inputs(self.state.download_rate.rate(), self.state.rtt.estimate,
-            self.state.outstanding_requests.len(), self.torrent.chunk_size() as usize,
-            arrival.unchoked_at)
-    }
 
-    fn note_arrival_request(&self, req: RequestIndex, net: Option<&ArrivalNet>) {
-        let Some(net) = net else { return; };
-        let Some(x) = self.arrival_inputs() else { return; };
-        self.arrival.write().samples.insert(req, ArrivalSample {
-            sent: Instant::now(), x, estimate: net.predict(x),
-        });
-    }
 
-    fn note_arrival_block(&self, req: RequestIndex) {
-        let sample = {
-            let mut arrival = self.arrival.write();
-            arrival.peer.note_block(self.torrent.chunk_size() as usize);
-            let sample = arrival.samples.remove(&req);
-            if let Some(sample) = sample {
-                let error = (sample.estimate - sample.sent.elapsed().as_secs_f64()).abs();
-                arrival.peer.on_block_arrived(error);
-            }
-            sample
-        };
-        // Never hold a peer-state lock while training the shared model.
-        if let Some(sample) = sample {
-            self.torrent.learn_arrival(sample, sample.sent.elapsed().as_secs_f64());
-        }
-    }
 
     /// Ask a newly unchoked peer that got no real work for one block, just to
     /// time it. Peers with no measured speed cannot be ranked, so straight
@@ -1806,7 +1108,9 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             self.update_requests(handle);
         }
         self.update_expecting();
-        if !is_block || self.last_snapshot.elapsed() >= SNAPSHOT_EVERY {
+        self.publish_live();
+        if self.last_snapshot.elapsed() >= SNAPSHOT_EVERY || (!is_block && self.choke_changed) {
+            self.choke_changed = false;
             self.last_snapshot = Instant::now();
             self.torrent.update_peer_snapshot(self.peer_conn_info());
         }
@@ -1833,208 +1137,16 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         }
     }
 
-    /// Endgame: one hedge per block, so the first peer to refill would keep
-    /// every copy and leave the rest idle. A much faster peer takes it over;
-    /// the old hedger cancels when woken.
-    fn take_over_hedge(&self, req: RequestIndex) -> bool {
-        let me = self.key();
-        let Some(other) = self.torrent.hedge_peer(req).filter(|&other| other != me) else {
-            return false;
-        };
-        let other_rate = self.torrent.webtor_peer_snap(other).map_or(0.0, |s| s.download_rate_bps);
-        if self.state.download_rate.rate() <= other_rate * 2.0 {
-            return false;
-        }
-        self.torrent.release_hedge(req, other);
-        if !self.torrent.claim_hedge(req, me) {
-            return false;
-        }
-        self.torrent.wake_peer(other);
-        true
-    }
 
     fn is_low_on_requests(&self) -> bool {
-        let tuning = self.torrent.seek_tuning();
-        let pending = self.state.outstanding_requests.len();
-        if tuning.refill_at > 0.0 && self.torrent.request_focus_index().is_some() {
-            pending <= (self.nominal_max() as f64 * tuning.refill_at) as usize
-        } else if tuning.full_pipeline {
-            pending <= self.nominal_max() / 2
-        } else {
-            pending == 0 && self.state.cancelled_requests.is_empty()
-        }
+        self.state.outstanding_requests.len() <= self.nominal_max() / 2
     }
 
-    fn seek_peer_snapshots(&self) -> Vec<HolPeerSnap<T>> {
-        let mut peers: Vec<HolPeerSnap<T>> = Vec::new();
-        peers.push(HolPeerSnap {
-            key: self.key(),
-            download_rate_bps: self.state.download_rate.rate(),
-            rtt: self.state.rtt.estimate,
-            queued: self.state.outstanding_requests.len() as u32,
-            cancelled: self.state.cancelled_requests.len() as u32,
-            nominal_max: self.nominal_max() as u32,
-            peer_choking: self.state.peer_choking,
-            closed: self.closed.load(Ordering::Relaxed),
-            last_useful: self.state.last_useful_chunk_received,
-            torrent: Arc::clone(&self.torrent),
-            valid_receive: self.state.valid_receive_chunks.clone(),
-            pieces: HashSet::new(),
-            have_all: self.state.peer_sent_have_all,
-            lookup_torrent: true,
-            arrival_inputs: self.arrival_inputs(),
-            arrival: Some(self.arrival.clone()),
-        });
-        for pk in self.torrent.connected_peer_keys() {
-            if pk == self.key() {
-                continue;
-            }
-            if let Some(s) = self.torrent.webtor_peer_snap(pk) {
-                let arrival = self.torrent.peer_arrival(pk);
-                let arrival_inputs = arrival.as_ref().and_then(|state| {
-                    let state = state.read();
-                    state.peer.inputs(s.download_rate_bps, s.rtt, s.queued as usize,
-                        self.torrent.chunk_size() as usize, state.unchoked_at)
-                });
-                peers.push(HolPeerSnap {
-                    key: s.key,
-                    download_rate_bps: s.download_rate_bps,
-                    rtt: s.rtt,
-                    queued: s.queued,
-                    cancelled: s.cancelled,
-                    nominal_max: s.nominal_max,
-                    peer_choking: s.peer_choking,
-                    closed: s.closed,
-                    last_useful: s.last_useful,
-                    torrent: Arc::clone(&self.torrent),
-                    valid_receive: HashMap::new(),
-                    pieces: HashSet::new(),
-                    have_all: false,
-                    lookup_torrent: true,
-                    arrival_inputs,
-                    arrival,
-                });
-            }
-        }
-        peers
-    }
 
-    /// Apply HOL rescue / hedge moves that involve this peer (Go nudge path).
-    fn apply_hol_and_hedge(&mut self, handle: &ConnHandle, tuning: &SeekTuning) {
-        let clock = SystemClock;
-        let torrent = self.torrent.clone();
-        let view = PeerTorrentView(&*torrent);
-        let peers = self.seek_peer_snapshots();
-        let net = self.torrent.arrival_net();
-        let learned = net.as_ref().map(|net| net as &dyn crate::webtor::ArrivalPredictor);
-        let features_for = |p: &HolPeerSnap<T>| p.arrival_inputs;
-        let learned_od = |p: &HolPeerSnap<T>, r: RequestIndex| -> Option<bool> {
-            if !tuning.learned_arrival { return None; }
-            p.arrival.as_ref()?.read().overdue(r, Duration::from_millis(100))
-        };
-
-        if tuning.hol_rescue {
-            let moves = rescue_decisions(&clock, tuning, &view, &peers, learned, &features_for);
-            let me = self.key();
-            let plen = self.torrent.piece_length();
-            let total = self.torrent.total_length();
-            for m in moves {
-                if m.from == me && self.state.outstanding_requests.contains(&m.req) {
-                    self.cancel_outstanding(handle, m.req);
-                    self.torrent.record_rescue();
-                } else if m.to == me
-                    && !self.state.outstanding_requests.contains(&m.req)
-                    && !self.state.peer_choking
-                {
-                    let coord = block_coord_from_req_index(m.req, plen, total);
-                    if self.state.peer_sent_have_all
-                        || self.state.peer_pieces.contains(&coord.piece)
-                        || self.state.peer_allowed_fast.contains(&coord.piece)
-                    {
-                        if self.state.outstanding_requests.len() >= self.nominal_max() { break; }
-                        self.torrent.release_request(m.req, m.from);
-                        if !self.torrent.claim_request(m.req, me, Instant::now()) { continue; }
-                        if m.from != me { self.torrent.wake_peer(m.from); }
-                        if !handle.send_message(Message::Request {
-                                index: coord.piece,
-                                begin: coord.offset,
-                                length: coord.length.max(1),
-                            }) {
-                            self.torrent.release_request(m.req, me);
-                            break;
-                        }
-                        self.note_arrival_request(m.req, net.as_ref());
-                        if self.state.outstanding_requests.is_empty() {
-                            self.state.rtt.on_request_sent(m.req);
-                        }
-                        self.state.outstanding_requests.insert(m.req);
-                        self.state.cancelled_requests.remove(&m.req);
-                        self.cancelled_at.remove(&m.req);
-                        *self.state.valid_receive_chunks.entry(m.req).or_default() += 1;
-                        self.torrent.mark_chunk_requested(m.req);
-                        self.torrent.record_rescue();
-                    }
-                }
-            }
-        }
-
-        if tuning.hedge {
-            let moves = hedge_decisions(
-                &clock,
-                tuning,
-                &view,
-                &peers,
-                learned,
-                &features_for,
-                &learned_od,
-            );
-            let me = self.key();
-            let plen = self.torrent.piece_length();
-            let total = self.torrent.total_length();
-            for m in moves {
-                if m.hedger != me || self.state.peer_choking {
-                    continue;
-                }
-                if self.state.outstanding_requests.contains(&m.req) {
-                    continue;
-                }
-                if pending_requests(tuning, self.state.outstanding_requests.len() as u32,
-                    self.state.cancelled_requests.len() as u32) >= self.nominal_max() as u32 { break; }
-                let coord = block_coord_from_req_index(m.req, plen, total);
-                if !(self.state.peer_sent_have_all
-                    || self.state.peer_pieces.contains(&coord.piece)
-                    || self.state.peer_allowed_fast.contains(&coord.piece))
-                {
-                    continue;
-                }
-                // Eager seek hedges are charged when sent: other peers
-                // compute the same moves but only the hedger applies them.
-                if m.eager && !self.torrent.take_seek_hedge() { continue; }
-                if !self.torrent.claim_hedge(m.req, me) {
-                    if m.eager { self.torrent.refund_seek_hedge(); }
-                    continue;
-                }
-                if !handle.send_message(Message::Request {
-                        index: coord.piece,
-                        begin: coord.offset,
-                        length: coord.length.max(1),
-                    }) {
-                    self.torrent.clear_hedge(m.req);
-                    if m.eager { self.torrent.refund_seek_hedge(); }
-                    break;
-                }
-                self.note_arrival_request(m.req, net.as_ref());
-                self.state.outstanding_requests.insert(m.req);
-                *self.state.valid_receive_chunks.entry(m.req).or_insert(0) += 1;
-                self.torrent.mark_chunk_requested(m.req);
-                self.torrent.record_hedge();
-            }
-        }
-    }
 
     fn handle_choke(&mut self, handle: &ConnHandle) {
         self.state.peer_choking = true;
-        self.arrival.write().unchoked_at = None;
+        self.choke_changed = true;
         self.state.webtor_choked_since = Some(Instant::now());
         // Cancel outstanding except allowed-fast
         let plen = self.torrent.piece_length();
@@ -2053,8 +1165,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
     fn handle_unchoke(&mut self) {
         self.state.peer_choking = false;
+        self.choke_changed = true;
         self.state.webtor_unchoked_at = Some(Instant::now());
-        self.arrival.write().unchoked_at = self.state.webtor_unchoked_at;
         self.state.webtor_choked_since = None;
         self.state.need_request_update = true;
     }
@@ -2173,7 +1285,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.outstanding_requests.remove(&req);
         self.state.cancelled_requests.remove(&req);
         self.cancelled_at.remove(&req);
-        self.torrent.clear_chunk_requested(req);
         if hedge == Some(me) {
             self.torrent.clear_hedge(req);
         }
@@ -2183,9 +1294,6 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if self.state.valid_receive_chunks.get(&req) == Some(&0) {
             self.state.valid_receive_chunks.remove(&req);
         }
-
-        // Go learns arrival timing before its haveChunk check.
-        self.note_arrival_block(req);
 
         // Go `haveChunk`: a late, cancelled or hedged copy of a block that is
         // written, or being written by another peer, is wasted — never
@@ -2516,9 +1624,17 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         {
             return Some(IDLE_CHOKED_WAKE);
         }
-        // Refill stalled Normal-priority pipelines (download_all) and keep PEX alive.
-        if !self.state.outstanding_requests.is_empty() || self.state.need_request_update {
+        if self.state.need_request_update {
             return Some(Duration::from_millis(100));
+        }
+        // Overdue playhead blocks are only noticed by looking. Outside playback
+        // arriving blocks refill the queue and this only catches a stall.
+        if !self.state.outstanding_requests.is_empty() {
+            return Some(if self.torrent.request_focus_index().is_some() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_millis(500)
+            });
         }
         if self.torrent.any_wanted_incomplete() {
             if self.idle_refill_at.is_some() && self.torrent.background_only() {
@@ -2635,9 +1751,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
                 }
                 self.state.cancelled_requests.remove(&req);
                 self.cancelled_at.remove(&req);
-                self.arrival.write().samples.remove(&req);
                 if self.torrent.requesting_peer(req) == Some(self.key()) {
-                    self.torrent.clear_chunk_requested(req);
                     self.torrent.clear_assignment(req);
                 }
                 if self.torrent.hedge_peer(req) == Some(self.key()) {
@@ -2688,11 +1802,11 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
         }
         let reqs: Vec<_> = self.state.outstanding_requests.iter().copied().collect();
         for r in reqs {
-            self.torrent.clear_chunk_requested(r);
             if self.torrent.requesting_peer(r) == Some(self.key()) {
                 self.torrent.clear_assignment(r);
             }
         }
+        self.torrent.unregister_live(&self.live);
         self.torrent.peer_closed(self.state.remote_addr);
         self.torrent.bump_change();
     }
@@ -2715,129 +1829,3 @@ impl ConnStatsExt for AtomicConnStats {
     }
 }
 
-// ---------------------------------------------------------------- Webtor view adapters
-
-struct PeerTorrentView<'a, T: PeerTorrent>(&'a T);
-
-impl<T: PeerTorrent> TorrentView for PeerTorrentView<'_, T> {
-    type PeerId = PeerKey;
-
-    fn request_focus_index(&self) -> Option<RequestIndex> {
-        self.0.request_focus_index()
-    }
-    fn eager_hedge(&self) -> bool {
-        self.0.seek_hedge_open()
-    }
-    fn piece_priority(&self, piece: PieceIndex) -> PiecePriority {
-        self.0.piece_priority(piece)
-    }
-    fn piece_of_request(&self, req: RequestIndex) -> PieceIndex {
-        block_coord_from_req_index(req, self.0.piece_length(), self.0.total_length()).piece
-    }
-    fn block_arrived(&self, req: RequestIndex) -> bool {
-        self.0.chunk_dirty(req) || self.0.piece_complete(self.piece_of_request(req))
-    }
-    fn hashing_or_marking(&self, piece: PieceIndex) -> bool {
-        self.0.piece_hashing(piece)
-    }
-    fn max_end_request(&self) -> RequestIndex {
-        let chunk = i64::from(self.0.chunk_size().max(1));
-        ((self.0.total_length() + chunk - 1) / chunk) as RequestIndex
-    }
-    fn request_when(&self, req: RequestIndex) -> Option<Instant> {
-        self.0.request_when(req)
-    }
-    fn requesting_peer(&self, req: RequestIndex) -> Option<Self::PeerId> {
-        self.0.requesting_peer(req)
-    }
-    fn piece_bytes_left(&self, piece: PieceIndex) -> u64 {
-        if self.0.piece_complete(piece) {
-            return 0;
-        }
-        let plen = self.0.piece_length();
-        let total = self.0.total_length();
-        let (start, end) = piece_req_index_range(piece, plen, total);
-        let mut left = 0u64;
-        for r in start..end {
-            if !self.0.chunk_dirty(r) {
-                left += u64::from(block_coord_from_req_index(r, plen, total).length);
-            }
-        }
-        left
-    }
-    fn hedge_peer(&self, req: RequestIndex) -> Option<Self::PeerId> {
-        self.0.hedge_peer(req)
-    }
-    fn chunk_size(&self) -> u32 {
-        self.0.chunk_size()
-    }
-    fn piece_complete(&self, piece: PieceIndex) -> bool {
-        self.0.piece_complete(piece)
-    }
-    fn num_pieces(&self) -> PieceIndex {
-        self.0.num_pieces()
-    }
-}
-
-struct HolPeerSnap<T: PeerTorrent> {
-    key: PeerKey,
-    download_rate_bps: f64,
-    rtt: Duration,
-    queued: u32,
-    cancelled: u32,
-    nominal_max: u32,
-    peer_choking: bool,
-    closed: bool,
-    last_useful: Option<Instant>,
-    torrent: Arc<T>,
-    valid_receive: HashMap<RequestIndex, u32>,
-    pieces: HashSet<u32>,
-    have_all: bool,
-    lookup_torrent: bool,
-    arrival_inputs: Option<[f64; ARRIVAL_FEATURES]>,
-    arrival: Option<Arc<RwLock<PeerArrivalState>>>,
-}
-
-impl<T: PeerTorrent> PeerView for HolPeerSnap<T> {
-    type Id = PeerKey;
-
-    fn id(&self) -> Self::Id {
-        self.key
-    }
-    fn download_rate_bps(&self) -> f64 {
-        self.download_rate_bps
-    }
-    fn rtt(&self) -> Duration {
-        self.rtt
-    }
-    fn queued_requests(&self) -> u32 {
-        self.queued
-    }
-    fn cancelled_requests(&self) -> u32 {
-        self.cancelled
-    }
-    fn nominal_max_requests(&self) -> u32 {
-        self.nominal_max
-    }
-    fn last_useful_data(&self) -> Option<Instant> {
-        self.last_useful
-    }
-    fn has_piece(&self, piece: PieceIndex) -> bool {
-        if self.have_all {
-            true
-        } else if self.lookup_torrent {
-            self.torrent.peer_has_piece(self.key, piece)
-        } else {
-            self.pieces.contains(&piece)
-        }
-    }
-    fn peer_choking(&self) -> bool {
-        self.peer_choking
-    }
-    fn closed(&self) -> bool {
-        self.closed
-    }
-    fn valid_receive_count(&self, req: RequestIndex) -> u32 {
-        self.valid_receive.get(&req).copied().unwrap_or(0)
-    }
-}

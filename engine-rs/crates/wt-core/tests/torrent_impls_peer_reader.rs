@@ -2,13 +2,14 @@
 //!
 //! Requires agy-2 `pub(crate)` fields on `TorrentInner` (see `torrent_impls.rs`).
 
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wt_core::arrival::ArrivalModel;
 use wt_core::peer_conn::PeerTorrent;
 use wt_core::reader::{PieceRange, ReaderHost};
+use wt_core::sched::{PickPeer, Take};
 use wt_core::storage_adapter::MemoryClientStorage;
 use wt_core::torrent::TorrentInner;
 use wt_core::torrent_impls::{note_peer_piece, peer_key_from_addr};
@@ -36,13 +37,11 @@ fn test_info(num_pieces: u32, piece_len: i64) -> Info {
 }
 
 fn fresh_torrent() -> Arc<TorrentInner> {
-    let arrival = Arc::new(parking_lot::RwLock::new(ArrivalModel::default()));
     Arc::new(TorrentInner::new(
         InfoHash([1u8; 20]),
         None,
         "test".into(),
         Arc::new(MemoryClientStorage::new()),
-        arrival,
     ))
 }
 
@@ -78,17 +77,14 @@ fn peer_torrent_chunk_io_assignment_hedge_meta_flags() {
 
     let pk = PeerTorrent::peer_key(t.as_ref(), SocketAddr::from((Ipv4Addr::LOCALHOST, 1)));
     note_peer_piece(&t, pk, 0, true);
-    assert!(PeerTorrent::peer_has_piece(t.as_ref(), pk, 0));
+    assert!(t.peer_pieces.read().get(&pk).is_some_and(|pieces| pieces.contains(&0)));
     PeerTorrent::note_availability(t.as_ref(), 1, 2);
 
-    let (snap, _order) = PeerTorrent::desired_request_context(t.as_ref());
-    assert_eq!(snap.num_pieces, 4);
-
-    PeerTorrent::assign_request(t.as_ref(), 2, pk, Instant::now());
+    assert!(PeerTorrent::claim_request(t.as_ref(), 2, pk, Instant::now()));
     assert_eq!(PeerTorrent::requesting_peer(t.as_ref(), 2), Some(pk));
     PeerTorrent::clear_assignment(t.as_ref(), 2);
 
-    PeerTorrent::set_hedge_peer(t.as_ref(), 3, pk);
+    assert!(PeerTorrent::claim_hedge(t.as_ref(), 3, pk));
     assert_eq!(PeerTorrent::hedge_peer(t.as_ref(), 3), Some(pk));
     PeerTorrent::clear_hedge(t.as_ref(), 3);
 
@@ -142,164 +138,85 @@ fn reader_host_have_wait_read_positions() {
     assert_eq!(got, after);
 }
 
-#[test]
-fn webtor_snapshot_preserves_live_peer_request_capacity() {
-    use tokio::sync::{mpsc, Notify};
-    use wt_core::peer_conn::PeerConn;
-    use wt_types::PeerSource;
-
-    let t = fresh_torrent();
-    let addr = "127.0.0.1:6881".parse().unwrap();
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let conn = PeerConn::new(addr, true, PeerSource::Direct, tx, Arc::new(Notify::new()));
-    {
-        let mut state = conn.inner.write();
-        state.max_requests = 500;
-        state.peak_requests = 200;
-        state.webtor_pipeline_limit = 128;
-        state.outstanding_requests.extend(0..64);
-    }
-    let key = peer_key_from_addr(addr);
-    // The handler publishes this same snapshot path for the HOL/hedge/steal consumers.
-    PeerTorrent::update_peer_snapshot(t.as_ref(), conn.peer_conn_info());
-    let snap = PeerTorrent::webtor_peer_snap(t.as_ref(), key).unwrap();
-    assert_eq!(snap.queued, 64);
-    assert_eq!(snap.nominal_max, 128);
-    assert!(
-        snap.queued < snap.nominal_max,
-        "a peer at 64 pending still has room"
-    );
-    for (peak, peer_max, pipeline, expected) in [
-        (200, 500, 0, 400),
-        (200, 100, 0, 100),
-        (0, 500, 0, 1),
-        (100000, 100000, 0, ((1 << 20) - (1 << 19) - 5) / 17),
-    ] {
-        let mut state = conn.inner.write();
-        state.peak_requests = peak;
-        state.max_requests = peer_max;
-        state.webtor_pipeline_limit = pipeline;
-        drop(state);
-        PeerTorrent::update_peer_snapshot(t.as_ref(), conn.peer_conn_info());
-        assert_eq!(
-            PeerTorrent::webtor_peer_snap(t.as_ref(), key)
-                .unwrap()
-                .nominal_max,
-            expected
-        );
+fn pick_peer<'a>(
+    key: u64,
+    pieces: &'a HashSet<u32>,
+    none: &'a HashSet<u32>,
+    choking: bool,
+) -> PickPeer<'a> {
+    PickPeer {
+        key,
+        have_all: false,
+        pieces,
+        allowed_fast: none,
+        choking,
+        outstanding: none,
+        cancelled: none,
+        starving: false,
+        rate: 1_000_000.0,
+        rtt: Duration::from_millis(50),
+        last_useful: Some(Instant::now()),
     }
 }
 
-#[test]
-fn peer_request_snapshot_copies_only_candidate_assignments() {
-    use wt_core::strategy::DesiredPeerSnapshot;
+fn wanting(num_pieces: u32, priority: PiecePriority) -> Arc<TorrentInner> {
     let t = fresh_torrent();
-    let info = Arc::new(test_info(512, 64 * 1024));
-    t.set_info(info.clone()).unwrap();
-    {
-        let mut pieces = t.pieces_mut();
-        for p in pieces.iter_mut() {
-            p.priority = PiecePriority::Normal;
-        }
+    t.set_info(Arc::new(test_info(num_pieces, 64 * 1024))).unwrap();
+    for piece in t.pieces_mut().iter_mut() {
+        piece.priority = priority;
     }
-    let owner = SocketAddr::from((Ipv4Addr::LOCALHOST, 9000));
-    let owner_key = peer_key_from_addr(owner);
-    let when = Instant::now();
-    for req in 0..2048 {
-        t.request_state.write().insert(
-            req,
-            wt_core::picker::ActiveRequest {
-                peer: owner,
-                when,
-                cancelled: false,
-            },
-        );
-        t.assignments.write().insert(req, (owner_key, when));
-    }
-    let mut has_piece = vec![false; 512];
-    has_piece[0] = true;
-    let peer = DesiredPeerSnapshot {
-        peer_id: owner_key,
-        has_piece,
-        peer_choking: false,
-        peer_allowed_fast: vec![false; 512],
-        outstanding: vec![],
-        cancelled: vec![],
-        nominal_max_requests: 64,
-    };
-    let start = Instant::now();
-    let (snapshot, _) = t.desired_request_context_for_peer(&peer);
-    eprintln!("snapshot with 2048 outstanding: {:?}", start.elapsed());
-    assert_eq!(snapshot.piece_of_request.len(), 4);
-    assert_eq!(
-        snapshot.assignments.len(),
-        4,
-        "a per-peer snapshot must not clone assignments outside its candidate blocks"
-    );
-    assert!(
-        snapshot
-            .assignments
-            .values()
-            .all(|a| a.peer_outstanding == 2048),
-        "steal ordering still needs the holder's full outstanding count"
-    );
+    t
 }
 
 #[test]
-#[ignore = "manual request refill CPU benchmark"]
-fn request_refill_cpu_benchmark() {
-    use wt_core::strategy::{
-        compute_desired_requests, sort_requests_for_peer, DesiredPeerSnapshot, RequestTuning,
-    };
-    let t = fresh_torrent();
-    let info = Arc::new(test_info(8192, 1024 * 1024));
-    t.set_info(info).unwrap();
-    for p in t.pieces_mut().iter_mut() {
-        p.priority = PiecePriority::Normal;
+fn refills_share_one_queue_without_overlap() {
+    let t = wanting(64, PiecePriority::Normal);
+    let (all, none): (HashSet<u32>, _) = ((0..64).collect(), HashSet::new());
+    let first = t.pick_blocks(&pick_peer(1, &all, &none, false), 8);
+    let second = t.pick_blocks(&pick_peer(2, &all, &none, false), 8);
+    assert!(first.interested);
+    assert_eq!(first.blocks.len(), 8);
+    assert_eq!(second.blocks.len(), 8);
+    let mine: HashSet<_> = first.blocks.iter().map(|b| b.0).collect();
+    assert!(second.blocks.iter().all(|b| !mine.contains(&b.0)));
+}
+
+#[test]
+fn a_choked_peer_is_interested_but_gets_nothing() {
+    let t = wanting(64, PiecePriority::Normal);
+    let (all, none): (HashSet<u32>, _) = ((0..64).collect(), HashSet::new());
+    let pick = t.pick_blocks(&pick_peer(1, &all, &none, true), 8);
+    assert!(pick.interested);
+    assert!(pick.blocks.is_empty());
+}
+
+#[test]
+fn a_peer_without_the_pieces_gets_nothing() {
+    let t = wanting(64, PiecePriority::Normal);
+    let none = HashSet::new();
+    let pick = t.pick_blocks(&pick_peer(1, &none, &none, false), 8);
+    assert!(!pick.interested);
+    assert!(pick.blocks.is_empty());
+}
+
+#[test]
+fn the_end_of_a_selection_gets_second_copies() {
+    let t = wanting(4, PiecePriority::Normal);
+    let (all, none): (HashSet<u32>, _) = ((0..4).collect(), HashSet::new());
+    for req in 0..16 {
+        assert!(PeerTorrent::claim_request(t.as_ref(), req, 1, Instant::now()));
     }
-    let when = Instant::now();
-    for req in 0..4096 {
-        let owner = SocketAddr::from((Ipv4Addr::LOCALHOST, 9000 + (req % 32) as u16));
-        t.request_state.write().insert(
-            req,
-            wt_core::picker::ActiveRequest {
-                peer: owner,
-                when,
-                cancelled: false,
-            },
-        );
-        t.assignments
-            .write()
-            .insert(req, (peer_key_from_addr(owner), when));
-    }
-    let peer = DesiredPeerSnapshot {
-        peer_id: 1,
-        has_piece: vec![true; 8192],
-        peer_choking: false,
-        peer_allowed_fast: vec![false; 8192],
-        outstanding: vec![],
-        cancelled: vec![],
-        nominal_max_requests: 128,
-    };
-    let mut context_time = Duration::ZERO;
-    let mut sort_time = Duration::ZERO;
-    let mut candidates = 0;
-    for _ in 0..32 {
-        let start = Instant::now();
-        let (snapshot, order) = t.desired_request_context_for_peer(&peer);
-        context_time += start.elapsed();
-        let mut desired =
-            compute_desired_requests(&snapshot, &peer, &order, &RequestTuning::default());
-        let start = Instant::now();
-        sort_requests_for_peer(
-            &mut desired.request_indexes,
-            &snapshot,
-            &peer,
-            &desired.piece_states,
-        );
-        sort_time += start.elapsed();
-        candidates = desired.request_indexes.len();
-        std::hint::black_box(&desired);
-    }
-    println!("32 refills: context={context_time:?} sort={sort_time:?} candidates={candidates}");
+    let pick = t.pick_blocks(&pick_peer(2, &all, &none, false), 4);
+    assert_eq!(pick.blocks.len(), 4);
+    assert!(pick.blocks.iter().all(|b| matches!(b.1, Take::Copy { eager: false })));
+}
+
+#[test]
+fn a_block_someone_else_delivered_is_displaced() {
+    let t = wanting(4, PiecePriority::Normal);
+    assert!(PeerTorrent::claim_hedge(t.as_ref(), 0, 2));
+    let requests: HashSet<u32> = [0].into();
+    assert!(PeerTorrent::displaced_requests(t.as_ref(), &requests, 2).is_empty());
+    PeerTorrent::mark_chunk_dirty(t.as_ref(), 0);
+    assert_eq!(PeerTorrent::displaced_requests(t.as_ref(), &requests, 2), vec![0]);
 }

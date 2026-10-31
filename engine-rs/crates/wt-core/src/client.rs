@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wt_types::{InfoHash, PeerId, PeerInfo, PeerSource};
 
-use crate::arrival::ArrivalModel;
 use crate::conn::{
     dial_peer as conn_dial_peer, AcceptedConn, DialParams, HalfOpenTracker, PeerListener,
     SharedDatagramAdapter,
@@ -191,7 +190,6 @@ pub struct ClientInner {
     /// Redo port mapping and LSD announces now (network changed, torrent added).
     port_map_wake: Arc<tokio::sync::Notify>,
     lsd_wake: Arc<tokio::sync::Notify>,
-    pub arrival_model: Arc<RwLock<ArrivalModel>>,
     pub dial_limiter: Limiter,
     pub download_limiter: Limiter,
     pub upload_limiter: Limiter,
@@ -286,7 +284,6 @@ impl ClientInner {
             port_mappings: Mutex::new(Vec::new()),
             port_map_wake: Arc::new(tokio::sync::Notify::new()),
             lsd_wake: Arc::new(tokio::sync::Notify::new()),
-            arrival_model: Arc::new(RwLock::new(ArrivalModel::new())),
             dial_limiter,
             download_limiter,
             upload_limiter,
@@ -574,7 +571,6 @@ impl ClientInner {
             spec.info_hash_v2,
             spec.display_name.clone(),
             storage,
-            self.arrival_model.clone(),
         ));
         *torrent_inner.client.write() = Arc::downgrade(self);
         torrent_inner

@@ -40,6 +40,21 @@ impl ChunkBits {
         }
     }
 
+    /// Sets the bit. False if it was already set: exactly one caller wins.
+    #[inline]
+    pub fn insert_new(&self, req: u32) -> bool {
+        let bit = 1 << (req % 64);
+        self.word(req as usize / 64)
+            .is_none_or(|w| w.fetch_or(bit, Ordering::AcqRel) & bit == 0)
+    }
+
+    #[inline]
+    pub fn remove(&self, req: u32) {
+        if let Some(w) = self.word(req as usize / 64) {
+            w.fetch_and(!(1 << (req % 64)), Ordering::Release);
+        }
+    }
+
     /// `mask` for the bits of word `index` inside `[begin, end)`.
     fn range_mask(index: usize, begin: u32, end: u32) -> u64 {
         let first = (index as u64) * 64;

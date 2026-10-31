@@ -11,7 +11,6 @@
 // Module and type docs explain engine call sites; field docs are optional.
 
 pub mod adaptive_buffer;
-pub mod arrival_persist;
 pub mod bypass;
 pub mod constants;
 pub mod ghost_mode;
@@ -28,7 +27,6 @@ pub mod transfer_rates;
 pub mod video_priority;
 
 pub use adaptive_buffer::AdaptiveBuffer;
-pub use arrival_persist::{ArrivalModelPersist, ArrivalStats};
 pub use bypass::{
     bypass_tcp_coverage, is_loopback_addr, split_write_sync, BypassController, BypassStatus,
     BypassStream, BYPASS_MODE_OFF, BYPASS_MODE_TCP_SPLIT,

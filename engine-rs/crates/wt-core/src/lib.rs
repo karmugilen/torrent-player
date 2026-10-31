@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 pub use wt_types::*;
 
-pub mod arrival;
 pub mod choking;
 pub mod client;
 pub mod conn;
@@ -21,25 +20,23 @@ pub mod pex;
 pub mod picker;
 pub mod piece_state;
 pub mod ratelimit;
+pub mod sched;
 pub mod reader;
 pub mod sources;
 pub mod stats;
 pub mod storage_adapter;
-pub mod strategy;
 pub mod torrent;
 pub mod torrent_impls;
 pub mod tuning;
 mod webseed_download;
 pub mod webseed_peer;
-pub mod webtor;
 pub mod wire;
 
-pub use arrival::ArrivalStats;
 pub use client::ClientInner;
 pub use stats::{ClientStats, ConnStats, PeerConnInfo, TorrentStats};
 pub use storage_adapter::{verify_piece_hash, MemoryClientStorage};
 pub use torrent::TorrentInner;
-pub use tuning::{current_seek_tuning, set_seek_tuning, PeakMode, SeekTuning};
+pub use tuning::{current_seek_tuning, set_seek_tuning, SeekTuning};
 pub use wt_wire::mse::HeaderObfuscationPolicy;
 
 // ---------------------------------------------------------------- config
@@ -278,36 +275,8 @@ impl Client {
         self.inner.set_urgent_request_stealing(after);
     }
 
-    pub fn arrival_stats(&self) -> ArrivalStats {
-        let m = self.inner.arrival_model.read();
-        ArrivalStats {
-            samples: m.samples,
-            mean_abs_error_ms: m.net_err * 1000.0,
-        }
-    }
 
-    pub fn arrival_state(&self) -> Result<Vec<u8>> {
-        let m = self.inner.arrival_model.read();
-        if m.samples == 0 {
-            return Ok(Vec::new());
-        }
-        serde_json::to_vec(&*m).map_err(|e| CoreError::Other(e.to_string()))
-    }
 
-    pub fn set_arrival_state(&self, state: &[u8]) -> Result<()> {
-        if state.is_empty() {
-            return Ok(());
-        }
-        let m: arrival::ArrivalModel =
-            serde_json::from_slice(state).map_err(|e| CoreError::Other(e.to_string()))?;
-        if m.samples == 0 { return Ok(()); }
-        if !m.net_err.is_finite() || m.net_err < 0.0 || !m.net.b2.is_finite()
-            || m.net.w1.iter().flatten().chain(m.net.w2.iter()).any(|w| !w.is_finite()) {
-            return Err(CoreError::Other("invalid arrival model weights".into()));
-        }
-        *self.inner.arrival_model.write() = m;
-        Ok(())
-    }
 
     pub fn stats(&self) -> ClientStats {
         let mut cs = ConnStats::default();
@@ -960,29 +929,19 @@ impl Torrent {
     }
 
     pub fn refocus_requests(&self) {
-        use crate::peer_conn::PeerTorrent;
         // Opens the seek hedging window for the new playhead.
         *self.inner.seek_hedge.lock() = Some((std::time::Instant::now(), crate::torrent::SEEK_HEDGES));
-        let tuning = current_seek_tuning();
-        let net = self.inner.arrival_model.read().net.clone();
+        self.inner.saved_queue.lock().rewind();
         let handles: Vec<_> = self.inner.conn_handles.read().values().cloned().collect();
+        let arrivals: std::collections::HashMap<_, _> = self.inner.live_peers.read().iter()
+            .map(|peer| (peer.key, peer.arrival())).collect();
         // Mark the whole cohort before waking anyone. Every handler cancels
         // old non-urgent requests before refilling, with soonest peers woken first.
         let mut ordered = Vec::with_capacity(handles.len());
         for handle in handles {
             handle.mark_refocus();
             let key = crate::torrent_impls::peer_key_from_addr(handle.remote_addr());
-            let score = self.inner.webtor_peer_snap(key).map(|peer| {
-                if !tuning.arrival_aware { return -peer.download_rate_bps; }
-                let features = self.inner.peer_arrival(key).and_then(|state| {
-                    let state = state.read();
-                    state.peer.inputs(peer.download_rate_bps, peer.rtt, peer.queued as usize,
-                        BLOCK_SIZE as usize, state.unchoked_at)
-                });
-                crate::webtor::expected_arrival_with_learned(&tuning, Some(&net), features,
-                    peer.download_rate_bps, peer.rtt, peer.queued, BLOCK_SIZE)
-            }).unwrap_or(f64::MAX);
-            ordered.push((score, handle));
+            ordered.push((arrivals.get(&key).copied().unwrap_or(f64::MAX), handle));
         }
         ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (_, handle) in ordered {

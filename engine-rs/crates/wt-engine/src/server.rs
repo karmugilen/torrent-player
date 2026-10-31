@@ -32,8 +32,6 @@ mod metadata_sources;
 mod torrent_status;
 #[path = "playback_resume.rs"]
 mod playback_resume;
-#[path = "arrival_model.rs"]
-mod arrival_model;
 #[cfg(test)]
 #[path = "server_settings_tests.rs"]
 mod settings_tests;
@@ -134,9 +132,6 @@ pub struct EngineServer {
     pub hedge_requests: AtomicBool,
     pub slow_peer_yield: AtomicBool,
     pub drop_chokers: AtomicBool,
-    pub learned_arrival: AtomicBool,
-    arrival_saved_samples: AtomicU64,
-    arrival_save_lock: Mutex<()>,
     pub idle_drop_minutes: AtomicI64,
     pub ram_cache_bytes: AtomicI64,
     pub seeding_enabled: AtomicBool,
@@ -383,9 +378,6 @@ impl EngineServer {
             hedge_requests: AtomicBool::new(true),
             slow_peer_yield: AtomicBool::new(true),
             drop_chokers: AtomicBool::new(true),
-            learned_arrival: AtomicBool::new(true),
-            arrival_saved_samples: AtomicU64::new(0),
-            arrival_save_lock: Mutex::new(()),
             idle_drop_minutes: AtomicI64::new(0),
             ram_cache_bytes: AtomicI64::new(64 * 1024 * 1024),
             seeding_enabled: AtomicBool::new(false),
@@ -420,21 +412,13 @@ impl EngineServer {
         // Match Go: defaults (hedge/slowPeerYield/learnedArrival) must reach
         // wt-core SeekTuning before the first torrent, not only after POST /settings.
         server.apply_seek_tuning();
-        server.load_arrival_model();
-        Self::start_arrival_saver(&server);
         Ok(server)
     }
 
-    /// Go `baseSeekTuning` + `torrent.SetSeekTuning`.
     fn apply_seek_tuning(&self) {
-        // Hedge uses HOLAfterMs timing; hol_rescue stays off while Hedge is on
-        // (Go DefaultSeekTuning + experimental switches).
         wt_core::set_seek_tuning(wt_core::SeekTuning {
             hedge: self.hedge_requests.load(Ordering::SeqCst),
             slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
-            learned_arrival: self.learned_arrival.load(Ordering::SeqCst),
-            hol_rescue: false,
-            ..wt_core::SeekTuning::default()
         });
     }
 
@@ -772,7 +756,6 @@ impl EngineServer {
             r.close();
         }
         self.flush_resume_saves();
-        self.save_arrival_model();
         self.client.close();
         let preview = self.preview_active.lock().take();
         if let Some(p) = preview {
@@ -1882,8 +1865,8 @@ impl EngineServer {
             hedge_requests: self.hedge_requests.load(Ordering::SeqCst),
             slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
             drop_chokers: self.drop_chokers.load(Ordering::SeqCst),
-            learned_arrival: self.learned_arrival.load(Ordering::SeqCst),
-            arrival: self.arrival_stats(),
+            learned_arrival: false,
+            arrival: Default::default(),
             idle_drop_minutes: self.idle_drop_minutes.load(Ordering::SeqCst),
             ram_cache_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
             seeding_enabled: self.seeding_enabled.load(Ordering::SeqCst),
@@ -2012,18 +1995,9 @@ impl EngineServer {
         if let Some(d) = req.drop_chokers {
             self.drop_chokers.store(d, Ordering::SeqCst);
         }
-        if let Some(la) = req.learned_arrival {
-            if self.learned_arrival.swap(la, Ordering::SeqCst) != la {
-                retune = true;
-            }
-        }
-        // Go `torrent.SetSeekTuning(s.baseSeekTuning())` — without this,
-        // peers_compare's hedgeRequests/slowPeerYield/learnedArrival only
-        // flipped AtomicBools and never reached wt-core's request path.
         if retune
             || req.hedge_requests.is_some()
             || req.slow_peer_yield.is_some()
-            || req.learned_arrival.is_some()
         {
             self.apply_seek_tuning();
         }

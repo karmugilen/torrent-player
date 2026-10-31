@@ -206,9 +206,8 @@ fn test_direct_play_local_peer_seeks_beyond_ram_budget() {
                     .get_storage(&rec.info_hash)
                     .unwrap();
                 eprintln!(
-                    "[DEBUG-play] peers={:?} requests={:?} dirty={:?}",
+                    "[DEBUG-play] peers={:?} dirty={:?}",
                     rec.torrent.peer_conns(),
-                    *rec.torrent.inner.request_state.read(),
                     rec.torrent.inner.dirty_chunks
                 );
                 panic!(

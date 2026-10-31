@@ -13,10 +13,8 @@ use wt_types::{
     PiecePriority, RequestIndex, TorrentStorage, Transport, BLOCK_SIZE,
 };
 
-use crate::arrival::ArrivalModel;
-use crate::picker::{
-    block_coord_from_req_index, piece_req_index_range, ActiveRequest, HOL_WINDOW_BLOCKS,
-};
+use crate::picker::{block_coord_from_req_index, piece_req_index_range};
+use crate::sched::{BlockTable, PeerLive, SharedQueue, PLAYHEAD_WINDOW_BLOCKS};
 use crate::reader::PieceRange;
 use crate::{CoreError, PieceState, Result};
 
@@ -95,13 +93,10 @@ pub struct TorrentInner {
     pub dht_nodes: RwLock<Vec<SocketAddr>>,
     pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
     pub dirty_chunks: crate::piece_state::ChunkBits,
-    /// Received blocks being written (Go `pendingWrites`). Not readable and
-    /// not requestable. Lock before `dirty_chunks` when both are needed.
-    pub pending_chunk_writes: Mutex<wt_types::IndexSet<RequestIndex>>,
-    pub request_state: RwLock<wt_types::IndexMap<RequestIndex, ActiveRequest>>,
-    pub assignments: RwLock<wt_types::IndexMap<RequestIndex, (u64, Instant)>>,
-    pub hedge_peers: RwLock<wt_types::IndexMap<RequestIndex, u64>>,
-    pub hedges: RwLock<wt_types::IndexMap<RequestIndex, SocketAddr>>,
+    /// Blocks on their way and being written.
+    pub blocks: BlockTable,
+    /// What refills read about every connected peer.
+    pub(crate) live_peers: RwLock<Vec<Arc<PeerLive>>>,
 
     /// Peer key to address, so looking up one peer does not scan them all.
     pub peer_addrs: RwLock<HashMap<u64, SocketAddr>>,
@@ -109,8 +104,6 @@ pub struct TorrentInner {
     pub(crate) piece_availability: std::sync::OnceLock<Box<[AtomicI32]>>,
     /// Have-all peers, counted once so they join and leave in O(1).
     pub(crate) have_all_peers: AtomicI32,
-    /// Outstanding requests per peer, for steal ranking; see [`REQUEST_COUNTS_MAX_AGE`].
-    pub(crate) request_counts: Mutex<Option<(Instant, Arc<HashMap<u64, u64>>)>>,
     /// Threads inside `change_cond`; `notify_progress` skips the lock without any.
     pub(crate) change_waiters: AtomicUsize,
     /// Pieces whose last hash failed, and a count of such failures.
@@ -126,7 +119,7 @@ pub struct TorrentInner {
     /// Bumped under the `pieces` write lock; see [`Self::pieces_mut`].
     pieces_generation: AtomicU64,
     pub(crate) wanted_pieces: Mutex<Option<Arc<WantedPieces>>>,
-    pub(crate) saved_queue: Mutex<SavedQueue>,
+    pub(crate) saved_queue: Mutex<SharedQueue>,
     /// Saved to the user's files, not Direct Play.
     pub saved_mode: std::sync::atomic::AtomicBool,
     pub(crate) last_refocus: Mutex<Option<Instant>>,
@@ -145,7 +138,6 @@ pub struct TorrentInner {
     /// Lifetime totals survive connection churn, like Go torrent.ConnStats.
     pub(crate) retired_conn_stats: Mutex<crate::stats::ConnStats>,
     pub peer_snapshots: RwLock<HashMap<SocketAddr, crate::stats::PeerConnInfo>>,
-    pub peer_arrivals: RwLock<HashMap<u64, Arc<RwLock<crate::arrival::PeerArrivalState>>>>,
     pub choked_since: RwLock<HashMap<SocketAddr, Instant>>,
     pub peer_notify: tokio::sync::Notify,
     pub trackers: RwLock<Vec<Vec<String>>>,
@@ -172,7 +164,6 @@ pub struct TorrentInner {
     pub change_mutex: Arc<Mutex<()>>,
     pub on_write_chunk_error: RwLock<Option<Arc<dyn Fn(&CoreError) + Send + Sync>>>,
 
-    pub arrival_model: Arc<RwLock<ArrivalModel>>,
     pub reader_ranges: RwLock<HashMap<u64, PieceRange>>,
     /// Peer start burst: the connection limit is raised until this instant.
     pub peer_burst_until: Mutex<Option<Instant>>,
@@ -189,17 +180,20 @@ pub struct TorrentInner {
 /// shared by all torrents bursting at once.
 pub const PEER_BURST_CONNS: usize = 250;
 
-/// The saved-download block queue all peers share. A refill continues where
-/// the last one stopped instead of re-reading every block already taken. Blocks
-/// handed back are found again at the next rewind.
-#[derive(Default)]
-pub(crate) struct SavedQueue {
-    /// Per piece: blocks from its start already handed out or finished.
-    pub(crate) next: Vec<u32>,
-    pub(crate) rewound_at: Option<Instant>,
-    /// Pieces holding RAM: started, or waiting on the hash and the disk.
-    pub(crate) open: usize,
-    pub(crate) generation: u64,
+/// Pieces this rare come first. Above it, file order: blocks then land next to
+/// each other on disk instead of all over a sparse file.
+const RARE_AVAILABILITY: i32 = 2;
+
+/// Rank among equal-priority pieces, lower first. Only `Normal` pieces have one:
+/// anything higher is near a playhead and stays in file order. Started pieces
+/// come first so hashing and write-back see whole pieces; rare ones are the most
+/// likely to vanish and the most useful to trade.
+fn background_rank(priority: PiecePriority, partial: bool, availability: i32) -> (bool, i32) {
+    if priority == PiecePriority::Normal {
+        (!partial, availability.min(RARE_AVAILABILITY + 1))
+    } else {
+        (false, 0)
+    }
 }
 
 /// One scan of `pieces` shared by every peer's refill.
@@ -213,16 +207,12 @@ pub(crate) struct WantedPieces {
     /// Wanted and not complete; unlike `count`, includes pieces being hashed.
     pub(crate) incomplete: u32,
     pub(crate) requestable: Vec<bool>,
-    pub(crate) unverified: Vec<bool>,
     /// `(index, priority, partial, chunks, availability)`, best first.
     pub(crate) candidates: Vec<(PieceIndex, PiecePriority, bool, usize, i32)>,
 }
 /// Availability moves with every have, so it refreshes on a timer instead of
 /// invalidating [`WantedPieces`].
 const WANTED_MAX_AGE: Duration = Duration::from_secs(1);
-/// Steal ranking only compares queue sizes, so all refills in this window can
-/// share one count instead of each walking the swarm's outstanding requests.
-pub(crate) const REQUEST_COUNTS_MAX_AGE: Duration = Duration::from_millis(25);
 /// How long a peer start burst lasts before trimming to the configured limit.
 pub const PEER_BURST_FOR: Duration = Duration::from_secs(10);
 /// After a seek, the first blocks are hedged without waiting this long.
@@ -239,7 +229,6 @@ impl TorrentInner {
         info_hash_v2: Option<InfoHashV2>,
         display_name: String,
         default_storage: Arc<dyn ClientStorage>,
-        arrival_model: Arc<RwLock<ArrivalModel>>,
     ) -> Self {
         Self {
             info_hash,
@@ -262,15 +251,11 @@ impl TorrentInner {
             dht_nodes: RwLock::new(Vec::new()),
             peer_pieces: RwLock::new(HashMap::new()),
             dirty_chunks: Default::default(),
-            pending_chunk_writes: Default::default(),
-            request_state: Default::default(),
-            assignments: Default::default(),
-            hedge_peers: Default::default(),
-            hedges: Default::default(),
+            blocks: BlockTable::default(),
+            live_peers: RwLock::new(Vec::new()),
             peer_addrs: RwLock::new(HashMap::new()),
             piece_availability: Default::default(),
             have_all_peers: AtomicI32::new(0),
-            request_counts: Mutex::new(None),
             change_waiters: AtomicUsize::new(0),
             failed_pieces: Default::default(),
             hash_fail_generation: AtomicU64::new(0),
@@ -280,7 +265,7 @@ impl TorrentInner {
             warm_epoch: Instant::now(),
             pieces_generation: AtomicU64::new(0),
             wanted_pieces: Mutex::new(None),
-            saved_queue: Mutex::new(SavedQueue::default()),
+            saved_queue: Mutex::new(SharedQueue::default()),
             saved_mode: std::sync::atomic::AtomicBool::new(false),
             last_refocus: Mutex::new(None),
             refocus_seq: AtomicU64::new(0),
@@ -294,7 +279,6 @@ impl TorrentInner {
             conn_handles: RwLock::new(HashMap::new()),
             retired_conn_stats: Mutex::new(crate::stats::ConnStats::default()),
             peer_snapshots: RwLock::new(HashMap::new()),
-            peer_arrivals: RwLock::new(HashMap::new()),
             choked_since: RwLock::new(HashMap::new()),
             peer_notify: tokio::sync::Notify::new(),
             trackers: RwLock::new(Vec::new()),
@@ -316,7 +300,6 @@ impl TorrentInner {
             change_cond: Arc::new(Condvar::new()),
             change_mutex: Arc::new(Mutex::new(())),
             on_write_chunk_error: RwLock::new(None),
-            arrival_model,
             reader_ranges: RwLock::new(HashMap::new()),
             peer_burst_until: Mutex::new(None),
             peer_burst_armed: AtomicBool::new(true),
@@ -347,7 +330,6 @@ impl TorrentInner {
             return wanted.clone();
         }
         let mut requestable = Vec::with_capacity(pieces.len());
-        let mut unverified = Vec::with_capacity(pieces.len());
         let mut candidates = Vec::new();
         let mut count = 0u32;
         let mut incomplete = 0u32;
@@ -358,7 +340,6 @@ impl TorrentInner {
             count += u32::from(wanted);
             incomplete += u32::from(!p.complete && p.priority > PiecePriority::None);
             requestable.push(wanted);
-            unverified.push(p.checking || p.partial);
             if wanted {
                 candidates.push((p.index, p.priority, p.partial, p.chunks_total, self.availability(p.index)));
             }
@@ -366,7 +347,7 @@ impl TorrentInner {
         // Pieces were collected in index order, so a stable sort keeps index
         // as the tie-break. Same order as `piece_order_cmp`.
         candidates.sort_by_key(|c| {
-            (std::cmp::Reverse(c.1), crate::strategy::background_rank(c.1, c.2, c.4))
+            (std::cmp::Reverse(c.1), background_rank(c.1, c.2, c.4))
         });
         let wanted = Arc::new(WantedPieces {
             generation,
@@ -376,7 +357,6 @@ impl TorrentInner {
             count,
             incomplete,
             requestable,
-            unverified,
             candidates,
         });
         *cached = Some(wanted.clone());
@@ -974,11 +954,7 @@ impl TorrentInner {
     }
 
     pub(crate) fn forget_peer_playback_state(&self, addr: SocketAddr) {
-        let key = crate::torrent_impls::peer_key_from_addr(addr);
-        self.peer_arrivals.write().remove(&key);
-        let mut peers = self.hedge_peers.write();
-        peers.retain(|_, peer| *peer != key);
-        self.hedges.write().retain(|_, peer| *peer != addr);
+        self.blocks.forget_peer(crate::torrent_impls::peer_key_from_addr(addr));
     }
 
     pub(crate) fn retire_connection(&self, addr: SocketAddr) -> Option<crate::conn::ConnHandle> {
@@ -1177,6 +1153,7 @@ impl TorrentInner {
         let blocks = crate::picker::piece_req_index_range(0, piece_len, piece_len).1
             .saturating_mul(info.num_pieces());
         self.dirty_chunks.init(blocks);
+        self.blocks.init(blocks);
         crate::torrent_impls::init_availability(self, info.num_pieces());
         *self.info.write() = Some(info);
         self.bump_change();
@@ -1244,7 +1221,7 @@ impl TorrentInner {
     pub fn head_of_line(&self) -> Option<RequestIndex> {
         let focus = self.request_focus_index()?;
         let total_reqs = self.max_end_request();
-        let end = (focus + HOL_WINDOW_BLOCKS).min(total_reqs);
+        let end = (focus + PLAYHEAD_WINDOW_BLOCKS).min(total_reqs);
         (focus..end).find(|&r| !self.is_block_arrived(r))
     }
 
@@ -1284,8 +1261,7 @@ mod dial_parity_tests {
 
     fn torrent() -> TorrentInner {
         TorrentInner::new(InfoHash([7; 20]), None, "dial-parity".into(),
-            Arc::new(crate::storage_adapter::MemoryClientStorage::new()),
-            Arc::new(RwLock::new(crate::arrival::ArrivalModel::default())))
+            Arc::new(crate::storage_adapter::MemoryClientStorage::new()))
     }
 
     #[test]

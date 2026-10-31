@@ -207,11 +207,9 @@ fn seek_hedge_budget_is_per_seek() {
         .unwrap();
     assert!(!t.inner.take_seek_hedge(), "no seek yet");
     t.refocus_requests();
-    assert!(t.inner.seek_hedge_open());
     for _ in 0..SEEK_HEDGES {
         assert!(t.inner.take_seek_hedge());
     }
-    assert!(!t.inner.seek_hedge_open());
     assert!(!t.inner.take_seek_hedge());
     t.inner.refund_seek_hedge();
     assert!(t.inner.take_seek_hedge());

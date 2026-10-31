@@ -1,7 +1,6 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::time::Duration;
-use wt_core::arrival::ArrivalModel;
 use wt_core::torrent::TorrentInner;
 use wt_core::{CancelToken, Info, InfoHash, MemoryClientStorage, TorrentStorage};
 
@@ -34,13 +33,11 @@ fn make_test_torrent(
         file_tree_raw: None,
     };
     let storage = Arc::new(MemoryClientStorage::new());
-    let arrival_model = Arc::new(parking_lot::RwLock::new(ArrivalModel::new()));
     let tor = Arc::new(TorrentInner::new(
         InfoHash([4u8; 20]),
         None,
         "test_reader".to_string(),
         storage.clone(),
-        arrival_model,
     ));
     tor.set_info(Arc::new(info)).unwrap();
     (tor, storage)
