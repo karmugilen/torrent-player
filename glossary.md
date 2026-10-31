@@ -1,0 +1,85 @@
+# Glossary
+
+## What we're doing
+- The app ships only the Rust engine (`engine-rs/`, packaged as `libengine.so`). Go was removed from the repo; its history is on the `go-engine` branch.
+- Last speedup measured with `wt-parity`: 189 to about 423 MiB/s, versus Go's 296 at the time.
+- Open: delete then re-add is proven by tests only, and engine start on the phone is unconfirmed; the phone dropped off adb right after install.
+- Peer scheduling rewritten (hang, pulsing, idle peers): built, not tested on a real swarm or phone. `cargo test` not run; tests that assert the old defaults (`full_pipeline`, 100 KiB upload headroom, 5 s choker timeout) may need updating.
+- Open: duplicate blocks.
+- Lock-free round built, not tested or measured on a swarm or phone: `dirty_chunks` is an atomic bitset (`piece_state/chunk_bits.rs`), the write-only `book` is gone from `TorrentInner`, the shared piece scan rebuilds on a piece's first block or every second, `Normal` pieces go partial-first then rarest-first (playback priorities unchanged), blocks are received without an extra copy, and busy peers see seeks within 5 ms. `cargo test` not run; rarest-first may hurt write-back on slow storage, so check that first if downloads regress.
+- Seek round 2 built, not tested or measured: uTP RTT-based timeouts and real LEDBAT, window in seconds from the video's duration, coarse-to-fine keyframes, unverified head/tail with stream close on hash failure, learned dial order and encryption order, warm-up requests (up to 8 KiB/s while playing), engine event log at `GET /events`. Not done: block state table, per-piece storage lock, block buffer pool, block-level keyframes, deadline scheduler, shared queue, single demand path, removing switches, replacing `ArrivalNet`, BEP 55 hole punching (only the PEX flag exists).
+- User measured `seekround` slower on seeks than `lockfree` (about 1.3 s vs 925 then 503 ms). Cause not proven. `seekround2` removes the suspects: uTP window shrink on delay and timeout, longer write retry, narrower low-bitrate window, 10 ms reader wait, 8-piece keyframe batch.
+- `seekbugs` fixes three seek bugs, not tested: a seek's session opened at the last played position and its refocus hit the 50 ms debounce (now opens at the Range start); hedges missed claims made after a peer's refill (claims of playhead blocks now wake the swarm); peers stepped aside on stale data right after a seek (no longer).
+- User measured `seekbugs` at about 2 s. `seekbugs2` puts back stepping aside to faster peers, the prime suspect: without it any slow peer can claim playhead blocks. Cause not proven; the other two fixes are still in.
+- `seekrace` (first 4 blocks raced by the 3 quickest peers, keyframes at +/-10 s and +/-30 s prefetched): user measured 2.1 s, so reverted in source; APK kept in `artifacts/`. Cause not proven. Readings taken right after an install may be cold: one build went 925 to 503 ms in one session, so compare after the same warm-up. User retested it and found it less instant than `seekbugs2`, with no ms number given.
+- `coldprobe` (one block timed from each new idle peer, `seek_2mib` and `speed_probe` logged): user read 437 ms and then chose it as the best build to keep. Back in source. `cargo test` still not run.
+- `savefix`, not tested: user reported saved downloads under 10 MB/s and unstable, against 20 MB/s in Direct Play. Write-back now writes finished pieces whole and in file order every 50 ms, partial pieces every 2 s or under cache pressure; fsync and checkpoint every 10 s instead of 250 ms; download cache 128 MiB or 8 pieces, up to 512 MiB; verified pieces evicted first; unverified cap at least 8 pieces when not playing; rarest-first only for availability 2 or less. Still one storage lock per torrent.
+- `savefix2`, not tested: saved downloads have their own block picker (`refill_background`, `background_pick`). The old scan stopped after 64 MiB of wanted pieces, so a few slow peers holding blocks there could leave fast peers idle. The playhead also never cleared after playback, which kept downloads on playback queues; closing the last session clears it now.
+- User reported `savefix2` speed rising to about 10 MB/s then dropping, repeatedly, and that uploading is not the cause. `savefix3`, not tested: write-back counted clean cached slots as pressure, so once the cache first filled it wrote every partial piece every 50 ms; it now counts only dirty pieces. Sync is data-only. Diagnostics log `disk_write`, `disk_sync` and `cache_full_wait`.
+- `fullspeed`, built, not tested (user asked for no testing; `cargo test` not run, and tests that assert the old flush and checkpoint timing may fail): `dd` to `/sdcard` on the phone took about 500 MB/s with fsync, so raw disk is not the 10 MB/s limit. Cause suspected, not proven: `background_pick` re-read every taken block on every refill while holding the tables peers need to claim blocks. It now resumes from a shared per-piece cursor (reset every 250 ms) and keeps about 64 MiB of pieces open; a peer under 64 requests may open more. Writer wakes when a piece finishes; partial pieces wait in RAM (sweep every 30 s, or at 75% dirty); peers run over the cache by up to 50% rather than wait on disk; fsync and checkpoint every 30 s. Diagnostics still log `disk_write`, `disk_sync` and `cache_full_wait`.
+- User reported `fullspeed` made saved downloads worse, so source went back to `coldprobe`. `savedirect` is built on `coldprobe`, not on the savefix builds; `wt-storage`, `transfer_test` and `client_integration` passed on host, no phone measurement yet. Saved pieces stay in RAM, hash there, then `mark_complete` writes them whole and drops the slot. No timed write-back; fsync and checkpoint every 30 s; RAM at least 256 MiB or 8 pieces (up to 512 MiB); unverified limit 192 MiB when nothing plays, 64 MiB when playing. Partial tracking (`partial_slots`, `evicting`, write-through) stays as the fallback when RAM is full. Logs `disk_write`, `disk_sync`, `cache_full_wait`.
+- User reported `savedirect` still throttles. `savequeue`, built on it, compiled but not tested (user stopped the test run; `cargo test` results unknown, picker and burst-order tests may need updating): saved downloads with nothing playing use `refill_background`/`background_pick`, a shared per-piece cursor rewound every 250 ms, with no stealing and no empty-refill lockout. Open pieces capped near 192 MiB, except peers under 16 requests. Queue 2 s of rate, floor 16. Playhead cleared when the last player closes. Cache slots and files are `Arc`, so hash and write do not copy under the lock; verified pieces stay in RAM for uploads; upload disk reads use `spawn_blocking`. Finished pieces no longer wake all peers. Burst end drops choked peers first. Status skips pieces with no blocks. Rarest-first only for availability 2 or less. No `fallocate`: it would defeat the hole check on restore.
+- User measured `savequeue` hitting 11 MB/s then falling to 2 MB/s on mobile data (`ccmni3`), while Direct Play reaches 15 MB/s on the same network. During a 2.6 MB/s sample Dirty was 6 MB, Writeback 0, socket queues empty, so the disk was not lagging then. Suspect: nothing takes blocks back from slow peers now, and `expire_stale_requests` only releases when a peer is silent 30 s, so open pieces may stall and hit the open limit. Not proven. `savelog` logs one `WTSAVE` line per second: `adb logcat -s webtor-engine | grep WTSAVE`; PLAY and SAVE lines compare the modes.
+- First `wtsave.log` (70 s SAVE, 40 s PLAY on mobile data): SAVE 8-11 MB/s, PLAY 7-10 MB/s, disk writes about 20 ms per second, no `CACHE_FULL`, so disk was not the limit. The drop to 2 MB/s was not captured. `focus=true` on every line, so the new picker almost never ran (`OLD_PICKER` high, `REFILLS` 0). `savefocus`: `background_only` goes by wanted priorities and `saved_mode`, not the playhead; queue is `rate * max(3 s, 2 RTT)`, floor 32. RTTs reach 2.4 s here, so the 2 s queue could shrink rates. What sets the playhead during a save (thumbnails suspected) is not confirmed. Not run.
+- User confirmed `savefocus` fixed the saved-download throttling ("now working well"). `cargo test` has not been run on it. The transfer log still writes `wtsave.log` every second.
+- Seek round built, not tested: keyframe prefetch from MP4/MKV indexes (`wt-engine/src/seek_index.rs`), more backup requests per seek. `cargo test` not run; tests that assert old timers or lifetime peer rate may need updating.
+
+## Mistakes
+### Engine (fixed)
+- Every incoming connection used RC4 encryption, the main seeding bottleneck.
+- A 1 ms delay was added to sends.
+- Uploads stalled.
+- Upload counts were wrong.
+- Each block needed a thread handoff.
+
+- Deleted torrents stayed registered for trackers and DHT, so a re-add got no peer discovery. `detach_torrent` now unregisters them.
+- A removed torrent's tracker slot stayed due forever and spun the dispatcher at full CPU; removal now drops the slot.
+- Torrents with no web seeds polled 40 times a second; now once a second.
+- Kotlin cleaned startup caches in `files/webtorrent`, not the engine's `files/webtorrent-rust`.
+
+### Process
+- Open: the branch has no upstream, so commits are local only.
+- Open: `webtor.app.yml` (F-Droid) still installs Go for its pinned old builds; a new release entry needs Rust.
+- Open: smoke scripts `peers_compare_three.py` and `peers_campaign_fast.py` and code comments still mention Go.
+- Looked for `engine-rs/` in `funProjects/torrent-player`; it is in the Orca worktree.
+- Said a directory looked empty from blank `ls` output; it had files.
+- Set `path` in zsh, which overwrites `PATH`; use another variable name.
+- `ls` is an icon alias: never parse its output or use it in `$(...)`. Use exact paths or `command ls`.
+- `echo =====` fails in zsh (`=` expansion), and unquoted `--include=*.kt` fails on glob; quote both.
+- `pkill -f pattern` matched its own shell and killed the command; don't use it with text from the same command line.
+- `adb wait-for-device` hangs forever with no device; check `adb devices` first or wrap it in `timeout`.
+- Spent time setting up an emulator when the user wanted the APK on the phone. Ask for the phone first; don't build an emulator flow unprompted.
+- A command stuck on `- waiting for device -` means the phone dropped off adb. Tell the user at once rather than waiting; run `adb` with `timeout`.
+- Don't delete `engine-go/`-style dirs while `cargo test` is running; tests may read fixtures from them.
+
+## Fast paths
+Run these from `~/orca/workspaces/torrent-player/rust-engine`.
+- One test first: `cd engine-rs && cargo test -p wt-core --test client_integration re_added` (about 30 s).
+- Engine suites: `cargo test -p wt-discovery -p wt-core -p wt-engine` (about 2 min).
+- APK, about 2.5 min: `cd android && ./gradlew :app:assembleRelease -Pwebtor.localSigning=true`. Output is `app/build/outputs/apk/release/app-release.apk`.
+- Also installed side by side at the user's request: last Go build, package `webtor.app.gotest`, `funProjects/torrent-player/artifacts/webtor-go-2.3.0-71b91ff-gotest.apk`. Installed on the phone (A015): `artifacts/webtor-2.3.0-savefocus-release.apk` (`savequeue`, transfer log, picker switch fix), source matches it. Read the log: `adb pull /sdcard/Android/data/webtor.app/files/wtsave.log`. To undo: `artifacts/webtor-2.3.0-savedirect-source-changed-files.tar.gz` (savedirect) or `artifacts/webtor-2.3.0-coldprobe-source.tar.gz`. The savefix and `fullspeed` engine changes are out of the source; the 7 changed files as they were at `fullspeed` are in `artifacts/webtor-2.3.0-fullspeed-source-changed-files.tar.gz`. Best seek build: `artifacts/webtor-2.3.0-coldprobe-release.apk`, with its source in `artifacts/webtor-2.3.0-coldprobe-source.tar.gz`. All signed with the local debug key. Copy each new build here and give the user this path.
+- Install a saved build: `scripts/install-apk.sh seekbugs2` (name or part of it; no argument lists builds). It checks the hash and that one phone is connected, and keeps app data. Install: `adb install -r <apk>`. A signature error means the installed copy has another key; uninstalling fixes it but wipes the library, so only do it when the user says so.
+- Check: `unzip -l <apk> | grep libengine` must show only `libengine.so`.
+- Tests that discover peers through a stub tracker catch more than ones that call `add_peers`, which skips discovery.
+
+## Directories
+- `android/`: Android app and core Kotlin module.
+- `artifacts/`: built APKs, their hashes and fix write-ups.
+- `docs/`: Direct Play, F-Droid, Play Store and signing docs.
+- `engine-native-rust/`: staged in git but deleted from disk.
+- `engine-rqbit/`: untracked librqbit engine; not built or shipped by the app.
+- `engine-rs/`: Rust port of the Go engine; the one we're speeding up.
+- `engine-rs/crates/wt-core/`: BitTorrent client core.
+- `engine-rs/crates/wt-discovery/`: peer discovery.
+- `engine-rs/crates/wt-engine/`: engine coordinator, JNI layer, HTTP streaming server and control API.
+- `engine-rs/crates/wt-meta/`: metainfo, bencode, magnets and BEP 52 merkle trees.
+- `engine-rs/crates/wt-parity/`: performance benchmark; compares two result files. It no longer has a Go API diff.
+- `engine-rs/crates/wt-policy/`: playback and peer decision logic.
+- `engine-rs/crates/wt-storage/`: download storage, Direct Play RAM cache, checkpoints and verification.
+- `engine-rs/crates/wt-types/`: shared data model.
+- `engine-rs/crates/wt-wire/`: wire protocol, including the codec, MSE/RC4 and uTP.
+- `engine-rs/docs/`: port map, progress notes, handoffs and specs.
+- `engine-rs/tools/smoke/`: smoke and peer comparison scripts.
+- `engine-rust/`: older Rust code (discovery, pieces); not the engine we're speeding up.
+- `fastlane/`: store metadata.
+- `scripts/`: discovery benchmark, Rust licence notices, and F-Droid and Play release scripts.

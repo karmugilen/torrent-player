@@ -20,19 +20,25 @@ struct HostArgs {
     port: u16,
     path: String,
     max_peers: usize,
+    half_open_conns: Option<usize>,
+    no_port_forwarding: bool,
 }
 
 fn print_usage(argv0: &str) {
-    eprintln!("Usage: {argv0} [-port|--port PORT] [-path|--path DIR] [-max-peers|--max-peers N]");
+    eprintln!("Usage: {argv0} [-port|--port PORT] [-path|--path DIR] [-max-peers|--max-peers N] [--half-open-conns N]");
     eprintln!("  -port       control server port (default {DEFAULT_PORT})");
     eprintln!("  -path       download directory (default {DEFAULT_PATH})");
     eprintln!("  -max-peers  maximum peers (default {DEFAULT_MAX_PEERS})");
+    eprintln!("  --half-open-conns  override pending dials per torrent and globally");
+    eprintln!("  --no-port-forwarding  no router port mapping or local peer discovery");
 }
 
 fn parse_args(args: &[String]) -> Result<HostArgs, String> {
     let mut port = DEFAULT_PORT;
     let mut path = DEFAULT_PATH.to_string();
     let mut max_peers = DEFAULT_MAX_PEERS;
+    let mut half_open_conns = None;
+    let mut no_port_forwarding = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -51,6 +57,12 @@ fn parse_args(args: &[String]) -> Result<HostArgs, String> {
             "-port" | "--port" => "port",
             "-path" | "--path" => "path",
             "-max-peers" | "--max-peers" => "max-peers",
+            "--half-open-conns" => "half-open-conns",
+            "--no-port-forwarding" => {
+                no_port_forwarding = true;
+                i += 1;
+                continue;
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag: {other}"));
             }
@@ -81,6 +93,15 @@ fn parse_args(args: &[String]) -> Result<HostArgs, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("invalid max-peers: {value}"))?;
             }
+            "half-open-conns" => {
+                let limit = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid half-open-conns: {value}"))?;
+                if limit == 0 {
+                    return Err("half-open-conns must be positive".into());
+                }
+                half_open_conns = Some(limit);
+            }
             _ => unreachable!(),
         }
         i += 1;
@@ -90,6 +111,8 @@ fn parse_args(args: &[String]) -> Result<HostArgs, String> {
         port,
         path,
         max_peers,
+        half_open_conns,
+        no_port_forwarding,
     })
 }
 
@@ -138,13 +161,24 @@ fn run_engine(args: HostArgs) -> i32 {
     };
 
     rt.block_on(async move {
-        let server = match EngineServer::new(args.port, &args.path, args.max_peers) {
-            Ok(s) => s,
-            Err(err) => {
-                eprintln!("{err}");
-                return 1;
-            }
-        };
+        let server =
+            match EngineServer::new_with_config(args.port, &args.path, args.max_peers, |config| {
+                if let Some(limit) = args.half_open_conns {
+                    config.half_open_conns_per_torrent = limit;
+                    config.total_half_open_conns = limit;
+                }
+                if args.no_port_forwarding {
+                    // Local benchmarks: leave the router and the LAN alone.
+                    config.port_forwarding = false;
+                    config.local_service_discovery = false;
+                }
+            }) {
+                Ok(s) => s,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
 
         if let Err(err) = server.start_streaming().await {
             eprintln!("{err}");

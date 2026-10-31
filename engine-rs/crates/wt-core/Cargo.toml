@@ -26,6 +26,7 @@ serde_json.workspace = true
 ring = "0.17"
 # Compact bitmaps for dirty/completed/requested chunk sets (Go RoaringBitmap).
 roaring = "0.10"
+hex.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

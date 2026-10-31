@@ -92,7 +92,7 @@ adb install -r torrent-player.apk
                                │ Direct JNI commands and events
 ┌──────────────────────────────▼──────────────────────────────┐
 │                    Swarm Engine Runtime                     │
-│        Native Go engine • anacrolix/torrent                 │
+│              Native Rust engine (engine-rs)                 │
 │            TCP • uTP • WebRTC • DHT • PEX                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -100,11 +100,11 @@ adb install -r torrent-player.apk
 - **Android Host (`android/app/`, `android/core/`)**:
   - Written in Kotlin with Jetpack Compose.
   - Manages Android foreground services, notifications, intent dispatch to external media players, and library state persistence.
-- **Engine Runtime (`engine-go/`)**:
-  - Native Go shared library based on `anacrolix/torrent`.
+- **Engine Runtime (`engine-rs/`)**:
+  - Native Rust shared library; the only engine the app ships.
   - Supports TCP, uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, and HTTP/WebSocket trackers.
   - Android commands run through JNI; there is no Android control listener on port 18080 and no OkHttp dependency.
-  - Settings saves the preferred playback method: HTTP stream (default) sends a loopback media URL for incomplete video and Direct Play, while Content URI sends a read-only Android content URI backed by a seekable proxy descriptor over verified Go torrent reads. Completed files use their saved descriptor with either setting.
+  - Settings saves the preferred playback method: HTTP stream (default) sends a loopback media URL for incomplete video and Direct Play, while Content URI sends a read-only Android content URI backed by a seekable proxy descriptor over verified torrent reads. Completed files use their saved descriptor with either setting.
   - The outlined Experimental section has a Playback group (seek time stats, playback method, hedged requests, slow peers step aside, drop peers that won't share, play this file only, play next video) and a Network and battery group. Play this file only is enabled by default: playing a saved torrent suspends requests for its other selected files, including their startup hints, until you return from the external player. Turning the switch off restores normal downloading. Direct Play already focuses on the playing video.
   - A loopback HTTP media endpoint remains available for streaming compatibility. The standalone host engine also provides an HTTP control adapter for development.
 
@@ -114,31 +114,26 @@ adb install -r torrent-player.apk
 
 ### Prerequisites
 - Linux and Git
-- Go 1.24 or newer
+- Rust (rustup) with the `aarch64-linux-android` target
 - Android SDK platform 34, build tools 34.0.0, and NDK 26.1.10909125
 - Java 17 or 21; set `JAVA_HOME` and `ANDROID_HOME` for your machine
 
 ### Build Steps
 
 ```bash
-# Gradle compiles engine-go into libengine.so, then packages the APK.
+# Gradle compiles engine-rs into libengine.so, then packages the APK.
 cd android
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`assembleRelease` produces an optimized, unsigned APK. The engine is pure Go;
-the build needs no Rust, Node.js, npm, V8 or JavaScript bundle.
+`assembleRelease` produces an optimized, unsigned APK. The engine is pure Rust;
+the build needs no Go, Node.js, npm, V8 or JavaScript bundle.
 
 Releases are reproducible: each GitHub APK is built in F-Droid's buildserver
 image and signed with the release key, and F-Droid publishes it after
 rebuilding the tag and matching it. See [the F-Droid release notes](docs/FDROID_SUBMISSION.md)
 and [signing](docs/SIGNING.md).
-
-### Desktop discovery page
-
-`engine-go/cmd/discovery` is a separate desktop tool and is not part of the app.
-See [its notes](engine-go/cmd/discovery/README.md).
 
 ---
 

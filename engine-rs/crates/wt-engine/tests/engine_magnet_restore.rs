@@ -51,7 +51,7 @@ fn test_cold_restored_pending_magnet_discovers_tracker_peer_and_metadata() {
     use std::time::{Duration, Instant};
     use base64::Engine as _;
     let seed = TestEngine::new();
-    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../engine-go/testdata/tiny.torrent")).unwrap();
+    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/tiny.torrent")).unwrap();
     let (mut mi, _) = wt_meta::parse_torrent(&bytes).unwrap();
     mi.announce = String::new();
     mi.announce_list.clear();

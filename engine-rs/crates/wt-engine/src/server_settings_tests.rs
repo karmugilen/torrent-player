@@ -61,21 +61,43 @@ fn settings(server: &EngineServer, body: serde_json::Value) -> serde_json::Value
 }
 
 #[test]
-fn connection_defaults_match_go_and_max_peers_keeps_half_open_limits() {
+fn connection_defaults_scale_half_open_with_max_peers() {
     let (_dir, server) = test_server();
     let config = &server.client.inner.config;
     assert_eq!(config.established_conns_per_torrent, 55);
-    assert_eq!(config.half_open_conns_per_torrent, 24);
-    assert_eq!(config.total_half_open_conns, 48);
+    assert_eq!(config.half_open_conns_per_torrent, 55);
+    assert_eq!(config.total_half_open_conns, 110);
+    assert_eq!(
+        server
+            .client
+            .inner
+            .half_open_conns_per_torrent
+            .load(Ordering::Relaxed),
+        55
+    );
     assert_eq!(config.nominal_dial_timeout, Duration::from_secs(8));
     assert_eq!(config.min_dial_timeout, Duration::from_secs(2));
     assert_eq!(config.handshakes_timeout, Duration::from_secs(5));
     assert_eq!(config.dial_rate, 30.0);
     let rec = add_torrent(&server);
-    settings(&server, json!({"maxPeers":500}));
-    assert_eq!(rec.read().torrent.set_max_established_conns(500), 500);
-    assert_eq!(server.client.inner.config.half_open_conns_per_torrent, 24);
-    assert_eq!(server.client.inner.config.total_half_open_conns, 48);
+    settings(&server, json!({"maxPeers":128}));
+    assert_eq!(rec.read().torrent.set_max_established_conns(128), 128);
+    assert_eq!(
+        server
+            .client
+            .inner
+            .half_open_conns_per_torrent
+            .load(Ordering::Relaxed),
+        128
+    );
+    assert_eq!(
+        server
+            .client
+            .inner
+            .total_half_open_conns
+            .load(Ordering::Relaxed),
+        256
+    );
     server.close();
 }
 
@@ -308,4 +330,71 @@ fn direct_play_limits_live_readers_and_releases_closed_slots() {
     server.open_playback(&id, 0).unwrap().close();
     for reader in readers { reader.close(); }
     server.close();
+}
+
+/// Answers every HTTP announce with no peers and records its event.
+fn event_tracker() -> (String, Arc<Mutex<Vec<String>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/announce", listener.local_addr().unwrap());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    std::thread::spawn(move || {
+        for mut sock in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let event = ["started", "stopped"].into_iter()
+                .find(|e| request.contains(&format!("event={e}")))
+                .unwrap_or("regular");
+            seen.lock().push(event.to_string());
+            let body = "d8:intervali1800e5:peers0:e";
+            let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    (url, events)
+}
+
+fn wait_for_event(events: &Mutex<Vec<String>>, event: &str, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while events.lock().iter().filter(|e| *e == event).count() < count {
+        assert!(Instant::now() < deadline, "wanted {count} {event}: {:?}", events.lock());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The control API's whole lifecycle, in both ways the app removes a torrent:
+/// Delete (destroyStore) and Drop (kept for the next Play).
+#[test]
+fn re_added_torrent_announces_again_after_every_kind_of_remove() {
+    let (_dir, server) = test_server();
+    let (tracker, events) = event_tracker();
+    let hash = "c".repeat(40);
+    let magnet = format!("magnet:?xt=urn:btih:{hash}&tr={tracker}");
+    let add = |magnet: &str| {
+        let (code, body) = server.request("POST", "/add", &json!({"torrentId": magnet}).to_string());
+        assert_eq!(code, 200);
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"].as_str().unwrap().to_string()
+    };
+
+    let mut id = add(&magnet);
+    wait_for_event(&events, "started", 1);
+    for (round, destroy) in [(2, true), (3, false)] {
+        assert_eq!(add(&magnet), id, "adding a live hash keeps its record");
+        for (route, paused) in [("/pause", true), ("/resume", false)] {
+            assert_eq!(server.request("POST", route, &json!({"id": id}).to_string()).0, 200);
+            assert_eq!(server.records_by_hash.read().get(&hash).unwrap().read().paused, paused);
+        }
+        let body = json!({"id": id, "destroyStore": destroy}).to_string();
+        assert_eq!(server.request("POST", "/remove", &body).0, 200);
+        assert_eq!(server.request("GET", &format!("/torrent/{id}"), "").0, 404);
+        assert_eq!(server.request("POST", "/remove", &body).0, 404);
+        wait_for_event(&events, "stopped", round - 1);
+
+        let next = add(&magnet);
+        assert_ne!(next, id, "a removed torrent gets a new record");
+        id = next;
+        assert_eq!(server.request("GET", &format!("/torrent/{id}"), "").0, 200);
+        wait_for_event(&events, "started", round);
+    }
 }

@@ -19,7 +19,7 @@ use serde_json::json;
 
 use crate::connections::{sort_peer_connections, GeoIpResolver};
 use crate::network::NetworkManager;
-use crate::playback::{start_stream_server_fallible, PlaybackReader, StreamServer};
+use crate::playback::{start_stream_server_seekable, PlaybackReader, StreamServer};
 use crate::preview::PreviewReader;
 use crate::seeding::{SeedAccount, SeedingManager};
 use crate::tracker_status::{build_tracker_views, TrackerStatusManager};
@@ -32,6 +32,8 @@ mod metadata_sources;
 mod torrent_status;
 #[path = "playback_resume.rs"]
 mod playback_resume;
+#[path = "arrival_model.rs"]
+mod arrival_model;
 #[cfg(test)]
 #[path = "server_settings_tests.rs"]
 mod settings_tests;
@@ -70,6 +72,7 @@ pub struct TorrentRecord {
     pub checking: bool,
     pub checked_pieces: usize,
     pub check_total: usize,
+    pub(crate) verification: Option<Arc<wt_storage::VerificationProgress>>,
     pub files: Vec<FileView>,
     pub original_trackers: Vec<Vec<String>>,
     pub supplemental_trackers: usize,
@@ -88,6 +91,10 @@ pub struct TorrentRecord {
     pub playback_readers: usize,
     pub resting: bool,
     pub idle_drop_ready: bool,
+    /// Go `nextEpisodePreload`; `next_preload` is its status view.
+    pub(crate) preload_plan: wt_policy::NextPreload,
+    /// Go `reconnectPeers`: dialable addresses kept across network handoffs.
+    pub(crate) reconnect_peers: Vec<wt_core::PeerInfo>,
 }
 
 impl TorrentRecord {
@@ -123,11 +130,13 @@ pub struct EngineServer {
     pub dial_rate_per_sec: AtomicUsize,
     pub peer_exploration: AtomicBool,
     pub claude_seek_mode: AtomicBool,
-    pub seek_stats: Mutex<SeekStats>,
+    pub seek_stats: Mutex<wt_policy::SeekLatencyStats>,
     pub hedge_requests: AtomicBool,
     pub slow_peer_yield: AtomicBool,
     pub drop_chokers: AtomicBool,
     pub learned_arrival: AtomicBool,
+    arrival_saved_samples: AtomicU64,
+    arrival_save_lock: Mutex<()>,
     pub idle_drop_minutes: AtomicI64,
     pub ram_cache_bytes: AtomicI64,
     pub seeding_enabled: AtomicBool,
@@ -145,6 +154,9 @@ pub struct EngineServer {
     resume_state: Mutex<playback_resume::ResumeState>,
     pub next_reader_id: AtomicI64,
     pub bypass_enabled: AtomicBool,
+    pub(crate) idle_states: crate::startup_policy::IdleStates,
+    /// Go `peerHints`: peers that completed a handshake, per torrent.
+    pub(crate) peer_hints: Arc<Mutex<wt_storage::PeerHintStore>>,
 }
 
 impl EngineServer {
@@ -177,6 +189,7 @@ impl EngineServer {
         } else {
             max_peers.min(500)
         };
+        let (half_open_per, half_open_total) = wt_core::half_open_for_max_peers(effective_peers);
 
         let storage = Arc::new(wt_storage::DocumentStorageClient::new(&dir));
         let status_target = tracker_status.clone();
@@ -229,11 +242,19 @@ impl EngineServer {
                 };
                 let hints = callback_hints.clone();
                 let dir = hint_dir.clone();
-                std::thread::spawn(move || {
+                let save = move || {
                     hints
                         .lock()
                         .remember_peer_hint(&dir, &hash.to_hex(), &peer, false)
-                });
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(runtime) => {
+                        runtime.spawn_blocking(save);
+                    }
+                    Err(_) => {
+                        std::thread::spawn(save);
+                    }
+                }
             })],
         };
         let dialer = network.dialer();
@@ -295,13 +316,15 @@ impl EngineServer {
             min_dial_timeout: Duration::from_secs(2),
             handshakes_timeout: Duration::from_secs(5),
             established_conns_per_torrent: effective_peers,
-            half_open_conns_per_torrent: 24,
-            total_half_open_conns: 48,
+            half_open_conns_per_torrent: half_open_per,
+            total_half_open_conns: half_open_total,
             torrent_peers_high_water: 120.max(effective_peers * 4),
             torrent_peers_low_water: 40.max(effective_peers * 2),
             http_user_agent: format!("TorrentPlayer/{}", crate::version::app_version()),
+            port_forwarding: true,
+            local_service_discovery: true,
             extended_handshake_client_version: format!(
-                "Torrent Player {} (Go)",
+                "Torrent Player {}",
                 crate::version::app_version()
             ),
             ice_servers: [
@@ -356,11 +379,13 @@ impl EngineServer {
             dial_rate_per_sec: AtomicUsize::new(30),
             peer_exploration: AtomicBool::new(false),
             claude_seek_mode: AtomicBool::new(false),
-            seek_stats: Mutex::new(SeekStats::default()),
+            seek_stats: Mutex::new(wt_policy::SeekLatencyStats::default()),
             hedge_requests: AtomicBool::new(true),
             slow_peer_yield: AtomicBool::new(true),
             drop_chokers: AtomicBool::new(true),
             learned_arrival: AtomicBool::new(true),
+            arrival_saved_samples: AtomicU64::new(0),
+            arrival_save_lock: Mutex::new(()),
             idle_drop_minutes: AtomicI64::new(0),
             ram_cache_bytes: AtomicI64::new(64 * 1024 * 1024),
             seeding_enabled: AtomicBool::new(false),
@@ -378,6 +403,8 @@ impl EngineServer {
             resume_state: Mutex::new(playback_resume::ResumeState::default()),
             next_reader_id: AtomicI64::new(1),
             bypass_enabled: AtomicBool::new(false),
+            idle_states: Default::default(),
+            peer_hints: hint_store,
         });
         let _ = server.self_ref.set(Arc::downgrade(&server));
         let weak = Arc::downgrade(&server);
@@ -393,6 +420,8 @@ impl EngineServer {
         // Match Go: defaults (hedge/slowPeerYield/learnedArrival) must reach
         // wt-core SeekTuning before the first torrent, not only after POST /settings.
         server.apply_seek_tuning();
+        server.load_arrival_model();
+        Self::start_arrival_saver(&server);
         Ok(server)
     }
 
@@ -407,6 +436,110 @@ impl EngineServer {
             hol_rescue: false,
             ..wt_core::SeekTuning::default()
         });
+    }
+
+    /// Go `recoverNetwork`: close the old route's peers (keeping up to 80
+    /// dialable addresses), then re-add them and re-announce to trackers and
+    /// DHT at 0, 3, 10 and 30 s until each torrent has active peers again.
+    fn recover_network(&self, episode: u64) {
+        let current = || self.network.episode() == episode
+            && !self.shutting_down.load(Ordering::SeqCst);
+        let records: Vec<_> = self.records.read().values().cloned().collect();
+        for rec_arc in &records {
+            let mut rec = rec_arc.write();
+            if !current() || rec.paused || rec.torrent.closed() {
+                continue;
+            }
+            let mut seen = HashSet::new();
+            let mut cached = Vec::new();
+            let conns = rec.torrent.peer_conns();
+            let previous = std::mem::take(&mut rec.reconnect_peers);
+            let candidates = conns.iter().map(|pc| wt_core::PeerInfo {
+                id: None,
+                addr: pc.remote_addr,
+                source: pc.source,
+                supports_encryption: pc.encrypted,
+                pex: Default::default(),
+                trusted: false,
+            }).chain(previous);
+            for peer in candidates {
+                if cached.len() >= 80 || peer.addr.port() == 0 || !seen.insert(peer.addr) {
+                    continue;
+                }
+                cached.push(peer);
+            }
+            rec.torrent.close_all_peers("network changed");
+            // Reconnect widely on the new route, then keep the best peers.
+            rec.torrent.start_peer_burst();
+            rec.reconnect_peers = cached;
+        }
+        // New network: map the port on its router and announce to its LAN.
+        self.client.refresh_local_network();
+        self.notify_change();
+        for delay in [0u64, 3, 10, 30] {
+            let until = Instant::now() + Duration::from_secs(delay);
+            while Instant::now() < until {
+                if !current() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if !current() {
+                return;
+            }
+            let mut pending = false;
+            for rec_arc in &records {
+                let rec = rec_arc.read();
+                if rec.paused || rec.torrent.closed()
+                    || (delay != 0 && rec.torrent.stats().active_peers > 0)
+                {
+                    continue;
+                }
+                pending = true;
+                rec.torrent.add_peers(rec.reconnect_peers.clone());
+                let torrent = rec.torrent.clone();
+                drop(rec);
+                torrent.rediscover();
+            }
+            if !pending {
+                return;
+            }
+            self.notify_change();
+        }
+    }
+
+    /// Go `applyPeerHints`: add unexpired remembered peers of a public torrent.
+    fn apply_peer_hints(&self, rec: &TorrentRecord) {
+        let Some(info) = rec.torrent.info() else { return; };
+        if info.private == Some(true) {
+            return;
+        }
+        let hints = self.peer_hints.lock().get_hints(&rec.info_hash);
+        let now = std::time::SystemTime::now();
+        let peers: Vec<wt_core::PeerInfo> = hints.into_iter()
+            .filter(|h| wt_storage::parse_time(&h.expires).is_some_and(|t| t > now))
+            .filter_map(|h| {
+                let addr = h.addr.parse::<std::net::SocketAddr>().ok()?;
+                let source = [
+                    wt_core::PeerSource::Tracker, wt_core::PeerSource::Incoming,
+                    wt_core::PeerSource::DhtGetPeers, wt_core::PeerSource::DhtAnnouncePeer,
+                    wt_core::PeerSource::Pex, wt_core::PeerSource::UtHolepunch,
+                    wt_core::PeerSource::WebRtc, wt_core::PeerSource::WebSeed,
+                    wt_core::PeerSource::Lsd,
+                ].into_iter().find(|s| s.code() == h.source).unwrap_or(wt_core::PeerSource::Direct);
+                Some(wt_core::PeerInfo {
+                    id: None,
+                    addr,
+                    source,
+                    supports_encryption: false,
+                    pex: Default::default(),
+                    trusted: false,
+                })
+            })
+            .collect();
+        if !peers.is_empty() {
+            rec.torrent.add_peers(peers);
+        }
     }
 
     pub fn close_preview_for(&self, id: &str) {
@@ -468,6 +601,10 @@ impl EngineServer {
     }
 
     fn apply_transfer_state(&self, rec: &mut TorrentRecord) {
+        rec.torrent.inner.saved_mode.store(!rec.direct_play, Ordering::Relaxed);
+        if let Some(progress) = &rec.verification {
+            progress.set_paused(rec.paused || !self.payload_transfers_allowed.load(Ordering::SeqCst));
+        }
         let active = self.payload_transfers_allowed.load(Ordering::SeqCst)
             && rec.configured
             && !rec.paused
@@ -478,33 +615,67 @@ impl EngineServer {
             rec.torrent.disallow_data_download();
             rec.torrent.disallow_data_upload();
             rec.playback_coordinator.hold_resume(HashMap::new());
-        }
-        if rec.torrent.info().is_some() {
-            let files = rec.torrent.files();
-            let only = rec.file_only && rec.focused_file.is_some() && !rec.direct_play;
-            for file in files {
-                let priority = if active && rec.selected.contains(&file.index()) && !rec.direct_play
-                {
-                    if only {
-                        if Some(file.index()) == rec.focused_file {
-                            wt_core::PiecePriority::Normal
-                        } else {
-                            wt_core::PiecePriority::None
-                        }
-                    } else {
-                        wt_core::PiecePriority::Normal
-                    }
-                } else {
-                    wt_core::PiecePriority::None
-                };
-                file.set_priority(priority);
+            // Cancellation only touches the token, never a session lock that
+            // an in-flight read holds while calling back into this record.
+            for reader in self.playback_readers.lock().values().filter(|r| r.id == rec.id) {
+                reader.cancel_pending_read();
             }
+        }
+        if let Some(info) = rec.torrent.info() {
+            let only = rec.file_only && rec.focused_file.is_some() && !rec.direct_play;
+            let mut priorities = vec![wt_core::PiecePriority::None; rec.torrent.num_pieces() as usize];
+            if active && !rec.direct_play && info.piece_length > 0 {
+                for file in rec.torrent.files().iter().filter(|file|
+                    rec.selected.contains(&file.index()) && (!only || Some(file.index()) == rec.focused_file)) {
+                    let begin = (file.offset() / info.piece_length) as usize;
+                    let end = ((file.offset() + file.length() + info.piece_length - 1) / info.piece_length) as usize;
+                    // File boundaries can share a piece. An unselected neighbor
+                    // must never overwrite a selected file's boundary demand.
+                    for priority in priorities.iter_mut().take(end).skip(begin) {
+                        *priority = wt_core::PiecePriority::Normal;
+                    }
+                }
+            }
+            rec.torrent.set_piece_priorities(priorities.into_iter().enumerate()
+                .map(|(piece, priority)| (piece as u32, priority)));
+            // Soft head/tail Now hints on top of the base Normal priority;
+            // gated off (cleared) while inactive.
+            self.apply_video_startup_hints(rec);
+            self.apply_background_focus(rec);
             if active {
+                let demand = rec.playback_coordinator.effective();
+                Self::apply_record_piece_priorities(rec, &demand);
                 rec.torrent.allow_data_download();
                 rec.torrent.allow_data_upload();
             }
         }
         self.apply_seed_policy(rec);
+    }
+
+    pub(crate) fn apply_record_piece_priorities(
+        rec: &mut TorrentRecord,
+        demand: &HashMap<u32, wt_core::PiecePriority>,
+    ) {
+        let previous = std::mem::take(&mut rec.playback_demand);
+        let info = rec.torrent.info();
+        let files = rec.torrent.files();
+        let mut priorities = Vec::with_capacity(previous.len() + demand.len());
+        for piece in previous {
+            if demand.contains_key(&piece) { continue; }
+            let wanted = !rec.direct_play && info.as_ref().is_some_and(|info| {
+                let p = info.piece(piece);
+                files.iter().any(|f| rec.selected.contains(&f.index())
+                    && (!rec.file_only || rec.focused_file.is_none() || rec.focused_file == Some(f.index()))
+                    && f.offset() < p.offset + p.length
+                    && f.offset() + f.length() > p.offset)
+            });
+            priorities.push((piece, if wanted {
+                wt_core::PiecePriority::Normal
+            } else { wt_core::PiecePriority::None }));
+        }
+        priorities.extend(demand.iter().map(|(&piece, &priority)| (piece, priority)));
+        rec.torrent.set_piece_priorities(priorities);
+        rec.playback_demand.extend(demand.keys().copied());
     }
 
     /// Go `watchMetadata`: a magnet has no info at add time, so the public
@@ -570,9 +741,9 @@ impl EngineServer {
     pub async fn start_streaming(self: &Arc<Self>) -> std::io::Result<()> {
         let this = self.clone();
         let resolver =
-            Arc::new(move |id: &str, file_index: usize| this.open_playback(id, file_index));
+            Arc::new(move |id: &str, file_index: usize, start: i64| this.open_playback_at(id, file_index, start));
 
-        let server = start_stream_server_fallible(0, resolver).await?;
+        let server = start_stream_server_seekable(0, resolver).await?;
         self.stream_port
             .store(server.port() as usize, Ordering::SeqCst);
         *self.stream_server.lock() = Some(server);
@@ -582,6 +753,9 @@ impl EngineServer {
 
     pub fn close(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        for record in self.records.read().values() {
+            if let Some(progress) = &record.read().verification { progress.cancel(); }
+        }
         let mut contacts = wt_storage::DhtContactStore::new();
         contacts.load(&self.download_dir);
         for addr in self.client.dht_contacts() {
@@ -598,6 +772,7 @@ impl EngineServer {
             r.close();
         }
         self.flush_resume_saves();
+        self.save_arrival_model();
         self.client.close();
         let preview = self.preview_active.lock().take();
         if let Some(p) = preview {
@@ -625,6 +800,7 @@ impl EngineServer {
 
         let response = match (method, parts.as_slice()) {
             ("GET", ["stats"]) => self.handle_stats(),
+            ("GET", ["events"]) => self.handle_events(),
             ("GET", ["version"]) => (
                 200,
                 serde_json::to_vec(&json!({"version": crate::version::app_version()})).unwrap(),
@@ -669,6 +845,21 @@ impl EngineServer {
             self.reset_ghost();
         }
         response
+    }
+
+    /// Recent engine events and per-torrent totals, for diagnostics.
+    fn handle_events(&self) -> (u16, Vec<u8>) {
+        let events: Vec<_> = wt_types::events::snapshot().into_iter()
+            .map(|(at, kind, detail)| json!({"at": at, "kind": kind, "detail": detail}))
+            .collect();
+        let torrents: Vec<_> = self.records.read().values()
+            .map(|r| {
+                let rec = r.read();
+                json!({"id": rec.id, "stats": format!("{:?}", rec.torrent.stats())})
+            })
+            .collect();
+        let seek = format!("{:?}", self.seek_stats.lock().snapshot());
+        (200, serde_json::to_vec(&json!({"events": events, "torrents": torrents, "seek": seek})).unwrap())
     }
 
     fn handle_stats(&self) -> (u16, Vec<u8>) {
@@ -864,6 +1055,7 @@ impl EngineServer {
             checking: false,
             checked_pieces: 0,
             check_total: 10,
+            verification: None,
             files,
             original_trackers,
             supplemental_trackers: 0,
@@ -886,6 +1078,8 @@ impl EngineServer {
             playback_readers: 0,
             resting: false,
             idle_drop_ready: false,
+            preload_plan: Default::default(),
+            reconnect_peers: Vec::new(),
         }));
 
         {
@@ -994,7 +1188,7 @@ impl EngineServer {
             playback_readers: rec.playback_readers,
             resting: rec.resting,
             idle_drop_ready: rec.idle_drop_ready,
-            next_preload: rec.next_preload.clone(),
+            next_preload: Self::next_preload_view(&rec),
         };
 
         (200, serde_json::to_vec(&view).unwrap())
@@ -1054,27 +1248,42 @@ impl EngineServer {
             );
         }
 
-        let file_index = req.file_index.unwrap_or(0);
-        if file_index >= rec.files.len() {
-            return (
-                400,
-                serde_json::to_vec(&json!({"error": "invalid file index"})).unwrap(),
-            );
+        let file_index = match req.file_index.or_else(|| {
+            rec.selected.iter().copied().filter(|&i| i < rec.files.len())
+                .max_by_key(|&i| rec.files[i].length)
+        }) {
+            Some(index) if index < rec.files.len() && rec.selected.contains(&index) => index,
+            _ => return (400, serde_json::to_vec(&json!({"error": "file is not selected"})).unwrap()),
+        };
+        let file = rec.files[file_index].clone();
+        if file.verified_bytes < file.length {
+            // An incomplete stream would appear to start, then hang waiting
+            // for bytes this policy deliberately blocks.
+            if !self.payload_transfers_allowed.load(Ordering::SeqCst) {
+                return (409, serde_json::to_vec(&json!({"error": "payload transfers are disabled in settings"})).unwrap());
+            }
+            if rec.paused || rec.checking {
+                return (409, serde_json::to_vec(&json!({"error": "payload transfers are paused or saved data is being checked"})).unwrap());
+            }
         }
-
-        let file = &rec.files[file_index];
-        if !self.payload_transfers_allowed.load(Ordering::SeqCst)
-            && file.verified_bytes < file.length
-        {
-            return (
-                409,
-                serde_json::to_vec(&json!({"error": "payload transfers are disabled in settings"}))
-                    .unwrap(),
-            );
+        rec.focused_file = Some(file_index);
+        rec.file_only = req.file_only && !rec.direct_play;
+        // Go setNextPreloadLocked: warm the next episode only near the end.
+        self.set_next_preload(&mut rec, file_index, req.next_file_index);
+        if rec.direct_play {
+            self.touch_direct_play(&rec.id);
         }
+        rec.playback_coordinator.set_play_boost(file_index, req.boost);
+        rec.playback_coordinator.set_buffer_experiments(file_index, req.adaptive_buffer, req.burst_aware_buffer);
         if let Some(offset) = req.offset {
             rec.playback_coordinator.prepare_resume(file_index, offset.clamp(0, (file.length - 1).max(0)));
         }
+        self.apply_transfer_state(&mut rec);
+        drop(rec);
+        if let Some(storage) = self.storage_for_torrent(&torrent) {
+            storage.set_startup_file(file_index);
+        }
+        self.notify_change();
         let stream_url = format!(
             "http://127.0.0.1:{}/torrent/{}/file/{}",
             self.stream_port.load(Ordering::SeqCst),
@@ -1115,11 +1324,12 @@ impl EngineServer {
         let records = self.records.read();
         if let Some(r) = records.get(id) {
             let enabled = req
-                .get("fileOnly")
+                .get("enabled")
+                .or_else(|| req.get("fileOnly"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let mut rec = r.write();
-            rec.file_only = enabled;
+            rec.file_only = enabled && !rec.direct_play;
             self.apply_transfer_state(&mut rec);
             (
                 200,
@@ -1226,6 +1436,9 @@ impl EngineServer {
             );
         };
 
+        if req.storage_mode.as_deref().is_some_and(|m| m != STORAGE_MODE_STREAM && m != STORAGE_MODE_DOWNLOAD && !m.is_empty()) {
+            return (400, serde_json::to_vec(&json!({"error": "invalid storageMode"})).unwrap());
+        }
         let stream = req.storage_mode.as_deref() == Some(STORAGE_MODE_STREAM);
         if stream {
             // Go server.go configure: clamp stream RAM and wire onStreamEvict so
@@ -1233,11 +1446,10 @@ impl EngineServer {
             if let Some(bytes) = req.stream_cache_bytes.filter(|&b| b > 0) {
                 storage.set_cache_limit(bytes.clamp(16 << 20, wt_storage::MAX_RAM_CACHE_BYTES));
             }
-            let torrent_for_cb = torrent.clone();
-            let rec_for_cb = Arc::clone(&rec_arc);
+            let torrent_for_cb = Arc::downgrade(&torrent.inner);
             storage.set_on_stream_evict(Some(Arc::new(move |index| {
-                if !rec_for_cb.read().torrent.closed() {
-                    torrent_for_cb.update_piece_completion(index as u32);
+                if let Some(inner) = torrent_for_cb.upgrade().filter(|t| !t.closed.load(Ordering::Relaxed)) {
+                    wt_core::Torrent { inner }.update_piece_completion(index as u32);
                 }
             })));
         }
@@ -1253,31 +1465,68 @@ impl EngineServer {
             return (409, serde_json::to_vec(&json!({"error": "torrent removed"})).unwrap());
         }
         rec.refresh();
-        for piece in 0..rec.torrent.num_pieces() {
-            rec.torrent.update_piece_completion(piece);
-        }
+        rec.torrent.update_all_piece_completion();
         rec.configured = true;
         rec.selected = selected;
+        rec.direct_play = stream;
         if stream {
-            rec.direct_play = true;
             // Match Go: temporary stream-cache pressure must not permanently
             // disable download; the failed chunk is re-requested.
             let t = rec.torrent.clone();
-            let t_cb = t.clone();
+            let t_cb = Arc::downgrade(&t.inner);
+            // Direct Play / stream: peer_conn already requeues failed chunks.
+            // Only permanent disable for true closure — transient cache/SAF/I/O
+            // pressure used to call disallow_data_download and freeze speed at 0
+            // while play waited forever for pieces that could no longer arrive.
             t.set_on_write_chunk_error(Some(Arc::new(move |err: &wt_core::CoreError| {
-                let busy = match err {
-                    wt_core::CoreError::Storage(wt_types::StorageError::Other(msg)) => {
-                        msg.contains("busy") || msg.contains("full") || msg.contains("evict")
+                let fatal = matches!(
+                    err,
+                    wt_core::CoreError::Storage(wt_types::StorageError::Closed)
+                );
+                if fatal {
+                    if let Some(inner) = t_cb.upgrade() {
+                        wt_core::Torrent { inner }.disallow_data_download();
                     }
-                    wt_core::CoreError::Storage(wt_types::StorageError::Unavailable) => true,
-                    _ => false,
-                };
-                if !busy {
-                    t_cb.disallow_data_download();
                 }
             })));
         }
+        // Go applyPeerHints: reconnect peers that worked last time at once.
+        self.apply_peer_hints(&rec);
+        let verification = if !stream && storage.needs_verify() {
+            let info = torrent.info().expect("configured torrent metadata");
+            let total = torrent.files().iter().filter(|f| rec.selected.contains(&f.index()))
+                .flat_map(|f| (f.offset() / info.piece_length) as usize..
+                    ((f.offset() + f.length() + info.piece_length - 1) / info.piece_length) as usize)
+                .collect::<HashSet<_>>().len();
+            let progress = Arc::new(wt_storage::VerificationProgress::new(total));
+            rec.checking = true;
+            rec.checked_pieces = 0;
+            rec.check_total = total;
+            rec.verification = Some(progress.clone());
+            Some((progress, info, rec.selected.clone()))
+        } else {
+            storage.unfreeze_trusted();
+            None
+        };
         self.apply_transfer_state(&mut rec);
+        drop(rec);
+        if let Some((progress, info, selected)) = verification {
+            let weak = self.self_ref.get().cloned().unwrap_or_default();
+            self.client.inner.tokio_handle.spawn_blocking(move || {
+                let result = wt_storage::check_saved_data(storage, &info, &selected, progress.clone());
+                let Some(server) = weak.upgrade() else { return; };
+                let mut rec = rec_arc.write();
+                if rec.torrent.closed() { return; }
+                rec.torrent.update_all_piece_completion();
+                rec.checked_pieces = progress.checked_pieces.load(Ordering::SeqCst);
+                rec.checking = false;
+                rec.verification = None;
+                if let Err(error) = result { rec.warning = Some(error.to_string()); }
+                server.apply_transfer_state(&mut rec);
+                drop(rec);
+                server.notify_change();
+            });
+        }
         self.notify_change();
         (
             200,
@@ -1344,6 +1593,8 @@ impl EngineServer {
                 if let Err(error) = storage.update_selection(descriptors, &selected) {
                     return (400, serde_json::to_vec(&json!({"error": error.to_string()})).unwrap());
                 }
+                // Pieces touching a replaced destination lost completion.
+                rec.torrent.update_all_piece_completion();
             } else if !storage.selection_can_use_existing_files(&selected) {
                 return (400, serde_json::to_vec(&json!({"error": "descriptors are required when selecting a file for the first time"})).unwrap());
             }
@@ -1402,30 +1653,47 @@ impl EngineServer {
             }
         };
         self.close_preview_for(&req.id);
-        let mut records = self.records.write();
-        let mut by_hash = self.records_by_hash.write();
-        if let Some(rec) = records.remove(&req.id) {
-            rec.read().torrent.drop_torrent();
-            if req.destroy_store.unwrap_or(false) {
-                let _ = self.storage.remove_torrent(rec.read().torrent.info_hash());
-            }
-            by_hash.remove(&rec.read().info_hash);
-            self.tracker_status.clear_status(&rec.read().info_hash);
-            self.notify_change();
-            (
-                200,
-                serde_json::to_vec(&OkResponse {
-                    ok: true,
-                    id: Some(req.id),
-                })
-                .unwrap(),
-            )
-        } else {
-            (
-                404,
-                serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap(),
-            )
+        // Detach before closing readers: their callbacks re-enter the host.
+        let rec = {
+            let mut records = self.records.write();
+            let mut by_hash = self.records_by_hash.write();
+            records.remove(&req.id).inspect(|rec| {
+                by_hash.remove(&rec.read().info_hash);
+            })
+        };
+        self.forget_idle_state(&req.id);
+        let Some(rec) = rec else {
+            return (404, serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap());
+        };
+        let (torrent, hash) = {
+            let rec = rec.read();
+            if let Some(progress) = &rec.verification { progress.cancel(); }
+            (rec.torrent.clone(), rec.info_hash.clone())
+        };
+        torrent.drop_torrent();
+        let readers = {
+            let mut registry = self.playback_readers.lock();
+            let handles: Vec<_> = registry.iter().filter(|(_, r)| r.id == req.id)
+                .map(|(&handle, _)| handle).collect();
+            handles.into_iter().filter_map(|handle| registry.remove(&handle)).collect::<Vec<_>>()
+        };
+        for reader in readers { reader.close(); }
+        if let Some(storage) = self.storage.get_storage(&hash) {
+            storage.set_on_stream_evict(None);
+            let _ = wt_types::TorrentStorage::close(storage.as_ref());
         }
+        let _ = self.storage.remove_torrent(torrent.info_hash());
+        // Go: a missing destroyStore means destroy.
+        if req.destroy_store.unwrap_or(true) {
+            // A Drop keeps the library entry; its peers reconnect on the next Play.
+            self.peer_hints.lock().forget_peer_hints(&self.download_dir, &hash);
+            let _ = self.storage.delete_checkpoint(&hash);
+            let _ = wt_storage::delete_engine_owned_storage(&self.download_dir, &hash);
+            let _ = std::fs::remove_dir_all(wt_storage::resume_window_dir(&self.download_dir, &hash));
+        }
+        self.tracker_status.clear_status(&hash);
+        self.notify_change();
+        (200, serde_json::to_vec(&OkResponse { ok: true, id: Some(req.id) }).unwrap())
     }
 
     fn handle_forget_peers(&self, body: &str) -> (u16, Vec<u8>) {
@@ -1439,6 +1707,8 @@ impl EngineServer {
             }
         };
         if let Some(hash) = req.get("infoHash").and_then(|v| v.as_str()) {
+            // Go: forgets hints even after the live torrent was dropped.
+            self.peer_hints.lock().forget_peer_hints(&self.download_dir, hash);
             if let Some(r) = self.records_by_hash.read().get(hash) {
                 r.read().torrent.forget_peers();
             }
@@ -1613,7 +1883,7 @@ impl EngineServer {
             slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
             drop_chokers: self.drop_chokers.load(Ordering::SeqCst),
             learned_arrival: self.learned_arrival.load(Ordering::SeqCst),
-            arrival: ArrivalStats::default(),
+            arrival: self.arrival_stats(),
             idle_drop_minutes: self.idle_drop_minutes.load(Ordering::SeqCst),
             ram_cache_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
             seeding_enabled: self.seeding_enabled.load(Ordering::SeqCst),
@@ -1623,7 +1893,15 @@ impl EngineServer {
             download_rate_bytes_sec: self.download_rate_limit.load(Ordering::SeqCst),
             upload_rate_bytes_sec: self.upload_rate_limit.load(Ordering::SeqCst),
             payload_transfers_allowed: self.payload_transfers_allowed.load(Ordering::SeqCst),
-            seek_stats: self.seek_stats.lock().clone(),
+            seek_stats: {
+                let snap = self.seek_stats.lock().snapshot();
+                SeekStats {
+                    count: snap.count.max(0) as usize,
+                    last_ms: snap.last_ms,
+                    median_ms: snap.median_ms,
+                    stalls: snap.stalls.max(0) as usize,
+                }
+            },
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }
@@ -1660,6 +1938,8 @@ impl EngineServer {
                 );
             }
             self.max_peers.store(peers, Ordering::SeqCst);
+            let (half_open_per, half_open_total) = wt_core::half_open_for_max_peers(peers);
+            self.client.set_half_open_limits(half_open_per, half_open_total);
             let records: Vec<_> = self.records.read().values().cloned().collect();
             for record in records {
                 let rec = record.read();
@@ -1699,6 +1979,13 @@ impl EngineServer {
                 self.ghost_pro_mode.store(false, Ordering::SeqCst);
             }
         }
+        // Go: Ghost Pro widens video startup hints; reapply them.
+        if req.ghost_pro_mode.is_some() || req.ghost_mode.is_some() || req.peer_exploration.is_some() {
+            let records: Vec<_> = self.records.read().values().cloned().collect();
+            for rec in records {
+                self.refresh_startup_hints(&mut rec.write());
+            }
+        }
         if let Some(seek) = req.claude_seek_mode {
             let prev = self.claude_seek_mode.swap(seek, Ordering::SeqCst);
             if prev != seek {
@@ -1708,7 +1995,7 @@ impl EngineServer {
                     std::time::Duration::ZERO
                 };
                 self.client.set_urgent_request_stealing(after);
-                *self.seek_stats.lock() = SeekStats::default();
+                self.seek_stats.lock().reset();
             }
         }
         let mut retune = false;
@@ -1815,7 +2102,20 @@ impl EngineServer {
             Ok(v) => v,
             Err(e) => return (400, serde_json::to_vec(&json!({"error":e})).unwrap()),
         };
-        let _ = self.network.on_network_change(generation, connected);
+        // Duplicate or delayed callbacks are ignored: a policy update must not
+        // tear down healthy peers on the same network.
+        if let Some(connected) = self.network.on_network_change(generation, connected) {
+            self.reset_ghost();
+            if connected {
+                if let Some(server) = self.self_ref.get().and_then(|w| w.upgrade()) {
+                    let episode = self.network.episode();
+                    std::thread::Builder::new()
+                        .name("wt-net-recover".into())
+                        .spawn(move || server.recover_network(episode))
+                        .ok();
+                }
+            }
+        }
         self.notify_change();
         (
             200,
@@ -1926,6 +2226,13 @@ impl EngineServer {
     }
 
     pub fn open_playback(&self, id: &str, index: usize) -> std::io::Result<Arc<PlaybackReader>> {
+        self.open_playback_at(id, index, -1)
+    }
+
+    /// Open at the player's Range start when it has one past the file's start.
+    /// Opening at the last played position instead sent every peer to the old
+    /// spot, and held the real refocus back behind its debounce.
+    pub fn open_playback_at(&self, id: &str, index: usize, requested: i64) -> std::io::Result<Arc<PlaybackReader>> {
         let (rec_arc, torrent) = self
             .record_by_id(id)
             .map(|r| {
@@ -1937,11 +2244,17 @@ impl EngineServer {
             })?;
         self.wait_for_info(&torrent)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::WouldBlock, e))?;
+        // Play must not inherit a stuck disallow_data_download from a prior
+        // Direct Play write glitch — re-apply transfer gates so peers resume.
+        {
+            let mut rec = rec_arc.write();
+            self.apply_transfer_state(&mut rec);
+        }
         let coordinator = rec_arc.read().playback_coordinator.clone();
         if let Some(offset) = self.apply_resume_window_to_storage(id, index) {
             coordinator.remember_resume(index, offset);
         }
-        let start = coordinator.preview_position(index);
+        let start = if requested > 0 { requested } else { coordinator.preview_position(index) };
         let host = self
             .self_ref
             .get()
@@ -1971,6 +2284,22 @@ impl EngineServer {
 }
 
 impl crate::playback::PlaybackHost for EngineServer {
+    fn record_seek(&self, latency: Duration) {
+        self.seek_stats.lock().record_seek(latency);
+    }
+    fn begin_playback_read(&self, id: &str) {
+        EngineServer::begin_playback_read(self, id);
+    }
+    fn end_playback_read(&self, id: &str) {
+        EngineServer::end_playback_read(self, id);
+    }
+    fn playback_near_end(&self, id: &str, file_index: usize) {
+        // Takes the record lock; the reader holds its session lock here.
+        let Some(server) = self.self_ref.get().and_then(|w| w.upgrade()) else { return; };
+        let id = id.to_string();
+        std::thread::spawn(move || server.start_next_preload(&id, file_index));
+    }
+
     fn torrent_for_playback(&self, id: &str) -> Option<crate::playback::PlaybackTorrentSnapshot> {
         let records = self.records.read();
         let rec = records.get(id)?.read();
@@ -2052,6 +2381,16 @@ impl crate::playback::PlaybackHost for EngineServer {
     fn payload_allowed(&self) -> bool {
         self.payload_transfers_allowed.load(Ordering::SeqCst)
     }
+    fn playback_allowed(&self, id: &str, index: usize) -> bool {
+        self.record_by_id(id).is_some_and(|record| {
+            let rec = record.read();
+            if rec.torrent.closed() || !rec.configured { return false; }
+            let file = rec.torrent.files().get(index).cloned();
+            file.is_some_and(|file| file.bytes_completed() >= file.length()
+                || (!rec.paused && !rec.checking && rec.error.is_none()
+                    && self.payload_transfers_allowed.load(Ordering::SeqCst)))
+        })
+    }
     fn ghost_pro(&self) -> bool {
         self.ghost_pro_mode.load(Ordering::SeqCst)
     }
@@ -2067,43 +2406,23 @@ impl crate::playback::PlaybackHost for EngineServer {
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "torrent or file not found")
             })?;
-        let backend = if let Some(storage) = self.storage.get_storage(&file.torrent.info_hash.to_hex()) {
+        let mut backend = if let Some(storage) = self.storage.get_storage(&file.torrent.info_hash.to_hex()) {
             crate::playback_core::CoreReaderBackend::from_file_with_storage(&file, storage)
         } else {
             crate::playback_core::CoreReaderBackend::from_file(&file)
         };
+        let server = self.self_ref.get().cloned().unwrap_or_default();
+        backend.set_on_stall(Arc::new(move || {
+            if let Some(server) = server.upgrade() {
+                server.seek_stats.lock().record_stall();
+                wt_types::events::record("stall", "");
+            }
+        }));
         Ok(Box::new(backend))
     }
     fn apply_piece_priorities(&self, id: &str, demand: &HashMap<u32, wt_core::PiecePriority>) {
-        if let Some(r) = self.records.read().get(id) {
-            let mut rec = r.write();
-            let previous = std::mem::take(&mut rec.playback_demand);
-            let info = rec.torrent.info();
-            for piece in previous {
-                if demand.contains_key(&piece) {
-                    continue;
-                }
-                let wanted = !rec.direct_play && info.as_ref().is_some_and(|info| {
-                    let p = info.piece(piece);
-                    rec.torrent.files().iter().any(|f| {
-                        rec.selected.contains(&f.index())
-                            && f.offset() < p.offset + p.length
-                            && f.offset() + f.length() > p.offset
-                    })
-                });
-                rec.torrent.set_piece_priority(
-                    piece,
-                    if wanted {
-                        wt_core::PiecePriority::Normal
-                    } else {
-                        wt_core::PiecePriority::None
-                    },
-                );
-            }
-            for (&piece, &priority) in demand {
-                rec.torrent.set_piece_priority(piece, priority);
-            }
-            rec.playback_demand.extend(demand.keys().copied());
+        if let Some(record) = self.record_by_id(id) {
+            Self::apply_record_piece_priorities(&mut record.write(), demand);
         }
     }
     fn clear_piece_priorities(&self, id: &str, pieces: &[u32]) {
@@ -2128,7 +2447,7 @@ impl crate::playback::PlaybackHost for EngineServer {
     }
     fn refocus_requests(&self, id: &str) {
         if let Some(r) = self.records.read().get(id) {
-            r.read().torrent.refocus_requests();
+            r.read().torrent.refocus_requests_debounced();
         }
     }
     fn nudge_urgent(&self, id: &str) -> usize {
@@ -2156,6 +2475,12 @@ impl crate::playback::PlaybackHost for EngineServer {
             return None;
         }
         self.storage.get_storage(&rec.info_hash).map(|st| st.max_cache_bytes())
+    }
+
+    fn read_verified(&self, id: &str, abs: i64, length: i64) -> Option<Vec<u8>> {
+        let rec = self.record_by_id(id)?;
+        let hash = rec.read().info_hash.clone();
+        self.storage.get_storage(&hash)?.copy_verified_range(abs, length)
     }
 
     fn refresh_playback_completion(&self, id: &str, pieces: &[u32]) {

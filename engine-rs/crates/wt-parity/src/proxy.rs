@@ -123,25 +123,38 @@ fn handle_conn(
     let gs2 = global_stop;
 
     let t2 = thread::spawn(move || {
+        // A delay line: sleeping the delay per read would cap the link at one
+        // read per delay, whatever its configured rate.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(Instant, Vec<u8>)>(64);
+        let writer = thread::spawn(move || {
+            let mut bucket = RateBucket::new(bytes_per_sec);
+            while let Ok((due, data)) = rx.recv() {
+                let now = Instant::now();
+                if due > now {
+                    thread::sleep(due - now);
+                }
+                bucket.wait_for(data.len() as u64);
+                if client_wr.write_all(&data).is_err() {
+                    break;
+                }
+            }
+            let _ = client_wr.shutdown(std::net::Shutdown::Both);
+        });
         let mut buf = [0u8; 32 * 1024];
-        let mut bucket = RateBucket::new(bytes_per_sec);
         while !cs2.load(Ordering::SeqCst) && !gs2.load(Ordering::SeqCst) {
             match server_rd.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if !delay.is_zero() {
-                        thread::sleep(delay);
-                    }
-                    bucket.wait_for(n as u64);
-                    if client_wr.write_all(&buf[..n]).is_err() {
+                    if tx.send((Instant::now() + delay, buf[..n].to_vec())).is_err() {
                         break;
                     }
                 }
                 Err(_) => break,
             }
         }
+        drop(tx);
+        let _ = writer.join();
         cs2.store(true, Ordering::SeqCst);
-        let _ = client_wr.shutdown(std::net::Shutdown::Both);
         if let Some(c) = c_rd_clone {
             let _ = c.shutdown(std::net::Shutdown::Both);
         }

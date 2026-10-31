@@ -2,10 +2,11 @@
 //!
 //! Port of `engine-go/connections.go`.
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::types::PeerConnectionView;
 
@@ -22,28 +23,45 @@ struct MaxMindCountry<'a> {
 }
 
 pub struct GeoIpResolver {
+    dir: PathBuf,
     reader: RwLock<Option<maxminddb::Reader<Vec<u8>>>>,
+    /// Last load attempt. Android copies the database after the engine is
+    /// ready, so a missing file is retried rather than cached forever.
+    last_attempt: Mutex<Option<Instant>>,
 }
 
+const GEOIP_RETRY: Duration = Duration::from_secs(30);
+
 impl GeoIpResolver {
+    /// Loading reads the whole database; defer it to the first lookup so
+    /// engine startup does not wait on that file I/O.
     pub fn new(download_dir: impl AsRef<Path>) -> Self {
-        let dir = download_dir.as_ref();
-        let mut reader = None;
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("geoip-country") && name.ends_with(".mmdb") {
-                        if let Ok(r) = maxminddb::Reader::open_readfile(&path) {
-                            reader = Some(r);
-                            break;
-                        }
-                    }
+        Self {
+            dir: download_dir.as_ref().to_path_buf(),
+            reader: RwLock::new(None),
+            last_attempt: Mutex::new(None),
+        }
+    }
+
+    fn ensure_loaded(&self) {
+        if self.reader.read().is_some() {
+            return;
+        }
+        let mut last = self.last_attempt.lock();
+        if self.reader.read().is_some() || last.is_some_and(|t| t.elapsed() < GEOIP_RETRY) {
+            return;
+        }
+        *last = Some(Instant::now());
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue; };
+            if name.starts_with("geoip-country") && name.ends_with(".mmdb") {
+                if let Ok(r) = maxminddb::Reader::open_readfile(&path) {
+                    *self.reader.write() = Some(r);
+                    return;
                 }
             }
-        }
-        Self {
-            reader: RwLock::new(reader),
         }
     }
 
@@ -80,6 +98,7 @@ impl GeoIpResolver {
             }
         }
 
+        self.ensure_loaded();
         let lock = self.reader.read();
         let reader = lock.as_ref()?;
         let record: MaxMindCountryRecord = reader.lookup(ip).ok()?;

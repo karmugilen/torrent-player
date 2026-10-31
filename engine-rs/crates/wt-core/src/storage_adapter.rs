@@ -63,6 +63,10 @@ impl PieceStorage for MemoryPieceStorage {
         Ok(buf.len())
     }
 
+    fn write_at_in_memory(&self, buf: &[u8], off: i64) -> Option<StorageResult<usize>> {
+        Some(self.write_at(buf, off))
+    }
+
     fn mark_complete(&self) -> StorageResult<()> {
         let mut comp = self.completion.write();
         comp.ok = true;

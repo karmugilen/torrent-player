@@ -90,6 +90,8 @@ pub trait ReaderHost: Send + Sync {
     fn is_closed(&self) -> bool;
     fn has_info(&self) -> bool;
 
+    fn data_download_allowed(&self) -> bool { true }
+
     /// Webtor: called while a blocking read waits (hedge / nudge urgent).
     fn on_read_waiting(&self, _torrent_offset: i64) {}
 }
@@ -200,6 +202,12 @@ impl Reader {
         self.reader_id
     }
 
+    pub fn refresh_demand(&mut self) {
+        self.host.clear_reader(self.reader_id);
+        self.pieces = PieceRange::default();
+        self.pos_changed();
+    }
+
     pub fn set_readahead(&mut self, bytes: i64) {
         self.readahead = bytes.max(0);
         self.readahead_fn = None;
@@ -296,6 +304,13 @@ impl Reader {
         self.host.set_reader_positions(self.reader_id, to);
     }
 
+    /// Whether a read at the current position would wait for missing data.
+    pub fn must_wait(&self) -> bool {
+        self.pos < self.file_length
+            && (!self.host.has_info()
+                || self.host.have(self.torrent_offset(self.pos), 1, self.responsive) <= 0)
+    }
+
     /// Blocking read with optional deadline (Go `readContext` + timeout).
     pub fn read_timeout(
         &mut self,
@@ -323,12 +338,13 @@ impl Reader {
                     ));
                 }
             }
+
             let after = self.host.change_version();
             let wait = deadline
                 .map(|dl| dl.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::from_secs(60));
             self.host
-                .wait_change(after, wait.min(Duration::from_millis(50)));
+                .wait_change(after, wait.min(Duration::from_millis(5)));
         }
 
         // Mark reading and refresh piece priorities (Go sets reading before readAt).
@@ -383,7 +399,7 @@ impl Reader {
                         let after = self.host.change_version();
                         let wait = remaining(deadline).unwrap_or(Duration::from_millis(50));
                         self.host
-                            .wait_change(after, wait.min(Duration::from_millis(50)));
+                            .wait_change(after, wait.min(Duration::from_millis(5)));
                         self.check_cancel_closed()?;
                         let avail2 = self.host.have(torrent_off, wanted, self.responsive);
                         if avail2 > 0 {
@@ -401,11 +417,17 @@ impl Reader {
                 }
             }
 
+            // Android queues proxy FD release behind this read. Missing bytes
+            // cannot arrive while paused, so let release run promptly.
+            if !self.host.data_download_allowed() {
+                return Err(std::io::Error::new(ErrorKind::Interrupted, "payload transfers are paused"));
+            }
+
             self.host.on_read_waiting(torrent_off);
             let after = self.host.change_version();
             let wait = remaining(deadline).unwrap_or(Duration::from_secs(60));
             self.host
-                .wait_change(after, wait.min(Duration::from_millis(50)));
+                .wait_change(after, wait.min(Duration::from_millis(5)));
         }
     }
 }

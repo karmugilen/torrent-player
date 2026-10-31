@@ -14,7 +14,7 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -83,7 +83,8 @@ impl StreamReady {
 
 #[derive(Debug)]
 pub struct FileDescriptor {
-    pub file: Option<File>,
+    /// Shared so unlocked I/O needs no descriptor duplicated under the lock.
+    pub file: Option<Arc<File>>,
     pub offset: i64,
     pub length: i64,
     pub path: String,
@@ -210,6 +211,8 @@ pub struct DocumentTorrentStorage {
     freeze_trusted: AtomicBool,
     weak_self: Mutex<Weak<DocumentTorrentStorage>>,
     startup_drained: Condvar,
+    /// Signalled when an unlocked piece flush finishes.
+    flush_done: Condvar,
     #[cfg(test)]
     startup_save_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -226,11 +229,13 @@ pub struct StorageInner {
     pub preview_temp: bool,
 
     // Cache / write-back
-    pub cache: HashMap<usize, Vec<u8>>,
-    pub cache_dirty: HashMap<usize, bool>,
-    pub dirty_spans: HashMap<usize, Vec<ByteRange>>,
-    pub partial_slots: HashMap<usize, Vec<ByteRange>>,
-    pub saved_partial: HashMap<usize, bool>,
+    /// Shared so a piece being hashed or written is not copied under the lock.
+    /// Stream slots are never shared. A write to a shared slot copies it first.
+    pub cache: wt_types::IndexMap<usize, Arc<Vec<u8>>>,
+    pub cache_dirty: wt_types::IndexMap<usize, bool>,
+    pub dirty_spans: wt_types::IndexMap<usize, Vec<ByteRange>>,
+    pub partial_slots: wt_types::IndexMap<usize, Vec<ByteRange>>,
+    pub saved_partial: wt_types::IndexMap<usize, bool>,
     pub cache_order: PieceLRU,
     pub cache_bytes: i64,
     pub max_cache_bytes: i64,
@@ -238,7 +243,7 @@ pub struct StorageInner {
     pub stream_max_bytes: i64,
 
     // Completion & checkpoints
-    pub completed: HashMap<usize, bool>,
+    pub completed: wt_types::IndexMap<usize, bool>,
     pub identities: Vec<FileIdentity>,
     pub checkpoint_dirty: bool,
     pub checkpoint_last_err: Option<String>,
@@ -246,13 +251,13 @@ pub struct StorageInner {
     pub pending_sync_fds: HashSet<RawFd>,
 
     // Direct play
-    startup_pending: HashMap<usize, Vec<u8>>,
+    startup_pending: wt_types::IndexMap<usize, Vec<u8>>,
     startup_in_flight: Option<usize>,
     startup_pending_bytes: usize,
     startup_writing: bool,
-    pub startup_pieces: HashMap<usize, bool>,
-    pub startup_saved: HashMap<usize, bool>,
-    pub startup_on_disk: HashMap<usize, bool>,
+    pub startup_pieces: wt_types::IndexMap<usize, bool>,
+    pub startup_saved: wt_types::IndexMap<usize, bool>,
+    pub startup_on_disk: wt_types::IndexMap<usize, bool>,
     pub startup_order: Vec<usize>,
     pub startup_file: usize,
     pub startup_planned: bool,
@@ -261,15 +266,15 @@ pub struct StorageInner {
     pub preload_file: usize,
 
     pub stream_demand: HashMap<usize, bool>,
-    pub stream_lost: HashMap<usize, bool>,
-    pub stream_whole: HashMap<usize, bool>,
-    pub stream_ranges: HashMap<usize, Vec<ByteRange>>,
+    pub stream_lost: wt_types::IndexMap<usize, bool>,
+    pub stream_whole: wt_types::IndexMap<usize, bool>,
+    pub stream_ranges: wt_types::IndexMap<usize, Vec<ByteRange>>,
     pub stream_revision: u64,
     pub stream_grid_runs: Vec<PieceRun>,
     pub stream_grid_revision: u64,
     pub stream_grid_total: usize,
 
-    pub stream_watch: HashMap<usize, bool>,
+    pub stream_watch: wt_types::IndexMap<usize, bool>,
     pub stream_ready: StreamReady,
 
     pub on_stream_evict: Option<Arc<dyn Fn(usize) + Send + Sync>>,
@@ -283,6 +288,52 @@ pub struct StorageInner {
     pub file_sync_hook: Option<FileSyncHook>,
     /// Test/seam: override checkpoint file write during drain.
     pub write_checkpoint_hook: Option<WriteCheckpointHook>,
+
+    /// Bumped whenever file handles are replaced or released. Unlocked I/O
+    /// that started on older handles retries against the new handles.
+    pub files_gen: u64,
+    /// Pieces whose dirty bytes are being written without the lock. They
+    /// keep their cache slot until that write is published.
+    pub flushing: wt_types::IndexSet<usize>,
+    /// Pieces chosen as cache victims. Receives wait instead of landing in
+    /// the slot, so the eviction flush can finish clean and free RAM.
+    /// Without this, every active piece stays dirty, the cache never turns
+    /// over, and new blocks write through 16 KiB at a time.
+    pub evicting: wt_types::IndexSet<usize>,
+    /// Flushing pieces written meanwhile; their snapshot may be stale.
+    pub flush_raced: wt_types::IndexSet<usize>,
+    /// Ranges written to a piece while it was being written back. Only these
+    /// stay dirty after the write-back, not everything received before it.
+    pub flush_new: wt_types::IndexMap<usize, Vec<ByteRange>>,
+    /// Go `checkpointFlushing` / `checkpointFlushScheduled`.
+    pub checkpoint_flushing: bool,
+    pub checkpoint_flush_scheduled: bool,
+    /// Go `checkpointRetry` backoff after a failed sync/checkpoint write.
+    pub checkpoint_retry: Duration,
+    pub checkpoint_failures: u32,
+    /// Bumped with each completion change, so a publish that raced one
+    /// leaves the checkpoint dirty.
+    pub checkpoint_seq: u64,
+    /// Test seam: keeps fixtures from depending on a write-back pass.
+    #[cfg(test)]
+    pub disk_flushing: bool,
+}
+
+/// Reads this large leave the storage lock before copying.
+const LARGE_READ_BYTES: usize = 1 << 20;
+
+/// How often saved data is synced and completion published. Each fsync holds
+/// up writes to the file, and written data already survives an app kill. Only
+/// power loss needs the sync; a checkpoint is written after its sync, so that
+/// just repeats the work since the last one.
+pub const CHECKPOINT_FLUSH_DELAY: Duration = Duration::from_secs(30);
+
+/// RAM a saved download keeps pieces in until they verify. It only fills as far
+/// as pieces are unfinished, since a verified piece leaves RAM once written.
+fn saved_download_cache_bytes(setting: i64, piece_length: i64) -> i64 {
+    setting
+        .max(256 << 20)
+        .max(piece_length.saturating_mul(8).min(512 << 20))
 }
 
 impl DocumentTorrentStorage {
@@ -300,31 +351,31 @@ impl DocumentTorrentStorage {
                 needs_verify: false,
                 preview_temp: false,
 
-                cache: HashMap::new(),
-                cache_dirty: HashMap::new(),
-                dirty_spans: HashMap::new(),
-                partial_slots: HashMap::new(),
-                saved_partial: HashMap::new(),
+                cache: Default::default(),
+                cache_dirty: Default::default(),
+                dirty_spans: Default::default(),
+                partial_slots: Default::default(),
+                saved_partial: Default::default(),
                 cache_order: PieceLRU::new(),
                 cache_bytes: 0,
                 max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
                 download_max_bytes: DEFAULT_MAX_CACHE_BYTES,
                 stream_max_bytes: DEFAULT_STREAM_CACHE_MAX_BYTES,
 
-                completed: HashMap::new(),
+                completed: Default::default(),
                 identities: Vec::new(),
                 checkpoint_dirty: false,
                 checkpoint_last_err: None,
                 flush_err: None,
                 pending_sync_fds: HashSet::new(),
 
-                startup_pending: HashMap::new(),
+                startup_pending: Default::default(),
                 startup_in_flight: None,
                 startup_pending_bytes: 0,
                 startup_writing: false,
-                startup_pieces: HashMap::new(),
-                startup_saved: HashMap::new(),
-                startup_on_disk: HashMap::new(),
+                startup_pieces: Default::default(),
+                startup_saved: Default::default(),
+                startup_on_disk: Default::default(),
                 startup_order: Vec::new(),
                 startup_file: 0,
                 startup_planned: false,
@@ -333,15 +384,15 @@ impl DocumentTorrentStorage {
                 preload_file: 0,
 
                 stream_demand: HashMap::new(),
-                stream_lost: HashMap::new(),
-                stream_whole: HashMap::new(),
-                stream_ranges: HashMap::new(),
+                stream_lost: Default::default(),
+                stream_whole: Default::default(),
+                stream_ranges: Default::default(),
                 stream_revision: 0,
                 stream_grid_runs: Vec::new(),
                 stream_grid_revision: 0,
                 stream_grid_total: 0,
 
-                stream_watch: HashMap::new(),
+                stream_watch: Default::default(),
                 stream_ready,
 
                 on_stream_evict: None,
@@ -349,6 +400,18 @@ impl DocumentTorrentStorage {
                 flush_retry: Duration::from_millis(0),
                 file_sync_hook: None,
                 write_checkpoint_hook: None,
+                files_gen: 0,
+                flushing: Default::default(),
+                evicting: Default::default(),
+                flush_raced: Default::default(),
+                flush_new: Default::default(),
+                checkpoint_flushing: false,
+                checkpoint_flush_scheduled: false,
+                checkpoint_retry: Duration::from_millis(0),
+                checkpoint_failures: 0,
+                checkpoint_seq: 0,
+                #[cfg(test)]
+                disk_flushing: false,
             }),
             info_hash,
             base_dir: base_dir.as_ref().to_path_buf(),
@@ -356,6 +419,7 @@ impl DocumentTorrentStorage {
             freeze_trusted: AtomicBool::new(false),
             weak_self: Mutex::new(Weak::new()),
             startup_drained: Condvar::new(),
+            flush_done: Condvar::new(),
             #[cfg(test)]
             startup_save_hook: Mutex::new(None),
         });
@@ -482,18 +546,83 @@ impl DocumentTorrentStorage {
     /// Public drain entry (Go `drainSyncAndCheckpoint`).
     /// Releases the storage lock around sync/write hooks so test seams can re-enter.
     pub fn drain_sync_and_checkpoint(&self) {
+        let _ = self.drain_sync_and_checkpoint_with(true);
+    }
+
+    /// `flush_dirty` first writes every cached dirty piece (explicit drains).
+    /// Scheduled drains, like Go's, only make completed pieces durable: the
+    /// write-back cache keeps partial pieces. Returns false when a sync or
+    /// checkpoint write failed and must be retried.
+    fn drain_sync_and_checkpoint_with(&self, flush_dirty: bool) -> bool {
         // Phase 1: snapshot under lock.
-        let (gen, need_cp, pending, sync_hook, write_hook, hash_hex, base) = {
+        let (gen, seq, checkpoint, syncs, sync_hook, write_hook, hash_hex, base) = {
             let mut inner = self.inner.lock();
             if inner.closed || !inner.attached {
-                return;
+                return true;
             }
-            let _ = self.flush_all_dirty_locked(&mut inner);
+            if flush_dirty {
+                let _ = self.flush_all_dirty_locked(&mut inner);
+            }
+            // Only completion bits present before taking pending syncs may
+            // become durable in this pass. Later completions need their own
+            // data sync, even when they share the same destination file.
+            let checkpoint = if inner.checkpoint_dirty && !inner.stream {
+                if let Some(info) = inner.info.as_ref() {
+                    let num_pieces = info.num_pieces() as usize;
+                    let mut complete = vec![false; num_pieces];
+                    for (&index, &ok) in &inner.completed {
+                        if index < num_pieces {
+                            complete[index] = ok;
+                        }
+                    }
+                    let files = match inner
+                        .files
+                        .iter()
+                        .map(FileIdentitySnapshot::new)
+                        .collect::<std::io::Result<Vec<_>>>()
+                    {
+                        Ok(files) => files,
+                        Err(e) => {
+                            inner.checkpoint_last_err = Some(e.to_string());
+                            return false;
+                        }
+                    };
+                    Some((
+                        PieceCheckpoint {
+                            info_hash: self.info_hash.0,
+                            piece_length: inner.chunk_length,
+                            num_pieces,
+                            files: Vec::new(),
+                            complete,
+                        },
+                        inner.files_gen,
+                        files,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let pending: Vec<RawFd> = inner.pending_sync_fds.drain().collect();
+            // Duplicate the descriptors so fsync runs unlocked and stays
+            // valid if storage closes or replaces a file meanwhile.
+            let syncs: Vec<(RawFd, std::io::Result<Option<File>>)> = pending
+                .into_iter()
+                .map(|fd| {
+                    let file = inner
+                        .files
+                        .iter()
+                        .filter_map(|f| f.file.as_ref())
+                        .find(|f| f.as_raw_fd() == fd);
+                    (fd, file.map(|f| f.try_clone()).transpose())
+                })
+                .collect();
             (
                 inner.checkpoint_gen,
-                inner.checkpoint_dirty && !inner.stream,
-                pending,
+                inner.checkpoint_seq,
+                checkpoint,
+                syncs,
                 inner.file_sync_hook.clone(),
                 inner.write_checkpoint_hook.clone(),
                 self.info_hash.to_hex(),
@@ -502,86 +631,63 @@ impl DocumentTorrentStorage {
         };
 
         // Phase 2: sync without holding the storage lock.
+        let sync_started = std::time::Instant::now();
         let mut sync_err: Option<String> = None;
         let mut failed_fds: Vec<RawFd> = Vec::new();
-        for fd in &pending {
+        for (fd, file) in syncs {
             let result = if let Some(hook) = &sync_hook {
-                hook(*fd)
+                hook(fd)
             } else {
-                // Re-lock briefly to sync the live File.
-                let inner = self.inner.lock();
-                let mut found = false;
-                let mut io_err = None;
-                for f in &inner.files {
-                    if let Some(file) = &f.file {
-                        if file.as_raw_fd() == *fd {
-                            found = true;
-                            if let Err(e) = file.sync_all() {
-                                io_err = Some(e);
-                            }
-                            break;
-                        }
-                    }
-                }
-                if !found {
-                    Ok(())
-                } else if let Some(e) = io_err {
-                    Err(e)
-                } else {
-                    Ok(())
+                match file {
+                    Ok(Some(file)) => file.sync_all(),
+                    // No longer open in this storage: nothing left to sync.
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e),
                 }
             };
             if let Err(e) = result {
                 sync_err = Some(e.to_string());
-                failed_fds.push(*fd);
+                failed_fds.push(fd);
             }
         }
 
+        wt_types::probe::add(wt_types::probe::SYNCS, 1);
+        wt_types::probe::add(wt_types::probe::SYNC_MS, sync_started.elapsed().as_millis() as u64);
+        if sync_started.elapsed() >= Duration::from_millis(100) {
+            wt_types::events::record("disk_sync", format!("{}ms", sync_started.elapsed().as_millis()));
+        }
         if let Some(err) = sync_err {
             let mut inner = self.inner.lock();
             for fd in failed_fds {
                 inner.pending_sync_fds.insert(fd);
             }
             inner.checkpoint_last_err = Some(err);
-            return;
+            return false;
         }
 
-        if !need_cp {
-            return;
-        }
+        let Some((mut cp, files_gen, identity_files)) = checkpoint else {
+            return true;
+        };
 
-        // Phase 3: build checkpoint under lock if generation still matches.
-        let cp_and_path: Option<(PieceCheckpoint, PathBuf, u64)> = {
+        // Phase 3: fstat may wait on MediaStore/FUSE, so sample metadata
+        // unlocked using the descriptor snapshot taken before the data sync.
+        cp.files = identity_files
+            .into_iter()
+            .map(FileIdentitySnapshot::capture)
+            .collect();
+        {
             let mut inner = self.inner.lock();
             if inner.closed || !inner.attached || inner.checkpoint_gen != gen {
-                return;
+                return true;
             }
-            self.capture_identities_locked(&mut inner);
-            let Some(info) = inner.info.as_ref() else {
-                return;
-            };
-            let num_pieces = info.num_pieces() as usize;
-            let mut complete = vec![false; num_pieces];
-            for (&p, &ok) in &inner.completed {
-                if p < num_pieces {
-                    complete[p] = ok;
-                }
+            if inner.files_gen != files_gen {
+                // Keep the dirty checkpoint for a fresh descriptor/sync pass.
+                return false;
             }
-            let cp = PieceCheckpoint {
-                info_hash: self.info_hash.0,
-                piece_length: inner.chunk_length,
-                num_pieces,
-                files: inner.identities.clone(),
-                complete,
-            };
-            let path = checkpoint_path(&base, &hash_hex);
-            let publish_gen = inner.checkpoint_gen;
-            Some((cp, path, publish_gen))
-        };
-
-        let Some((cp, path, publish_gen)) = cp_and_path else {
-            return;
-        };
+            inner.identities = cp.files.clone();
+        }
+        let publish_gen = gen;
+        let path = checkpoint_path(&base, &hash_hex);
 
         // Phase 4: persist without holding the lock (hooks may delete/bump gen).
         let write_result = if let Some(hook) = &write_hook {
@@ -592,7 +698,7 @@ impl DocumentTorrentStorage {
 
         // Phase 5: finalize.
         let mut inner = self.inner.lock();
-        if inner.checkpoint_gen != publish_gen {
+        if inner.checkpoint_gen != publish_gen || inner.files_gen != files_gen {
             let _ = delete_piece_checkpoint(&base, &hash_hex);
             inner.checkpoint_last_err = Some(
                 write_result
@@ -600,16 +706,140 @@ impl DocumentTorrentStorage {
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "checkpoint publish aborted: generation changed".into()),
             );
-            return;
+            return true;
         }
         match write_result {
             Ok(()) => {
-                inner.checkpoint_dirty = false;
+                // A completion published meanwhile is not in this snapshot.
+                if inner.checkpoint_seq == seq {
+                    inner.checkpoint_dirty = false;
+                }
                 inner.checkpoint_last_err = None;
+                true
             }
             Err(e) => {
                 inner.checkpoint_last_err = Some(e.to_string());
+                false
             }
+        }
+    }
+
+    /// One pass over all unsaved data. Returns whether more remains. Saved
+    /// downloads write a piece when it verifies (`mark_complete`), not on a timer.
+    #[cfg(test)]
+    fn run_disk_flush(&self) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.closed || !inner.attached || inner.stream {
+            inner.disk_flushing = false;
+            return false;
+        }
+        // Go flushAllDirtyLocked: every pass writes all dirty spans, so the
+        // cache stays clean and eviction never waits on disk. Holding
+        // receiving pieces back until complete filled the cache with dirty
+        // slots under load, and evictions fell back to lock-held disk I/O.
+        let dirty: Vec<usize> = inner
+            .cache_dirty
+            .iter()
+            .filter(|&(i, &d)| d && !inner.flushing.contains(i))
+            .map(|(&i, _)| i)
+            .collect();
+        let mut failed = None;
+        for index in dirty {
+            let (guard, result) = self.flush_piece_unlocked(inner, index);
+            inner = guard;
+            if inner.closed {
+                inner.disk_flushing = false;
+                return false;
+            }
+            if let Err(e) = result {
+                failed = Some(e.to_string());
+            }
+        }
+        match failed {
+            Some(err) => {
+                inner.flush_err = Some(err);
+                inner.flush_retry = (inner.flush_retry * 2)
+                    .max(Duration::from_millis(100))
+                    .min(Duration::from_secs(5));
+            }
+            None => {
+                inner.flush_err = None;
+                inner.flush_retry = Duration::ZERO;
+            }
+        }
+        let more = inner.cache_dirty.values().any(|&d| d);
+        if !more {
+            inner.disk_flushing = false;
+        }
+        more
+    }
+
+    /// Go `scheduleCheckpointFlushLocked`: persist completion bits shortly
+    /// after pieces finish, so a killed process resumes without rehashing.
+    fn schedule_checkpoint_flush_locked(&self, inner: &mut StorageInner) {
+        if inner.stream
+            || inner.closed
+            || !inner.attached
+            || inner.checkpoint_flushing
+            || inner.checkpoint_flush_scheduled
+        {
+            return;
+        }
+        if !inner.checkpoint_dirty && inner.pending_sync_fds.is_empty() {
+            return;
+        }
+        let weak = self.weak_self.lock().clone();
+        let delay = CHECKPOINT_FLUSH_DELAY + inner.checkpoint_retry;
+        inner.checkpoint_flush_scheduled = true;
+        let spawned = std::thread::Builder::new()
+            .name("wt-checkpoint".into())
+            .spawn(move || {
+                std::thread::sleep(delay);
+                if let Some(storage) = weak.upgrade() {
+                    storage.run_scheduled_checkpoint_flush();
+                }
+            });
+        if spawned.is_err() {
+            inner.checkpoint_flush_scheduled = false;
+        }
+    }
+
+    fn run_scheduled_checkpoint_flush(&self) {
+        {
+            let mut inner = self.inner.lock();
+            inner.checkpoint_flush_scheduled = false;
+            if inner.closed || !inner.attached || inner.stream || inner.checkpoint_flushing {
+                return;
+            }
+            if !inner.checkpoint_dirty && inner.pending_sync_fds.is_empty() {
+                return;
+            }
+            inner.checkpoint_flushing = true;
+        }
+        let ok = self.drain_sync_and_checkpoint_with(false);
+        let mut inner = self.inner.lock();
+        inner.checkpoint_flushing = false;
+        self.startup_drained.notify_all();
+        if inner.closed {
+            return;
+        }
+        if ok {
+            inner.checkpoint_failures = 0;
+            inner.checkpoint_retry = Duration::ZERO;
+        } else {
+            inner.checkpoint_failures += 1;
+            let shift = (inner.checkpoint_failures - 1).min(5);
+            inner.checkpoint_retry =
+                (Duration::from_millis(100) * (1u32 << shift)).min(Duration::from_secs(30));
+        }
+        self.schedule_checkpoint_flush_locked(&mut inner);
+    }
+
+    /// Block until no scheduled checkpoint publish is in flight (Go waits on
+    /// `checkpointFlushing` before Close/MarkVerified rewrite the file).
+    fn wait_checkpoint_idle_locked(&self, inner: &mut parking_lot::MutexGuard<'_, StorageInner>) {
+        while inner.checkpoint_flushing || inner.startup_writing {
+            self.startup_drained.wait(inner);
         }
     }
 
@@ -621,7 +851,8 @@ impl DocumentTorrentStorage {
                 "file index {index} out of range"
             )));
         }
-        inner.files[index].file = Some(file);
+        inner.files[index].file = Some(Arc::new(file));
+        inner.files_gen += 1;
         Ok(())
     }
 
@@ -753,9 +984,27 @@ impl DocumentTorrentStorage {
 
     pub fn mark_verified(&self) {
         let mut inner = self.inner.lock();
+        self.wait_checkpoint_idle_locked(&mut inner);
         inner.needs_verify = false;
         inner.checkpoint_dirty = true;
-        self.drain_sync_and_checkpoint_locked(&mut inner);
+        inner.checkpoint_seq += 1;
+        drop(self.drain_now(inner));
+    }
+
+    /// Go Close/MarkVerified: drain immediately with `checkpoint_flushing`
+    /// held so no scheduled drain interleaves, but fsync and write unlocked.
+    /// Callers have waited for [`Self::wait_checkpoint_idle_locked`].
+    fn drain_now<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+    ) -> parking_lot::MutexGuard<'a, StorageInner> {
+        inner.checkpoint_flushing = true;
+        drop(inner);
+        let _ = self.drain_sync_and_checkpoint_with(false);
+        let mut inner = self.inner.lock();
+        inner.checkpoint_flushing = false;
+        self.startup_drained.notify_all();
+        inner
     }
 
     pub fn set_cache_limit(&self, bytes: i64) {
@@ -768,7 +1017,28 @@ impl DocumentTorrentStorage {
                 let min_req = DIRECT_PLAY_MIN_PIECES * inner.chunk_length;
                 inner.max_cache_bytes = inner.max_cache_bytes.max(min_req);
             }
+            if !inner.closed && inner.attached && !inner.stream {
+                inner.max_cache_bytes = saved_download_cache_bytes(bytes, inner.chunk_length);
+            }
         }
+    }
+
+    /// One line for the per-second transfer log.
+    pub fn probe_line(&self) -> String {
+        let inner = self.inner.lock();
+        format!(
+            "stream={} ram={}M/{}M slots={} dirty={} partial_slots={} flushing={} evicting={} sync_pending={} write_err={:?}",
+            inner.stream,
+            inner.cache_bytes >> 20,
+            inner.max_cache_bytes >> 20,
+            inner.cache.len(),
+            inner.cache_dirty.values().filter(|&&d| d).count(),
+            inner.partial_slots.len(),
+            inner.flushing.len(),
+            inner.evicting.len(),
+            inner.pending_sync_fds.len(),
+            inner.flush_err,
+        )
     }
 
     pub fn set_memory_limit(&self, bytes: i64) {
@@ -799,6 +1069,7 @@ impl DocumentTorrentStorage {
             offset += f.length;
         }
         inner.files = files;
+        inner.files_gen += 1;
         inner.info = Some(info.clone());
     }
 
@@ -969,15 +1240,17 @@ impl DocumentTorrentStorage {
         }
 
         for (i, f) in opened.into_iter().enumerate() {
-            inner.files[i].file = f;
+            inner.files[i].file = f.map(Arc::new);
             inner.files[i].external = descriptors[i].is_some();
         }
+        inner.files_gen += 1;
         inner.stream = false;
         inner.attached = true;
+        inner.max_cache_bytes = saved_download_cache_bytes(inner.download_max_bytes, inner.chunk_length);
 
         // Flush prepared cache data to disk
         let prepared_spans = inner.dirty_spans.clone();
-        let cache_items: Vec<(usize, Vec<u8>)> =
+        let cache_items: Vec<(usize, Arc<Vec<u8>>)> =
             inner.cache.iter().map(|(&k, v)| (k, v.clone())).collect();
         for (index, data) in cache_items {
             let spans = prepared_spans.get(&index).cloned().unwrap_or_else(|| {
@@ -994,6 +1267,7 @@ impl DocumentTorrentStorage {
         }
         inner.cache_dirty.clear();
         inner.dirty_spans.clear();
+        inner.flush_new.clear();
 
         // Check if cache exceeded maxCacheBytes
         if inner.cache_bytes > inner.max_cache_bytes {
@@ -1107,6 +1381,7 @@ impl DocumentTorrentStorage {
         inner.cache_dirty.clear();
         inner.cache_bytes = 0;
         inner.dirty_spans.clear();
+        inner.flush_new.clear();
         inner.partial_slots.clear();
         inner.saved_partial.clear();
         inner.cache_order.reset();
@@ -1121,6 +1396,7 @@ impl DocumentTorrentStorage {
         selected: &[usize],
     ) -> StorageResult<()> {
         let mut inner = self.inner.lock();
+        self.wait_checkpoint_idle_locked(&mut inner);
         if inner.closed || !inner.attached || inner.info.is_none() {
             return Err(StorageError::Other(
                 "storage not in valid state for selection".into(),
@@ -1137,32 +1413,24 @@ impl DocumentTorrentStorage {
             }
         }
 
-        let old_files: Vec<FileDescriptor> = std::mem::take(&mut inner.files);
-        let mut next_files = Vec::with_capacity(old_files.len());
-        let mut opened_replacements: Vec<(usize, File)> = Vec::new();
-
-        for i in 0..old_files.len() {
-            let is_sel = chosen.contains(&i);
-            let cur_external = old_files[i].external;
-
-            if !is_sel || (cur_external || inner.stream) && descriptors[i].is_none() {
-                next_files.push(FileDescriptor {
-                    file: None,
-                    offset: old_files[i].offset,
-                    length: old_files[i].length,
-                    path: old_files[i].path.clone(),
-                    external: old_files[i].external,
-                });
+        // Go UpdateSelection. Handles are replaced only after every step
+        // succeeds; on error the opened duplicates are dropped (closed).
+        let mut opened: Vec<(usize, File)> = Vec::new();
+        for (i, descriptor) in descriptors.iter().enumerate() {
+            let old = &inner.files[i];
+            // A selected boundary file needs an Android destination (download
+            // mode). Stream mode keeps engine-owned handles; a selected external
+            // file may omit its descriptor to keep the existing handle.
+            if !chosen.contains(&i) || (old.external || inner.stream) && descriptor.is_none() {
                 continue;
             }
-
             if inner.stream {
                 return Err(StorageError::Other(format!(
                     "stream storage rejects external descriptor for file {}",
                     i
                 )));
             }
-            let fd = match descriptors[i] {
+            let fd = match *descriptor {
                 Some(f) if f >= 0 => f,
                 _ => {
                     return Err(StorageError::Other(format!(
@@ -1171,53 +1439,69 @@ impl DocumentTorrentStorage {
                     )))
                 }
             };
-
             let dup_fd = unsafe { libc::dup(fd) };
             if dup_fd < 0 {
                 return Err(StorageError::Io(std::io::Error::last_os_error()));
             }
             let file = unsafe { File::from_raw_fd(dup_fd) };
-            file.set_len(0)?;
-            file.set_len(old_files[i].length as u64)?;
-
-            opened_replacements.push((i, file));
-            next_files.push(FileDescriptor {
-                file: None,
-                offset: old_files[i].offset,
-                length: old_files[i].length,
-                path: old_files[i].path.clone(),
-                external: true,
-            });
-        }
-
-        for (i, f) in old_files.into_iter().enumerate() {
-            if next_files[i].file.is_none() {
-                next_files[i].file = f.file;
+            // Android may resend descriptors for every selected file. The
+            // already owned destination must keep its bytes: truncating it
+            // would zero pieces that stay marked complete.
+            if same_file(old.file.as_deref(), &file) {
+                continue;
             }
+            // A new destination is rebuilt from verified pieces below rather
+            // than trusting arbitrary stale bytes.
+            file.set_len(0)?;
+            file.set_len(old.length as u64)?;
+            opened.push((i, file));
         }
-        for (i, f) in opened_replacements {
+
+        // Copy only pieces known complete; partial data is fetched and
+        // hash-checked again after reselection.
+        for (i, file) in &opened {
+            let (offset, length) = (inner.files[*i].offset, inner.files[*i].length);
             for (&p, &is_comp) in &inner.completed {
                 if !is_comp {
                     continue;
                 }
                 let piece_len = inner.info.as_ref().unwrap().piece(p as u32).length;
                 let piece_start = (p as i64) * inner.chunk_length;
-                let from = piece_start.max(next_files[i].offset);
-                let to = (piece_start + piece_len).min(next_files[i].offset + next_files[i].length);
-                if from < to {
-                    let mut data = vec![0u8; (to - from) as usize];
-                    Self::read_from_files_locked(&next_files, from, &mut data)?;
-                    f.write_all_at(&data, (from - next_files[i].offset) as u64)?;
+                let from = piece_start.max(offset);
+                let to = (piece_start + piece_len).min(offset + length);
+                if from >= to {
+                    continue;
                 }
+                let mut data = vec![0u8; (to - from) as usize];
+                Self::read_from_files_locked(&inner.files, from, &mut data)?;
+                file.write_all_at(&data, (from - offset) as u64)?;
             }
-            next_files[i].file = Some(f);
         }
 
-        inner.files = next_files;
+        let replaced: Vec<usize> = opened.iter().map(|(i, _)| *i).collect();
+        for (i, file) in opened {
+            inner.files[i].file = Some(Arc::new(file));
+            inner.files[i].external = true;
+        }
+        if !replaced.is_empty() {
+            inner.files_gen += 1;
+        }
+        // Go clearCompletedOverlappingLocked: a stale checkpoint must not let
+        // pieces touching a replaced file skip hashing later.
+        for i in replaced {
+            let (offset, length) = (inner.files[i].offset, inner.files[i].length);
+            let chunk = inner.chunk_length;
+            let info = inner.info.clone();
+            inner.completed.retain(|&p, _| {
+                let start = p as i64 * chunk;
+                let end = start + info.as_ref().map_or(0, |info| info.piece(p as u32).length);
+                end <= offset || start >= offset + length
+            });
+        }
         self.capture_identities_locked(&mut inner);
         inner.checkpoint_dirty = true;
-        self.drain_sync_and_checkpoint_locked(&mut inner);
-
+        inner.checkpoint_seq += 1;
+        self.schedule_checkpoint_flush_locked(&mut inner);
         Ok(())
     }
 
@@ -1623,7 +1907,8 @@ impl DocumentTorrentStorage {
         }
 
         let chunk_len = inner.chunk_length;
-        match self.read_piece_data_locked(&mut inner, index, abs % chunk_len, buf) {
+        let piece = inner.info.as_ref().unwrap().piece(index as u32);
+        match self.read_piece_data_unlocked(inner, piece, buf, abs % chunk_len) {
             Ok(n) => (n, None, Ok(())),
             Err(e) => (0, None, Err(e)),
         }
@@ -1636,14 +1921,7 @@ impl DocumentTorrentStorage {
         index: usize,
         off: i64,
     ) -> Option<usize> {
-        if inner.stream_lost.get(&index).copied().unwrap_or(false)
-            || inner.startup_pieces.get(&index).copied().unwrap_or(false)
-            || inner
-                .preload_pieces
-                .as_ref()
-                .map(|p| p.contains_key(&index))
-                .unwrap_or(false)
-        {
+        if inner.stream_lost.get(&index).copied().unwrap_or(false) {
             return None;
         }
         let data = inner.cache.get(&index)?;
@@ -1712,7 +1990,7 @@ impl DocumentTorrentStorage {
             };
             pending_refresh.extend(refresh);
             if let Some(cache_slot) = inner.cache.get_mut(&index) {
-                cache_slot.copy_from_slice(buf);
+                Arc::make_mut(cache_slot).copy_from_slice(buf);
             }
             inner.cache_dirty.insert(index, false);
             inner.partial_slots.remove(&index);
@@ -1735,11 +2013,12 @@ impl DocumentTorrentStorage {
         }
         let callback = inner.on_stream_evict.clone();
         drop(inner);
-        if let Some(cb) = callback {
-            for v in pending_refresh {
-                let cb = Arc::clone(&cb);
-                std::thread::spawn(move || cb(v));
-            }
+        if let Some(cb) = callback.filter(|_| !pending_refresh.is_empty()) {
+            std::thread::spawn(move || {
+                for v in pending_refresh {
+                    cb(v);
+                }
+            });
         }
         installed
     }
@@ -1852,6 +2131,7 @@ impl DocumentTorrentStorage {
         inner.cache_dirty.clear();
         inner.cache_bytes = 0;
         inner.dirty_spans.clear();
+        inner.flush_new.clear();
         inner.partial_slots.clear();
         inner.saved_partial.clear();
         inner.cache_order.reset();
@@ -1868,7 +2148,7 @@ impl DocumentTorrentStorage {
     }
 
     pub fn read_verified_preview(&self, buf: &mut [u8], abs: i64) -> (usize, bool) {
-        let mut inner = self.inner.lock();
+        let inner = self.inner.lock();
         if inner.closed || !inner.attached || inner.chunk_length <= 0 || buf.is_empty() {
             return (0, false);
         }
@@ -1877,7 +2157,8 @@ impl DocumentTorrentStorage {
             return (0, false);
         }
         let chunk_len = inner.chunk_length;
-        match self.read_piece_data_locked(&mut inner, index, abs % chunk_len, buf) {
+        let piece = inner.info.as_ref().unwrap().piece(index as u32);
+        match self.read_piece_data_unlocked(inner, piece, buf, abs % chunk_len) {
             Ok(n) => (n, true),
             Err(_) => (0, false),
         }
@@ -1890,28 +2171,42 @@ impl DocumentTorrentStorage {
         inner: &mut StorageInner,
         index: usize,
         expected: i64,
-    ) -> StorageResult<bool> {
+    ) -> StorageResult<CacheSlot> {
         if let Some(existing) = inner.cache.get(&index) {
             if existing.len() as i64 == expected {
                 inner.cache_order.touch(index as i32);
-                return Ok(false);
+                return Ok(CacheSlot::Ready(false));
             }
             self.drop_cache_locked(inner, index);
         }
 
         while inner.cache_bytes + expected > inner.max_cache_bytes {
             let mut victim = None;
-            inner.cache_order.each(|p| {
-                let p_idx = p as usize;
-                if p_idx == index {
-                    return true;
+            // Verified pieces first: an unverified one evicted here is read
+            // straight back from disk to be hashed or to finish receiving.
+            for verified_only in [true, false] {
+                if victim.is_some() {
+                    break;
                 }
-                if inner.cache_dirty.get(&p_idx).copied().unwrap_or(false) {
-                    return true;
-                }
-                victim = Some(p_idx);
-                false
-            });
+                inner.cache_order.each(|p| {
+                    let p_idx = p as usize;
+                    // A flushing slot holds bytes not yet published to disk.
+                    if p_idx == index || inner.flushing.contains(&p_idx) {
+                        return true;
+                    }
+                    if inner.cache_dirty.get(&p_idx).copied().unwrap_or(false) {
+                        return true;
+                    }
+                    if verified_only && !inner.completed.get(&p_idx).copied().unwrap_or(false) {
+                        return true;
+                    }
+                    if !verified_only {
+                        wt_types::probe::add(wt_types::probe::EVICT_UNVERIFIED, 1);
+                    }
+                    victim = Some(p_idx);
+                    false
+                });
+            }
 
             if let Some(v) = victim {
                 self.drop_cache_locked(inner, v);
@@ -1919,25 +2214,25 @@ impl DocumentTorrentStorage {
                 let mut dirty_victim = None;
                 inner.cache_order.each(|p| {
                     let p_idx = p as usize;
-                    if p_idx != index {
+                    if p_idx != index && !inner.flushing.contains(&p_idx) {
                         dirty_victim = Some(p_idx);
                         return false;
                     }
                     true
                 });
                 if let Some(dv) = dirty_victim {
-                    self.flush_piece_locked(inner, dv)?;
-                    self.drop_cache_locked(inner, dv);
+                    // The caller writes it back unlocked, then retries.
+                    return Ok(CacheSlot::FlushFirst(dv));
                 } else {
                     return Err(StorageError::Other("cache full of unflushable data".into()));
                 }
             }
         }
 
-        inner.cache.insert(index, vec![0u8; expected as usize]);
+        inner.cache.insert(index, Arc::new(vec![0u8; expected as usize]));
         inner.cache_bytes += expected;
         inner.cache_order.touch(index as i32);
-        Ok(true)
+        Ok(CacheSlot::Ready(true))
     }
 
     /// Ensures a stream RAM slot. Returns `(created, pieces_to_refresh)` —
@@ -2012,7 +2307,7 @@ impl DocumentTorrentStorage {
             }
         }
 
-        inner.cache.insert(index, vec![0u8; expected as usize]);
+        inner.cache.insert(index, Arc::new(vec![0u8; expected as usize]));
         inner.cache_bytes += expected;
         inner.stream_revision += 1;
         inner.cache_order.touch(index as i32);
@@ -2023,6 +2318,10 @@ impl DocumentTorrentStorage {
         if let Some(data) = inner.cache.remove(&index) {
             inner.cache_bytes -= data.len() as i64;
             inner.cache_dirty.remove(&index);
+            // Spans describe this buffer. Stale ones would make a later slot
+            // flush zeros for ranges it never received.
+            inner.dirty_spans.remove(&index);
+            inner.flush_new.remove(&index);
             inner.cache_order.remove(index as i32);
         }
     }
@@ -2035,6 +2334,11 @@ impl DocumentTorrentStorage {
             Some(d) => d,
             None => return Ok(()),
         };
+        if !inner.dirty_spans.contains_key(&index) && inner.partial_slots.contains_key(&index) {
+            // Go: unwritten bytes of a partial slot are zeros, not the piece.
+            inner.cache_dirty.insert(index, false);
+            return Ok(());
+        }
         let spans = inner.dirty_spans.remove(&index).unwrap_or_else(|| {
             vec![ByteRange {
                 start: 0,
@@ -2042,19 +2346,296 @@ impl DocumentTorrentStorage {
             }]
         });
 
-        for span in spans {
+        for (i, span) in spans.iter().enumerate() {
             let start = (index as i64) * inner.chunk_length + span.start;
             let chunk = &data[span.start as usize..span.end as usize];
             if let Err(e) = Self::write_to_files_locked(&mut inner.files, start, chunk) {
+                // Keep this and later spans dirty. Earlier spans are on disk;
+                // a retry must neither lose these nor rewrite the whole piece.
+                inner.dirty_spans.insert(index, spans[i..].to_vec());
                 inner.flush_err = Some(e.to_string());
                 return Err(e);
             }
         }
 
         inner.cache_dirty.insert(index, false);
+        self.mark_saved_partial_locked(inner, index);
         inner.flush_err = None;
-        self.note_piece_files_need_sync_locked(inner, index);
         Ok(())
+    }
+
+    fn mark_saved_partial_locked(&self, inner: &mut StorageInner, index: usize) {
+        if !inner.completed.get(&index).copied().unwrap_or(false) {
+            inner.saved_partial.insert(index, true);
+        }
+    }
+
+    /// Plan an unlocked write of `index`'s dirty spans, mirroring
+    /// [`Self::write_to_files_locked`] bounds checks. `None` when clean.
+    fn plan_piece_flush_locked(
+        &self,
+        inner: &StorageInner,
+        index: usize,
+    ) -> StorageResult<Option<PieceFlush>> {
+        if !inner.cache_dirty.get(&index).copied().unwrap_or(false) {
+            return Ok(None);
+        }
+        let Some(data) = inner.cache.get(&index) else {
+            return Ok(None);
+        };
+        if !inner.dirty_spans.contains_key(&index) && inner.partial_slots.contains_key(&index) {
+            // Go: unwritten bytes of a partial slot are zeros, not the piece.
+            return Ok(Some(PieceFlush {
+                writes: Vec::new(),
+                files_gen: inner.files_gen,
+            }));
+        }
+        let whole = [ByteRange {
+            start: 0,
+            end: data.len() as i64,
+        }];
+        let spans = inner.dirty_spans.get(&index).map_or(&whole[..], |s| &s[..]);
+        let mut writes = Vec::new();
+        for span in spans {
+            let start = (index as i64) * inner.chunk_length + span.start;
+            let n = (span.end - span.start) as usize;
+            for (file, at, lo, hi) in plan_file_reads(&inner.files, start, n)? {
+                let base = span.start as usize;
+                writes.push((file, at, Arc::clone(data), base + lo, base + hi));
+            }
+        }
+        Ok(Some(PieceFlush {
+            writes,
+            files_gen: inner.files_gen,
+        }))
+    }
+
+    /// Write `index`'s dirty spans without holding the lock. The slot cannot
+    /// be evicted meanwhile. `Ok(true)`: the cache bytes are on disk and the
+    /// slot is clean. `Ok(false)`: a write arrived or files were replaced
+    /// meanwhile; its spans stay dirty for another flush. Errors keep the
+    /// spans dirty.
+    fn flush_piece_unlocked<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+        index: usize,
+    ) -> (
+        parking_lot::MutexGuard<'a, StorageInner>,
+        StorageResult<bool>,
+    ) {
+        // One unlocked writer per piece; the other re-plans afterwards.
+        while inner.flushing.contains(&index) {
+            self.flush_done.wait(&mut inner);
+        }
+        if inner.closed {
+            return (inner, Err(StorageError::Closed));
+        }
+        let plan = match self.plan_piece_flush_locked(&inner, index) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return (inner, Ok(true)),
+            Err(e) => {
+                inner.flush_err = Some(e.to_string());
+                return (inner, Err(e));
+            }
+        };
+        inner.flushing.insert(index);
+        inner.flush_raced.remove(&index);
+        inner.flush_new.remove(&index);
+        drop(inner);
+        let written = plan.write();
+        let mut inner = self.inner.lock();
+        inner.flushing.remove(&index);
+        self.flush_done.notify_all();
+        let raced = inner.flush_raced.remove(&index);
+        let arrived = inner.flush_new.remove(&index);
+        if inner.closed {
+            return (inner, Err(StorageError::Closed));
+        }
+        if let Err(e) = written {
+            inner.flush_err = Some(e.to_string());
+            return (inner, Err(e));
+        }
+        if inner.files_gen != plan.files_gen {
+            // Files were replaced: every span stays dirty for the new files.
+            // Escalating to the whole slot would write a partial slot's
+            // zeros over data saved before an eviction.
+            return (inner, Ok(false));
+        }
+        if !plan.writes.is_empty() {
+            self.mark_saved_partial_locked(&mut inner, index);
+        }
+        if raced {
+            // Blocks are never rewritten (core rejects duplicates) and
+            // flushes of one piece are serialized, so the written bytes are
+            // current: only blocks that arrived during the write are still
+            // unsaved. Keeping every span dirty made each later flush
+            // rewrite all the piece had received so far, again and again
+            // while it downloaded.
+            if let Some(arrived) =
+                arrived.filter(|a| !a.is_empty() && inner.cache.contains_key(&index))
+            {
+                inner.dirty_spans.insert(index, arrived);
+                inner.cache_dirty.insert(index, true);
+                inner.flush_err = None;
+                return (inner, Ok(false));
+            }
+        }
+        inner.cache_dirty.insert(index, false);
+        inner.dirty_spans.remove(&index);
+        inner.flush_err = None;
+        (inner, Ok(true))
+    }
+
+    /// Completion must drain racing writes too. Each retry replans under the
+    /// mutex and performs the actual I/O after releasing it.
+    fn flush_piece_until_clean<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+        index: usize,
+    ) -> (parking_lot::MutexGuard<'a, StorageInner>, StorageResult<()>) {
+        loop {
+            let (guard, result) = self.flush_piece_unlocked(inner, index);
+            inner = guard;
+            match result {
+                Ok(true) => return (inner, Ok(())),
+                Ok(false) => continue,
+                Err(e) => return (inner, Err(e)),
+            }
+        }
+    }
+
+    /// Bounded-cache fallback. Reserve the uncached piece while writing so
+    /// another receiver cannot create a stale slot or publish an older write
+    /// over this one. Duplicated handles keep the unlocked write valid.
+    fn write_through_unlocked<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+        index: usize,
+        off: i64,
+        data: &[u8],
+    ) -> (
+        parking_lot::MutexGuard<'a, StorageInner>,
+        StorageResult<usize>,
+    ) {
+        wt_types::probe::add(wt_types::probe::WRITE_THROUGH, 1);
+        inner.flushing.insert(index);
+        let result = loop {
+            if inner.closed {
+                break Err(StorageError::Closed);
+            }
+            if !inner.attached || inner.stream {
+                break Err(StorageError::Unavailable);
+            }
+            let start = index as i64 * inner.chunk_length + off;
+            let writes = match plan_file_reads(&inner.files, start, data.len()) {
+                Ok(writes) => writes
+                    .into_iter()
+                    .map(|(file, at, lo, hi)| (file, at, Arc::new(data[lo..hi].to_vec()), 0, hi - lo))
+                    .collect(),
+                Err(e) => break Err(e),
+            };
+            let plan = PieceFlush {
+                writes,
+                files_gen: inner.files_gen,
+            };
+            drop(inner);
+            let written = plan.write();
+            inner = self.inner.lock();
+            if inner.closed {
+                break Err(StorageError::Closed);
+            }
+            if inner.files_gen != plan.files_gen {
+                continue;
+            }
+            match written {
+                Ok(()) => {
+                    self.mark_saved_partial_locked(&mut inner, index);
+                    break Ok(data.len());
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        inner.flushing.remove(&index);
+        self.flush_done.notify_all();
+        (inner, result)
+    }
+
+    /// Fill a partial cache slot with the flush and disk read done unlocked.
+    /// Bytes written meanwhile (tracked in `partial_slots`) win over
+    /// the disk copy.
+    fn fill_partial_slot_unlocked<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+        index: usize,
+        off: i64,
+        n: i64,
+    ) -> (parking_lot::MutexGuard<'a, StorageInner>, StorageResult<()>) {
+        match inner.partial_slots.get(&index) {
+            Some(spans) if !ranges_cover(spans, off, off + n) => {}
+            _ => return (inner, Ok(())),
+        }
+        let (guard, flushed) = self.flush_piece_unlocked(inner, index);
+        inner = guard;
+        // Racing received bytes are overlaid below; they need not be forced
+        // to disk just to fill the slot's missing ranges.
+        let flushed = flushed.map(|_| ());
+        if let Err(e) = flushed {
+            return (inner, Err(e));
+        }
+        let Some(len) = inner.cache.get(&index).map(|slot| slot.len()) else {
+            return (inner, Ok(()));
+        };
+        if !inner.partial_slots.contains_key(&index) {
+            return (inner, Ok(()));
+        }
+        let start = (index as i64) * inner.chunk_length;
+        let reads = match plan_file_reads(&inner.files, start, len) {
+            Ok(r) => r,
+            Err(e) => return (inner, Err(e)),
+        };
+        let files_gen = inner.files_gen;
+        drop(inner);
+        let mut disk = vec![0u8; len];
+        let mut read: StorageResult<()> = Ok(());
+        for (file, at, lo, hi) in reads {
+            #[cfg(test)]
+            writeback_tests::before_io(false);
+            if let Err(e) = file.read_exact_at(&mut disk[lo..hi], at) {
+                read = Err(e.into());
+                break;
+            }
+        }
+        let mut inner = self.inner.lock();
+        if inner.closed {
+            return (inner, Err(StorageError::Closed));
+        }
+        if inner.files_gen != files_gen {
+            // Keep the partial slot so a retry fills from the new files.
+            return (inner, Err(StorageError::Unavailable));
+        }
+        if let Err(e) = read {
+            return (inner, Err(e));
+        }
+        // The slot may have been dropped or replaced while unlocked.
+        let Some(kept) = inner.partial_slots.get(&index).cloned() else {
+            return (inner, Ok(()));
+        };
+        if let Some(buf) = inner.cache.get_mut(&index).filter(|b| b.len() == len) {
+            let buf = Arc::make_mut(buf);
+            let mut at = 0usize;
+            for span in kept
+                .iter()
+                .map(|r| (r.start as usize, r.end as usize))
+                .chain(std::iter::once((len, len)))
+            {
+                if span.0 > at {
+                    buf[at..span.0].copy_from_slice(&disk[at..span.0]);
+                }
+                at = at.max(span.1);
+            }
+            inner.partial_slots.remove(&index);
+        }
+        (inner, Ok(()))
     }
 
     pub fn flush_all_dirty_locked(&self, inner: &mut StorageInner) -> StorageResult<()> {
@@ -2078,100 +2659,9 @@ impl DocumentTorrentStorage {
                 .as_ref()
                 .map(|i| i.piece(index as u32).length)
                 .unwrap_or(0);
-        for f in &inner.files {
-            if f.offset + f.length <= start || f.offset >= end {
-                continue;
-            }
+        for f in files_overlapping(&inner.files, start, end) {
             if let Some(file) = &f.file {
                 inner.pending_sync_fds.insert(file.as_raw_fd());
-            }
-        }
-    }
-
-    /// Locked convenience wrapper used by mark_verified / close.
-    /// Prefer [`Self::drain_sync_and_checkpoint`] when test hooks may re-enter.
-    fn drain_sync_and_checkpoint_locked(&self, _inner: &mut StorageInner) {
-        // Drop the caller's guard by unlocking via parking_lot: we re-enter the
-        // public drain which acquires its own guards. Caller must not use
-        // `_inner` after this returns.
-        //
-        // Safety of unlock: parking_lot::MutexGuard is released by drop. We
-        // cannot drop a &mut reference, so call sites that need hook-safe drain
-        // should call `drain_sync_and_checkpoint` directly. For production
-        // paths without hooks, inline a simple sync+write here.
-        //
-        // Keep a simple in-lock path for production (no hooks).
-        self.drain_sync_and_checkpoint_locked_simple(_inner);
-    }
-
-    fn drain_sync_and_checkpoint_locked_simple(&self, inner: &mut StorageInner) {
-        if inner.closed || !inner.attached {
-            return;
-        }
-        let _ = self.flush_all_dirty_locked(inner);
-        // When hooks are installed, bounce to the unlock-safe public path.
-        if inner.file_sync_hook.is_some() || inner.write_checkpoint_hook.is_some() {
-            // Can't safely unlock from &mut guard; production callers won't set hooks.
-            // Tests must call `drain_sync_and_checkpoint()` instead.
-        }
-        for f in &inner.files {
-            if let Some(file) = &f.file {
-                if let Some(fd) = inner
-                    .pending_sync_fds
-                    .iter()
-                    .find(|&&x| x == file.as_raw_fd())
-                {
-                    let _ = fd;
-                    let _ = file.sync_all();
-                }
-            }
-        }
-        // Sync any pending fds' files.
-        let pending: Vec<RawFd> = inner.pending_sync_fds.drain().collect();
-        for fd in pending {
-            for f in &inner.files {
-                if let Some(file) = &f.file {
-                    if file.as_raw_fd() == fd {
-                        let _ = file.sync_all();
-                    }
-                }
-            }
-        }
-
-        if !(inner.checkpoint_dirty && !inner.stream) {
-            return;
-        }
-        let gen = inner.checkpoint_gen;
-        self.capture_identities_locked(inner);
-        let Some(info) = inner.info.as_ref() else {
-            return;
-        };
-        let num_pieces = info.num_pieces() as usize;
-        let mut complete = vec![false; num_pieces];
-        for (&p, &ok) in &inner.completed {
-            if p < num_pieces {
-                complete[p] = ok;
-            }
-        }
-        let cp = PieceCheckpoint {
-            info_hash: self.info_hash.0,
-            piece_length: inner.chunk_length,
-            num_pieces,
-            files: inner.identities.clone(),
-            complete,
-        };
-        let path = checkpoint_path(&self.base_dir, &self.info_hash.to_hex());
-        match write_piece_checkpoint(&path, &cp) {
-            Ok(()) => {
-                if inner.checkpoint_gen == gen {
-                    inner.checkpoint_dirty = false;
-                    inner.checkpoint_last_err = None;
-                } else {
-                    let _ = delete_piece_checkpoint(&self.base_dir, &self.info_hash.to_hex());
-                }
-            }
-            Err(e) => {
-                inner.checkpoint_last_err = Some(e.to_string());
             }
         }
     }
@@ -2180,6 +2670,8 @@ impl DocumentTorrentStorage {
         let mut ids = Vec::with_capacity(inner.files.len());
         for f in &inner.files {
             if let Some(file) = &f.file {
+                #[cfg(test)]
+                writeback_tests::before_io(false);
                 let (id, _) = identity_from_file(file, f.external, f.length, f.path.clone());
                 ids.push(id);
             } else {
@@ -2244,11 +2736,7 @@ impl DocumentTorrentStorage {
                 .as_ref()
                 .map(|i| i.piece(piece_idx as u32).length)
                 .unwrap_or(0);
-        for i in 0..inner.files.len() {
-            let f = &inner.files[i];
-            if f.offset + f.length <= start || f.offset >= end {
-                continue;
-            }
+        for i in overlapping_file_range(&inner.files, start, end) {
             if !file_stable(&saved[i], &current[i]) {
                 return false;
             }
@@ -2256,68 +2744,87 @@ impl DocumentTorrentStorage {
         true
     }
 
-    fn fill_partial_slot_locked(
-        &self,
-        inner: &mut StorageInner,
-        index: usize,
-        off: i64,
-        n: i64,
-    ) -> StorageResult<()> {
-        let spans = match inner.partial_slots.get(&index) {
-            Some(s) => s.clone(),
-            None => return Ok(()),
-        };
-        if ranges_cover(&spans, off, off + n) {
-            return Ok(());
-        }
-
-        self.flush_piece_locked(inner, index)?;
-
-        let start = (index as i64) * inner.chunk_length;
-        if let Some(buf) = inner.cache.get_mut(&index) {
-            Self::read_from_files_locked(&inner.files, start, buf)?;
-        }
-        inner.partial_slots.remove(&index);
-        Ok(())
-    }
-
-    fn read_piece_data_locked(
-        &self,
-        inner: &mut StorageInner,
-        index: usize,
-        off: i64,
+    /// Cache, preview and playback reads share the same unlocked I/O path.
+    /// Descriptor snapshots keep positional reads valid through close/replacement.
+    fn read_piece_data_unlocked<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+        piece: Piece,
         buf: &mut [u8],
+        off: i64,
     ) -> StorageResult<usize> {
-        let piece_len = inner.info.as_ref().unwrap().piece(index as u32).length;
-        if off < 0 || off >= piece_len {
+        if inner.closed {
+            return Err(StorageError::Closed);
+        }
+        if off < 0 || off >= piece.length {
             return Ok(0);
+        }
+        let index = piece.index as usize;
+        if inner.stream_lost.get(&index).copied().unwrap_or(false) {
+            return Err(StorageError::Unavailable);
         }
 
         if inner.cache.contains_key(&index) {
-            self.fill_partial_slot_locked(inner, index, off, buf.len() as i64)?;
+            let (guard, filled) =
+                self.fill_partial_slot_unlocked(inner, index, off, buf.len() as i64);
+            inner = guard;
+            filled?;
             inner.cache_order.touch(index as i32);
             if let Some(data) = inner.cache.get(&index) {
-                let n = (piece_len - off).min(buf.len() as i64) as usize;
+                if off >= data.len() as i64 {
+                    return Ok(0);
+                }
+                let n = ((data.len() as i64 - off) as usize).min(buf.len());
+                // A whole piece for the hash is copied unlocked, so peers keep
+                // landing blocks meanwhile. Stream slots are never shared.
+                if !inner.stream && n >= LARGE_READ_BYTES {
+                    let data = Arc::clone(data);
+                    drop(inner);
+                    buf[..n].copy_from_slice(&data[off as usize..off as usize + n]);
+                    return Ok(n);
+                }
                 buf[..n].copy_from_slice(&data[off as usize..off as usize + n]);
                 return Ok(n);
             }
         }
 
+        if !inner.attached {
+            return Err(StorageError::Other(
+                "download storage is not configured".into(),
+            ));
+        }
+
         if inner.stream {
-            if inner.startup_saved.get(&index).copied().unwrap_or(false) {
-                let path = self.startup_piece_path(index);
-                let mut file = File::open(path)?;
-                file.seek(SeekFrom::Start((32 + off) as u64))?;
-                let n = (piece_len - off).min(buf.len() as i64) as usize;
-                file.read_exact(&mut buf[..n])?;
-                return Ok(n);
+            if !inner.startup_saved.get(&index).copied().unwrap_or(false) {
+                return Err(StorageError::Unavailable);
             }
-            return Err(StorageError::Unavailable);
+            let path = self.startup_piece_path(index);
+            let n = ((piece.length - off) as usize).min(buf.len());
+            drop(inner);
+            let file = File::open(path)?;
+            #[cfg(test)]
+            writeback_tests::before_io(false);
+            file.read_exact_at(&mut buf[..n], (32 + off) as u64)?;
+            return Ok(n);
         }
 
         let abs = (index as i64) * inner.chunk_length + off;
-        let n = (piece_len - off).min(buf.len() as i64) as usize;
-        Self::read_from_files_locked(&inner.files, abs, &mut buf[..n])
+        let length = piece.length;
+        if off < 0 || off >= length {
+            return Ok(0);
+        }
+        let n = ((length - off) as usize).min(buf.len());
+        // Bytes outside the cache are on disk and no longer change; read them
+        // unlocked so playback and hashing do not stall peers' cache writes.
+        let reads = plan_file_reads(&inner.files, abs, n)?;
+        drop(inner);
+        wt_types::probe::add(wt_types::probe::DISK_READ_KIB, n as u64 / 1024);
+        for (file, at, lo, hi) in reads {
+            #[cfg(test)]
+            writeback_tests::before_io(false);
+            file.read_exact_at(&mut buf[lo..hi], at)?;
+        }
+        Ok(n)
     }
 
     pub fn write_to_files_locked(
@@ -2327,10 +2834,8 @@ impl DocumentTorrentStorage {
     ) -> StorageResult<usize> {
         let end = start + data.len() as i64;
         let mut done = 0usize;
-        for f in files.iter_mut() {
-            if f.offset + f.length <= start || f.offset >= end {
-                continue;
-            }
+        let range = overlapping_file_range(files, start, end);
+        for f in files[range].iter_mut() {
             let from = start.max(f.offset);
             let to = end.min(f.offset + f.length);
             if from >= to {
@@ -2340,6 +2845,8 @@ impl DocumentTorrentStorage {
                 StorageError::Other(format!("storage for {} is not configured", f.path))
             })?;
             let chunk = &data[(from - start) as usize..(to - start) as usize];
+            #[cfg(test)]
+            writeback_tests::before_io(true);
             file.write_all_at(chunk, (from - f.offset) as u64)?;
             done += chunk.len();
         }
@@ -2356,10 +2863,7 @@ impl DocumentTorrentStorage {
     ) -> StorageResult<usize> {
         let end = start + buf.len() as i64;
         let mut done = 0usize;
-        for f in files {
-            if f.offset + f.length <= start || f.offset >= end {
-                continue;
-            }
+        for f in files_overlapping(files, start, end) {
             let from = start.max(f.offset);
             let to = end.min(f.offset + f.length);
             if from >= to {
@@ -2369,6 +2873,8 @@ impl DocumentTorrentStorage {
                 StorageError::Other(format!("storage for {} is not configured", f.path))
             })?;
             let chunk = &mut buf[(from - start) as usize..(to - start) as usize];
+            #[cfg(test)]
+            writeback_tests::before_io(false);
             file.read_exact_at(chunk, (from - f.offset) as u64)?;
             done += chunk.len();
         }
@@ -2401,7 +2907,7 @@ impl DocumentTorrentStorage {
             return;
         }
         inner.startup_pending_bytes += data.len();
-        inner.startup_pending.insert(index, data.clone());
+        inner.startup_pending.insert(index, data.to_vec());
         if !inner.startup_writing {
             inner.startup_writing = true;
             let storage = self.weak_self.lock().upgrade().expect("storage dropped");
@@ -2450,7 +2956,7 @@ impl DocumentTorrentStorage {
                 && inner.startup_pieces.get(&index).copied().unwrap_or(false)
                 && fs::rename(&tmp, &path).is_ok();
             if committed {
-                if inner.cache.get(&index) != Some(&data) {
+                if inner.cache.get(&index).map(|slot| slot.as_ref()) != Some(&data) {
                     self.drop_cache_locked(&mut inner, index);
                     inner.stream_ranges.remove(&index);
                     inner.stream_whole.remove(&index);
@@ -2490,20 +2996,29 @@ impl TorrentStorage for DocumentTorrentStorage {
         if inner.closed {
             return Ok(());
         }
-        while inner.startup_writing {
-            self.startup_drained.wait(&mut inner);
-        }
+        // Also drain a scheduled checkpoint publish: it must not finish
+        // after Close and delete or overwrite the final checkpoint.
+        self.wait_checkpoint_idle_locked(&mut inner);
         if inner.closed {
             return Ok(());
         }
         let mut flush_res = Ok(());
         if inner.attached && !inner.stream {
             flush_res = self.flush_all_dirty_locked(&mut inner);
-            self.drain_sync_and_checkpoint_locked(&mut inner);
+            inner.checkpoint_dirty = true;
+            inner.checkpoint_seq += 1;
+            inner = self.drain_now(inner);
+            // Another close may have run while the lock was released.
+            self.wait_checkpoint_idle_locked(&mut inner);
+            if inner.closed {
+                return flush_res;
+            }
         }
         inner.closed = true;
+        inner.evicting.clear();
         inner.checkpoint_gen = inner.checkpoint_gen.wrapping_add(1);
         inner.stream_ready.notify();
+        self.flush_done.notify_all();
         if inner.stream {
             crate::direct_storage::unregister_startup_cache(
                 &self.base_dir,
@@ -2513,12 +3028,14 @@ impl TorrentStorage for DocumentTorrentStorage {
         for f in &mut inner.files {
             let _ = f.file.take();
         }
+        inner.files_gen += 1;
         inner.attached = false;
         inner.cache.clear();
         inner.cache_dirty.clear();
         inner.completed.clear();
         inner.cache_bytes = 0;
         inner.dirty_spans.clear();
+        inner.flush_new.clear();
         inner.partial_slots.clear();
         inner.saved_partial.clear();
         inner.cache_order.reset();
@@ -2615,63 +3132,28 @@ impl DocumentPiece {
     }
 }
 
-impl PieceStorage for DocumentPiece {
-    fn read_at(&self, buf: &mut [u8], off: i64) -> StorageResult<usize> {
-        let mut inner = self.storage.inner.lock();
-        if inner.closed {
-            return Err(StorageError::Closed);
+impl DocumentPiece {
+    /// A write into an existing slot is a copy. Creating a slot may first
+    /// write a victim back to disk, and a slot being evicted waits for it.
+    fn write_stays_in_memory_locked(&self, inner: &StorageInner) -> bool {
+        if inner.closed || !inner.attached {
+            // Closed fails at once; prepared data lives in RAM only.
+            return true;
         }
         let index = self.piece.index as usize;
-        if inner.stream_lost.get(&index).copied().unwrap_or(false) {
-            return Err(StorageError::Unavailable);
-        }
-
-        if inner.cache.contains_key(&index) {
-            self.storage
-                .fill_partial_slot_locked(&mut inner, index, off, buf.len() as i64)?;
-            inner.cache_order.touch(index as i32);
-            if let Some(data) = inner.cache.get(&index) {
-                if off >= data.len() as i64 {
-                    return Ok(0);
-                }
-                let n = ((data.len() as i64 - off) as usize).min(buf.len());
-                buf[..n].copy_from_slice(&data[off as usize..off as usize + n]);
-                return Ok(n);
-            }
-        }
-
-        if !inner.attached {
-            return Err(StorageError::Other(
-                "download storage is not configured".into(),
-            ));
-        }
-
-        if inner.stream {
-            if !inner.startup_saved.get(&index).copied().unwrap_or(false) {
-                return Err(StorageError::Unavailable);
-            }
-            let path = self.storage.startup_piece_path(index);
-            let mut file = File::open(path)?;
-            if off < 0 || off >= self.piece.length {
-                return Ok(0);
-            }
-            file.seek(SeekFrom::Start((32 + off) as u64))?;
-            let n = ((self.piece.length - off) as usize).min(buf.len());
-            file.read_exact(&mut buf[..n])?;
-            return Ok(n);
-        }
-
-        let abs = (index as i64) * inner.chunk_length + off;
-        let length = self.piece.length;
-        if off < 0 || off >= length {
-            return Ok(0);
-        }
-        let n = ((length - off) as usize).min(buf.len());
-        DocumentTorrentStorage::read_from_files_locked(&inner.files, abs, &mut buf[..n])
+        inner
+            .cache
+            .get(&index)
+            .is_some_and(|slot| slot.len() as i64 == self.piece.length)
+            && !inner.evicting.contains(&index)
     }
 
-    fn write_at(&self, buf: &[u8], off: i64) -> StorageResult<usize> {
-        let mut inner = self.storage.inner.lock();
+    fn write_locked<'a>(
+        &'a self,
+        mut inner: parking_lot::MutexGuard<'a, StorageInner>,
+        buf: &[u8],
+        off: i64,
+    ) -> StorageResult<usize> {
         if inner.closed {
             return Err(StorageError::Closed);
         }
@@ -2692,11 +3174,11 @@ impl PieceStorage for DocumentPiece {
                 if inner.cache_bytes + expected > inner.max_cache_bytes {
                     return Err(StorageError::Other("prepared data cache is full".into()));
                 }
-                inner.cache.insert(index, vec![0u8; expected as usize]);
+                inner.cache.insert(index, Arc::new(vec![0u8; expected as usize]));
                 inner.cache_bytes += expected;
                 inner.cache_order.touch(index as i32);
             }
-            let data = inner.cache.get_mut(&index).unwrap();
+            let data = Arc::make_mut(inner.cache.get_mut(&index).unwrap());
             data[off as usize..off as usize + buf.len()].copy_from_slice(buf);
             inner.cache_dirty.insert(index, true);
             let spans = inner.dirty_spans.entry(index).or_default();
@@ -2719,54 +3201,100 @@ impl PieceStorage for DocumentPiece {
             pending_refresh = refresh;
             created
         } else {
-            match self
-                .storage
-                .ensure_cache_slot_locked(&mut inner, index, expected)
-            {
-                Ok(c) => c,
-                Err(_) => {
-                    // Cache full of dirty: fallback to disk write
-                    let start = (index as i64) * inner.chunk_length + off;
-                    return DocumentTorrentStorage::write_to_files_locked(
-                        &mut inner.files,
-                        start,
-                        buf,
-                    );
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                // An eviction flush must finish clean. New bytes wait outside
+                // the slot; background flushes of other pieces do not.
+                while inner.evicting.contains(&index) {
+                    self.storage.flush_done.wait(&mut inner);
+                }
+                // An uncached write-through owns this piece until its I/O
+                // finishes. Waiting releases the mutex for other peers.
+                while !inner.cache.contains_key(&index) && inner.flushing.contains(&index) {
+                    self.storage.flush_done.wait(&mut inner);
+                }
+                if inner.closed {
+                    return Err(StorageError::Closed);
+                }
+                let victim = match self
+                    .storage
+                    .ensure_cache_slot_locked(&mut inner, index, expected)
+                {
+                    Ok(CacheSlot::Ready(c)) => break c,
+                    Ok(CacheSlot::FlushFirst(victim)) if attempts <= 8 => Some(victim),
+                    _ => None,
+                };
+                // Write the dirty victim back without the lock, so other
+                // peers' cache writes and reads continue meanwhile.
+                // Freeze the victim first: a receive into it during the
+                // unlocked write used to keep it dirty forever, the cache
+                // never freed, and this block fell through as a 16 KiB
+                // write. Go flushes under st.mu so the slot can always be
+                // dropped before the next receive.
+                let evicted = match victim {
+                    Some(victim) => {
+                        // RAM is all unfinished pieces: a peer now waits on disk.
+                        wt_types::probe::add(wt_types::probe::CACHE_FULL, 1);
+                        wt_types::events::record("cache_full_wait", format!("piece={victim}"));
+                        inner.evicting.insert(victim);
+                        let (guard, flushed) = self.storage.flush_piece_until_clean(inner, victim);
+                        inner = guard;
+                        if inner.closed {
+                            inner.evicting.remove(&victim);
+                            self.storage.flush_done.notify_all();
+                            return Err(StorageError::Closed);
+                        }
+                        let clean = flushed.is_ok()
+                            && !inner.cache_dirty.get(&victim).copied().unwrap_or(false)
+                            && !inner.flushing.contains(&victim);
+                        if clean {
+                            self.storage.drop_cache_locked(&mut inner, victim);
+                        }
+                        inner.evicting.remove(&victim);
+                        self.storage.flush_done.notify_all();
+                        clean
+                    }
+                    None => false,
+                };
+                if !evicted {
+                    // The victim flush released the mutex. Another writer may
+                    // now own this piece or have created its cache slot.
+                    if inner.cache.contains_key(&index) || inner.flushing.contains(&index) {
+                        continue;
+                    }
+                    // Cache full of unflushable data: write through to disk.
+                    let (_guard, result) =
+                        self.storage.write_through_unlocked(inner, index, off, buf);
+                    return result;
                 }
             }
         };
 
-        if created {
-            if inner.stream
-                || inner.completed.get(&index).copied().unwrap_or(false)
-                || inner.saved_partial.get(&index).copied().unwrap_or(false)
-            {
-                // load from disk if partial
-                if !inner.stream {
-                    let start = (index as i64) * inner.chunk_length;
-                    let p_len = inner
-                        .info
-                        .as_ref()
-                        .map(|i| i.piece(index as u32).length)
-                        .unwrap_or(0);
-                    let mut data = vec![0u8; p_len as usize];
-                    if DocumentTorrentStorage::read_from_files_locked(
-                        &inner.files,
-                        start,
-                        &mut data,
-                    )
-                    .is_ok()
-                    {
-                        inner.cache.insert(index, data);
-                    }
-                }
-            } else {
-                inner.partial_slots.insert(index, Vec::new());
-            }
+        if created && !inner.stream {
+            // A piece partly saved before its slot was evicted gets a partial
+            // slot like a new one: flushes write only received ranges, so the
+            // zeros never reach the disk, and a read that needs the saved
+            // bytes loads them unlocked (fill_partial_slot_unlocked). Reading
+            // the whole piece here, under the lock every peer's write takes,
+            // ran once per evicted piece per block on Android's FUSE storage.
+            inner.partial_slots.insert(index, Vec::new());
         }
 
+        // A slot being written back unlocked now holds newer bytes than its
+        // snapshot (the lock may have been released above).
+        if inner.flushing.contains(&index) {
+            inner.flush_raced.insert(index);
+            merge_received_range(
+                inner.flush_new.entry(index).or_default(),
+                ByteRange {
+                    start: off,
+                    end: off + buf.len() as i64,
+                },
+            );
+        }
         if let Some(data) = inner.cache.get_mut(&index) {
-            data[off as usize..off as usize + buf.len()].copy_from_slice(buf);
+            Arc::make_mut(data)[off as usize..off as usize + buf.len()].copy_from_slice(buf);
         }
 
         if let Some(written) = inner.partial_slots.get_mut(&index) {
@@ -2813,14 +3341,54 @@ impl PieceStorage for DocumentPiece {
 
         let callback = inner.on_stream_evict.clone();
         drop(inner);
-        if let Some(cb) = callback {
-            for v in pending_refresh {
-                let cb = Arc::clone(&cb);
-                std::thread::spawn(move || cb(v));
-            }
+        if let Some(cb) = callback.filter(|_| !pending_refresh.is_empty()) {
+            std::thread::spawn(move || {
+                for v in pending_refresh {
+                    cb(v);
+                }
+            });
         }
 
         Ok(buf.len())
+    }
+}
+
+impl PieceStorage for DocumentPiece {
+    fn read_at(&self, buf: &mut [u8], off: i64) -> StorageResult<usize> {
+        self.storage
+            .read_piece_data_unlocked(self.storage.inner.lock(), self.piece, buf, off)
+    }
+
+    fn read_at_in_memory(&self, buf: &mut [u8], off: i64) -> Option<StorageResult<usize>> {
+        let inner = self.storage.inner.lock();
+        let index = self.piece.index as usize;
+        if inner.closed || off < 0 {
+            return None;
+        }
+        let data = inner.cache.get(&index)?;
+        let end = off + buf.len() as i64;
+        if end > data.len() as i64
+            || inner.stream_lost.get(&index).copied().unwrap_or(false)
+            || inner.partial_slots.get(&index).is_some_and(|spans| !ranges_cover(spans, off, end))
+        {
+            return None;
+        }
+        buf.copy_from_slice(&data[off as usize..end as usize]);
+        Some(Ok(buf.len()))
+    }
+
+    fn write_at_in_memory(&self, buf: &[u8], off: i64) -> Option<StorageResult<usize>> {
+        let waiting = std::time::Instant::now();
+        let inner = self.storage.inner.lock();
+        wt_types::probe::max(wt_types::probe::LOCK_WAIT_MAX_US, waiting.elapsed().as_micros() as u64);
+        if !self.write_stays_in_memory_locked(&inner) {
+            return None;
+        }
+        Some(self.write_locked(inner, buf, off))
+    }
+
+    fn write_at(&self, buf: &[u8], off: i64) -> StorageResult<usize> {
+        self.write_locked(self.storage.inner.lock(), buf, off)
     }
 
     fn mark_complete(&self) -> StorageResult<()> {
@@ -2850,13 +3418,29 @@ impl PieceStorage for DocumentPiece {
             return Ok(());
         }
 
-        // Download mode: flush piece to disk
-        self.storage.flush_piece_locked(&mut inner, index)?;
+        // Download mode: the piece is whole and verified in RAM, so it goes to
+        // disk in one write, without the lock, so peers keep filling RAM. A
+        // piece that fails its hash never gets here and never reaches the disk.
+        let write_started = std::time::Instant::now();
+        let (guard, flushed) = self.storage.flush_piece_until_clean(inner, index);
+        inner = guard;
+        flushed?;
+        let write_ms = write_started.elapsed().as_millis() as u64;
+        wt_types::probe::add(wt_types::probe::DISK_WRITES, 1);
+        wt_types::probe::add(wt_types::probe::DISK_WRITE_KIB, self.piece.length as u64 / 1024);
+        wt_types::probe::add(wt_types::probe::DISK_WRITE_MS, write_ms);
+        wt_types::probe::max(wt_types::probe::DISK_WRITE_MAX_MS, write_ms);
+        if write_started.elapsed() >= Duration::from_millis(100) {
+            wt_types::events::record("disk_write", format!(
+                "piece={index} {}KiB {}ms", self.piece.length / 1024, write_started.elapsed().as_millis()));
+        }
         inner.completed.insert(index, true);
         inner.saved_partial.remove(&index);
         self.storage
             .note_piece_files_need_sync_locked(&mut inner, index);
         inner.checkpoint_dirty = true;
+        inner.checkpoint_seq += 1;
+        self.storage.schedule_checkpoint_flush_locked(&mut inner);
         Ok(())
     }
 
@@ -2880,6 +3464,8 @@ impl PieceStorage for DocumentPiece {
         }
         self.storage.drop_cache_locked(&mut inner, index);
         inner.checkpoint_dirty = true;
+        inner.checkpoint_seq += 1;
+        self.storage.schedule_checkpoint_flush_locked(&mut inner);
         Ok(())
     }
 
@@ -2914,12 +3500,128 @@ impl PieceStorage for DocumentPiece {
 
 // ---------------------------------------------------------------- Helpers
 
+/// Go `sameFile`: both handles name the same device/inode.
+fn same_file(a: Option<&File>, b: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(a) = a else {
+        return false;
+    };
+    match (a.metadata(), b.metadata()) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Duplicated descriptors and positions for reading `[start, start + n)`
+/// unlocked: `(file, file_offset, buf_start, buf_end)`.
+fn plan_file_reads(
+    files: &[FileDescriptor],
+    start: i64,
+    n: usize,
+) -> StorageResult<Vec<(Arc<File>, u64, usize, usize)>> {
+    let end = start + n as i64;
+    let mut reads = Vec::new();
+    let mut done = 0usize;
+    for f in files_overlapping(files, start, end) {
+        let from = start.max(f.offset);
+        let to = end.min(f.offset + f.length);
+        if from >= to {
+            continue;
+        }
+        let file = f.file.as_ref().ok_or_else(|| {
+            StorageError::Other(format!("storage for {} is not configured", f.path))
+        })?;
+        let lo = (from - start) as usize;
+        let hi = (to - start) as usize;
+        reads.push((Arc::clone(file), (from - f.offset) as u64, lo, hi));
+        done += hi - lo;
+    }
+    if done != n {
+        return Err(StorageError::Other("short read from files".into()));
+    }
+    Ok(reads)
+}
+
+/// [`DocumentTorrentStorage::ensure_cache_slot_locked`] outcome.
+enum CacheSlot {
+    /// Slot present; `true` when newly created.
+    Ready(bool),
+    /// Only dirty pieces can be evicted: write this one back first.
+    FlushFirst(usize),
+}
+
+/// A descriptor and its layout captured before an unlocked metadata query.
+struct FileIdentitySnapshot {
+    file: Option<File>,
+    identity: FileIdentity,
+}
+
+impl FileIdentitySnapshot {
+    fn new(file: &FileDescriptor) -> std::io::Result<Self> {
+        Ok(Self {
+            file: file.file.as_ref().map(|f| f.try_clone()).transpose()?,
+            identity: FileIdentity {
+                external: file.external,
+                length: file.length,
+                path: file.path.clone(),
+                ..Default::default()
+            },
+        })
+    }
+
+    fn capture(self) -> FileIdentity {
+        match self.file {
+            Some(file) => {
+                #[cfg(test)]
+                writeback_tests::before_io(false);
+                identity_from_file(
+                    &file,
+                    self.identity.external,
+                    self.identity.length,
+                    self.identity.path,
+                )
+                .0
+            }
+            None => self.identity,
+        }
+    }
+}
+
+/// A piece's dirty bytes, copied with duplicated descriptors so the write can
+/// run without the storage lock (and survive file replacement or close).
+pub struct PieceFlush {
+    writes: Vec<(Arc<File>, u64, Arc<Vec<u8>>, usize, usize)>,
+    files_gen: u64,
+}
+
+impl PieceFlush {
+    fn write(&self) -> StorageResult<()> {
+        for (file, at, data, lo, hi) in &self.writes {
+            #[cfg(test)]
+            writeback_tests::before_io(true);
+            file.write_all_at(&data[*lo..*hi], *at)?;
+        }
+        Ok(())
+    }
+}
+
 /// Files holding bytes of `[start, end)` (Go `filesOverlapping`).
 /// Files are in torrent order; binary search finds the overlapping slice.
 pub fn files_overlapping(files: &[FileDescriptor], start: i64, end: i64) -> &[FileDescriptor] {
+    &files[overlapping_file_range(files, start, end)]
+}
+
+/// Index range of [`files_overlapping`]. File ends never decrease in torrent
+/// order, so both searches are monotonic. Zero-length files inside the range
+/// are included and skipped by callers' empty-span checks.
+pub fn overlapping_file_range(
+    files: &[FileDescriptor],
+    start: i64,
+    end: i64,
+) -> std::ops::Range<usize> {
     let first = files.partition_point(|f| f.offset + f.length <= start);
     let last = first + files[first..].partition_point(|f| f.offset < end);
-    &files[first..last]
+    first..last
 }
 
 pub fn startup_file_pieces(f: &FileDescriptor, chunk: i64) -> Vec<usize> {
@@ -3006,6 +3708,10 @@ pub fn delete_engine_owned_storage(base_dir: &Path, info_hash_hex: &str) -> Stor
 }
 
 #[cfg(test)]
+#[path = "storage_writeback_tests.rs"]
+mod writeback_tests;
+
+#[cfg(test)]
 mod startup_save_tests {
     use super::*;
     use std::sync::mpsc;
@@ -3017,7 +3723,7 @@ mod startup_save_tests {
         {
             let mut inner = storage.inner.lock();
             for index in [0, 1, 2, 3, 4, 5] {
-                inner.cache.insert(index, vec![1]);
+                inner.cache.insert(index, Arc::new(vec![1]));
                 inner
                     .stream_ranges
                     .insert(index, vec![ByteRange { start: 0, end: 1 }]);

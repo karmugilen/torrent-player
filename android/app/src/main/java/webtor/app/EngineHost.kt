@@ -12,12 +12,15 @@ import kotlinx.coroutines.withTimeoutOrNull
 import webtor.core.EngineResponse
 import webtor.core.EngineTransport
 
+/** Private engine state: checkpoints, startup data and engine-owned boundary files. */
+fun engineDownloadDir(context: Context): File = File(context.filesDir, "webtorrent-rust")
+
 class EngineHost(private val context: Context) : EngineTransport {
     private val started = AtomicBoolean(false)
     private val ready = CompletableDeferred<Boolean>()
     private val changeVersion = MutableStateFlow(-1L)
 
-    fun downloadDir(): File = File(context.filesDir, "webtorrent")
+    fun downloadDir(): File = engineDownloadDir(context)
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -27,6 +30,11 @@ class EngineHost(private val context: Context) : EngineTransport {
         Thread({
             try {
                 check(downloadDir().mkdirs() || downloadDir().isDirectory) { "Could not create engine storage" }
+                // Start the engine before the optional ~8MB GeoIP copy so a
+                // cold start is not blocked on asset I/O.
+                check(startEngine(downloadDir().absolutePath.toByteArray(StandardCharsets.UTF_8), maxPeers) == 0) { "Native engine initialization failed" }
+                Log.i(TAG, "native engine ready")
+                ready.complete(true)
                 // A memory-mapped country database keeps peer lookup offline.
                 // Geo data is optional; a damaged asset must not stop downloads.
                 runCatching {
@@ -42,9 +50,6 @@ class EngineHost(private val context: Context) : EngineTransport {
                         }
                     }
                 }.onFailure { Log.w(TAG, "Offline peer countries unavailable", it) }
-                check(startEngine(downloadDir().absolutePath.toByteArray(StandardCharsets.UTF_8), maxPeers) == 0) { "Native engine initialization failed" }
-                Log.i(TAG, "native engine ready")
-                ready.complete(true)
                 // One process-owned observer waits in native code. Its StateFlow
                 // callbacks are cancellable and never hold a coroutine IO worker.
                 var version = -1L

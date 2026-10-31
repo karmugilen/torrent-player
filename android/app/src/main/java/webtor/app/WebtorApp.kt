@@ -34,6 +34,8 @@ class WebtorApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The engine's transfer log goes here; Android must create the folder.
+        getExternalFilesDir(null)
         engine = EngineHost(this)
         engineClient = EngineClient(engine)
         session = LibrarySession(this, engineClient, engine)

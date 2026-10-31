@@ -14,7 +14,7 @@ pub const OPTIMISTIC_UNCHOKE_INTERVAL: Duration = Duration::from_secs(30);
 /// Regular rechoke interval.
 pub const REGULAR_UNCHOKE_INTERVAL: Duration = Duration::from_secs(10);
 /// anacrolix tit-for-tat headroom (100 KiB).
-pub const TIT_FOR_TAT_HEADROOM: i64 = 100 << 10;
+pub const TIT_FOR_TAT_HEADROOM: i64 = 8 << 20;
 
 pub type PeerId = u64;
 

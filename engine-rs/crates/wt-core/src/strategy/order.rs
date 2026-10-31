@@ -1,25 +1,57 @@
 //! Piece ordering and `GetRequestablePieces` scan.
 //!
-//! Webtor: priority then piece index (file/playhead order), not rarest-first.
+//! Priority first, so playback keeps file/playhead order. Background (`Normal`)
+//! pieces finish what is started, then go rarest-first.
 
 use std::cmp::Ordering;
+
+use wt_types::PiecePriority;
 
 use super::piece_request_order::{
     PieceRequestOrder, PieceRequestOrderItem, PieceRequestOrderState,
 };
 
-/// Compare two order items the way Go `pieceOrderLess` does.
-///
-/// Returns `Ordering::Less` when `i` should be requested before `j`:
-/// higher priority first, then lower piece index, then lower infohash.
+/// Pieces this rare come first. Above it, file order: blocks then land next to
+/// each other on disk instead of all over a sparse file.
+const RARE_AVAILABILITY: i32 = 2;
+
+/// Rank among equal-priority pieces, lower first. Only `Normal` pieces have
+/// one: anything higher is near a playhead and stays in file order. Rare pieces
+/// are the most likely to vanish and the most useful to trade; started pieces
+/// come first so hashing and write-back see whole pieces.
+pub fn background_rank(priority: PiecePriority, partial: bool, availability: i32) -> (bool, i32) {
+    if priority == PiecePriority::Normal {
+        (!partial, availability.min(RARE_AVAILABILITY + 1))
+    } else {
+        (false, 0)
+    }
+}
+
+/// Returns `Ordering::Less` when `i` should be requested before `j`: higher
+/// priority first, then [`background_rank`], lower piece index, lower infohash.
 pub fn piece_order_cmp(i: &PieceRequestOrderItem, j: &PieceRequestOrderItem) -> Ordering {
     // Go: multiless.Int(j.Priority, i.Priority) — higher priority sorts first.
     j.state
         .priority
         .cmp(&i.state.priority)
+        .then_with(|| {
+            background_rank(i.state.priority, i.state.partial, i.state.availability)
+                .cmp(&background_rank(j.state.priority, j.state.partial, j.state.availability))
+        })
         .then_with(|| i.key.index.cmp(&j.key.index))
         .then_with(|| i.key.info_hash.cmp(&j.key.info_hash))
 }
+
+/// Go `NewDefaultClientConfig` field `MaxUnverifiedBytes` (`64 << 20`).
+/// The engine never overrides it. `0` is the scan's uncapped sentinel, so
+/// production must not use [`StrategyLimits::default`].
+pub const DEFAULT_MAX_UNVERIFIED_BYTES: i64 = 64 << 20;
+
+/// The same cap for a saved download with nothing playing. It must stay under
+/// the storage's RAM for saved downloads, so pieces finish in RAM.
+pub const SAVED_MAX_UNVERIFIED_BYTES: i64 = 192 << 20;
+/// Pieces a saved download keeps open, as a floor when pieces are large.
+pub const SAVED_OPEN_MIN_PIECES: i64 = 4;
 
 /// Shared limits for a requestable-piece scan (`requestStrategy.Input`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -28,6 +60,26 @@ pub struct StrategyLimits {
     pub capacity: Option<i64>,
     /// Cap on cumulative unverified piece length. `0` = uncapped.
     pub max_unverified_bytes: i64,
+}
+
+impl StrategyLimits {
+    /// Single-torrent Go input: storage capacity uncapped, unverified bytes
+    /// capped at 64 MiB. Past that, new pieces wait so the write-back cache
+    /// can flush whole pieces instead of thrashing partial ones.
+    pub fn go_default() -> Self {
+        Self {
+            capacity: None,
+            max_unverified_bytes: DEFAULT_MAX_UNVERIFIED_BYTES,
+        }
+    }
+
+    /// Nothing playing: pieces gather in RAM, so RAM sets the limit.
+    pub fn saved_download() -> Self {
+        Self {
+            capacity: None,
+            max_unverified_bytes: SAVED_MAX_UNVERIFIED_BYTES,
+        }
+    }
 }
 
 /// Query a torrent piece during the scan (Go `requestStrategy.Torrent`/`Piece`).
@@ -109,6 +161,15 @@ mod tests {
         fn count_unverified(&self, _: &[u8; 20], _: u32) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn go_default_matches_client_config() {
+        let limits = StrategyLimits::go_default();
+        assert_eq!(limits.max_unverified_bytes, 64 << 20);
+        assert_eq!(limits.capacity, None);
+        // Default stays the uncapped sentinel. Production uses go_default.
+        assert_eq!(StrategyLimits::default().max_unverified_bytes, 0);
     }
 
     #[test]

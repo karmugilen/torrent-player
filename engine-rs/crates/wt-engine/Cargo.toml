@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Allocator for the engine library and host: cheaper per-block buffers than
+# Android's hardened default allocator at high transfer rates.
+mimalloc = { version = "0.1", default-features = false }
 wt-types.workspace = true
 wt-meta.workspace = true
 wt-policy.workspace = true

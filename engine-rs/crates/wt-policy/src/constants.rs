@@ -56,11 +56,12 @@ pub const REST_PEER_LIMIT: usize = 80;
 /// Seek latency rolling window size.
 pub const SEEK_STATS_WINDOW: usize = 20;
 /// Claude seek: steal urgent blocks after this age.
-pub const CLAUDE_SEEK_STEAL_AFTER: Duration = Duration::from_millis(500);
+pub const CLAUDE_SEEK_STEAL_AFTER: Duration = Duration::from_millis(200);
 /// Claude seek: nudge interval while a read is blocked.
 pub const CLAUDE_SEEK_NUDGE_EVERY: Duration = Duration::from_millis(100);
-/// Drop-chokers timeout (WebTorrent CHOKE_TIMEOUT).
-pub const CHOKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Drop-chokers timeout. Peers rotate their unchoke slots every 10-30 s, so a
+/// shorter wait drops peers before they ever had a turn to unchoke us.
+pub const CHOKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Arrival model save cadence.
 pub const ARRIVAL_SAVE_EVERY: Duration = Duration::from_secs(60);

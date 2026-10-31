@@ -48,6 +48,10 @@ pub trait TorrentAnnounceInfo: Send + Sync {
         self.need_data() || self.want_peers()
     }
     fn completed(&self) -> bool;
+    /// BEP 27 private torrent: trackers only, never DHT or PEX.
+    fn private(&self) -> bool {
+        false
+    }
     /// Edge trigger for the Completed announce event.
     fn newly_completed(&self) -> bool;
 }

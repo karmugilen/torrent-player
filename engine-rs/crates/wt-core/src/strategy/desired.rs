@@ -3,7 +3,7 @@
 //! Builds the candidate request list and interest flag. Applying/stealing
 //! requests against the live peer stays in agy-2's peer_conn layer.
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -34,8 +34,9 @@ pub struct RequestTorrentSnapshot {
     /// `should_request` / `count_unverified` per piece.
     pub piece_requestable: Vec<bool>,
     pub piece_count_unverified: Vec<bool>,
-    /// Undirtied request indexes per piece (precomputed by caller).
-    pub undirtied_by_piece: Vec<Vec<RequestIndex>>,
+    /// Undirtied request indexes of candidate pieces (precomputed by caller).
+    /// Keyed by piece so a refill allocates only for pieces it may request.
+    pub undirtied_by_piece: HashMap<u32, Vec<RequestIndex>>,
     /// Map request index → piece index.
     pub piece_of_request: HashMap<RequestIndex, u32>,
     /// Current holders of outstanding requests.
@@ -44,6 +45,8 @@ pub struct RequestTorrentSnapshot {
     pub focus_request: Option<RequestIndex>,
     pub has_active_webseed_requests: bool,
     pub limits: StrategyLimits,
+    /// Incomplete pieces still wanted, from any peer (endgame detection).
+    pub wanted_pieces: u32,
 }
 
 impl TorrentPieceQuery for RequestTorrentSnapshot {
@@ -72,7 +75,9 @@ pub struct DesiredPeerSnapshot {
     pub has_piece: Vec<bool>,
     pub peer_choking: bool,
     pub peer_allowed_fast: Vec<bool>,
+    /// Sorted ascending: checked for every candidate block.
     pub outstanding: Vec<RequestIndex>,
+    /// Sorted ascending.
     pub cancelled: Vec<RequestIndex>,
     pub nominal_max_requests: u32,
 }
@@ -87,11 +92,11 @@ impl DesiredPeerSnapshot {
             .copied()
             .unwrap_or(false)
     }
-    fn has_outstanding(&self, r: RequestIndex) -> bool {
-        self.outstanding.contains(&r)
+    pub fn has_outstanding(&self, r: RequestIndex) -> bool {
+        self.outstanding.binary_search(&r).is_ok()
     }
-    fn has_cancelled(&self, r: RequestIndex) -> bool {
-        self.cancelled.contains(&r)
+    pub fn has_cancelled(&self, r: RequestIndex) -> bool {
+        self.cancelled.binary_search(&r).is_ok()
     }
 }
 
@@ -133,7 +138,7 @@ pub fn compute_desired_requests(
             }
             desired.piece_states.insert(piece_index, piece_extra);
             let allowed_fast = peer.allowed_fast(piece_index);
-            if let Some(reqs) = torrent.undirtied_by_piece.get(piece_index as usize) {
+            if let Some(reqs) = torrent.undirtied_by_piece.get(&piece_index) {
                 for &r in reqs {
                     if !allowed_fast {
                         desired.interested = true;
@@ -167,12 +172,73 @@ pub fn sort_requests_for_peer(
     peer: &DesiredPeerSnapshot,
     piece_states: &HashMap<u32, PieceRequestOrderState>,
 ) {
-    requests.sort_by(
-        |a, b| match request_less_by_value(*a, *b, torrent, peer, piece_states) {
-            true => Ordering::Less,
-            false => Ordering::Greater,
-        },
-    );
+    // Resolve snapshot maps once per candidate, rather than twice per sort
+    // comparison. The comparator and SipHash lookups dominated live download
+    // CPU profiles with thousands of outstanding blocks across peers.
+    let focus_piece = torrent.focus_request.map(|focus| {
+        torrent
+            .piece_of_request
+            .get(&focus)
+            .copied()
+            .unwrap_or_else(|| {
+                crate::picker::block_coord_from_req_index(
+                    focus,
+                    torrent.piece_length,
+                    i64::from(torrent.num_pieces) * torrent.piece_length,
+                )
+                .piece
+            })
+    });
+    requests.sort_by_cached_key(|&request| {
+        let piece = torrent.piece_of_request.get(&request).copied();
+        let Some(index) = piece else {
+            return (
+                true,
+                false,
+                Reverse(PiecePriority::None),
+                0u8,
+                Reverse(0u64),
+                Reverse(None),
+                0i32,
+                false,
+                (false, 0i32),
+                0u32,
+                request,
+            );
+        };
+        let state = piece_states.get(&index);
+        let priority = state.map_or(PiecePriority::None, |s| s.priority);
+        let rank = state.map_or((false, 0), |s| {
+            super::order::background_rank(s.priority, s.partial, s.availability)
+        });
+        let assignment = torrent.assignments.get(&request);
+        let owner_rank = match assignment {
+            Some(a) if a.peer == peer.peer_id => 0u8,
+            None => 1,
+            Some(_) => 2,
+        };
+        (
+            piece.is_none(),
+            peer.peer_choking && !peer.allowed_fast(index),
+            Reverse(priority),
+            owner_rank,
+            Reverse(assignment.map_or(0, |a| a.peer_outstanding)),
+            Reverse(assignment.map(|a| a.when)),
+            focus_piece.map_or(0, |focus| focus_distance(index, focus)),
+            focus_piece == piece && torrent.focus_request.is_some_and(|focus| request < focus),
+            rank,
+            if torrent.has_active_webseed_requests {
+                0
+            } else {
+                index
+            },
+            if torrent.has_active_webseed_requests {
+                u32::MAX - request
+            } else {
+                request
+            },
+        )
+    });
 }
 
 /// Returns true when `left` is a better request than `right` (should come first).
@@ -251,7 +317,20 @@ pub fn request_less_by_value(
     }
 
     if let Some(focus_r) = torrent.focus_request {
-        let focus_piece = torrent.piece_of_request.get(&focus_r).copied().unwrap_or(0);
+        // Candidate pieces map their requests; the focus block may not be a
+        // candidate (written or held elsewhere), so fall back to geometry.
+        let focus_piece = torrent
+            .piece_of_request
+            .get(&focus_r)
+            .copied()
+            .unwrap_or_else(|| {
+                crate::picker::block_coord_from_req_index(
+                    focus_r,
+                    torrent.piece_length,
+                    i64::from(torrent.num_pieces) * torrent.piece_length,
+                )
+                .piece
+            });
         if left_piece == right_piece {
             if left_piece == focus_piece {
                 // Within focus piece: prefer requests at/after focus.
@@ -286,7 +365,7 @@ mod tests {
     use wt_types::PiecePriority;
 
     fn setup_torrent(n_pieces: u32, chunk_per_piece: u32) -> RequestTorrentSnapshot {
-        let mut undirtied = Vec::new();
+        let mut undirtied = HashMap::new();
         let mut piece_of = HashMap::new();
         let mut req = 0u32;
         for p in 0..n_pieces {
@@ -296,7 +375,7 @@ mod tests {
                 piece_of.insert(req, p);
                 req += 1;
             }
-            undirtied.push(rs);
+            undirtied.insert(p, rs);
         }
         RequestTorrentSnapshot {
             info_hash: [9u8; 20],
@@ -310,6 +389,7 @@ mod tests {
             focus_request: None,
             has_active_webseed_requests: false,
             limits: StrategyLimits::default(),
+            wanted_pieces: n_pieces,
         }
     }
 
@@ -410,5 +490,77 @@ mod tests {
         // piece 3 (dist 1) before piece 4 (dist 2); piece 3 before piece 1 (behind)
         assert!(request_less_by_value(3, 4, &torrent, &peer, &states));
         assert!(request_less_by_value(3, 1, &torrent, &peer, &states));
+    }
+
+    #[test]
+    fn cached_sort_matches_pairwise_order_for_download_and_playback() {
+        let now = Instant::now();
+        for seed in 0..24u32 {
+            let mut torrent = setup_torrent(32, 8);
+            let mut states = HashMap::new();
+            let priorities = [
+                PiecePriority::Normal,
+                PiecePriority::High,
+                PiecePriority::Readahead,
+                PiecePriority::Next,
+                PiecePriority::Now,
+            ];
+            for piece in 0..32 {
+                states.insert(
+                    piece,
+                    PieceRequestOrderState {
+                        availability: 1,
+                        priority: priorities[((piece + seed) % 5) as usize],
+                        partial: false,
+                    },
+                );
+            }
+            let peer = DesiredPeerSnapshot {
+                peer_id: 7,
+                has_piece: vec![true; 32],
+                peer_choking: seed % 2 == 0,
+                peer_allowed_fast: (0..32).map(|p| (p + seed) % 3 == 0).collect(),
+                outstanding: vec![],
+                cancelled: vec![],
+                nominal_max_requests: 64,
+            };
+            torrent.focus_request = (seed % 3 != 0).then_some(97);
+            // Exercise geometry fallback for a received/noncandidate focus block.
+            if seed % 4 == 0 {
+                torrent.piece_of_request.remove(&97);
+            }
+            torrent.has_active_webseed_requests = seed % 2 == 1;
+            for req in 0..260u32 {
+                if (req + seed) % 4 != 0 {
+                    torrent.assignments.insert(
+                        req,
+                        PeerRequestAssignment {
+                            peer: if req % 3 == 0 {
+                                7
+                            } else {
+                                11 + u64::from(req % 3)
+                            },
+                            when: now - std::time::Duration::from_millis(u64::from(req % 11)),
+                            peer_outstanding: u64::from(req % 17),
+                        },
+                    );
+                }
+            }
+            let mut old: Vec<_> = (0..260u32).rev().collect();
+            old.sort_by(|a, b| {
+                if a == b {
+                    std::cmp::Ordering::Equal
+                } else if request_less_by_value(*a, *b, &torrent, &peer, &states) {
+                    std::cmp::Ordering::Less
+                } else if request_less_by_value(*b, *a, &torrent, &peer, &states) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(b)
+                }
+            });
+            let mut cached: Vec<_> = (0..260u32).rev().collect();
+            sort_requests_for_peer(&mut cached, &torrent, &peer, &states);
+            assert_eq!(cached, old, "sort ordering changed for seed {seed}");
+        }
     }
 }

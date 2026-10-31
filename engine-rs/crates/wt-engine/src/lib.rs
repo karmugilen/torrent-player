@@ -2,8 +2,12 @@
 //!
 //! Pure Rust port of `engine-go`. See `engine-rs/docs/PORT_MAP.md` for crate scope.
 
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod connections;
 pub mod ghost;
+pub mod seek_index;
 pub mod telemetry;
 pub mod peer_exploration;
 pub mod ctl_http;
@@ -15,6 +19,7 @@ pub mod playback_core;
 pub mod preview;
 pub mod seeding;
 pub mod server;
+pub mod startup_policy;
 pub mod stream_http;
 pub mod tracker_status;
 pub mod trackers;

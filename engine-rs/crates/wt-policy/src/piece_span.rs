@@ -83,6 +83,23 @@ pub struct FileLayout {
     pub end_piece: PieceIndex,
 }
 
+impl FileLayout {
+    /// Go `File.BeginPieceIndex` / `EndPieceIndex`. Spans clamp to these
+    /// bounds, so zero bounds would make every span of the file empty.
+    pub fn for_file(torrent_offset: i64, length: i64, piece_length: i64) -> Self {
+        if piece_length <= 0 {
+            return Self { torrent_offset, length, begin_piece: 0, end_piece: 0 };
+        }
+        let begin = (torrent_offset / piece_length) as PieceIndex;
+        let end = if length <= 0 {
+            begin
+        } else {
+            ((torrent_offset + length + piece_length - 1) / piece_length) as PieceIndex
+        };
+        Self { torrent_offset, length, begin_piece: begin, end_piece: end }
+    }
+}
+
 /// Map a half-open byte range within a file to torrent piece indices `[begin, end)`.
 pub fn file_piece_range(file: &FileLayout, piece_length: i64, start: i64, end: i64) -> PieceSpan {
     if piece_length <= 0 || start >= end {

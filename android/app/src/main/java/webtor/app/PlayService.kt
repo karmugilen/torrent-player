@@ -8,8 +8,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
@@ -27,6 +29,12 @@ class PlayService : Service() {
     private var playbackOnly: Boolean = false
     // Live playback stats (seek time, arrival estimates), shown expanded.
     private var stats: String = ""
+    // With the screen off Android lets the CPU sleep and puts Wi-Fi into
+    // power save, which throttles transfers. Held only while this runs.
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    // Lets the engine hear local peers' discovery announces (BEP 14).
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -61,6 +69,7 @@ class PlayService : Service() {
     }
 
     override fun onDestroy() {
+        releaseTransferLocks()
         if (Build.VERSION.SDK_INT >= 24) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -69,6 +78,40 @@ class PlayService : Service() {
         }
         getSystemService(NotificationManager::class.java).cancel(NOTIF_ID)
         super.onDestroy()
+    }
+
+    private fun holdTransferLocks() {
+        if (wakeLock == null) {
+            wakeLock = runCatching {
+                getSystemService(PowerManager::class.java)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "webtor:transfers")
+                    .apply { setReferenceCounted(false); acquire() }
+            }.getOrNull()
+        }
+        if (wifiLock == null) {
+            wifiLock = runCatching {
+                @Suppress("DEPRECATION")
+                applicationContext.getSystemService(WifiManager::class.java)
+                    .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "webtor:transfers")
+                    .apply { setReferenceCounted(false); acquire() }
+            }.getOrNull()
+        }
+        if (multicastLock == null) {
+            multicastLock = runCatching {
+                applicationContext.getSystemService(WifiManager::class.java)
+                    .createMulticastLock("webtor:lsd")
+                    .apply { setReferenceCounted(false); acquire() }
+            }.getOrNull()
+        }
+    }
+
+    private fun releaseTransferLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
+        multicastLock?.let { if (it.isHeld) it.release() }
+        multicastLock = null
     }
 
     private fun applyExtras(intent: Intent?) {
@@ -93,6 +136,7 @@ class PlayService : Service() {
         } else {
             startForeground(NOTIF_ID, value)
         }
+        holdTransferLocks()
         true
     }.getOrElse {
         stopSelf()

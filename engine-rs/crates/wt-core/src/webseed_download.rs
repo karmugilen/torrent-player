@@ -55,7 +55,7 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
                         / info.piece_length;
                     let next = {
                         let pieces = torrent.pieces.read();
-                        let dirty = torrent.dirty_chunks.read();
+                        let dirty = &torrent.dirty_chunks;
                         pieces
                             .iter()
                             .filter(|p| {
@@ -68,10 +68,10 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
                                     info.total_length(),
                                 );
                                 let first = (begin..end)
-                                    .find(|r| !dirty.contains(r) && !pending.contains(r))?;
+                                    .find(|r| !dirty.contains(*r) && !pending.contains(r))?;
                                 let blocks = (MAX_FETCH_BYTES / BLOCK_SIZE as i64).max(1) as u32;
                                 let last = (first..end.min(first + blocks))
-                                    .take_while(|r| !dirty.contains(r) && !pending.contains(r))
+                                    .take_while(|r| !dirty.contains(*r) && !pending.contains(r))
                                     .last()?
                                     + 1;
                                 Some((
@@ -126,15 +126,20 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
                                 {
                                     for (i, chunk) in data.chunks(BLOCK_SIZE as usize).enumerate() {
                                         let at = offset as u32 + i as u32 * BLOCK_SIZE;
-                                        if torrent.write_chunk(piece, at, chunk).is_err() {
-                                            break;
-                                        }
                                         let req = req_index_from_piece_and_offset(
                                             piece,
                                             at,
                                             torrent.piece_length(),
                                         );
-                                        torrent.mark_chunk_dirty(req);
+                                        // A peer may have delivered this block already.
+                                        if !torrent.begin_chunk_write(req) {
+                                            continue;
+                                        }
+                                        let written = torrent.write_chunk(piece, at, chunk).is_ok();
+                                        torrent.finish_chunk_write(req, written);
+                                        if !written {
+                                            break;
+                                        }
                                         torrent
                                             .webseed_stats
                                             .bytes_read_data
@@ -164,7 +169,9 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
         }
         drop(torrent);
         drop(client);
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        // Most torrents have no web seed: poll those gently, not 40 times a second.
+        let idle = if sources.is_empty() { 1_000 } else { 25 };
+        tokio::time::sleep(Duration::from_millis(idle)).await;
     }
     jobs.abort_all();
 }

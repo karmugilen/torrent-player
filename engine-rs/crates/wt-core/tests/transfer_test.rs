@@ -99,8 +99,8 @@ async fn test_local_2_client_tcp_transfer_64_mib() {
             let end = (start + piece_obj.length as usize).min(TOTAL_SIZE);
             p_storage.write_at(&raw_data[start..end], 0).unwrap();
             p_storage.mark_complete().unwrap();
-            seeder_torrent.inner.pieces.write()[i as usize].complete = true;
-            seeder_torrent.inner.pieces.write()[i as usize].ok = true;
+            seeder_torrent.inner.pieces_mut()[i as usize].complete = true;
+            seeder_torrent.inner.pieces_mut()[i as usize].ok = true;
         }
     }
 
@@ -234,8 +234,8 @@ async fn test_reader_seeks_into_missing_data_and_gets_first_64_kib() {
             let end = (start + piece_obj.length as usize).min(TOTAL_SIZE);
             p_storage.write_at(&raw_data[start..end], 0).unwrap();
             p_storage.mark_complete().unwrap();
-            seeder_torrent.inner.pieces.write()[i as usize].complete = true;
-            seeder_torrent.inner.pieces.write()[i as usize].ok = true;
+            seeder_torrent.inner.pieces_mut()[i as usize].complete = true;
+            seeder_torrent.inner.pieces_mut()[i as usize].ok = true;
         }
     }
 
@@ -363,7 +363,7 @@ async fn test_magnet_ut_metadata_transfer() {
             let end = (start + piece_obj.length as usize).min(TOTAL_SIZE);
             p_storage.write_at(&raw_data[start..end], 0).unwrap();
             p_storage.mark_complete().unwrap();
-            seeder_torrent.inner.pieces.write()[i as usize].complete = true;
+            seeder_torrent.inner.pieces_mut()[i as usize].complete = true;
         }
     }
 

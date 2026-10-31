@@ -235,7 +235,7 @@ pub fn seed_memory(
         let end = (start + piece_obj.length as usize).min(data.len());
         p_storage.write_at(&data[start..end], 0).unwrap();
         p_storage.mark_complete().unwrap();
-        if let Some(slot) = torrent.inner.pieces.write().get_mut(i as usize) {
+        if let Some(slot) = torrent.inner.pieces_mut().get_mut(i as usize) {
             slot.complete = true;
             slot.ok = true;
         }

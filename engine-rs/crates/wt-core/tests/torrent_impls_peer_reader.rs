@@ -11,7 +11,7 @@ use wt_core::peer_conn::PeerTorrent;
 use wt_core::reader::{PieceRange, ReaderHost};
 use wt_core::storage_adapter::MemoryClientStorage;
 use wt_core::torrent::TorrentInner;
-use wt_core::torrent_impls::{init_book_and_glue, note_peer_piece, peer_key_from_addr};
+use wt_core::torrent_impls::{note_peer_piece, peer_key_from_addr};
 use wt_types::{FileInfo, Info, InfoHash, PiecePriority, BLOCK_SIZE};
 
 fn test_info(num_pieces: u32, piece_len: i64) -> Info {
@@ -61,37 +61,20 @@ fn peer_torrent_chunk_io_assignment_hedge_meta_flags() {
 
     let info = Arc::new(test_info(4, 32 * 1024));
     t.set_info(Arc::clone(&info)).expect("set_info");
-    init_book_and_glue(&t, &info);
 
     assert!(PeerTorrent::have_info(t.as_ref()));
     assert_eq!(PeerTorrent::num_pieces(t.as_ref()), 4);
     assert_eq!(PeerTorrent::piece_length(t.as_ref()), 32 * 1024);
     assert_eq!(PeerTorrent::chunk_size(t.as_ref()), BLOCK_SIZE);
 
-    {
-        let mut book = t.book.write();
-        let b = book.as_mut().expect("book");
-        b.set_complete_cached(0, true, false);
-        b.set_file_priority_exact(0, 4, PiecePriority::Normal);
-    }
-
     let chunk = vec![0x7Au8; BLOCK_SIZE as usize];
     PeerTorrent::write_chunk(t.as_ref(), 0, 0, &chunk).unwrap();
     PeerTorrent::mark_chunk_dirty(t.as_ref(), 0);
     assert!(PeerTorrent::chunk_dirty(t.as_ref(), 0));
-    assert!(t
-        .book
-        .read()
-        .as_ref()
-        .unwrap()
-        .piece_partially_downloaded(0));
+    assert!(t.pieces.read().first().expect("piece 0").partial);
 
     let got = PeerTorrent::read_chunk(t.as_ref(), 0, 0, BLOCK_SIZE).unwrap();
     assert_eq!(&got[..], &chunk[..]);
-
-    PeerTorrent::mark_chunk_requested(t.as_ref(), 1);
-    assert!(t.book.read().as_ref().unwrap().chunk_is_requested(1));
-    PeerTorrent::clear_chunk_requested(t.as_ref(), 1);
 
     let pk = PeerTorrent::peer_key(t.as_ref(), SocketAddr::from((Ipv4Addr::LOCALHOST, 1)));
     note_peer_piece(&t, pk, 0, true);
@@ -129,13 +112,6 @@ fn reader_host_have_wait_read_positions() {
     let t = fresh_torrent();
     let info = Arc::new(test_info(2, 32 * 1024));
     t.set_info(Arc::clone(&info)).unwrap();
-    init_book_and_glue(&t, &info);
-    {
-        let mut book = t.book.write();
-        let b = book.as_mut().unwrap();
-        b.set_complete_cached(0, true, false);
-        b.set_complete_cached(1, true, false);
-    }
 
     let host: Arc<dyn ReaderHost> = t.clone();
     assert!(host.has_info());
@@ -184,9 +160,6 @@ fn webtor_snapshot_preserves_live_peer_request_capacity() {
         state.outstanding_requests.extend(0..64);
     }
     let key = peer_key_from_addr(addr);
-    t.conns.write().insert(addr, conn.clone());
-    let live = PeerTorrent::webtor_peer_snap(t.as_ref(), key).unwrap();
-    assert_eq!(live.nominal_max, 128);
     // The handler publishes this same snapshot path for the HOL/hedge/steal consumers.
     PeerTorrent::update_peer_snapshot(t.as_ref(), conn.peer_conn_info());
     let snap = PeerTorrent::webtor_peer_snap(t.as_ref(), key).unwrap();
@@ -200,12 +173,7 @@ fn webtor_snapshot_preserves_live_peer_request_capacity() {
         (200, 500, 0, 400),
         (200, 100, 0, 100),
         (0, 500, 0, 1),
-        (
-            100000,
-            100000,
-            0,
-            ((1 << 20) - (1 << 19) - 5) / 17,
-        ),
+        (100000, 100000, 0, ((1 << 20) - (1 << 19) - 5) / 17),
     ] {
         let mut state = conn.inner.write();
         state.peak_requests = peak;
@@ -220,4 +188,118 @@ fn webtor_snapshot_preserves_live_peer_request_capacity() {
             expected
         );
     }
+}
+
+#[test]
+fn peer_request_snapshot_copies_only_candidate_assignments() {
+    use wt_core::strategy::DesiredPeerSnapshot;
+    let t = fresh_torrent();
+    let info = Arc::new(test_info(512, 64 * 1024));
+    t.set_info(info.clone()).unwrap();
+    {
+        let mut pieces = t.pieces_mut();
+        for p in pieces.iter_mut() {
+            p.priority = PiecePriority::Normal;
+        }
+    }
+    let owner = SocketAddr::from((Ipv4Addr::LOCALHOST, 9000));
+    let owner_key = peer_key_from_addr(owner);
+    let when = Instant::now();
+    for req in 0..2048 {
+        t.request_state.write().insert(
+            req,
+            wt_core::picker::ActiveRequest {
+                peer: owner,
+                when,
+                cancelled: false,
+            },
+        );
+        t.assignments.write().insert(req, (owner_key, when));
+    }
+    let mut has_piece = vec![false; 512];
+    has_piece[0] = true;
+    let peer = DesiredPeerSnapshot {
+        peer_id: owner_key,
+        has_piece,
+        peer_choking: false,
+        peer_allowed_fast: vec![false; 512],
+        outstanding: vec![],
+        cancelled: vec![],
+        nominal_max_requests: 64,
+    };
+    let start = Instant::now();
+    let (snapshot, _) = t.desired_request_context_for_peer(&peer);
+    eprintln!("snapshot with 2048 outstanding: {:?}", start.elapsed());
+    assert_eq!(snapshot.piece_of_request.len(), 4);
+    assert_eq!(
+        snapshot.assignments.len(),
+        4,
+        "a per-peer snapshot must not clone assignments outside its candidate blocks"
+    );
+    assert!(
+        snapshot
+            .assignments
+            .values()
+            .all(|a| a.peer_outstanding == 2048),
+        "steal ordering still needs the holder's full outstanding count"
+    );
+}
+
+#[test]
+#[ignore = "manual request refill CPU benchmark"]
+fn request_refill_cpu_benchmark() {
+    use wt_core::strategy::{
+        compute_desired_requests, sort_requests_for_peer, DesiredPeerSnapshot, RequestTuning,
+    };
+    let t = fresh_torrent();
+    let info = Arc::new(test_info(8192, 1024 * 1024));
+    t.set_info(info).unwrap();
+    for p in t.pieces_mut().iter_mut() {
+        p.priority = PiecePriority::Normal;
+    }
+    let when = Instant::now();
+    for req in 0..4096 {
+        let owner = SocketAddr::from((Ipv4Addr::LOCALHOST, 9000 + (req % 32) as u16));
+        t.request_state.write().insert(
+            req,
+            wt_core::picker::ActiveRequest {
+                peer: owner,
+                when,
+                cancelled: false,
+            },
+        );
+        t.assignments
+            .write()
+            .insert(req, (peer_key_from_addr(owner), when));
+    }
+    let peer = DesiredPeerSnapshot {
+        peer_id: 1,
+        has_piece: vec![true; 8192],
+        peer_choking: false,
+        peer_allowed_fast: vec![false; 8192],
+        outstanding: vec![],
+        cancelled: vec![],
+        nominal_max_requests: 128,
+    };
+    let mut context_time = Duration::ZERO;
+    let mut sort_time = Duration::ZERO;
+    let mut candidates = 0;
+    for _ in 0..32 {
+        let start = Instant::now();
+        let (snapshot, order) = t.desired_request_context_for_peer(&peer);
+        context_time += start.elapsed();
+        let mut desired =
+            compute_desired_requests(&snapshot, &peer, &order, &RequestTuning::default());
+        let start = Instant::now();
+        sort_requests_for_peer(
+            &mut desired.request_indexes,
+            &snapshot,
+            &peer,
+            &desired.piece_states,
+        );
+        sort_time += start.elapsed();
+        candidates = desired.request_indexes.len();
+        std::hint::black_box(&desired);
+    }
+    println!("32 refills: context={context_time:?} sort={sort_time:?} candidates={candidates}");
 }

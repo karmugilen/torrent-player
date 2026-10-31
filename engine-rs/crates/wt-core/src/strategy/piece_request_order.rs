@@ -19,8 +19,8 @@ pub struct PieceRequestOrderKey {
 
 /// State that participates in (or is stored alongside) the order.
 ///
-/// `availability` and `partial` are kept for callers / diagnostics; Webtor
-/// ordering ignores them (priority + index + infohash only).
+/// `availability` and `partial` only order `Normal` pieces; see
+/// [`super::order::background_rank`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PieceRequestOrderState {
     pub availability: i32,
@@ -64,8 +64,7 @@ impl PartialOrd for Ordered {
 
 impl Ord for Ordered {
     fn cmp(&self, other: &Self) -> Ordering {
-        // piece_order_cmp already includes priority, index, infohash — a total
-        // order over distinct keys. Availability/partial are ignored (Webtor).
+        // piece_order_cmp ends in index, infohash — a total order over distinct keys.
         piece_order_cmp(&self.0, &other.0)
     }
 }

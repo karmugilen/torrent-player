@@ -12,7 +12,7 @@ which `scripts/play-bundle.sh` sets; the content provider authority follows it.
 ## What the code already meets (2.3.0, versionCode 99)
 
 - Target API 36 (Android 16), required for new apps and updates since 2026-08-31.
-- 64-bit native code with 16 KB page alignment (`engine-go/build.sh` links with
+- 64-bit native code with 16 KB page alignment (`engine-rs/build-android.sh` links with
   `-z max-page-size=16384`). Check: `llvm-readelf -lW libengine.so` shows `0x4000`.
 - Android 15+ dataSync time limit: `PlayService.onTimeout` stops the service in
   time and posts a notice; opening the app resets the 6-hour budget.

@@ -4,6 +4,8 @@
 Usage: peers_compare.py <engine-host> <label: go-*|rust-*> <magnet> <seconds>
 Ubuntu magnet: magnet:?xt=urn:btih:d160b8d8ea35a5b4e52837468fc8f03d55cef1f7&tr=https%3A%2F%2Ftorrent.ubuntu.com%2Fannounce
 A result.json and host.log are retained in ~/.cache/wt-tmp/peers-<label>.
+Optional env: WT_BENCH_MAX_PEERS (55), WT_BENCH_HALF_OPEN (Rust host only),
+WT_BENCH_DIAL_RATE (30). Leave unset for the standard Go parity campaign.
 """
 import collections
 import hashlib
@@ -24,6 +26,12 @@ import urllib.request
 
 def main():
     binary, label, magnet, seconds = sys.argv[1:]
+    max_peers = int(os.environ.get('WT_BENCH_MAX_PEERS', '55'))
+    half_open = os.environ.get('WT_BENCH_HALF_OPEN') if label.startswith('rust-') else None
+    # Go SettingsRequest.DialRatePerSec is *int; JSON 30.0 fails to decode.
+    dial_rate = int(float(os.environ.get('WT_BENCH_DIAL_RATE', '30')))
+    if not 1 <= max_peers <= 500 or (half_open is not None and int(half_open) < 1):
+        raise ValueError('invalid benchmark peer limits')
     seconds = int(seconds)
     work = pathlib.Path.home() / '.cache/wt-tmp' / f'peers-{label}'
     work.mkdir(parents=True, exist_ok=True)
@@ -34,24 +42,31 @@ def main():
     dash = '-' if label.startswith('go-') else '--'
     result = {'label': label, 'requested_seconds': seconds, 'samples': [],
               'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              'requested_port': port}
+              'requested_port': port, 'configured_max_peers': max_peers,
+              'requested_half_open': int(half_open) if half_open else None,
+              'dial_rate_per_sec': dial_rate}
     if pathlib.Path(binary).is_file():
         result['binary_sha256'] = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest()
     stop = threading.Event()
     process = None
 
     def call(method, path, body=None, timeout=10):
+        call_started = time.monotonic()
         req = urllib.request.Request(
             f'http://127.0.0.1:{port}{path}', method=method,
             data=json.dumps(body).encode() if body is not None else None)
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read() or b'null')
+            payload = json.loads(response.read() or b'null')
+        if method == 'POST':
+            result.setdefault('setup_calls_s', {})[path] = round(time.monotonic() - call_started, 3)
+        return payload
 
     try:
+        extra_args = ['--half-open-conns', half_open] if half_open else []
         with open(work / 'host.log', 'wb') as log:
             process = subprocess.Popen(
                 [binary, dash+'port', str(port), dash+'path', str(work / 'data'),
-                 dash+'max-peers', '55'], stdout=log, stderr=subprocess.STDOUT,
+                 dash+'max-peers', str(max_peers), *extra_args], stdout=log, stderr=subprocess.STDOUT,
                 env={**os.environ, 'WT_SWARM_DIAGNOSTICS': '1'})
         ready_deadline = time.monotonic() + 20
         while time.monotonic() < ready_deadline:
@@ -72,11 +87,11 @@ def main():
         else:
             raise RuntimeError('host did not become ready in 20 seconds')
         call('POST', '/settings', {
-            'maxPeers': 55, 'dialRatePerSec': 30, 'peerExploration': True,
+            'maxPeers': max_peers, 'dialRatePerSec': dial_rate, 'peerExploration': True,
             'claudeSeekMode': True, 'hedgeRequests': True, 'slowPeerYield': True,
             'dropChokers': True, 'seedingEnabled': True,
         })
-        started = time.monotonic()
+        started = torrent_started = time.monotonic()
         tid = call('POST', '/add', {'torrentId': magnet, 'prepare': True})['id']
         while True:
             status = call('GET', f'/torrent/{tid}')
@@ -110,6 +125,7 @@ def main():
 
         threading.Thread(target=reader, daemon=True).start()
         started = time.monotonic()
+        result['setup_s'] = round(started - torrent_started, 3)
         with open(work / 'diagnostics.jsonl', 'w') as diagnostics:
             for sample_at in range(5, seconds + 1, 5):
                 stop.wait(max(0, started + sample_at - time.monotonic()))
@@ -119,6 +135,7 @@ def main():
                 top = sorted(peers, key=lambda p: p.get('downloadRate', 0), reverse=True)[:5]
                 sample = {
                     'elapsed_s': round(time.monotonic() - started, 2),
+                    'elapsed_since_add_s': round(time.monotonic() - torrent_started, 2),
                     'peers': status.get('numPeers', 0),
                     'mib_s': round(status.get('downloadSpeed', 0) / 2**20, 3),
                     'downloaded': status.get('downloaded', 0),

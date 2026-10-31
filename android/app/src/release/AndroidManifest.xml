@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Keep release speed measurements observable through authorized adb. -->
+        <profileable android:shell="true" />
+    </application>
+</manifest>

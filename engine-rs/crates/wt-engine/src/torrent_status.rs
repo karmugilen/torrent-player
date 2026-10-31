@@ -7,6 +7,9 @@ use crate::types::FileView;
 
 impl TorrentRecord {
     pub(super) fn refresh_status(&mut self) {
+        if let Some(progress) = &self.verification {
+            self.checked_pieces = progress.checked_pieces.load(Ordering::SeqCst);
+        }
         let Some(info) = self.torrent.info() else {
             return;
         };
@@ -42,6 +45,7 @@ impl TorrentRecord {
         }
         self.downloaded = 0;
         self.verified_bytes = 0;
+        let dirty = &self.torrent.inner.dirty_chunks;
         for (view, file) in self.files.iter_mut().zip(files.iter()) {
             let start = file.offset();
             let end = start + file.length();
@@ -59,13 +63,20 @@ impl TorrentRecord {
                     if changed {
                         file_verified += overlap;
                     }
-                } else {
-                    for &offset in &piece.chunks_received {
+                } else if piece.partial {
+                    let begin_req = self.torrent.inner.piece_request_index_begin(i as u32);
+                    let mut piece_received = 0i64;
+                    for c in 0..piece.chunks_total as u32 {
+                        let offset = c * wt_types::BLOCK_SIZE;
+                        if !dirty.contains(begin_req + c) {
+                            continue;
+                        }
                         let block_start = piece_start + i64::from(offset);
                         let block_end =
                             (block_start + i64::from(wt_types::BLOCK_SIZE)).min(piece_end);
-                        received += (end.min(block_end) - start.max(block_start)).max(0);
+                        piece_received += (end.min(block_end) - start.max(block_start)).max(0);
                     }
+                    received += piece_received.min(overlap);
                 }
             }
             if changed {
@@ -81,15 +92,14 @@ impl TorrentRecord {
             self.verified_bytes += view.verified_bytes;
         }
         self.piece_verified = verified;
+        self.next_preload = super::EngineServer::next_preload_view(self);
+        // stats() acquires the piece lock again. Never retain it
+        // across that call: a queued writer can block a recursive read.
         drop(pieces);
         let stats = self.torrent.stats();
         self.uploaded = stats.conn_stats.bytes_written_data;
-        self.rates.sample(
-            Instant::now(),
-            stats.conn_stats.bytes_read_data,
-            stats.conn_stats.bytes_written_data,
-            self.paused || self.torrent.closed(),
-        );
+        // The one-second sampler owns rates. UI requests must not change the
+        // sample interval or consume a byte delta just before the next tick.
     }
 }
 
@@ -114,4 +124,94 @@ impl EngineServer {
         self.download_speed.store(down, Ordering::SeqCst);
         self.upload_speed.store(up, Ordering::SeqCst);
     }
+
+    /// The per-second transfer log, on its own thread so it can never stall the
+    /// engine's clock, and a panic in it is written down instead of lost.
+    pub(crate) fn start_transfer_log(server: &std::sync::Arc<Self>) {
+        let weak = std::sync::Arc::downgrade(server);
+        let _ = std::thread::Builder::new().name("wt-probe".into()).spawn(move || {
+            write_probe_line("log started");
+            let mut tick = 0u64;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let Some(server) = weak.upgrade() else {
+                    return;
+                };
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    server.log_transfer_probe(tick);
+                }));
+                if done.is_err() {
+                    write_probe_line("log panicked");
+                }
+                tick += 1;
+            }
+        });
+    }
+
+    fn log_transfer_probe(&self, tick: u64) {
+        let counters = wt_types::probe::take_line();
+        let records: Vec<_> = self.records.read().values().cloned().collect();
+        // Written before any torrent lock: a silent gap after it means a hang.
+        if tick % 5 == 0 {
+            write_probe_line(&format!("alive torrents={} {counters}", records.len()));
+        }
+        for record in records {
+            let rec = record.read();
+            let skip = if rec.paused {
+                Some("paused")
+            } else if rec.torrent.closed() {
+                Some("closed")
+            } else if rec.torrent.info().is_none() {
+                Some("no-metadata")
+            } else {
+                None
+            };
+            if let Some(skip) = skip {
+                if tick % 5 == 0 {
+                    write_probe_line(&format!("skip {} {skip}", &rec.info_hash[..8.min(rec.info_hash.len())]));
+                }
+                continue;
+            }
+            let peers = rec.torrent.inner.probe_line();
+            let storage = self.storage.get_storage(&rec.info_hash)
+                .map_or_else(|| "storage=none".to_string(), |st| st.probe_line());
+            let mode = if rec.direct_play { "PLAY" } else { "SAVE" };
+            write_probe_line(&format!(
+                "{mode} {} down={}K up={}K | {counters}| {storage} | {peers}",
+                &rec.info_hash[..8.min(rec.info_hash.len())],
+                rec.rates.down / 1024,
+                rec.rates.up / 1024,
+            ));
+        }
+    }
+}
+
+/// To logcat, and to `files/wtsave.log` in the app's external folder, which adb
+/// can pull: logcat's buffer here holds only a couple of minutes.
+fn write_probe_line(line: &str) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    /// Older lines are dropped past this.
+    const MAX_LOG_BYTES: u64 = 16 << 20;
+    static FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+    log::info!(target: "WTSAVE", "{line}");
+    let file = FILE.get_or_init(|| {
+        let package = std::fs::read("/proc/self/cmdline").unwrap_or_default();
+        let package = String::from_utf8_lossy(package.split(|&b| b == 0).next().unwrap_or_default()).into_owned();
+        let path = format!("/storage/emulated/0/Android/data/{package}/files/wtsave.log");
+        let opened = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+        if let Err(err) = &opened {
+            log::info!(target: "WTSAVE", "no log file at {path}: {err}");
+        }
+        Mutex::new(opened.ok())
+    });
+    let Ok(mut file) = file.lock() else { return };
+    let Some(file) = file.as_mut() else { return };
+    if file.metadata().is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
+        let _ = file.set_len(0);
+    }
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let _ = writeln!(file, "{at} {line}");
 }

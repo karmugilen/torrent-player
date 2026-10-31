@@ -19,6 +19,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 hex.workspace = true
 sha1.workspace = true
+socket2.workspace = true
 
 # HTTP(S) tracker + webseed (pure Rust TLS)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

@@ -7,6 +7,7 @@ pub mod handshake;
 pub mod message;
 pub mod mse;
 pub mod transport;
+mod udp_batch;
 pub mod utp;
 
 // Re-export common types

@@ -209,7 +209,7 @@ fn test_direct_play_local_peer_seeks_beyond_ram_budget() {
                     "[DEBUG-play] peers={:?} requests={:?} dirty={:?}",
                     rec.torrent.peer_conns(),
                     *rec.torrent.inner.request_state.read(),
-                    *rec.torrent.inner.dirty_chunks.read()
+                    rec.torrent.inner.dirty_chunks
                 );
                 panic!(
                     "read stalled at {offset}: stats={:?} cache={} max={} window={:?} pieces={:?}",

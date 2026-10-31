@@ -56,6 +56,7 @@
 mod bitset;
 mod book;
 mod bytes;
+mod chunk_bits;
 mod piece;
 mod priority;
 mod runs;
@@ -64,6 +65,7 @@ mod watch;
 pub use bitset::Bitset;
 pub use book::PieceBook;
 pub use bytes::{file_bytes_completed, file_bytes_left};
+pub use chunk_bits::ChunkBits;
 pub use piece::PieceFlags;
 pub use priority::{combine_pure_priority, raise_priority};
 pub use runs::{format_piece_state_run, PiecePublicState, PieceStateRun};

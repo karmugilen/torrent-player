@@ -25,9 +25,17 @@ impl TransferRates {
     }
 
     pub fn sample(&mut self, now: Instant, downloaded: i64, uploaded: i64, paused: bool) {
+        if paused {
+            self.down = 0;
+            self.up = 0;
+            self.last_sample = Some(now);
+            self.downloaded = downloaded;
+            self.uploaded = uploaded;
+            return;
+        }
         let elapsed = self
             .last_sample
-            .map(|t| now.duration_since(t).as_secs_f64())
+            .map(|t| now.saturating_duration_since(t).as_secs_f64())
             .unwrap_or(0.0);
         if self.last_sample.is_none() || downloaded < self.downloaded || uploaded < self.uploaded {
             self.down = 0;

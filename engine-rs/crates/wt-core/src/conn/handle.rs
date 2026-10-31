@@ -18,6 +18,12 @@ pub trait ConnHandler: Send + 'static {
     /// Invoked whenever a new BitTorrent message arrives from the peer.
     fn on_message(&mut self, handle: &ConnHandle, msg: Message) -> Result<()>;
 
+    /// A block, borrowed from the read buffer so receiving it copies only once.
+    fn on_piece(&mut self, handle: &ConnHandle, index: u32, begin: u32, data: &[u8]) -> Result<()> {
+        let piece = bytes::Bytes::copy_from_slice(data);
+        self.on_message(handle, Message::Piece { index, begin, piece })
+    }
+
     /// Invoked when the connection closes, with an optional error description.
     fn on_closed(&mut self, handle: &ConnHandle, reason: &str);
 
@@ -52,6 +58,10 @@ pub struct ConnHandleInner {
     pub write_waker: Arc<Notify>,
     pub read_waker: Notify,
     refocus_requested: AtomicBool,
+    update_requested: AtomicBool,
+    wake_pending: AtomicBool,
+    /// Blocks the peer cancelled before we sent them (Go `peerRequests`).
+    peer_cancels: parking_lot::Mutex<std::collections::HashSet<(u32, u32, u32)>>,
 }
 
 impl ConnHandle {
@@ -89,6 +99,9 @@ impl ConnHandle {
                 write_waker,
                 read_waker: Notify::new(),
                 refocus_requested: AtomicBool::new(false),
+                update_requested: AtomicBool::new(false),
+                wake_pending: AtomicBool::new(false),
+                peer_cancels: parking_lot::Mutex::new(std::collections::HashSet::new()),
             }),
         }
     }
@@ -124,8 +137,12 @@ impl ConnHandle {
     }
 
     pub fn request_refocus(&self) {
-        self.inner.refocus_requested.store(true, Ordering::Relaxed);
+        self.mark_refocus();
         self.wake();
+    }
+
+    pub(crate) fn mark_refocus(&self) {
+        self.inner.refocus_requested.store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn refocus_pending(&self) -> bool {
@@ -136,9 +153,51 @@ impl ConnHandle {
         self.inner.refocus_requested.swap(false, Ordering::Relaxed)
     }
 
+    /// Go `onPeerSentCancel`: a queued, unsent block is dropped by the writer.
+    pub(crate) fn note_peer_cancel(&self, index: u32, begin: u32, length: u32) {
+        let mut cancels = self.inner.peer_cancels.lock();
+        // Cancels for blocks already sent stay until re-requested; bound them.
+        if cancels.len() >= 8192 {
+            cancels.clear();
+        }
+        cancels.insert((index, begin, length));
+    }
+
+    pub(crate) fn clear_peer_cancel(&self, index: u32, begin: u32, length: u32) {
+        let mut cancels = self.inner.peer_cancels.lock();
+        if !cancels.is_empty() {
+            cancels.remove(&(index, begin, length));
+        }
+    }
+
+    /// Whether a queued block was cancelled; consumes the cancel.
+    pub(crate) fn take_peer_cancel(&self, index: u32, begin: u32, length: u32) -> bool {
+        let mut cancels = self.inner.peer_cancels.lock();
+        !cancels.is_empty() && cancels.remove(&(index, begin, length))
+    }
+
+    /// Go `onNeedUpdateRequests`: recompute requests on the next wake even
+    /// when the pipeline is not yet low. Unlike refocus, keeps queued requests.
+    pub fn request_update(&self) {
+        self.inner.update_requested.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    pub(crate) fn take_update_request(&self) -> bool {
+        self.inner.update_requested.swap(false, Ordering::Relaxed)
+    }
+
     /// Coalesce request-update notifications until the reader handles them.
     pub fn wake(&self) {
+        self.inner.wake_pending.store(true, Ordering::Relaxed);
         self.inner.read_waker.notify_one();
+    }
+
+    /// Whether a wake came since the last call. The reader polls this between
+    /// messages: its select prefers the socket, so a busy peer would otherwise
+    /// not see a seek or a cancel until its next timer.
+    pub(crate) fn take_wake_pending(&self) -> bool {
+        self.inner.wake_pending.swap(false, Ordering::Relaxed)
     }
 
     pub(crate) fn read_waker(&self) -> &Notify {

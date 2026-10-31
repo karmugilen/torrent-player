@@ -155,6 +155,8 @@ pub struct HedgeMove<Id> {
     pub req: RequestIndex,
     pub holder: Id,
     pub hedger: Id,
+    /// Sent before the block is overdue: spends the seek's hedge budget.
+    pub eager: bool,
 }
 
 /// Decide hedges (Go `webtorHedgeHeadOfLine` body).
@@ -176,6 +178,7 @@ where
     if !tuning.hedge {
         return out;
     }
+    let eager = torrent.eager_hedge();
     let Some(head) = head_of_line(torrent) else {
         return out;
     };
@@ -207,7 +210,11 @@ where
             continue;
         };
         let learned_od = learned_overdue_for(holder, r);
-        if !block_is_overdue(clock, tuning, when, holder.rtt(), learned_od) {
+        // Right after a seek the first blocks are hedged without waiting:
+        // the first copy to arrive wins and the other is discarded unwritten.
+        let overdue = block_is_overdue(clock, tuning, when, holder.rtt(), learned_od);
+        let seek_head = eager && !overdue && r < focus.saturating_add(SEEK_HEDGE_BLOCKS);
+        if !seek_head && !overdue {
             continue;
         }
         let piece = torrent.piece_of_request(r);
@@ -252,11 +259,16 @@ where
                 req: r,
                 holder: holder_id,
                 hedger: best.id(),
+                eager: seek_head,
             });
         }
     }
     out
 }
+
+/// Blocks at a new playhead hedged immediately after a seek (1 MiB: what a
+/// player needs to decode its first frame, not just the first block).
+pub const SEEK_HEDGE_BLOCKS: RequestIndex = 64;
 
 /// Whether hedge answered bookkeeping should clear (`webtorHedgeAnswered`).
 pub fn hedge_answered<Id: PartialEq>(

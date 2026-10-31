@@ -11,7 +11,9 @@ use tokio::sync::{mpsc, watch, Notify};
 use wt_types::{InfoHash, PeerId, PeerSource, Transport};
 use wt_wire::handshake::{default_peer_extension_bytes, handshake_incoming, PeerExtensionBits};
 use wt_wire::message::Message;
-use wt_wire::mse::{handle_encryption, CryptoMethod};
+use wt_wire::mse::{
+    default_crypto_selector, handle_encryption, CryptoMethod, HeaderObfuscationPolicy,
+};
 use wt_wire::utp::UtpSocket;
 
 use crate::conn::half_open::HalfOpenTracker;
@@ -263,6 +265,20 @@ async fn handle_inbound_connection(
     .map_err(|_| CoreError::Other("incoming handshake timeout".to_string()))?
 }
 
+/// Payload cipher for an inbound MSE handshake. Go `mse.DefaultCryptoSelector`:
+/// plaintext whenever the dialer offers it, for speed; the header stays
+/// obfuscated either way. Choosing RC4 whenever obfuscation was preferred,
+/// which is the default, encrypted every byte of every upload in pure Rust
+/// and capped seeding near 220 MiB/s on loopback. A policy that requires
+/// obfuscation keeps RC4, as the dialer then offers only RC4.
+fn select_inbound_crypto(policy: HeaderObfuscationPolicy, offered: CryptoMethod) -> CryptoMethod {
+    if policy.preferred && policy.require_preferred && offered.supports_rc4() {
+        CryptoMethod::RC4
+    } else {
+        default_crypto_selector(offered)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_inbound_inner(
     raw_stream: Box<dyn PeerStream>,
@@ -277,17 +293,7 @@ async fn handle_inbound_inner(
     // 1. MSE Handshake
     let skeys: Vec<Vec<u8>> = (skey_provider)().into_iter().map(|k| k.to_vec()).collect();
     let mse_policy = cfg.header_obfuscation_policy;
-    let selector = move |methods: CryptoMethod| {
-        if mse_policy.preferred && methods.supports_rc4() {
-            CryptoMethod::RC4
-        } else if !mse_policy.preferred && methods.supports_plaintext() {
-            CryptoMethod::PLAINTEXT
-        } else if !mse_policy.require_preferred && methods.supports_rc4() {
-            CryptoMethod::RC4
-        } else {
-            CryptoMethod::PLAINTEXT
-        }
-    };
+    let selector = move |methods: CryptoMethod| select_inbound_crypto(mse_policy, methods);
 
     let (encrypted_stream, _is_header_enc, crypto_method) =
         handle_encryption(raw_stream, skeys, mse_policy, selector)
@@ -346,4 +352,33 @@ async fn handle_inbound_inner(
         peer_id,
         peer_extension_bits: peer_ext_bits,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(preferred: bool, require_preferred: bool) -> HeaderObfuscationPolicy {
+        HeaderObfuscationPolicy {
+            preferred,
+            require_preferred,
+        }
+    }
+
+    #[test]
+    fn inbound_prefers_plaintext_payload_like_go() {
+        // Default policy: obfuscated header, plaintext payload when offered.
+        let default = HeaderObfuscationPolicy::default();
+        assert_eq!(select_inbound_crypto(default, CryptoMethod::ALL), CryptoMethod::PLAINTEXT);
+        assert_eq!(select_inbound_crypto(policy(false, false), CryptoMethod::ALL), CryptoMethod::PLAINTEXT);
+        // RC4 only when it is the only offer.
+        assert_eq!(select_inbound_crypto(default, CryptoMethod::RC4), CryptoMethod::RC4);
+    }
+
+    #[test]
+    fn inbound_required_obfuscation_keeps_rc4() {
+        let required = policy(true, true);
+        assert_eq!(select_inbound_crypto(required, CryptoMethod::ALL), CryptoMethod::RC4);
+        assert_eq!(select_inbound_crypto(required, CryptoMethod::PLAINTEXT), CryptoMethod::PLAINTEXT);
+    }
 }

@@ -73,6 +73,11 @@ pub struct ClientConfig {
     pub torrent_peers_high_water: usize,
     pub torrent_peers_low_water: usize,
     pub http_user_agent: String,
+    /// Map the listen port on the local router (UPnP, else NAT-PMP), like Go
+    /// `forwardPort`. Off by default so tests never touch a real router.
+    pub port_forwarding: bool,
+    /// BEP 14 Local Service Discovery of peers on the local network.
+    pub local_service_discovery: bool,
     /// Dial hook shared by HTTP, HTTPS and WebSocket trackers.
     pub tracker_dialer: Option<wt_discovery::tracker::DialerHook>,
     pub extended_handshake_client_version: String,
@@ -109,6 +114,8 @@ impl Default for ClientConfig {
             torrent_peers_high_water: 200,
             torrent_peers_low_water: 50,
             http_user_agent: "Webtor/2.0".to_string(),
+            port_forwarding: false,
+            local_service_discovery: false,
             tracker_dialer: None,
             extended_handshake_client_version: "Webtor 2.0".to_string(),
             ice_servers: Vec::new(),
@@ -197,10 +204,31 @@ pub trait PeerStream:
 }
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static> PeerStream for T {}
 
+/// Half-open dial budget derived from the established peer cap.
+///
+/// Matches the unlocked Bunny harness: raising maxPeers also raises pending
+/// dials so a 128-peer cap is not stuck behind a hard-coded 24 half-open limit.
+pub fn half_open_for_max_peers(max_peers: usize) -> (usize, usize) {
+    let peers = max_peers.clamp(1, 500);
+    let per_torrent = peers.max(24).min(500);
+    let total = peers.saturating_mul(2).max(48).min(500);
+    (per_torrent, total)
+}
+
 impl Client {
     pub fn new(cfg: ClientConfig) -> Result<Client> {
         let inner = ClientInner::new(cfg)?;
         Ok(Client { inner })
+    }
+
+    /// Update the live half-open dial budget (for example when maxPeers changes).
+    pub fn set_half_open_limits(&self, per_torrent: usize, total: usize) {
+        self.inner
+            .half_open_conns_per_torrent
+            .store(per_torrent.max(1), Ordering::Relaxed);
+        self.inner
+            .total_half_open_conns
+            .store(total.max(1), Ordering::Relaxed);
     }
 
     /// Returns the torrent and whether it was newly added.
@@ -237,6 +265,11 @@ impl Client {
         self.inner.dht_contacts()
     }
 
+    /// Redo router port mapping and LSD announces after a network change.
+    pub fn refresh_local_network(&self) {
+        self.inner.refresh_local_network();
+    }
+
     pub fn set_outgoing_tcp_conn_hook(&self, hook: Option<TcpConnHook>) {
         self.inner.set_outgoing_tcp_conn_hook(hook);
     }
@@ -267,6 +300,11 @@ impl Client {
         }
         let m: arrival::ArrivalModel =
             serde_json::from_slice(state).map_err(|e| CoreError::Other(e.to_string()))?;
+        if m.samples == 0 { return Ok(()); }
+        if !m.net_err.is_finite() || m.net_err < 0.0 || !m.net.b2.is_finite()
+            || m.net.w1.iter().flatten().chain(m.net.w2.iter()).any(|w| !w.is_finite()) {
+            return Err(CoreError::Other("invalid arrival model weights".into()));
+        }
         *self.inner.arrival_model.write() = m;
         Ok(())
     }
@@ -276,6 +314,8 @@ impl Client {
         let torrents = self.inner.torrents.read();
         for t in torrents.values() {
             let conns = t.conn_handles.read();
+            cs.add(&t.retired_conn_stats.lock());
+            cs.add(&t.webseed_stats.snapshot());
             for c in conns.values() {
                 cs.add(&c.stats().snapshot());
             }
@@ -313,6 +353,10 @@ pub struct PieceStateRun {
     pub length: u32,
 }
 
+/// Forward playhead movement that is a jump rather than playback.
+const FOCUS_WAKE_BYTES: i64 = 1 << 20;
+const REFOCUS_GAP: Duration = Duration::from_millis(50);
+
 impl Torrent {
     pub fn info_hash(&self) -> InfoHash {
         self.inner.info_hash
@@ -344,13 +388,13 @@ impl Torrent {
                     return Err(CoreError::Other("timeout waiting for info".to_string()));
                 }
             }
-            let mut guard = self.inner.change_mutex.lock();
             let wait_dur = deadline
                 .map(|dl| dl.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::from_millis(50));
-            self.inner
-                .change_cond
-                .wait_for(&mut guard, wait_dur.min(Duration::from_millis(50)));
+            self.inner.wait_version(
+                self.inner.change_version.load(Ordering::SeqCst),
+                wait_dur.min(Duration::from_millis(50)),
+            );
         }
     }
 
@@ -388,13 +432,38 @@ impl Torrent {
     }
 
     pub fn set_piece_priority(&self, piece: PieceIndex, p: PiecePriority) {
-        let mut pieces = self.inner.pieces.write();
-        if let Some(pe) = pieces.get_mut(piece as usize) {
-            pe.priority = p;
-            pe.base_priority = p;
+        self.set_piece_priorities([(piece, p)]);
+    }
+
+    /// Publish a playback window with one lock and one swarm wakeup. Waking
+    /// every connection once per piece stalls control requests on large files.
+    pub fn set_piece_priorities(
+        &self,
+        priorities: impl IntoIterator<Item = (PieceIndex, PiecePriority)>,
+    ) {
+        let ranges: Vec<_> = self.inner.reader_ranges.read().values().copied().collect();
+        let (now, readahead) = crate::reader::reader_piece_priorities(&ranges);
+        let mut pieces = self.inner.pieces_mut();
+        let mut changed = false;
+        for (piece, p) in priorities {
+            if let Some(pe) = pieces.get_mut(piece as usize) {
+                let reader = if now.contains(&piece) {
+                    PiecePriority::Now
+                } else if readahead.contains(&piece) {
+                    PiecePriority::High
+                } else {
+                    PiecePriority::None
+                };
+                let effective = p.max(reader);
+                changed |= pe.priority != effective || pe.base_priority != p;
+                pe.priority = effective;
+                pe.base_priority = p;
+            }
         }
         drop(pieces);
-        self.inner.bump_change();
+        if changed {
+            self.inner.bump_change();
+        }
     }
 
     pub fn piece_state(&self, piece: PieceIndex) -> PieceState {
@@ -443,11 +512,28 @@ impl Torrent {
     }
 
     pub fn update_piece_completion(&self, piece: PieceIndex) {
+        if self.refresh_piece_completion(piece) {
+            self.inner.bump_change();
+        }
+    }
+
+    /// Refresh every piece with one scheduler wake instead of one per piece.
+    pub fn update_all_piece_completion(&self) {
+        let mut refreshed = false;
+        for piece in 0..self.num_pieces() {
+            refreshed |= self.refresh_piece_completion(piece);
+        }
+        if refreshed {
+            self.inner.bump_change();
+        }
+    }
+
+    fn refresh_piece_completion(&self, piece: PieceIndex) -> bool {
         let Some(storage) = self.inner.storage.read().clone() else {
-            return;
+            return false;
         };
         let Some(info) = self.inner.info.read().clone() else {
-            return;
+            return false;
         };
         let piece_obj = info.piece(piece);
         let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece));
@@ -464,13 +550,12 @@ impl Torrent {
         // piece is no longer readable, treat it as an eviction.
         let had_local_data = {
             let pieces = self.inner.pieces.read();
-            let dirty = self.inner.dirty_chunks.read();
             let p = pieces.get(piece as usize);
             let was_complete = p.map(|p| p.complete).unwrap_or(false);
             let was_partial = p
-                .map(|p| p.partial || !p.chunks_received.is_empty())
+                .map(|p| p.partial)
                 .unwrap_or(false);
-            let has_dirty = (begin..end).any(|r| dirty.contains(&r));
+            let has_dirty = self.inner.dirty_chunks.any_in_range(begin, end);
             was_complete || was_partial || has_dirty
         };
         let storage_lost = !complete
@@ -479,8 +564,15 @@ impl Torrent {
                 let mut probe = [0u8];
                 piece_storage.read_at(&mut probe, 0).is_err()
             };
+        if storage_lost {
+            // Direct Play marks an evicted partial piece as lost. Clearing
+            // only the scheduler's dirty bits leaves that storage flag set:
+            // every replacement block is then unreadable, including to the
+            // hasher. Reset both sides before requesting replacement blocks.
+            let _ = piece_storage.mark_not_complete();
+        }
         let evicted = {
-            let mut pieces = self.inner.pieces.write();
+            let mut pieces = self.inner.pieces_mut();
             if let Some(p) = pieces.get_mut(piece as usize) {
                 let evicted = (p.complete && !complete) || storage_lost;
                 p.complete = complete;
@@ -488,7 +580,6 @@ impl Torrent {
                 if evicted {
                     p.partial = false;
                     p.checking = false;
-                    p.chunks_received.clear();
                 }
                 evicted
             } else {
@@ -498,20 +589,9 @@ impl Torrent {
         // Completion and dirty/request bitmaps must agree after bounded storage
         // discards a piece, otherwise the scheduler never requests it again.
         if evicted {
-            let mut dirty = self.inner.dirty_chunks.write();
-            for req in begin..end {
-                dirty.remove(&req);
-            }
+            self.inner.dirty_chunks.remove_range(begin, end);
         }
-        if let Some(book) = self.inner.book.write().as_mut() {
-            book.set_complete_cached(piece, comp.ok, complete);
-            if evicted {
-                for req in begin..end {
-                    book.mark_chunk_pending(req);
-                }
-            }
-        }
-        self.inner.bump_change();
+        true
     }
 
     pub fn bytes_completed(&self) -> i64 {
@@ -538,6 +618,7 @@ impl Torrent {
     pub fn stats(&self) -> TorrentStats {
         let mut cs = self.inner.webseed_stats.snapshot();
         let handles = self.inner.conn_handles.read();
+        cs.add(&self.inner.retired_conn_stats.lock());
         let snapshots = self.inner.peer_snapshots.read();
         let dialing = self.inner.dialing_peers.lock();
         let pending = self
@@ -563,18 +644,10 @@ impl Torrent {
                     .count(),
             )
         } else {
-            let conns = self.inner.conns.read();
-            for c in conns.values() {
-                cs.add(&c.inner.read().stats.snapshot());
-            }
-            (
-                conns.len(),
-                conns
-                    .values()
-                    .filter(|c| c.inner.read().peer_sent_have_all)
-                    .count(),
-            )
+            (0, 0)
         };
+        drop(snapshots);
+        drop(handles);
         TorrentStats {
             conn_stats: cs,
             total_peers: total,
@@ -600,7 +673,7 @@ impl Torrent {
         self.inner
             .download_all_requested
             .store(true, Ordering::Relaxed);
-        let mut pieces = self.inner.pieces.write();
+        let mut pieces = self.inner.pieces_mut();
         for p in pieces.iter_mut() {
             if p.base_priority == PiecePriority::None {
                 p.priority = p.priority.max(PiecePriority::Normal);
@@ -615,13 +688,24 @@ impl Torrent {
         self.inner
             .data_download_disallowed
             .store(false, Ordering::Relaxed);
+        // Download (re)started: find good peers quickly. Armed on creation
+        // too, because a new torrent starts allowed and never transitions.
+        if self.inner.peer_burst_armed.swap(false, Ordering::Relaxed) {
+            self.inner.start_peer_burst();
+        }
         self.inner.wake_all_connections();
+    }
+
+    /// Network recovery etc.: connect widely again, then trim.
+    pub fn start_peer_burst(&self) {
+        self.inner.start_peer_burst();
     }
 
     pub fn disallow_data_download(&self) {
         self.inner
             .data_download_disallowed
             .store(true, Ordering::Relaxed);
+        self.inner.peer_burst_armed.store(true, Ordering::Relaxed);
         self.inner.wake_all_connections();
     }
 
@@ -675,7 +759,26 @@ impl Torrent {
         self.inner.web_seeds.write().extend(urls);
     }
 
-    pub fn announce_to_dht(&self) {}
+    /// Go `AnnounceToDht`; here also re-announces to trackers (see [`Self::rediscover`]).
+    pub fn announce_to_dht(&self) {
+        self.rediscover();
+    }
+
+    /// Go network recovery: announce to trackers now and restart DHT lookup.
+    pub fn rediscover(&self) {
+        if let Some(client) = self.inner.client.read().upgrade() {
+            client.rediscover_torrent(&self.inner);
+        }
+    }
+
+    /// Close every peer connection (Go network recovery closes the old
+    /// route's peers instead of waiting for their read deadlines).
+    pub fn close_all_peers(&self, reason: &str) {
+        let addrs: Vec<SocketAddr> = self.inner.conn_handles.read().keys().copied().collect();
+        for addr in addrs {
+            self.inner.drop_conn_addr(addr, reason);
+        }
+    }
 
     /// Go `SetMaxEstablishedConns`: store the new cap and drop worst
     /// connections until under the limit (worseConn heap order).
@@ -700,52 +803,7 @@ impl Torrent {
     }
 
     pub fn peer_conns(&self) -> Vec<PeerConnInfo> {
-        let snapshots = self.inner.peer_snapshots.read();
-        if !snapshots.is_empty() {
-            return snapshots.values().cloned().collect();
-        }
-        drop(snapshots);
-        let conns = self.inner.conns.read();
-        conns
-            .values()
-            .map(|c| {
-                let inner = c.inner.read();
-                PeerConnInfo {
-                    remote_addr: inner.remote_addr,
-                    dial_addr: c.cache_dial_addr(),
-                    peer_id: inner.peer_id,
-                    client_name: inner.client_name.clone(),
-                    transport: inner.transport,
-                    source: inner.source,
-                    encrypted: inner.encrypted,
-                    outgoing: inner.outgoing,
-                    peer_choking: inner.peer_choking,
-                    am_choking: inner.am_choking,
-                    peer_interested: inner.peer_interested,
-                    am_interested: inner.am_interested,
-                    conn_stats: inner.stats.snapshot(),
-                    download_rate: inner.download_rate.rate(),
-                    upload_rate: inner.upload_rate.rate(),
-                    peer_completion: if inner.peer_sent_have_all {
-                        1.0
-                    } else if self.num_pieces() > 0 {
-                        inner.peer_pieces.len() as f64 / self.num_pieces() as f64
-                    } else {
-                        0.0
-                    },
-                    pending_requests: inner.outstanding_requests.len(),
-                    peer_max_requests: inner.max_requests,
-                    peak_requests: inner.peak_requests,
-                    pipeline_limit: inner.webtor_pipeline_limit,
-                    nominal_max_requests: inner.nominal_max_requests(),
-                    rtt: inner.rtt.estimate,
-                    queued: inner.outstanding_requests.len(),
-                    cancelled: inner.cancelled_requests.len(),
-                    connected_for: inner.connected_at.elapsed(),
-                    last_useful_data: inner.last_useful_chunk_received.map(|t| t.elapsed()),
-                }
-            })
-            .collect()
+        self.inner.peer_snapshots.read().values().cloned().collect()
     }
 
     pub fn drop_peer(&self, addr: SocketAddr) -> bool {
@@ -753,15 +811,7 @@ impl Torrent {
             handle.close("dropped by caller");
             return true;
         }
-        let mut conns = self.inner.conns.write();
-        if let Some(conn) = conns.remove(&addr) {
-            conn.close();
-            drop(conns);
-            self.inner.bump_change();
-            true
-        } else {
-            false
-        }
+        false
     }
 
     pub fn forget_peers(&self) {
@@ -808,7 +858,7 @@ impl Torrent {
                 piece_obj.length as usize,
                 info.piece_hash_v1(i),
             );
-            let mut pieces = self.inner.pieces.write();
+            let mut pieces = self.inner.pieces_mut();
             if let Some(p) = pieces.get_mut(i as usize) {
                 if valid {
                     let _ = piece_storage.mark_complete();
@@ -845,16 +895,7 @@ impl Torrent {
     }
 
     pub fn wait_change(&self, after: u64, timeout: Duration) -> u64 {
-        let deadline = Instant::now() + timeout;
-        let mut guard = self.inner.change_mutex.lock();
-        loop {
-            let cur = self.inner.change_version.load(Ordering::SeqCst);
-            if cur > after || Instant::now() >= deadline {
-                return cur;
-            }
-            let wait_dur = deadline.saturating_duration_since(Instant::now());
-            self.inner.change_cond.wait_for(&mut guard, wait_dur);
-        }
+        self.inner.wait_version(after, timeout)
     }
 
     pub fn closed(&self) -> bool {
@@ -863,43 +904,105 @@ impl Torrent {
 
     pub fn drop_torrent(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
+        if let Some(client) = self.inner.client.read().upgrade() {
+            client.detach_torrent(&self.inner);
+        }
         for handle in self.inner.conn_handles.read().values() {
             handle.close("torrent dropped");
         }
-        let conns = self.inner.conns.write();
-        for c in conns.values() {
-            c.close();
-        }
-        drop(conns);
         self.inner.bump_change();
     }
 
     // ------------------------------------------------ Webtor extensions
 
     pub fn set_request_focus(&self, torrent_offset: i64) {
-        if torrent_offset < 0 {
-            self.inner.request_focus.store(0, Ordering::Relaxed);
-        } else {
-            self.inner
-                .request_focus
-                .store(torrent_offset + 1, Ordering::Relaxed);
+        let focus = if torrent_offset < 0 { 0 } else { torrent_offset + 1 };
+        let previous = self.inner.request_focus.swap(focus, Ordering::Relaxed);
+        // Playback advances this on every read. Waking the whole swarm is only
+        // worth it for a jump; peers see small steps on their next refill.
+        if previous == 0 || focus == 0 || focus < previous || focus - previous >= FOCUS_WAKE_BYTES {
+            self.inner.bump_change();
         }
-        self.inner.bump_change();
+    }
+
+    /// [`Self::refocus_requests`] for seeks. While a seek bar is dragged only
+    /// the first jump and the last one cancel and refill the whole swarm.
+    pub fn refocus_requests_debounced(&self) {
+        let seq = self.inner.refocus_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut last = self.inner.last_refocus.lock();
+        if last.is_none_or(|at| at.elapsed() >= REFOCUS_GAP) {
+            *last = Some(std::time::Instant::now());
+            drop(last);
+            self.refocus_requests();
+            return;
+        }
+        drop(last);
+        let torrent = self.clone();
+        let handle = self.inner.client.read().upgrade().map(|c| c.tokio_handle.clone());
+        let fire = move || {
+            if torrent.inner.refocus_seq.load(Ordering::SeqCst) == seq {
+                *torrent.inner.last_refocus.lock() = Some(std::time::Instant::now());
+                torrent.refocus_requests();
+            }
+        };
+        // Scrubbing calls this constantly; a timer costs no thread per call.
+        if let Some(handle) = handle {
+            handle.spawn(async move {
+                tokio::time::sleep(REFOCUS_GAP).await;
+                fire();
+            });
+        } else {
+            std::thread::spawn(move || {
+                std::thread::sleep(REFOCUS_GAP);
+                fire();
+            });
+        }
     }
 
     pub fn refocus_requests(&self) {
-        for handle in self.inner.conn_handles.read().values() {
-            handle.request_refocus();
+        use crate::peer_conn::PeerTorrent;
+        // Opens the seek hedging window for the new playhead.
+        *self.inner.seek_hedge.lock() = Some((std::time::Instant::now(), crate::torrent::SEEK_HEDGES));
+        let tuning = current_seek_tuning();
+        let net = self.inner.arrival_model.read().net.clone();
+        let handles: Vec<_> = self.inner.conn_handles.read().values().cloned().collect();
+        // Mark the whole cohort before waking anyone. Every handler cancels
+        // old non-urgent requests before refilling, with soonest peers woken first.
+        let mut ordered = Vec::with_capacity(handles.len());
+        for handle in handles {
+            handle.mark_refocus();
+            let key = crate::torrent_impls::peer_key_from_addr(handle.remote_addr());
+            let score = self.inner.webtor_peer_snap(key).map(|peer| {
+                if !tuning.arrival_aware { return -peer.download_rate_bps; }
+                let features = self.inner.peer_arrival(key).and_then(|state| {
+                    let state = state.read();
+                    state.peer.inputs(peer.download_rate_bps, peer.rtt, peer.queued as usize,
+                        BLOCK_SIZE as usize, state.unchoked_at)
+                });
+                crate::webtor::expected_arrival_with_learned(&tuning, Some(&net), features,
+                    peer.download_rate_bps, peer.rtt, peer.queued, BLOCK_SIZE)
+            }).unwrap_or(f64::MAX);
+            ordered.push((score, handle));
         }
-        self.inner.wake_all_connections();
-        let conns = self.inner.conns.read();
-        for c in conns.values() {
-            self.inner.refill_peer_requests(c);
+        ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, handle) in ordered {
+            handle.wake();
         }
     }
 
     pub fn nudge_urgent_requests(&self) -> usize {
         self.inner.nudge_urgent_requests()
+    }
+
+    /// Go `NudgeUrgentRequests`; see [`TorrentInner::nudge_urgent_peers`].
+    pub fn nudge_urgent_peers(&self) {
+        self.inner.nudge_urgent_peers();
+    }
+
+    /// Claude seek mode is on (Go `SetUrgentRequestStealing` with a non-zero age).
+    pub fn urgent_stealing_enabled(&self) -> bool {
+        self.inner.client.read().upgrade()
+            .is_some_and(|c| !c.urgent_steal_after.read().is_zero())
     }
 
     pub fn set_playback_interest(&self, begin: PieceIndex, end: PieceIndex) {
@@ -925,14 +1028,7 @@ impl Torrent {
                 snapshots.values().filter(|s| !s.peer_choking).count(),
             );
         }
-        drop(snapshots);
-        let conns = self.inner.conns.read();
-        let total = conns.len();
-        let unchoked = conns
-            .values()
-            .filter(|c| !c.inner.read().peer_choking)
-            .count();
-        (total, unchoked)
+        (0, 0)
     }
 
     /// Go `WebtorDropChokers`: drop peers that keep us choked while interested,
@@ -947,7 +1043,7 @@ impl Torrent {
         }
         let waiting = self.inner.known_peers.read().len();
         let established = self.inner.conn_handles.read().len();
-        let max_est = self.inner.max_established_conns.load(Ordering::Relaxed);
+        let max_est = self.inner.conn_limit();
         let free = max_est.saturating_sub(established);
         // Go: `if t.peers.Len() <= 2*max(t.maxEstablishedConns-len(t.conns), 0)`
         if waiting <= 2 * free {
@@ -956,26 +1052,17 @@ impl Torrent {
 
         let mut to_drop = Vec::new();
         {
-            let conns = self.inner.conns.read();
-            for (&addr, c) in conns.iter() {
+            let snapshots = self.inner.peer_snapshots.read();
+            let choked_since = self.inner.choked_since.read();
+            for (addr, peer) in snapshots.iter() {
                 if to_drop.len() == 2 {
                     break;
                 }
-                let inner = c.inner.read();
-                if !inner.peer_choking || !inner.am_interested {
+                if !peer.peer_choking || !peer.am_interested {
                     continue;
                 }
-                // Go: since = max(webtorChokedSince, lastBecameInterested)
-                let mut since = inner.webtor_choked_since;
-                if let Some(li) = inner.last_became_interested {
-                    since = Some(match since {
-                        Some(s) if li > s => li,
-                        Some(s) => s,
-                        None => li,
-                    });
-                }
-                if since.is_some_and(|s| s.elapsed() >= after) {
-                    to_drop.push(addr);
+                if choked_since.get(addr).is_some_and(|at| at.elapsed() >= after) {
+                    to_drop.push(*addr);
                 }
             }
         }
@@ -988,6 +1075,8 @@ impl Torrent {
         for addr in to_drop {
             if self.inner.conn_handles.read().contains_key(&addr) {
                 self.inner.drop_conn_addr(addr, "choked too long");
+                // Do not redial it as soon as a tracker reports it again.
+                self.inner.dial_backoff.lock().insert(addr, Instant::now() + Duration::from_secs(120));
                 dropped += 1;
             }
         }
@@ -1099,7 +1188,7 @@ impl File {
         let start_piece = (self.offset / info.piece_length) as usize;
         let end_piece =
             ((self.offset + self.length + info.piece_length - 1) / info.piece_length) as usize;
-        let mut pieces = self.torrent.pieces.write();
+        let mut pieces = self.torrent.pieces_mut();
         for i in start_piece..end_piece.min(pieces.len()) {
             pieces[i].priority = p;
             pieces[i].base_priority = p;

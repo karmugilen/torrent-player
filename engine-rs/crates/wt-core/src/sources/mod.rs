@@ -342,16 +342,49 @@ impl Sources {
         };
         let port = g.cfg.listen_port;
         drop(g);
-        let e = entry.lock();
-        if e.paused {
-            return;
-        }
-        let port = e.info.port().max(port);
-        for ih in e.keys.all_short() {
+        // Lock order: `inner` and an entry are never held together.
+        // add_trackers takes inner → entry; holding the entry while taking
+        // inner here deadlocked torrent add against the dial loop.
+        let (keys, info) = {
+            let e = entry.lock();
+            if e.paused {
+                return;
+            }
+            (e.keys.clone(), Arc::clone(&e.info))
+        };
+        let port = info.port().max(port);
+        for ih in keys.all_short() {
             if self.inner.lock().registered.contains(&ih) {
-                self.push_snapshot(ih, &e.info, port);
+                self.push_snapshot(ih, &info, port);
             }
         }
+    }
+
+    /// Go network recovery: announce to every tracker now and restart the DHT
+    /// announcer, so the new route finds peers without waiting out intervals.
+    pub fn rediscover(&self, keys: &TorrentKeys) {
+        let g = self.inner.lock();
+        if g.closed {
+            return;
+        }
+        let Some(entry) = keys.all_short().into_iter().find_map(|ih| g.torrents.get(&ih).cloned())
+        else {
+            return;
+        };
+        let port = g.cfg.listen_port;
+        drop(g);
+        {
+            let e = entry.lock();
+            if e.paused {
+                return;
+            }
+            let port = e.info.port().max(port);
+            for ih in e.keys.all_short() {
+                self.push_snapshot(ih, &e.info, port);
+                self.dispatcher.announce_now(ih);
+            }
+        }
+        self.spawn_dht_announcer(entry);
     }
 
     /// Add tracker tiers. URLs for short hashes that are not registered are ignored.
@@ -372,12 +405,13 @@ impl Sources {
         }
         let entry = g.torrents.get(&shorts[0]).cloned();
         let disable_ws = g.cfg.disable_webtorrent;
+        // Release `inner` before locking the entry (see refresh_torrent).
+        drop(g);
         let peer_id = entry
             .as_ref()
             .map(|e| e.lock().info.peer_id())
             .unwrap_or([0u8; 20]);
         let sink = entry.as_ref().map(|e| Arc::clone(&e.lock().sink));
-        drop(g);
 
         for ih in &shorts {
             self.dispatcher.add_trackers(*ih, http_udp.clone());
@@ -401,6 +435,9 @@ impl Sources {
         else {
             return;
         };
+        let listen_port = g.cfg.listen_port;
+        // Release `inner` before the entry; never take it back while the
+        // entry is held (see refresh_torrent).
         drop(g);
         let mut e = entry.lock();
         e.paused = paused;
@@ -416,7 +453,7 @@ impl Sources {
                 h.abort();
             }
         } else {
-            let port = e.info.port().max(self.inner.lock().cfg.listen_port);
+            let port = e.info.port().max(listen_port);
             for ih in &shorts {
                 self.push_snapshot(*ih, &e.info, port);
             }
@@ -619,7 +656,8 @@ impl Sources {
                         e.keys.clone(),
                         Arc::clone(&e.sink),
                         e.info.port().max(listen_port),
-                        e.info.want_conns(),
+                        // BEP 27: private torrents never use the DHT.
+                        e.info.want_conns() && !e.info.private(),
                         e.paused,
                     )
                 };
@@ -723,7 +761,9 @@ impl Sources {
                 );
             }
         });
-        self.ws_peer_tasks.lock().push(handle);
+        let mut tasks = self.ws_peer_tasks.lock();
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(handle);
     }
 }
 

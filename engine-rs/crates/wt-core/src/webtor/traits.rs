@@ -49,6 +49,11 @@ pub trait TorrentView {
     type PeerId: Copy + Eq + std::fmt::Debug;
 
     fn request_focus_index(&self) -> Option<RequestIndex>;
+    /// A seek just moved the playhead and its eager hedge budget is not
+    /// spent: hedge the first blocks at once.
+    fn eager_hedge(&self) -> bool {
+        false
+    }
     fn piece_priority(&self, piece: PieceIndex) -> PiecePriority;
     fn piece_of_request(&self, req: RequestIndex) -> PieceIndex;
     fn block_arrived(&self, req: RequestIndex) -> bool;

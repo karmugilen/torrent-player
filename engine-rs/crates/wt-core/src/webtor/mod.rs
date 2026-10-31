@@ -50,7 +50,8 @@ pub use decisions::{
     chokers_to_drop, encode_request_focus, expected_arrival_secs, expected_arrival_with_learned,
     faster_focus_peer, has_playing_piece_we_lack, may_take_existing_request, next_peak_requests,
     nominal_from_peak, peer_counts, pending_requests, refocus_should_cancel, refocus_sort_key,
-    request_focus_index, should_nudge_peer, should_steal_urgent, urgent_past_cancels,
+    request_focus_index, should_nudge_peer, should_steal_urgent, steal_lands_in_flight,
+    urgent_past_cancels,
     yield_to_faster_peers, DEFAULT_RTT_SECS, SLOW_PEER_BYTES_PER_SEC, SLOW_PEER_YIELDS_PER_REFILL,
 };
 pub use hol::{

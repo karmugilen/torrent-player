@@ -57,7 +57,7 @@ fn test_reader_read_completed_data() {
     let p0 = tor_storage.piece(info.piece(0), info.piece_hash_v1(0));
     let buf_data = vec![0x5a; 256 * 1024];
     p0.write_at(&buf_data, 0).unwrap();
-    tor.pieces.write()[0].complete = true;
+    tor.pieces_mut()[0].complete = true;
 
     let mut reader = t.new_reader();
     let mut read_buf = vec![0u8; 100];
@@ -77,7 +77,7 @@ fn test_reader_seek_and_read() {
     let mut p1_data = vec![0x00; 256 * 1024];
     p1_data[100..200].copy_from_slice(&[0x42; 100]);
     p1.write_at(&p1_data, 0).unwrap();
-    tor.pieces.write()[1].complete = true;
+    tor.pieces_mut()[1].complete = true;
 
     let mut reader = t.new_reader();
     let seek_pos = 256 * 1024 + 100;
@@ -115,7 +115,7 @@ fn test_reader_responsive_mode() {
     let p0 = tor_storage.piece(info.piece(0), info.piece_hash_v1(0));
     let chunk_data = vec![0x77; 16 * 1024];
     p0.write_at(&chunk_data, 0).unwrap();
-    tor.dirty_chunks.write().insert(0); // mark block 0 dirty
+    tor.dirty_chunks.insert(0); // mark block 0 dirty
 
     let mut reader = t.new_reader();
     reader.set_responsive();

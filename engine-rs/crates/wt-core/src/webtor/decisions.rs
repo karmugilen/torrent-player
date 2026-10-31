@@ -87,6 +87,16 @@ pub fn should_steal_urgent(
     }
 }
 
+/// Whether a holder has most likely sent a block already, given how many of
+/// its requests were queued ahead of it. A peer serves its queue in order;
+/// by the time a cancel reaches it, roughly one bandwidth-delay product of
+/// blocks plus the one on the wire has left. Stealing those only duplicates
+/// them.
+pub fn steal_lands_in_flight(ahead: usize, holder_rate_bps: f64, holder_rtt: Duration, chunk: u32) -> bool {
+    let bdp = holder_rate_bps.max(0.0) * holder_rtt.as_secs_f64() / f64::from(chunk.max(1));
+    (ahead as f64) < bdp.ceil() + 1.0
+}
+
 /// Go `pendingRequests`: requests (+ cancelled unless FullPipeline).
 pub fn pending_requests(tuning: &SeekTuning, outstanding: u32, cancelled: u32) -> u32 {
     if tuning.full_pipeline {
@@ -525,6 +535,20 @@ pub fn peer_counts<P: PeerView>(peers: &[P]) -> (usize, usize) {
 mod unit {
     use super::*;
     use crate::webtor::clock::ManualClock;
+
+    #[test]
+    fn steal_skips_blocks_the_holder_has_likely_sent() {
+        let chunk = 16 * 1024;
+        // 1 MiB/s over 100 ms: 6.4 blocks in flight plus the one on the wire.
+        let rate = 1024.0 * 1024.0;
+        let rtt = Duration::from_millis(100);
+        assert!(steal_lands_in_flight(0, rate, rtt, chunk));
+        assert!(steal_lands_in_flight(7, rate, rtt, chunk));
+        assert!(!steal_lands_in_flight(8, rate, rtt, chunk));
+        // Unknown round trip: only the block at the front is protected.
+        assert!(steal_lands_in_flight(0, rate, Duration::ZERO, chunk));
+        assert!(!steal_lands_in_flight(1, rate, Duration::ZERO, chunk));
+    }
 
     #[test]
     fn encode_focus_matches_go() {

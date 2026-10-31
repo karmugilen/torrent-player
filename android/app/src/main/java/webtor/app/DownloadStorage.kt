@@ -165,8 +165,8 @@ class DownloadStorage(private val context: Context) {
     val freeBytes get() = runCatching {
         StatFs(Environment.getExternalStorageDirectory().absolutePath).availableBytes
     }.getOrDefault(-1L)
-    private val legacyDir get() = File(context.filesDir, "webtorrent")
-    val legacyBytes get() = legacyDir.walkTopDown().filter { it.isFile }.sumOf {
+    private val engineDir get() = engineDownloadDir(context)
+    val legacyBytes get() = engineDir.walkTopDown().filter { it.isFile }.sumOf {
         runCatching { Os.stat(it.absolutePath).st_blocks * 512L }.getOrDefault(it.length())
     }
     val cacheBytes get() = context.cacheDir.takeIf { it.exists() }?.walkTopDown()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
@@ -212,12 +212,12 @@ class DownloadStorage(private val context: Context) {
 
     fun deleteStartupCache(key: String) {
         require(Regex("[a-fA-F0-9]{40,64}").matches(key)) { "Invalid torrent identity" }
-        val directory = File(legacyDir, ".startup/$key")
+        val directory = File(engineDir, ".startup/$key")
         check(!directory.exists() || directory.deleteRecursively()) { "Could not remove startup cache" }
     }
 
     fun clearStartupCaches(activeKeys: Set<String>) {
-        File(legacyDir, ".startup").listFiles().orEmpty().filter { it.name !in activeKeys }.forEach {
+        File(engineDir, ".startup").listFiles().orEmpty().filter { it.name !in activeKeys }.forEach {
             check(it.deleteRecursively()) { "Could not remove startup cache" }
         }
     }
@@ -580,7 +580,7 @@ class DownloadStorage(private val context: Context) {
         }
     }
 
-    // Keep originals alive until the Go engine has duplicated them. It then owns its
+    // Keep originals alive until the engine has duplicated them. It then owns its
     // copies; these Kotlin descriptors can be closed immediately after configure.
     fun openFiles(files: List<SavedFile>, selected: Set<Int>): List<ParcelFileDescriptor?> {
         val handles = mutableListOf<ParcelFileDescriptor?>()

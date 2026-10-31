@@ -52,7 +52,8 @@ pub use desired::{
     compute_desired_requests, request_less_by_value, sort_requests_for_peer, DesiredPeerSnapshot,
     DesiredRequestState, PeerRequestAssignment, RequestTorrentSnapshot,
 };
-pub use order::{get_requestable_pieces, piece_order_cmp, StrategyLimits, TorrentPieceQuery};
+pub use order::{background_rank, get_requestable_pieces, piece_order_cmp, StrategyLimits,
+    SAVED_MAX_UNVERIFIED_BYTES, SAVED_OPEN_MIN_PIECES, TorrentPieceQuery};
 pub use piece_request_order::{
     PieceRequestOrder, PieceRequestOrderItem, PieceRequestOrderKey, PieceRequestOrderState,
 };

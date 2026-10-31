@@ -141,11 +141,15 @@ struct MockTorrent {
     interest: Option<(PieceIndex, PieceIndex)>,
     complete: HashSet<PieceIndex>,
     num_pieces: PieceIndex,
+    eager: bool,
 }
 
 impl TorrentView for MockTorrent {
     type PeerId = u32;
 
+    fn eager_hedge(&self) -> bool {
+        self.eager
+    }
     fn request_focus_index(&self) -> Option<RequestIndex> {
         self.focus
     }
@@ -731,6 +735,41 @@ fn test_overdue_head_of_line_block_is_hedged_on_a_second_peer() {
         &no_learned
     )
     .is_empty());
+}
+
+#[test]
+fn test_seek_hedges_only_the_new_playhead_before_blocks_are_overdue() {
+    let clock = ManualClock::new();
+    let tuning = SeekTuning {
+        hedge: true,
+        ..SeekTuning::default()
+    };
+    let chunk = 16 * 1024u32;
+    let mut tor = MockTorrent {
+        focus: Some(0),
+        max_end: 64,
+        chunk,
+        piece_len: 256 * 1024,
+        eager: true,
+        ..Default::default()
+    };
+    // Fresh requests at the playhead and beyond the seek head.
+    for r in [0u32, 1, 9] {
+        tor.when.insert(r, clock.now());
+        tor.holders.insert(r, 1);
+    }
+    let holder = MockPeer::new(1).with_rate(1024.0 * 1024.0).with_all_pieces();
+    let hedger = MockPeer::new(2).with_rate(1024.0 * 1024.0).with_all_pieces();
+    let peers = vec![holder, hedger];
+    let no_learned = |_: &MockPeer, _: RequestIndex| None;
+
+    let moves = hedge_decisions(&clock, &tuning, &tor, &peers, None, &none_features, &no_learned);
+    let hedged: Vec<_> = moves.iter().map(|m| (m.req, m.eager)).collect();
+    assert_eq!(hedged, vec![(0, true), (1, true)]);
+
+    // Budget spent (or window closed): fresh blocks wait until overdue.
+    tor.eager = false;
+    assert!(hedge_decisions(&clock, &tuning, &tor, &peers, None, &none_features, &no_learned).is_empty());
 }
 
 #[test]

@@ -99,8 +99,19 @@ pub fn start_swarm(
             return Err("seeder listenPort is 0".into());
         }
 
-        let delay = Duration::from_millis(20 + rng.gen_range(0..180));
-        let speed = SPEEDS[i % SPEEDS.len()];
+        // Default mirrors seek_search (delay + a slow upload cap). Set
+        // WT_PARITY_UNLIMITED=1 for a raw loopback throughput compare.
+        let unlimited = std::env::var("WT_PARITY_UNLIMITED").ok().as_deref() == Some("1");
+        let delay = if unlimited {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(20 + rng.gen_range(0..180))
+        };
+        let speed = if unlimited {
+            0
+        } else {
+            SPEEDS[i % SPEEDS.len()]
+        };
         let proxy = start_proxy("127.0.0.1", listen, delay, speed)?;
 
         eprintln!(

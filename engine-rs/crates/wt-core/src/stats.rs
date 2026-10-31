@@ -196,7 +196,16 @@ pub struct ExpectingRate {
     useful_bytes: u64,
     expecting_total: Duration,
     expecting_since: Option<Instant>,
+    /// Smoothed rate of completed windows; 0 until the first one ends.
+    recent_rate: f64,
+    window_bytes: u64,
+    /// Expecting time when the current window began.
+    window_start: Duration,
 }
+
+/// Length of one rate window, in time spent expecting data.
+const RATE_WINDOW: Duration = Duration::from_secs(1);
+const RATE_WINDOW_WEIGHT: f64 = 0.3;
 
 impl ExpectingRate {
     pub fn new() -> Self {
@@ -215,9 +224,38 @@ impl ExpectingRate {
         }
     }
 
+    /// First estimate from a probe: `n` bytes that took `took` to come back.
+    /// Only for a peer with no measurement; real blocks then take over.
+    pub fn seed(&mut self, n: usize, took: Duration) {
+        if self.useful_bytes == 0 && !took.is_zero() {
+            self.useful_bytes = n as u64;
+            self.window_bytes = n as u64;
+            self.expecting_total += took;
+        }
+    }
+
     /// Go `BytesReadUsefulData`.
     pub fn add_bytes(&mut self, n: usize) {
         self.useful_bytes += n as u64;
+        self.window_bytes += n as u64;
+        let elapsed = self.expecting_time().saturating_sub(self.window_start);
+        if elapsed >= RATE_WINDOW {
+            self.recent_rate = self.blended_rate(elapsed);
+            self.window_bytes = 0;
+            self.window_start += elapsed;
+        }
+    }
+
+    /// The current window blended in by its length, so a peer that stops
+    /// delivering falls to zero within a few seconds.
+    fn blended_rate(&self, elapsed: Duration) -> f64 {
+        let secs = elapsed.as_secs_f64();
+        let now = self.window_bytes as f64 / secs;
+        if self.recent_rate <= 0.0 {
+            return now;
+        }
+        let weight = (RATE_WINDOW_WEIGHT * secs).min(1.0);
+        weight * now + (1.0 - weight) * self.recent_rate
     }
 
     /// Go `totalExpectingTime`.
@@ -228,6 +266,13 @@ impl ExpectingRate {
     pub fn rate(&self) -> f64 {
         if self.useful_bytes == 0 {
             return 0.0;
+        }
+        let elapsed = self.expecting_time().saturating_sub(self.window_start);
+        if elapsed >= RATE_WINDOW {
+            return self.blended_rate(elapsed);
+        }
+        if self.recent_rate > 0.0 {
+            return self.recent_rate;
         }
         let secs = self.expecting_time().as_secs_f64();
         if secs <= 0.0 {

@@ -47,8 +47,13 @@ pub fn run(opts: RunOpts) -> Result<RunReport, String> {
     };
 
     // One swarm shared across scenarios for this run when possible.
+    // WT_PARITY_SEED_ENGINE runs the seeders on another binary, to tell a
+    // slow seeding side from a slow downloading side.
+    let seed_engine = std::env::var_os("WT_PARITY_SEED_ENGINE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| opts.engine.clone());
     let swarm_root = opts.work.join(format!("swarm-{}", opts.label));
-    let swarm = start_swarm(&opts.engine, &swarm_root, &video, opts.seeders, 1)?;
+    let swarm = start_swarm(&seed_engine, &swarm_root, &video, opts.seeders, 1)?;
 
     let started = unix_ms();
     let mut metrics = BTreeMap::new();
@@ -231,6 +236,7 @@ fn add_and_configure_download(
     peers: &[(String, u16)],
 ) -> Result<String, String> {
     let client = leech.client();
+    let t0 = Instant::now();
     // Prefer magnet with x.pe so discovery stays local.
     let magnet = magnet_with_peers(&fixture.info_hash, &fixture.name, peers);
     let add = AddRequest {
@@ -251,7 +257,9 @@ fn add_and_configure_download(
             client.post_json("/add", &add)?
         }
     };
+    let t_add = t0.elapsed();
     wait_ready(&client, &added.id, Duration::from_secs(120))?;
+    let t_ready = t0.elapsed();
     let cfg = ConfigureRequest {
         id: added.id.clone(),
         descriptors: vec![None; fixture.files.len()],
@@ -260,7 +268,75 @@ fn add_and_configure_download(
         stream_cache_bytes: None,
     };
     client.post_ok("/configure", &cfg)?;
+    if phases_enabled() {
+        eprintln!(
+            "  phases: add={:.0}ms ready={:.0}ms configured={:.0}ms",
+            t_add.as_secs_f64() * 1e3,
+            t_ready.as_secs_f64() * 1e3,
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+    }
     Ok(added.id)
+}
+
+/// `WT_PARITY_PHASES=1` prints add/metadata/configure times and samples the
+/// transfer every 5 ms. The sampling adds load, so scores taken with it are
+/// not comparable to plain runs.
+fn phases_enabled() -> bool {
+    std::env::var("WT_PARITY_PHASES").ok().as_deref() == Some("1")
+}
+
+/// Polls `/torrent/{id}` every 5 ms until the download is verified; prints
+/// first downloaded byte, first verified byte, done, and the 5–95% rate.
+fn spawn_transfer_sampler(
+    client: crate::client::EngineClient,
+    id: String,
+    t0: Instant,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let ms = |t: Option<Duration>| t.map_or(-1.0, |d| d.as_secs_f64() * 1e3);
+        let (mut first_dl, mut first_ok, mut p5, mut p95) = (None, None, None, None);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            let Ok(tv) = client.get_json::<TorrentView>(&format!("/torrent/{id}")) else {
+                break;
+            };
+            let at = t0.elapsed();
+            let frac = if tv.length > 0 {
+                tv.verified_bytes as f64 / tv.length as f64
+            } else {
+                0.0
+            };
+            if first_dl.is_none() && tv.downloaded > 0 {
+                first_dl = Some(at);
+            }
+            if first_ok.is_none() && tv.verified_bytes > 0 {
+                first_ok = Some(at);
+            }
+            if p5.is_none() && frac >= 0.05 {
+                p5 = Some(at);
+            }
+            if p95.is_none() && frac >= 0.95 {
+                p95 = Some(at);
+            }
+            if tv.done || (tv.length > 0 && tv.verified_bytes >= tv.length) {
+                let rate = match (p5, p95) {
+                    (Some(a), Some(b)) if b > a => {
+                        0.9 * tv.length as f64 / (1 << 20) as f64 / (b - a).as_secs_f64()
+                    }
+                    _ => 0.0,
+                };
+                eprintln!(
+                    "  phases: first_downloaded={:.0}ms first_verified={:.0}ms done={:.0}ms rate5-95={rate:.1}MiB/s",
+                    ms(first_dl),
+                    ms(first_ok),
+                    at.as_secs_f64() * 1e3
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })
 }
 
 fn scenario_download(
@@ -273,8 +349,12 @@ fn scenario_download(
     let peers = swarm.peer_addrs();
     let t0 = Instant::now();
     let id = add_and_configure_download(&leech, fixture, &peers)?;
+    let sampler = phases_enabled().then(|| spawn_transfer_sampler(leech.client(), id.clone(), t0));
     let tv = wait_done(&leech.client(), &id, Duration::from_secs(600))?;
     let elapsed = t0.elapsed().as_secs_f64().max(1e-6);
+    if let Some(sampler) = sampler {
+        let _ = sampler.join();
+    }
     let mib = tv.length as f64 / (1024.0 * 1024.0);
     let thr = mib / elapsed;
     eprintln!(

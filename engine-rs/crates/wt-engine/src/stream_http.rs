@@ -52,6 +52,10 @@ pub trait StreamReader: Send + Sync {
 /// Resolves `/torrent/{id}/file/{index}` opens.
 pub trait StreamSource: Send + Sync {
     fn open(&self, id: &str, file_index: usize) -> io::Result<Arc<dyn StreamReader>>;
+    /// [`Self::open`] knowing the request's Range start (`-1` when it has none).
+    fn open_at(&self, id: &str, file_index: usize, _start: i64) -> io::Result<Arc<dyn StreamReader>> {
+        self.open(id, file_index)
+    }
 }
 
 pub struct StreamServer {
@@ -228,8 +232,14 @@ async fn handle_stream_request(
             .unwrap());
     };
 
+    wt_types::events::record("stream_open", format!(
+        "player={} range={}",
+        req.headers().get(hyper::header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("?"),
+        req.headers().get(RANGE).and_then(|v| v.to_str().ok()).unwrap_or("-"),
+    ));
     let id = id.to_owned();
-    let opened = tokio::task::spawn_blocking(move || source.open(&id, file_index))
+    let start = req.headers().get(RANGE).and_then(|v| v.to_str().ok()).map_or(-1, range_start);
+    let opened = tokio::task::spawn_blocking(move || source.open_at(&id, file_index, start))
         .await
         .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
     let reader = match opened {

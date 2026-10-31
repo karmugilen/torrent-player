@@ -200,3 +200,67 @@ async fn client_can_start_and_close_inside_current_thread_runtime() {
     client.close();
     drop(client);
 }
+
+/// Answers HTTP announces with `peer`, counting each announce event.
+async fn spawn_tracker(peer: std::net::SocketAddrV4) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/announce", listener.local_addr().unwrap());
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&events);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let event = ["started", "stopped", "completed"]
+                .into_iter()
+                .find(|e| request.contains(&format!("event={e}")))
+                .unwrap_or("regular");
+            seen.lock().unwrap().push(event.to_string());
+            let mut body = b"d8:intervali1800e5:peers6:".to_vec();
+            body.extend_from_slice(&peer.ip().octets());
+            body.extend_from_slice(&peer.port().to_be_bytes());
+            body.push(b'e');
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(header.as_bytes()).await;
+            let _ = sock.write_all(&body).await;
+        }
+    });
+    (url, events)
+}
+
+/// Delete then add again: the new torrent must find peers by itself. Nothing
+/// here calls add_peers, so only tracker discovery can complete the download.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn re_added_torrent_finds_peers_through_tracker() {
+    let (info, ih, data, bytes) = patterned_torrent("data", 32768, 16384);
+    let seed_storage = Arc::new(MemoryClientStorage::new());
+    let seed = Client::new(testing_config(seed_storage.clone(), true)).unwrap();
+    let (seed_t, _) = seed
+        .add_torrent_spec(torrent_spec(ih, Some(bytes.clone()), "seed", Some(seed_storage.clone())))
+        .unwrap();
+    seed_memory(&seed_storage, &seed_t, &info, ih, &data);
+    let seed_port = e2e_support::wait_local_port(&seed).await;
+    let (url, events) = spawn_tracker(std::net::SocketAddrV4::new([127, 0, 0, 1].into(), seed_port)).await;
+
+    let client = Client::new(testing_config(Arc::new(MemoryClientStorage::new()), false)).unwrap();
+    for attempt in 0..2 {
+        let storage = Arc::new(MemoryClientStorage::new());
+        let mut spec = torrent_spec(ih, Some(bytes.clone()), "download", Some(storage.clone()));
+        spec.trackers = vec![vec![url.clone()]];
+        let (torrent, created) = client.add_torrent_spec(spec).unwrap();
+        assert!(created, "attempt {attempt} must create a fresh torrent");
+        torrent.download_all();
+        wait_bytes_completed(&torrent, info.total_length(), Duration::from_secs(20)).await;
+        assert_eq!(read_all_from_storage(&storage, &info, ih), data);
+        torrent.drop_torrent();
+    }
+    let events = events.lock().unwrap().clone();
+    assert_eq!(events.iter().filter(|e| *e == "started").count(), 2, "{events:?}");
+    client.close();
+    seed.close();
+}

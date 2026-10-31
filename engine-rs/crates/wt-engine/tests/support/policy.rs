@@ -7,7 +7,7 @@ pub fn peer() -> (TestEngine, String) {
     let eng = TestEngine::new();
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../engine-go/testdata/tiny.torrent"),
+            .join("tests/testdata/tiny.torrent"),
     )
     .unwrap();
     let (code, raw) = eng.dispatch("POST", "/add", &serde_json::json!({"prepare":true,"torrentData":base64::engine::general_purpose::STANDARD.encode(bytes)}).to_string());

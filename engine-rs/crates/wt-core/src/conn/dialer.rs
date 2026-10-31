@@ -9,7 +9,7 @@
 //! LTEP / HaveNone are sent by `PeerConnHandler::start` (Go sendInitialMessages).
 
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +29,32 @@ use crate::{ClientConfig, CoreError, PeerStream, Result, TcpConnHook};
 /// Capacity for the outbound message queue. Sized for Go `localClientReqq` (1024).
 /// Legacy size constant (writer is unbounded).
 pub const OUTBOUND_MSG_QUEUE: usize = 1024;
+
+/// First-attempt handshakes that worked and failed: encrypted, then plain.
+static FIRST_TRY: [[AtomicU32; 2]; 2] =
+    [[AtomicU32::new(0), AtomicU32::new(0)], [AtomicU32::new(0), AtomicU32::new(0)]];
+static FIRST_TRY_TURN: AtomicU32 = AtomicU32::new(0);
+/// Handshakes per mode before trusting the comparison.
+const FIRST_TRY_MIN_SAMPLES: u32 = 20;
+
+fn first_try_rate(plain: bool) -> (f64, u32) {
+    let [ok, failed] = &FIRST_TRY[usize::from(plain)];
+    let (ok, failed) = (ok.load(Ordering::Relaxed), failed.load(Ordering::Relaxed));
+    (f64::from(ok + 1) / f64::from(ok + failed + 2), ok + failed)
+}
+
+/// Encrypted first unless plain has clearly worked better on this network. An
+/// encrypted first try costs round trips; on some networks plain is what gets
+/// blocked. One dial in eight tries the other order, to keep learning.
+fn try_encrypted_first() -> bool {
+    let (encrypted, encrypted_samples) = first_try_rate(false);
+    let (plain, plain_samples) = first_try_rate(true);
+    let plain_wins = encrypted_samples >= FIRST_TRY_MIN_SAMPLES
+        && plain_samples >= FIRST_TRY_MIN_SAMPLES
+        && plain > encrypted + 0.1;
+    let explore = FIRST_TRY_TURN.fetch_add(1, Ordering::Relaxed) % 8 == 0;
+    plain_wins == explore
+}
 
 /// Outcome of a successful outgoing dial and handshake.
 pub struct DialOutcome {
@@ -80,10 +106,13 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
         }
     }
 
+    let policy = cfg.header_obfuscation_policy;
     let prefer_obfuscated = if params.require_plain {
         false
+    } else if policy.preferred && !policy.require_preferred {
+        try_encrypted_first()
     } else {
-        cfg.header_obfuscation_policy.preferred
+        policy.preferred
     };
     let allow_fallback = !params.require_plain && !cfg.header_obfuscation_policy.require_preferred;
 
@@ -94,15 +123,19 @@ pub async fn dial_peer(params: DialParams<'_>) -> Result<DialOutcome> {
         pool.add(&params, transport, dial_timeout);
     }
     let (stream, transport) = pool.get_first().await?;
-    match complete_bt_handshake(
+    let first = complete_bt_handshake(
         &params,
         stream,
         transport,
         prefer_obfuscated,
         cfg.handshakes_timeout,
     )
-    .await
-    {
+    .await;
+    if !params.require_plain {
+        let slot = &FIRST_TRY[usize::from(!prefer_obfuscated)][usize::from(first.is_err())];
+        slot.fetch_add(1, Ordering::Relaxed);
+    }
+    match first {
         Ok(outcome) => Ok(outcome),
         Err(first_err) if allow_fallback => {
             tracing::debug!(

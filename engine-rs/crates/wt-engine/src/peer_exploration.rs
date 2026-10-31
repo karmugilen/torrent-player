@@ -27,9 +27,6 @@ pub(crate) fn peer_identity(torrent: &wt_core::Torrent, addr: std::net::SocketAd
     if let Some(handle) = torrent.inner.conn_handles.read().get(&addr) {
         return std::sync::Arc::as_ptr(&handle.stats()) as usize as u64;
     }
-    if let Some(peer) = torrent.inner.conns.read().get(&addr) {
-        return std::sync::Arc::as_ptr(&peer.inner) as usize as u64;
-    }
     wt_core::torrent_impls::peer_key_from_addr(addr)
 }
 

@@ -22,7 +22,7 @@ fn add_metadata(eng: &TestEngine, mi: &wt_types::MetaInfo) -> String {
     serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["id"].as_str().unwrap().into()
 }
 fn tracker_metadata(private: bool) -> wt_types::MetaInfo {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../engine-go/testdata/tiny.torrent");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/tiny.torrent");
     let (mut mi, mut info) = wt_meta::parse_torrent(&std::fs::read(path).unwrap()).unwrap();
     info.private = Some(private);
     mi.info_bytes = wt_meta::encode_info(&info).unwrap();

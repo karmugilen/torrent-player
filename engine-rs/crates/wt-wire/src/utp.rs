@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
 use std::io::{self, Error, ErrorKind};
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -32,6 +33,7 @@ pub const INITIAL_CWND: usize = 512 * 1024; // 512 KiB
 pub const MAX_CWND: usize = 8 * 1024 * 1024; // 8 MiB for high loopback throughput
 pub const DEFAULT_RECV_WND: u32 = 8 * 1024 * 1024;
 pub const DUP_ACKS_BEFORE_RESEND: u16 = 3;
+const WINDOW_UPDATE_BYTES: u32 = 64 * 1024;
 
 /// Skip linked uTP extension headers after the 20-byte packet header.
 /// `first_ext` is `PacketHeader.extension`. Returns remaining payload and
@@ -146,7 +148,19 @@ struct OutgoingPacket {
     len: usize,
     payload: Bytes,
     sent_at: Instant,
+    /// Sent more than once, so its ACK says nothing about the round trip.
+    retransmitted: bool,
 }
+
+/// Retransmit timeout before a connection has a round-trip sample.
+const INITIAL_RTO: Duration = Duration::from_millis(500);
+const MIN_RTO: Duration = Duration::from_millis(200);
+const MAX_RTO: Duration = Duration::from_secs(4);
+/// How long a base delay is trusted: clocks drift and routes change.
+const BASE_DELAY_WINDOW: Duration = Duration::from_secs(60);
+
+static UTP_TRACE: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("WT_UTP_TRACE").is_some());
 
 struct StreamState {
     send_id: u16,
@@ -174,10 +188,17 @@ struct StreamState {
     out_of_order: BTreeMap<u16, Bytes>,
     read_closed: bool,
     read_waker: Option<Waker>,
+    last_advertised_window: u32,
 
     // Congestion / RTT
     base_delay_micros: u32,
+    /// Lowest outbound delay in the current window, next window's base.
+    recent_min_delay: u32,
+    base_delay_since: Instant,
     last_measured_delay: u32,
+    srtt: Option<Duration>,
+    rttvar: Duration,
+    rto: Duration,
     unacked_recv_count: usize,
 
     // Reset / Fin
@@ -196,6 +217,11 @@ impl StreamState {
             last_remote_ack: 0,
             remote_wnd: DEFAULT_RECV_WND,
             cwnd: INITIAL_CWND,
+            recent_min_delay: u32::MAX,
+            base_delay_since: Instant::now(),
+            srtt: None,
+            rttvar: Duration::ZERO,
+            rto: INITIAL_RTO,
             unacked: VecDeque::new(),
             bytes_in_flight: 0,
             write_closed: false,
@@ -207,6 +233,7 @@ impl StreamState {
             out_of_order: BTreeMap::new(),
             read_closed: false,
             read_waker: None,
+            last_advertised_window: DEFAULT_RECV_WND,
             base_delay_micros: u32::MAX,
             last_measured_delay: 0,
             unacked_recv_count: 0,
@@ -215,6 +242,51 @@ impl StreamState {
     }
 
     /// Build selective-ACK bitmask for packets past `ack_nr` that sit in the OOO buffer.
+    /// RFC 6298 estimate from an ACK of a packet sent once.
+    fn on_rtt_sample(&mut self, sample: Duration) {
+        match self.srtt {
+            None => {
+                self.srtt = Some(sample);
+                self.rttvar = sample / 2;
+            }
+            Some(srtt) => {
+                self.rttvar = (self.rttvar * 3 + srtt.abs_diff(sample)) / 4;
+                self.srtt = Some((srtt * 7 + sample) / 8);
+            }
+        }
+        let srtt = self.srtt.unwrap_or(sample);
+        self.rto = (srtt + self.rttvar * 4).clamp(MIN_RTO, MAX_RTO);
+    }
+
+    /// The oldest packet went unanswered for a whole timeout. The window stays:
+    /// requests share it, and a shrunken one held up seeks.
+    fn on_timeout(&mut self) {
+        self.rto = (self.rto * 2).min(MAX_RTO);
+    }
+
+    /// Grow the window by how far the delay of what we send, reported back by
+    /// the peer, is below the LEDBAT target. It never shrinks on delay: requests
+    /// share this window, and comparing builds showed seeks got slower.
+    fn on_send_delay(&mut self, delay: u32) {
+        if delay == 0 {
+            return;
+        }
+        if self.base_delay_since.elapsed() >= BASE_DELAY_WINDOW {
+            self.base_delay_micros = self.recent_min_delay;
+            self.recent_min_delay = u32::MAX;
+            self.base_delay_since = Instant::now();
+        }
+        self.recent_min_delay = self.recent_min_delay.min(delay);
+        self.base_delay_micros = self.base_delay_micros.min(delay);
+        let queue = u64::from(delay.saturating_sub(self.base_delay_micros));
+        let target = u64::from(LEDBAT_TARGET_MICROS);
+        let mss = MAX_PAYLOAD_SIZE as u64;
+        if queue < target {
+            let grow = (mss * (target - queue) / target) as usize;
+            self.cwnd = (self.cwnd + grow).min(MAX_CWND);
+        }
+    }
+
     fn selective_ack_bitmask(&self) -> Option<Vec<u8>> {
         if self.out_of_order.is_empty() {
             return None;
@@ -249,19 +321,21 @@ impl StreamState {
     }
 }
 
-fn encode_ack_packet(st: &StreamState, delay: u32, sack: Option<&[u8]>) -> Bytes {
+fn encode_ack_packet(st: &mut StreamState, delay: u32, sack: Option<&[u8]>) -> Bytes {
     let (ext, ext_overhead) = match sack {
         Some(m) if !m.is_empty() => (EXT_SELECTIVE_ACK, 2 + m.len()),
         _ => (EXT_NONE, 0),
     };
     let mut b = BytesMut::with_capacity(HEADER_SIZE + ext_overhead);
+    let window = DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32);
+    st.last_advertised_window = window;
     let resp = PacketHeader {
         type_ver: (ST_STATE << 4) | UTP_VERSION,
         extension: ext,
         connection_id: st.send_id,
         timestamp_micros: wall_micros(),
         timestamp_diff_micros: delay,
-        wnd_size: DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32),
+        wnd_size: window,
         seq_nr: st.seq_nr,
         ack_nr: st.ack_nr,
     };
@@ -283,6 +357,7 @@ pub struct UtpStream {
     /// Keeps the owning `UtpSocket` alive for ephemeral dial sockets so the
     /// recv/send pumps are not left only on detached task Arcs.
     _socket: Option<Arc<UtpSocket>>,
+    read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 pub struct UtpStreamInner {
@@ -300,13 +375,15 @@ impl UtpStream {
         let mut st = self.inner.state.lock();
         if !st.write_closed && !st.is_reset {
             st.write_closed = true;
+            let window = DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32);
+            st.last_advertised_window = window;
             let hdr = PacketHeader {
                 type_ver: (ST_FIN << 4) | UTP_VERSION,
                 extension: EXT_NONE,
                 connection_id: st.send_id,
                 timestamp_micros: wall_micros(),
                 timestamp_diff_micros: st.last_measured_delay,
-                wnd_size: DEFAULT_RECV_WND,
+                wnd_size: window,
                 seq_nr: st.seq_nr,
                 ack_nr: st.ack_nr,
             };
@@ -350,11 +427,16 @@ impl AsyncRead for UtpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut st = self.inner.state.lock();
+        let this = self.get_mut();
+        let mut st = this.inner.state.lock();
+        if st.unacked.is_empty() {
+            this.read_timer = None;
+        }
         // Retransmit while blocked on read — otherwise a lost first DATA
         // after SYN-ACK never retries (poll_write is not called again).
+        let rto = st.rto;
         let retransmit = st.unacked.front().and_then(|front| {
-            if front.sent_at.elapsed() > Duration::from_millis(500) {
+            if front.sent_at.elapsed() > rto {
                 Some((
                     front.seq_nr,
                     front.len,
@@ -373,7 +455,9 @@ impl AsyncRead for UtpStream {
         if let Some((seq, len, payload, send_id, ts, delay, wnd, ack, target)) = retransmit {
             if let Some(front) = st.unacked.front_mut() {
                 front.sent_at = Instant::now();
+                front.retransmitted = true;
             }
+            st.on_timeout();
             let hdr = PacketHeader {
                 type_ver: (ST_DATA << 4) | UTP_VERSION,
                 extension: EXT_NONE,
@@ -387,7 +471,8 @@ impl AsyncRead for UtpStream {
             let mut pkt = BytesMut::with_capacity(HEADER_SIZE + len);
             hdr.encode(&mut pkt);
             pkt.extend_from_slice(&payload);
-            let _ = self.inner.socket_tx.send((pkt.freeze(), target));
+            st.last_advertised_window = wnd;
+            let _ = this.inner.socket_tx.send((pkt.freeze(), target));
         }
 
         if !st.recv_buf.is_empty() {
@@ -395,23 +480,21 @@ impl AsyncRead for UtpStream {
             let slice = st.recv_buf.split_to(to_read);
             buf.put_slice(&slice);
 
-            // Send piggybacked / pending ACK if any unacked packets
-            if st.unacked_recv_count > 0 {
+            // Receiving already ACKed these packets, but draining the buffer
+            // must also advertise newly available space. Otherwise a sender
+            // that saw a zero window can never send the next packet.
+            let window = DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32);
+            let reopened = window.saturating_sub(st.last_advertised_window);
+            if st.unacked_recv_count > 0
+                || reopened >= WINDOW_UPDATE_BYTES
+                || (st.last_advertised_window == 0 && window > 0)
+            {
                 st.unacked_recv_count = 0;
-                let resp = PacketHeader {
-                    type_ver: (ST_STATE << 4) | UTP_VERSION,
-                    extension: EXT_NONE,
-                    connection_id: st.send_id,
-                    timestamp_micros: wall_micros(),
-                    timestamp_diff_micros: st.last_measured_delay,
-                    wnd_size: DEFAULT_RECV_WND,
-                    seq_nr: st.seq_nr,
-                    ack_nr: st.ack_nr,
-                };
-                let mut b = BytesMut::with_capacity(HEADER_SIZE);
-                resp.encode(&mut b);
+                let delay = st.last_measured_delay;
+                let sack = st.selective_ack_bitmask();
+                let packet = encode_ack_packet(&mut st, delay, sack.as_deref());
                 let target = st.remote_addr;
-                let _ = self.inner.socket_tx.send((b.freeze(), target));
+                let _ = this.inner.socket_tx.send((packet, target));
             }
 
             return Poll::Ready(Ok(()));
@@ -422,12 +505,20 @@ impl AsyncRead for UtpStream {
         }
 
         st.read_waker = Some(cx.waker().clone());
-        // Wake periodically so retransmit check above can run while reading.
-        let waker = cx.waker().clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            waker.wake();
-        });
+        // Reuse one timer for the oldest unacked packet. Spawning a fresh
+        // sleeping task on every Pending poll accumulated thousands of stale
+        // wakes under load, including when there was nothing to retransmit.
+        if let Some(front) = st.unacked.front() {
+            let deadline =
+                tokio::time::Instant::from_std(front.sent_at + st.rto);
+            let timer = this
+                .read_timer
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+            timer.as_mut().reset(deadline);
+            if timer.as_mut().poll(cx).is_ready() {
+                cx.waker().wake_by_ref();
+            }
+        }
         Poll::Pending
     }
 }
@@ -478,12 +569,13 @@ impl AsyncWrite for UtpStream {
                 connection_id: st.send_id,
                 timestamp_micros: wall_micros(),
                 timestamp_diff_micros: st.last_measured_delay,
-                wnd_size: DEFAULT_RECV_WND,
+                wnd_size: DEFAULT_RECV_WND.saturating_sub(st.recv_buf.len() as u32),
                 seq_nr: seq,
                 ack_nr: st.ack_nr,
             };
 
             let mut pkt = BytesMut::with_capacity(HEADER_SIZE + chunk_len);
+            st.last_advertised_window = hdr.wnd_size;
             hdr.encode(&mut pkt);
             pkt.extend_from_slice(&payload);
             let pkt_bytes = pkt.freeze();
@@ -494,6 +586,7 @@ impl AsyncWrite for UtpStream {
                 len: chunk_len,
                 payload: payload.clone(),
                 sent_at: Instant::now(),
+                retransmitted: false,
             });
 
             packets_to_send.push(pkt_bytes);
@@ -512,6 +605,7 @@ impl AsyncWrite for UtpStream {
             if let Some(front) = st.unacked.front_mut() {
                 if front.sent_at.elapsed() > Duration::from_millis(50) {
                     front.sent_at = Instant::now();
+                    front.retransmitted = true;
                     let hdr = PacketHeader {
                         type_ver: (ST_DATA << 4) | UTP_VERSION,
                         extension: EXT_NONE,
@@ -534,6 +628,11 @@ impl AsyncWrite for UtpStream {
         }
 
         let target = st.remote_addr;
+        // A read may already be waiting with no retransmission timer. New
+        // unacked data must wake it to register the first packet's deadline.
+        if let Some(waker) = st.read_waker.take() {
+            waker.wake();
+        }
         drop(st);
 
         for pkt in packets_to_send {
@@ -632,8 +731,8 @@ impl UtpSocket {
                 if count == 0 {
                     break;
                 }
-                for (buf, target) in batch.drain(..) {
-                    if std::env::var_os("WT_UTP_TRACE").is_some() && buf.len() >= HEADER_SIZE {
+                for (buf, target) in &batch {
+                    if *UTP_TRACE && buf.len() >= HEADER_SIZE {
                         let t = buf[0] >> 4;
                         let cid = u16::from_be_bytes([buf[2], buf[3]]);
                         let seq = u16::from_be_bytes([buf[16], buf[17]]);
@@ -643,8 +742,9 @@ impl UtpSocket {
                             buf.len()
                         );
                     }
-                    let _ = udp_out.send_to(&buf, target).await;
                 }
+                crate::udp_batch::send_datagrams(&udp_out, &batch).await;
+                batch.clear();
             }
         });
 
@@ -658,9 +758,28 @@ impl UtpSocket {
         let recv_task = tokio::spawn(async move {
             let mut buf = [0u8; 65535];
             let start_time = Instant::now();
+            let mut drained = 0u32;
 
             while !closed_in.load(Ordering::Relaxed) {
-                let (len, peer) = match udp_in.recv_from(&mut buf).await {
+                // Take what is already queued without a trip through the
+                // scheduler, yielding now and then so other tasks still run.
+                let received = match udp_in.try_recv_from(&mut buf) {
+                    Ok(res) if drained < 64 => {
+                        drained += 1;
+                        Ok(res)
+                    }
+                    Ok(res) => {
+                        drained = 0;
+                        tokio::task::yield_now().await;
+                        Ok(res)
+                    }
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                        drained = 0;
+                        udp_in.recv_from(&mut buf).await
+                    }
+                    Err(err) => Err(err),
+                };
+                let (len, peer) = match received {
                     Ok(res) => res,
                     Err(_) => break,
                 };
@@ -693,7 +812,7 @@ impl UtpSocket {
                 let now_u = wall_micros();
                 let delay = now_u.wrapping_sub(hdr.timestamp_micros);
 
-                if std::env::var_os("WT_UTP_TRACE").is_some() {
+                if *UTP_TRACE {
                     eprintln!(
                         "utp IN  <-{peer} type={pkt_type} cid={} seq={} ack={} len={len}",
                         hdr.connection_id, hdr.seq_nr, hdr.ack_nr
@@ -741,6 +860,7 @@ impl UtpSocket {
                         inner,
                         registry: Arc::downgrade(&streams_in),
                         _socket: None,
+                        read_timer: None,
                     };
                     let _ = accept_tx.send(stream);
                     continue;
@@ -827,33 +947,30 @@ impl UtpSocket {
                 let mut st = inner.state.lock();
                 st.remote_wnd = hdr.wnd_size;
                 st.last_measured_delay = delay;
-                if delay < st.base_delay_micros {
-                    st.base_delay_micros = delay;
-                }
-
-                // LEDBAT congestion window update (increase when under target).
-                let queue_delay = delay.saturating_sub(st.base_delay_micros);
-                if queue_delay < LEDBAT_TARGET_MICROS {
-                    let off_target = LEDBAT_TARGET_MICROS - queue_delay;
-                    let scaled = (st.cwnd as u64 * off_target as u64) / LEDBAT_TARGET_MICROS as u64;
-                    let inc = (scaled / st.cwnd as u64).max(MAX_PAYLOAD_SIZE as u64) as usize;
-                    st.cwnd = (st.cwnd + inc).min(MAX_CWND);
-                }
 
                 // Handle cumulative ACKs
                 let mut acked_any = false;
                 let prev_ack = st.last_remote_ack;
+                let mut rtt_sample = None;
                 while let Some(front) = st.unacked.front() {
                     let diff = hdr.ack_nr.wrapping_sub(front.seq_nr) as i16;
                     if diff >= 0 {
-                        st.bytes_in_flight = st.bytes_in_flight.saturating_sub(front.len);
+                        let len = front.len;
+                        if !front.retransmitted {
+                            rtt_sample = Some(front.sent_at.elapsed());
+                        }
+                        st.bytes_in_flight = st.bytes_in_flight.saturating_sub(len);
                         st.unacked.pop_front();
                         acked_any = true;
                     } else {
                         break;
                     }
                 }
+                if let Some(sample) = rtt_sample {
+                    st.on_rtt_sample(sample);
+                }
                 if acked_any {
+                    st.on_send_delay(hdr.timestamp_diff_micros);
                     st.last_remote_ack = hdr.ack_nr;
                     st.dup_ack_count = 0;
                 } else if hdr.ack_nr == prev_ack && !st.unacked.is_empty() {
@@ -880,6 +997,7 @@ impl UtpSocket {
                 let resend = if need_fast_resend {
                     let front = st.unacked.front_mut().expect("checked is_some");
                     front.sent_at = Instant::now();
+                    front.retransmitted = true;
                     let seq = front.seq_nr;
                     let len = front.len;
                     let payload = front.payload.clone();
@@ -953,7 +1071,7 @@ impl UtpSocket {
                         if should_ack {
                             st.unacked_recv_count = 0;
                             let sack_bytes = st.selective_ack_bitmask();
-                            let pkt = encode_ack_packet(&st, delay, sack_bytes.as_deref());
+                            let pkt = encode_ack_packet(&mut st, delay, sack_bytes.as_deref());
                             let _ = out_tx_in.send((pkt, peer));
                         }
                     }
@@ -964,7 +1082,7 @@ impl UtpSocket {
                         if let Some(w) = st.read_waker.take() {
                             w.wake();
                         }
-                        let pkt = encode_ack_packet(&st, delay, None);
+                        let pkt = encode_ack_packet(&mut st, delay, None);
                         let _ = out_tx_in.send((pkt, peer));
                     }
                     ST_RESET => {
@@ -1072,6 +1190,7 @@ impl UtpSocket {
                     inner,
                     registry: Arc::downgrade(&self.streams),
                     _socket: None,
+                    read_timer: None,
                 })
             }
             Ok(Ok(Err(error))) => Err(error),
@@ -1102,3 +1221,7 @@ impl Drop for UtpSocket {
         self.close();
     }
 }
+
+#[cfg(test)]
+#[path = "utp_flow_tests.rs"]
+mod flow_tests;

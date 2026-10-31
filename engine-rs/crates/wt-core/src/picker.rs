@@ -159,6 +159,32 @@ pub fn compute_playback_pipeline_limit(
         .max(PLAYBACK_PIPELINE_FLOOR)
 }
 
+/// Seconds of a peer's own rate kept requested outside playback. A longer
+/// queue only parks blocks on that peer where faster peers cannot fetch them.
+const DOWNLOAD_QUEUE_SECONDS: f64 = 3.0;
+const DOWNLOAD_QUEUE_FLOOR: usize = 32;
+/// Limit until a peer has delivered anything: its speed is still unknown.
+const UNMEASURED_QUEUE: usize = 32;
+
+/// Request limit for one peer: its playback pipeline during playback,
+/// otherwise a few seconds of what it actually delivers.
+pub fn compute_peer_pipeline_limit(download_rate: f64, rtt: Duration, has_focus: bool) -> usize {
+    if has_focus {
+        return match compute_playback_pipeline_limit(download_rate, rtt, true) {
+            0 => UNMEASURED_QUEUE,
+            limit => limit,
+        };
+    }
+    if download_rate <= 0.0 {
+        return UNMEASURED_QUEUE;
+    }
+    // Never less than two round trips. On mobile data those reach 2 s or more,
+    // and a queue shorter than one makes the peer's measured rate shrink, then
+    // the queue sized from it, and so on down.
+    let seconds = DOWNLOAD_QUEUE_SECONDS.max(rtt.as_secs_f64() * 2.0);
+    ((download_rate * seconds / (BLOCK_SIZE as f64)) as usize).max(DOWNLOAD_QUEUE_FLOOR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

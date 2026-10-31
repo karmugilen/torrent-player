@@ -292,14 +292,43 @@ impl EngineServer {
             state.known.clear();
             self.remove_inactive_resume_windows(&protected);
         }
+        drop(state);
+        if categories.iter().any(|category| category == "peers") {
+            // Clear the live store too, or the next handshake re-persists it.
+            let mut hints = self.peer_hints.lock();
+            let hashes: Vec<String> = hints.hints_mut().keys().cloned().collect();
+            for hash in hashes {
+                hints.forget_peer_hints(&self.download_dir, &hash);
+            }
+        }
+        if categories.iter().any(|category| category == "startup") {
+            self.clear_inactive_startup_caches();
+        }
         let other: Vec<_> = categories
             .iter()
-            .filter(|category| category.as_str() != "resume")
+            .filter(|category| !["resume", "startup"].contains(&category.as_str()))
             .cloned()
             .collect();
         if !other.is_empty() {
             wt_storage::clear_cache_categories(&self.download_dir, &other)?;
         }
         Ok(())
+    }
+
+    /// Go `clearInactiveStartupCaches`: an attached Direct Play session keeps
+    /// its saved startup pieces; storage still serves them.
+    fn clear_inactive_startup_caches(&self) {
+        let protected: HashSet<String> = self.records.read().values()
+            .map(|r| r.read().info_hash.clone())
+            .filter(|hash| self.storage.get_storage(hash).is_some_and(|st| st.stream_mode()))
+            .collect();
+        let root = self.download_dir.join(".startup");
+        let Ok(entries) = std::fs::read_dir(&root) else { return; };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().is_dir() && !protected.contains(&name) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
     }
 }

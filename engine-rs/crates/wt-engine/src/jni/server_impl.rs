@@ -172,7 +172,10 @@ impl EngineHostApi for AndroidEngineHost {
                 None => return -1,
             }
         };
-        match reader.read_at(buf, offset) {
+        // ProxyFileDescriptorCallback accepts short reads. Return available
+        // bytes rather than holding the player's callback until its entire
+        // (up to 1 MiB) buffer has arrived from the swarm.
+        match reader.read_some(buf, offset) {
             Ok(n) => n as i32,
             Err(err) => {
                 log_error(&format!("playback read: {err}"));
@@ -182,11 +185,13 @@ impl EngineHostApi for AndroidEngineHost {
     }
 
     fn close_playback(&self, handle: i64) {
-        if let Some(reader) = self.playback.lock().remove(&handle) {
+        let reader = self.playback.lock().remove(&handle);
+        if let Some(reader) = reader {
             reader.close();
         }
         if let Some(server) = self.current_server() {
-            if let Some(reader) = server.playback_readers.lock().remove(&handle) {
+            let reader = server.playback_readers.lock().remove(&handle);
+            if let Some(reader) = reader {
                 reader.close();
             }
         }
@@ -246,14 +251,15 @@ impl EngineHostApi for AndroidEngineHost {
     }
 
     fn close_preview(&self, handle: i64) {
-        if let Some(reader) = self.preview.lock().remove(&handle) {
+        let reader = self.preview.lock().remove(&handle);
+        if let Some(reader) = reader {
             reader.close();
         }
         if let Some(server) = self.current_server() {
-            if let Some(reader) = server.preview_readers.lock().remove(&handle) {
+            let reader = server.preview_readers.lock().remove(&handle);
+            if let Some(reader) = reader {
                 reader.close();
             }
-            *server.preview_active.lock() = None;
         }
     }
 }

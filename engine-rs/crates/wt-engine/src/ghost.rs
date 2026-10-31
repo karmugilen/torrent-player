@@ -117,12 +117,7 @@ impl EngineServer {
                 .map(|f| WantedFile {
                     index: f.index(),
                     selected: rec.selected.contains(&f.index()),
-                    layout: FileLayout {
-                        torrent_offset: f.offset(),
-                        length: f.length(),
-                        begin_piece: 0,
-                        end_piece: 0,
-                    },
+                    layout: FileLayout::for_file(f.offset(), f.length(), rec.piece_length),
                 })
                 .collect::<Vec<_>>();
             let wanted = compute_wanted_pieces(
@@ -205,9 +200,22 @@ impl EngineServer {
 
     /// One weakly-owned task shares the existing one-second telemetry clock.
     pub(crate) fn start_policy_sampler(server: &Arc<Self>) {
+        Self::start_transfer_log(server);
         let weak = Arc::downgrade(server);
         server.client.inner.tokio_handle.spawn(async move {
             let mut previous = None;
+            // How late a timer fires on the peers' runtime: are peers starved of CPU?
+            if let Some(server) = weak.upgrade() {
+                let lag_weak = weak.clone();
+                server.client.inner.tokio_handle.spawn(async move {
+                    while lag_weak.strong_count() > 0 {
+                        let asleep = Instant::now();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let late = asleep.elapsed().saturating_sub(Duration::from_millis(50));
+                        wt_types::probe::max(wt_types::probe::RT_LAG_MAX_MS, late.as_millis() as u64);
+                    }
+                });
+            }
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let Some(server) = weak.upgrade() else {
@@ -222,10 +230,12 @@ impl EngineServer {
                 server.ghost_pro_mode_tick(now);
                 server.peer_exploration_tick(now);
                 server.seed_tick();
+                server.direct_play_idle_tick(now);
+                server.park_idle_readers();
                 // Go `dropChokersLoop`: free slots held by peers that keep us
-                // choked while we are interested (CHOKE_TIMEOUT = 5s).
+                // choked while we are interested.
                 if server.drop_chokers.load(Ordering::SeqCst) {
-                    let after = Duration::from_secs(5);
+                    let after = wt_policy::choke_timeout();
                     for rec in server.records.read().values() {
                         let rec = rec.read();
                         if !rec.resting {

@@ -78,27 +78,33 @@ fn webrtc_synthetic_addr(offer_id: &str, peer_id: PeerId) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 2], port))
 }
 
+/// Lifetime data totals: live and retired connections plus web seeds.
+fn transfer_totals(t: &TorrentInner) -> crate::stats::ConnStats {
+    let mut cs = t.webseed_stats.snapshot();
+    cs.add(&t.retired_conn_stats.lock());
+    for h in t.conn_handles.read().values() {
+        cs.add(&h.stats().snapshot());
+    }
+    cs
+}
+
 impl TorrentAnnounceInfo for TorrentSourcesAdapter {
     fn peer_id(&self) -> PeerId {
         self.peer_id
     }
 
+    /// Go announces `BytesReadData` (connection totals, not completed pieces).
     fn downloaded(&self) -> i64 {
-        let Some(info) = self.torrent.info.read().clone() else {
-            return 0;
-        };
-        let pieces = self.torrent.pieces.read();
-        let mut completed = 0i64;
-        for p in pieces.iter() {
-            if p.complete {
-                completed += info.piece(p.index).length;
-            }
-        }
-        completed
+        transfer_totals(&self.torrent).bytes_read_data
     }
 
+    /// Go `BytesWrittenData`; private trackers compute ratio from it.
     fn uploaded(&self) -> i64 {
-        0
+        transfer_totals(&self.torrent).bytes_written_data
+    }
+
+    fn private(&self) -> bool {
+        self.torrent.info.read().as_ref().is_some_and(|i| i.private == Some(true))
     }
 
     fn left(&self) -> i64 {
@@ -180,6 +186,11 @@ pub struct ClientInner {
     add_torrent_lock: Mutex<()>,
     pub outgoing_tcp_conn_hook: RwLock<Option<TcpConnHook>>,
     pub urgent_steal_after: RwLock<Duration>,
+    /// Router mappings of the listen port, removed on close.
+    port_mappings: Mutex<Vec<wt_discovery::portfwd::PortMapping>>,
+    /// Redo port mapping and LSD announces now (network changed, torrent added).
+    port_map_wake: Arc<tokio::sync::Notify>,
+    lsd_wake: Arc<tokio::sync::Notify>,
     pub arrival_model: Arc<RwLock<ArrivalModel>>,
     pub dial_limiter: Limiter,
     pub download_limiter: Limiter,
@@ -187,6 +198,9 @@ pub struct ClientInner {
     pub half_open: HalfOpenTracker,
     /// Mirrored for `ClientStats` / older readers; prefer [`HalfOpenTracker::current_total`].
     pub active_half_open: AtomicUsize,
+    /// Live dial budget; starts from [`ClientConfig`] and can rise with maxPeers.
+    pub half_open_conns_per_torrent: AtomicUsize,
+    pub total_half_open_conns: AtomicUsize,
     pub closed: AtomicBool,
     pub tokio_handle: tokio::runtime::Handle,
     _runtime: ClientRuntime,
@@ -257,6 +271,8 @@ impl ClientInner {
 
         let listen_port = Arc::new(RwLock::new(cfg.listen_port));
         let half_open = HalfOpenTracker::new();
+        let half_open_per = cfg.half_open_conns_per_torrent;
+        let half_open_total = cfg.total_half_open_conns;
 
         let client = Arc::new(Self {
             peer_id,
@@ -267,12 +283,17 @@ impl ClientInner {
             add_torrent_lock: Mutex::new(()),
             outgoing_tcp_conn_hook: RwLock::new(None),
             urgent_steal_after: RwLock::new(Duration::ZERO),
+            port_mappings: Mutex::new(Vec::new()),
+            port_map_wake: Arc::new(tokio::sync::Notify::new()),
+            lsd_wake: Arc::new(tokio::sync::Notify::new()),
             arrival_model: Arc::new(RwLock::new(ArrivalModel::new())),
             dial_limiter,
             download_limiter,
             upload_limiter,
             half_open,
             active_half_open: AtomicUsize::new(0),
+            half_open_conns_per_torrent: AtomicUsize::new(half_open_per),
+            total_half_open_conns: AtomicUsize::new(half_open_total),
             closed: AtomicBool::new(false),
             tokio_handle: handle.clone(),
             _runtime: ClientRuntime(Some(rt)),
@@ -353,6 +374,12 @@ impl ClientInner {
             self.tasks.lock().push(task);
 
             *self.listener.write() = Some(Arc::new(listener));
+            if self.config.port_forwarding {
+                self.start_port_forwarding(port);
+            }
+            if self.config.local_service_discovery {
+                self.start_local_service_discovery(port);
+            }
         }
 
         // Discovery (trackers always; DHT/WebTorrent per config).
@@ -377,7 +404,33 @@ impl ClientInner {
         Ok(())
     }
 
-    fn torrent_keys_for(t: &TorrentInner) -> TorrentKeys {
+    /// Half-open dial limits for `t`: the live settings, raised during a
+    /// peer start burst.
+    /// Established connections across all torrents. Locks one at a time.
+    pub(crate) fn established_conns(&self) -> usize {
+        let torrents: Vec<_> = self.torrents.read().values().cloned().collect();
+        torrents.iter().map(|t| t.conn_handles.read().len()).sum()
+    }
+
+    pub(crate) fn half_open_limits_for(&self, t: &TorrentInner) -> (usize, usize) {
+        let per = self.half_open_conns_per_torrent.load(Ordering::Relaxed);
+        let total = self.total_half_open_conns.load(Ordering::Relaxed);
+        if t.bursting() {
+            let (burst_per, burst_total) = crate::half_open_for_max_peers(crate::torrent::PEER_BURST_CONNS);
+            (per.max(burst_per), total.max(burst_total))
+        } else {
+            (per, total)
+        }
+    }
+
+    pub(crate) fn rediscover_torrent(&self, t: &TorrentInner) {
+        let Some(sources) = self.sources.read().clone() else { return; };
+        // The DHT announcer is a Tokio task; callers may be plain threads.
+        let _runtime = self.tokio_handle.enter();
+        sources.rediscover(&Self::torrent_keys_for(t));
+    }
+
+    pub(crate) fn torrent_keys_for(t: &TorrentInner) -> TorrentKeys {
         TorrentKeys {
             v1: Some(t.info_hash),
             v2_short: t.info_hash_v2.map(|v| v.to_short()),
@@ -419,8 +472,9 @@ impl ClientInner {
             sink: adapter as Arc<dyn PeerSink>,
         };
         let _entered = self.tokio_handle.enter();
+        // Without its sources a torrent only ever sees peers that find it.
         if let Err(e) = sources.register_torrent(reg) {
-            tracing::debug!("register_torrent: {e}");
+            tracing::warn!("register_torrent: {e}");
         }
     }
 
@@ -559,14 +613,22 @@ impl ClientInner {
             spec.web_seeds.clone(),
         );
 
+        // A magnet's first dials already burst: peers turned away at the
+        // configured limit are backed off before its download is allowed.
+        // Torrents with info burst when their download is allowed.
+        torrent_inner.start_peer_burst();
         if self.config.dial_for_peer_conns {
             self.start_dialer(&torrent_inner);
         }
+        self.lsd_wake.notify_one();
         let task = self.tokio_handle.spawn(crate::webseed_download::run(
             Arc::downgrade(self),
             Arc::downgrade(&torrent_inner),
         ));
-        self.tasks.lock().push(task);
+        let mut tasks = self.tasks.lock();
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
+        drop(tasks);
 
         Ok((torrent_inner, true))
     }
@@ -635,6 +697,24 @@ impl ClientInner {
         self.torrents.read().values().cloned().collect()
     }
 
+    pub(crate) fn detach_torrent(&self, torrent: &Arc<TorrentInner>) {
+        let _add_guard = self.add_torrent_lock.lock();
+        let hashes: Vec<InfoHash> = self.torrents_by_short.read().iter()
+            .filter(|(_, entry)| Arc::ptr_eq(entry, torrent))
+            .map(|(hash, _)| *hash)
+            .collect();
+        self.torrents.write().retain(|_, entry| !Arc::ptr_eq(entry, torrent));
+        self.torrents_by_short.write().retain(|_, entry| !Arc::ptr_eq(entry, torrent));
+        // Stop its trackers and DHT. Left registered, they kept announcing for
+        // the dead torrent and made a re-add of the hash start without discovery.
+        if let Some(sources) = self.sources.read().clone() {
+            let _entered = self.tokio_handle.enter();
+            for hash in hashes {
+                sources.unregister_torrent(&TorrentKeys { v1: Some(hash), v2_short: None });
+            }
+        }
+    }
+
     pub fn local_port(&self) -> u16 {
         *self.listen_port.read()
     }
@@ -681,6 +761,117 @@ impl ClientInner {
         *self.urgent_steal_after.write() = after;
     }
 
+    /// The network changed: map the port on the new router and announce to
+    /// the new local network.
+    pub fn refresh_local_network(&self) {
+        self.port_map_wake.notify_one();
+        self.lsd_wake.notify_one();
+    }
+
+    /// Go `forwardPort`, renewed every 30 minutes (leases, router restarts)
+    /// and after network changes.
+    fn start_port_forwarding(self: &Arc<Self>, port: u16) {
+        let weak = Arc::downgrade(self);
+        let wake = Arc::clone(&self.port_map_wake);
+        let description = self.config.http_user_agent.clone();
+        let task = self.tokio_handle.spawn(async move {
+            loop {
+                let mappings = wt_discovery::portfwd::map_port(port, &description).await;
+                match weak.upgrade() {
+                    Some(client) if !client.closed.load(Ordering::Relaxed) => {
+                        *client.port_mappings.lock() = mappings;
+                    }
+                    _ => {
+                        wt_discovery::portfwd::unmap(&mappings).await;
+                        return;
+                    }
+                }
+                tokio::select! {
+                    _ = wake.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(30 * 60)) => {}
+                }
+            }
+        });
+        self.tasks.lock().push(task);
+    }
+
+    /// BEP 14: announce public torrents to the local network every five
+    /// minutes (sooner when one is added) and add the peers others announce.
+    fn start_local_service_discovery(self: &Arc<Self>, port: u16) {
+        use wt_discovery::lsd;
+        let weak = Arc::downgrade(self);
+        let wake = Arc::clone(&self.lsd_wake);
+        let cookie = hex::encode(rand::random::<[u8; 8]>());
+        let task = self.tokio_handle.spawn(async move {
+            let Ok(socket) = lsd::bind() else { return };
+            let group = SocketAddr::from((lsd::LSD_GROUP, lsd::LSD_PORT));
+            let mut buf = [0u8; 1500];
+            let mut last: Option<tokio::time::Instant> = None;
+            let mut next = tokio::time::Instant::now();
+            loop {
+                if tokio::time::Instant::now() >= next {
+                    let Some(client) = weak.upgrade() else { return };
+                    if client.closed.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let hashes = client.lsd_info_hashes();
+                    drop(client);
+                    for chunk in hashes.chunks(lsd::HASHES_PER_ANNOUNCE) {
+                        let _ = socket.send_to(lsd::announce(port, &cookie, chunk).as_bytes(), group).await;
+                    }
+                    last = Some(tokio::time::Instant::now());
+                    next = tokio::time::Instant::now() + lsd::ANNOUNCE_EVERY;
+                }
+                tokio::select! {
+                    received = socket.recv_from(&mut buf) => {
+                        let Ok((n, from)) = received else { continue };
+                        let Some(announce) = lsd::parse(&buf[..n]) else { continue };
+                        if announce.cookie.as_deref() == Some(cookie.as_str()) {
+                            continue;
+                        }
+                        let Some(client) = weak.upgrade() else { return };
+                        client.add_lsd_peers(&announce, SocketAddr::new(from.ip(), announce.port));
+                    }
+                    // BEP 14: at most one announce a minute.
+                    _ = wake.notified() => {
+                        next = last.map_or(tokio::time::Instant::now(), |at| at + Duration::from_secs(60));
+                    }
+                    _ = tokio::time::sleep_until(next) => {}
+                }
+            }
+        });
+        self.tasks.lock().push(task);
+    }
+
+    /// Public torrents with metadata. BEP 27: private torrents use no LSD.
+    fn lsd_info_hashes(&self) -> Vec<String> {
+        let torrents: Vec<_> = self.torrents.read().values().cloned().collect();
+        torrents.iter()
+            .filter(|t| !t.closed.load(Ordering::Relaxed)
+                && t.info.read().as_ref().is_some_and(|i| i.private != Some(true)))
+            .map(|t| hex::encode(t.info_hash.0))
+            .collect()
+    }
+
+    fn add_lsd_peers(&self, announce: &wt_discovery::lsd::Announce, addr: SocketAddr) {
+        for hash in &announce.info_hashes {
+            let Some(t) = self.torrents_by_short.read().get(&InfoHash(*hash)).cloned() else { continue };
+            if t.closed.load(Ordering::Relaxed)
+                || !t.info.read().as_ref().is_some_and(|i| i.private != Some(true))
+            {
+                continue;
+            }
+            t.add_peers(vec![PeerInfo {
+                id: None,
+                addr,
+                source: PeerSource::Lsd,
+                supports_encryption: false,
+                pex: Default::default(),
+                trusted: false,
+            }]);
+        }
+    }
+
     pub fn close(self: &Arc<Self>) {
         let _add_guard = self.add_torrent_lock.lock();
         if self.closed.swap(true, Ordering::SeqCst) {
@@ -693,6 +884,15 @@ impl ClientInner {
 
         for task in self.tasks.lock().drain(..) {
             task.abort();
+        }
+        // Go `clearPortMappings`; a router that stopped answering must not
+        // hold up shutdown.
+        let mappings = std::mem::take(&mut *self.port_mappings.lock());
+        if !mappings.is_empty() {
+            self.block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_millis(1500),
+                    wt_discovery::portfwd::unmap(&mappings)).await;
+            });
         }
 
         if let Some(sources) = self.sources.write().take() {
@@ -712,10 +912,6 @@ impl ClientInner {
             for c in t.conn_handles.write().drain().map(|(_, c)| c) {
                 c.close("client closed");
             }
-            let conns = t.conns.write();
-            for c in conns.values() {
-                c.close();
-            }
         }
     }
 
@@ -731,11 +927,15 @@ impl ClientInner {
                 if client.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
                     break;
                 }
+                torrent.end_peer_burst_if_due();
+                if torrent.bursting() {
+                    torrent.update_peer_burst_limit(client.established_conns());
+                }
                 let count = if torrent.wants_conns() > 0 {
-                    torrent.max_half_open(client.config.half_open_conns_per_torrent)
+                    let (per, total) = client.half_open_limits_for(&torrent);
+                    torrent.max_half_open(per)
                         .saturating_sub(torrent.dialing_peers.lock().len())
-                        .min(client.config.total_half_open_conns
-                            .saturating_sub(client.half_open.current_total()))
+                        .min(total.saturating_sub(client.half_open.current_total()))
                 } else { 0 };
                 // Refresh want_peers snapshot every 5s while under low-water so
                 // tracker slots can be nudged (see AnnounceDispatcher::update_torrent).
@@ -769,12 +969,14 @@ impl ClientInner {
                             }
                             *tor.swarm_diagnostics.lock().dial_failures
                                 .entry(crate::stats::failure_kind(&msg).into()).or_default() += 1;
-                            // Temporary dial-failure taxonomy for peers_compare
-                            // (stderr → engine-host log). Remove once Ubuntu
-                            // peer-count matches Go.
+                            // Dial-failure taxonomy for the desktop peers_compare
+                            // tool (stderr → engine-host log). Android discards
+                            // stderr, so it is not built there.
                             // Align with Go webtorFailureKind: race failures are
                             // "other" ("all initial dials failed"); timeouts in
                             // that message must not dominate dialFailures.
+                            #[cfg(not(target_os = "android"))]
+                            {
                             let kind = if msg.contains("all initial dials failed") {
                                 "other"
                             } else if msg.contains("MSE") {
@@ -794,6 +996,7 @@ impl ClientInner {
                                 peer.addr,
                                 msg.chars().take(160).collect::<String>()
                             );
+                            }
                         }
                         // Go PopMax: failed dials leave the pool; rediscovery
                         // (tracker/DHT/PEX mid-run feed) re-adds them. Requeue
@@ -802,10 +1005,19 @@ impl ClientInner {
                         // peers.Len() allowed longer dials and a higher mid-run
                         // peer spike. Keep fail_count/backoff so rediscovery
                         // cannot immediately redial the same dead contact.
+                        tor.note_dial_source(peer.source, ok);
+                        if let Err(ref e) = result {
+                            wt_types::events::record("dial_fail", format!(
+                                "src={:?} kind={}", peer.source, crate::stats::failure_kind(&e.to_string())));
+                        } else {
+                            wt_types::events::record("dial_ok", format!("src={:?}", peer.source));
+                        }
                         if !ok {
                             tor.dial_finished(peer.addr, false);
                         } else {
                             tor.swarm_diagnostics.lock().dial_ok += 1;
+                            #[cfg(not(target_os = "android"))]
+                            {
                             let transport = tor
                                 .conn_handles
                                 .read()
@@ -816,6 +1028,7 @@ impl ClientInner {
                                 "dial_ok src={:?} transport={} addr={}",
                                 peer.source, transport, peer.addr
                             );
+                            }
                             tor.dial_finished(peer.addr, true);
                         }
                     });
@@ -978,6 +1191,11 @@ impl ClientInner {
             .map(|i| i.info_bytes.len() as u32);
         let hook = self.outgoing_tcp_conn_hook.read().clone();
         let mut cfg = self.config.clone();
+        // Live limits: Settings changes and peer bursts apply without restart
+        // (the startup config kept the dialer at the launch-time limit).
+        let (per_torrent, total) = self.half_open_limits_for(&torrent);
+        cfg.half_open_conns_per_torrent = per_torrent;
+        cfg.total_half_open_conns = total;
         // Diagnostic: WT_FORCE_UTP=1 dials uTP only (Ubuntu Go holds ~25% uTP).
         if std::env::var_os("WT_FORCE_UTP").is_some() {
             cfg.disable_tcp = true;
@@ -989,7 +1207,7 @@ impl ClientInner {
         cfg.nominal_dial_timeout = crate::conn::reduced_dial_timeout(
             cfg.min_dial_timeout,
             cfg.nominal_dial_timeout,
-            self.config.half_open_conns_per_torrent,
+            per_torrent,
             pending,
         );
         let utp = self

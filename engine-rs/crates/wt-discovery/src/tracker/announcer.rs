@@ -29,6 +29,9 @@ pub const DEFAULT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// announce timeout so dead trackers do not sit idle for a full minute while
 /// the dialer is starved for candidates.
 pub const ANNOUNCE_ERROR_BACKOFF: Duration = Duration::from_secs(15);
+/// Slots can be due yet unable to send (tracker at its concurrency limit), so
+/// the loop rests this long; every state change still wakes it at once.
+const MIN_DISPATCH_SLEEP: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TorrentAnnounceKey {
@@ -74,6 +77,8 @@ struct SlotState {
     last_failed: bool,
     sent_completed: bool,
     interval: Duration,
+    /// Tells an announce finishing for a removed torrent from a re-added one.
+    epoch: u64,
 }
 
 impl Default for SlotState {
@@ -85,6 +90,7 @@ impl Default for SlotState {
             last_failed: false,
             sent_completed: false,
             interval: DEFAULT_ANNOUNCE_INTERVAL,
+            epoch: 0,
         }
     }
 }
@@ -96,6 +102,7 @@ struct Inner {
     url_inflight: HashMap<String, usize>,
     clients: HashMap<String, Arc<Client>>,
     snapshots: HashMap<InfoHash, TorrentAnnounceSnapshot>,
+    next_epoch: u64,
     closed: bool,
 }
 
@@ -115,6 +122,7 @@ impl AnnounceDispatcher {
                 url_inflight: HashMap::new(),
                 clients: HashMap::new(),
                 snapshots: HashMap::new(),
+                next_epoch: 0,
                 closed: false,
             })),
             wake: tokio::sync::Notify::new(),
@@ -167,9 +175,12 @@ impl AnnounceDispatcher {
                 url: url.clone(),
                 info_hash,
             };
+            g.next_epoch += 1;
+            let epoch = g.next_epoch;
             g.slots.entry(key).or_insert_with(|| SlotState {
                 event: AnnounceEvent::Started,
                 next_at: Instant::now(),
+                epoch,
                 ..SlotState::default()
             });
         }
@@ -177,17 +188,49 @@ impl AnnounceDispatcher {
         self.wake.notify_one();
     }
 
-    /// Schedule Stopped announces then drop slots for the torrent.
-    pub fn remove_torrent(&self, info_hash: InfoHash) {
+    /// Network change: announce every tracker of `info_hash` now and drop
+    /// the old route's error backoff (Go announces with fresh sockets).
+    pub fn announce_now(&self, info_hash: InfoHash) {
         let mut g = self.inner.lock();
+        let now = Instant::now();
         for (key, slot) in g.slots.iter_mut() {
-            if key.info_hash == info_hash {
-                slot.event = AnnounceEvent::Stopped;
-                slot.next_at = Instant::now();
+            if key.info_hash == info_hash && slot.event != AnnounceEvent::Stopped {
+                slot.next_at = now;
+                slot.last_failed = false;
             }
         }
-        g.snapshots.remove(&info_hash);
         drop(g);
+        self.wake.notify_one();
+    }
+
+    /// Drop the torrent's slots now and tell trackers it stopped. A slot left
+    /// behind to send Stopped would have no snapshot to send it with, so it
+    /// stayed due forever, and a re-add of the hash would inherit it.
+    pub fn remove_torrent(&self, info_hash: InfoHash) {
+        let mut g = self.inner.lock();
+        let snap = g.snapshots.remove(&info_hash);
+        let keys: Vec<_> = g.slots.keys().filter(|k| k.info_hash == info_hash).cloned().collect();
+        let opt = g.cfg.announce_opt.clone();
+        let mut stops = Vec::new();
+        for key in keys {
+            let Some(slot) = g.slots.remove(&key) else { continue };
+            // A slot still on Started never reached this tracker.
+            if slot.event == AnnounceEvent::Started {
+                continue;
+            }
+            if let (Some(snap), Some(client)) = (&snap, g.clients.get(&key.url)) {
+                stops.push((Arc::clone(client), announce_request(snap, AnnounceEvent::Stopped)));
+            }
+        }
+        drop(g);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            for (client, req) in stops {
+                let opt = opt.clone();
+                runtime.spawn(async move {
+                    let _ = client.announce(req, opt).await;
+                });
+            }
+        }
         self.wake.notify_one();
     }
 
@@ -215,6 +258,7 @@ impl AnnounceDispatcher {
                     .map(|s| s.next_at.saturating_duration_since(Instant::now()))
                     .min()
                     .unwrap_or(Duration::from_secs(5))
+                    .max(MIN_DISPATCH_SLEEP)
             };
             tokio::select! {
                 _ = self.wake.notified() => {}
@@ -229,6 +273,7 @@ impl AnnounceDispatcher {
             AnnounceEvent,
             AnnounceRequest,
             AnnounceOpt,
+            u64,
         )> = {
             let mut g = self.inner.lock();
             let now = Instant::now();
@@ -267,35 +312,23 @@ impl AnnounceDispatcher {
                 let Some(snap) = g.snapshots.get(&key.info_hash).cloned() else {
                     continue;
                 };
-                // Go still sends regular announces when !wantPeers (NumWant=0) so
-                // the interval clock stays aligned with tracker `interval`.
-                let req = AnnounceRequest {
-                    info_hash: snap.info_hash,
-                    peer_id: snap.peer_id,
-                    downloaded: snap.downloaded,
-                    left: snap.left,
-                    uploaded: snap.uploaded,
-                    event,
-                    ip_address: 0,
-                    key: snap.key,
-                    // Go `Torrent.announceRequest` uses 200 when wantPeers (Windozer UDP limit).
-                    num_want: if snap.want_peers { 200 } else { 0 },
-                    port: snap.port,
-                };
+                let req = announce_request(&snap, event);
+                let mut epoch = 0;
                 if let Some(slot) = g.slots.get_mut(&key) {
                     slot.active = true;
+                    epoch = slot.epoch;
                 }
                 *g.url_inflight.entry(key.url.clone()).or_insert(0) += 1;
                 let opt = g.cfg.announce_opt.clone();
-                out.push((key, event, req, opt));
+                out.push((key, event, req, opt, epoch));
             }
             out
         };
 
-        for (key, event, req, opt) in due {
+        for (key, event, req, opt, epoch) in due {
             let this = Arc::clone(self);
             tokio::spawn(async move {
-                this.run_announce(key, event, req, opt).await;
+                this.run_announce(key, event, req, opt, epoch).await;
             });
         }
     }
@@ -306,6 +339,7 @@ impl AnnounceDispatcher {
         event: AnnounceEvent,
         req: AnnounceRequest,
         opt: AnnounceOpt,
+        epoch: u64,
     ) {
         let existing = {
             let g = self.inner.lock();
@@ -325,25 +359,32 @@ impl AnnounceDispatcher {
                     c
                 }
                 Err(e) => {
-                    self.finish_announce(&key, event, Err(e));
+                    self.finish_announce(&key, event, epoch, Err(e));
                     return;
                 }
             }
         };
 
         let result = client.announce(req, opt).await;
-        self.finish_announce(&key, event, result);
+        self.finish_announce(&key, event, epoch, result);
     }
 
     fn finish_announce(
         &self,
         key: &TorrentAnnounceKey,
         event: AnnounceEvent,
+        epoch: u64,
         result: std::result::Result<AnnounceResponse, TrackerError>,
     ) {
         let mut g = self.inner.lock();
         if let Some(n) = g.url_inflight.get_mut(&key.url) {
             *n = n.saturating_sub(1);
+        }
+        // The torrent was removed while this ran; its result is not the new slot's.
+        if g.slots.get(key).is_none_or(|slot| slot.epoch != epoch) {
+            drop(g);
+            self.wake.notify_one();
+            return;
         }
         let status_cb = g.cfg.status.clone();
         let peers_tx = g.cfg.peers_tx.clone();
@@ -380,9 +421,7 @@ impl AnnounceDispatcher {
                     if event == AnnounceEvent::Completed {
                         slot.sent_completed = true;
                     }
-                    if event == AnnounceEvent::Stopped {
-                        // Drop after stopped.
-                    } else if event == AnnounceEvent::Started || event == AnnounceEvent::Completed {
+                    if event == AnnounceEvent::Started || event == AnnounceEvent::Completed {
                         slot.event = AnnounceEvent::None;
                     }
                     let peers = resp.peers.clone();
@@ -402,9 +441,6 @@ impl AnnounceDispatcher {
                     }
                     if let Some(tx) = peers_tx {
                         let _ = tx.send((key.info_hash, peers));
-                    }
-                    if event == AnnounceEvent::Stopped {
-                        self.inner.lock().slots.remove(key);
                     }
                     return;
                 }
@@ -437,10 +473,24 @@ impl AnnounceDispatcher {
                 return;
             }
         }
-        // Slot vanished.
-        if let Some(slot) = self.inner.lock().slots.get_mut(key) {
-            slot.active = false;
-        }
+    }
+}
+
+fn announce_request(snap: &TorrentAnnounceSnapshot, event: AnnounceEvent) -> AnnounceRequest {
+    // Go still sends regular announces when !wantPeers (NumWant=0) so
+    // the interval clock stays aligned with tracker `interval`.
+    AnnounceRequest {
+        info_hash: snap.info_hash,
+        peer_id: snap.peer_id,
+        downloaded: snap.downloaded,
+        left: snap.left,
+        uploaded: snap.uploaded,
+        event,
+        ip_address: 0,
+        key: snap.key,
+        // Go `Torrent.announceRequest` uses 200 when wantPeers (Windozer UDP limit).
+        num_want: if snap.want_peers && event != AnnounceEvent::Stopped { 200 } else { 0 },
+        port: snap.port,
     }
 }
 
@@ -561,6 +611,37 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(got, "floored re-announce should still deliver peers");
+        dispatcher.close();
+    }
+
+    #[tokio::test]
+    async fn removed_torrent_leaves_nothing_due_and_can_be_added_again() {
+        let announces = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_counting_http_tracker(Arc::clone(&announces)).await;
+        let dispatcher = AnnounceDispatcher::new(AnnounceDispatcherConfig::default());
+        let ih = InfoHash([0x43; 20]);
+        let url = format!("http://{addr}/announce");
+        dispatcher.update_torrent(snap(ih, false));
+        dispatcher.add_trackers(ih, [url.clone()]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while dispatcher.inner.lock().slots.values().any(|s| s.event == AnnounceEvent::Started) {
+            assert!(tokio::time::Instant::now() < deadline, "first announce never finished");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let before = announces.load(Ordering::SeqCst);
+
+        dispatcher.remove_torrent(ih);
+        assert!(dispatcher.inner.lock().slots.is_empty(), "a slot left due spins run_loop");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while announces.load(Ordering::SeqCst) == before {
+            assert!(tokio::time::Instant::now() < deadline, "Stopped never reached the tracker");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        dispatcher.update_torrent(snap(ih, false));
+        dispatcher.add_trackers(ih, [url]);
+        let event = dispatcher.inner.lock().slots.values().next().map(|s| s.event);
+        assert_eq!(event, Some(AnnounceEvent::Started));
         dispatcher.close();
     }
 

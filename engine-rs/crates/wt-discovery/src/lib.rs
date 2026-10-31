@@ -17,6 +17,8 @@ pub fn ensure_rustls_provider() {
 pub mod bep40;
 pub mod datagram;
 pub mod dht;
+pub mod lsd;
+pub mod portfwd;
 pub mod status;
 pub mod tracker;
 pub mod webseed;

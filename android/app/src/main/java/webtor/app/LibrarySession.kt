@@ -25,11 +25,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import webtor.core.EngineClient
 import webtor.core.EngineException
 import webtor.core.TorrentStatus
@@ -188,6 +190,7 @@ class LibrarySession(
                 settings.edit().also { editor ->
                     editor.remove("playerPackage").remove("playerActivity")
                     editor.remove("downloadRateBytesSec").remove("uploadRateBytesSec")
+                    editor.remove("nativeEngine")
                     // Playback has one built-in mode; forget the old experiment switches.
                     RETIRED_EXPERIMENT_PREF_KEYS.forEach(editor::remove)
                     LEGACY_DOWNLOAD_QUEUE_PREF_KEYS.forEach(editor::remove)
@@ -686,7 +689,13 @@ class LibrarySession(
     fun requestClearAll() = _ui.update { it.copy(clearAllConfirm = true) }
     fun dismissClearAll() = _ui.update { it.copy(clearAllConfirm = false) }
     fun pickTorrent() { _events.trySend(UiEvent.PickTorrent) }
-    fun exportDiagnostics() { _ui.update { it.copy(diagnosticsPreview = buildDiagnosticsReport(it.library, "1.4.5")) } }
+    fun exportDiagnostics() {
+        _ui.update { it.copy(diagnosticsPreview = buildDiagnosticsReport(it.library, "1.4.5")) }
+        scope.launch {
+            val events = withContext(io) { runCatching { client.events() }.getOrNull() } ?: return@launch
+            _ui.update { state -> state.copy(diagnosticsPreview = state.diagnosticsPreview?.let { "$it\n\nengine events\n$events" }) }
+        }
+    }
     fun closeDiagnostics() { _ui.update { it.copy(diagnosticsPreview = null) } }
     fun shareDiagnostics() { _ui.value.diagnosticsPreview?.let { _events.trySend(UiEvent.ShareText(it)) } }
 
@@ -1545,12 +1554,14 @@ class LibrarySession(
                     withContext(io) { runCatching { client.forgetPeerHints(hash) } }
                 }
                 withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(target) }
+                // Before the entry leaves the list: a re-add from then on takes a newer
+                // generation, which a later tombstone would wrongly erase on restart.
+                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
-                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 persist()
                 refreshStorageStats()
                 syncService()
@@ -1612,12 +1623,14 @@ class LibrarySession(
                 }
                 withContext(io) { storage.deleteFiles(target.files); if (target.directPlay) storage.deleteStartupCache(target.key) }
                 withContext(io) { (app as? WebtorApp)?.thumbnails?.invalidate(target) }
+                // Before the entry leaves the list: a re-add from then on takes a newer
+                // generation, which a later tombstone would wrongly erase on restart.
+                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 _ui.update { state ->
                     state.copy(library = state.library.filter { it.key != target.key },
                         screen = if (state.openTorrentKey == target.key) Screen.Library else state.screen,
                         openTorrentKey = state.openTorrentKey.takeUnless { it == target.key })
                 }
-                withContext(io) { storage.retireTorrent(target.key, nextGen) }
                 persist()
                 refreshStorageStats()
                 syncService()
@@ -1995,6 +2008,13 @@ class LibrarySession(
 
     private suspend fun addTorrent(torrentId: String, torrentData: String? = null, commit: Boolean = true) {
         val generation = draftGeneration
+        // Adding a torrent back right after deleting it waits for that delete,
+        // instead of being taken for a duplicate of the entry on its way out.
+        infoHashFromMagnet(torrentId)?.let { hash ->
+            withTimeoutOrNull(10_000) {
+                _ui.first { state -> state.library.none { it.isDeleting && it.key.equals(hash, true) } }
+            }
+        }
         var createdId: String? = null
         try {
             val addedId = mutex.withLock {
@@ -2705,6 +2725,7 @@ class LibrarySession(
         }
         return fds.toList()
     }
+
 
     private fun patch(key: String, transform: (DownloadEntry) -> DownloadEntry) {
         _ui.update { state ->

@@ -48,6 +48,8 @@ struct FakeTorrent {
     listen_ports: Mutex<Vec<(SocketAddr, u16)>>,
     peer_pieces: Mutex<HashMap<PeerKey, HashSet<u32>>>,
     bumps: AtomicU32,
+    request_contexts: AtomicU32,
+    wanted: AtomicBool,
     info_hash: [u8; 20],
     focused: AtomicBool,
     urgent: AtomicBool,
@@ -74,6 +76,8 @@ impl FakeTorrent {
             listen_ports: Mutex::new(Vec::new()),
             peer_pieces: Mutex::new(HashMap::new()),
             bumps: AtomicU32::new(0),
+            request_contexts: AtomicU32::new(0),
+            wanted: AtomicBool::new(true),
             info_hash: [7u8; 20],
             focused: AtomicBool::new(true),
             urgent: AtomicBool::new(true),
@@ -126,6 +130,7 @@ impl PeerTorrent for FakeTorrent {
         self.complete.lock().contains(&piece)
     }
     fn piece_priority(&self, _piece: u32) -> PiecePriority {
+        if !self.wanted.load(Ordering::Relaxed) { return PiecePriority::None; }
         if self.urgent.load(Ordering::Relaxed) { PiecePriority::Now } else { PiecePriority::Normal }
     }
     fn chunk_dirty(&self, req: RequestIndex) -> bool {
@@ -179,8 +184,9 @@ impl PeerTorrent for FakeTorrent {
         self.assignments.lock().remove(&req);
     }
     fn desired_request_context(&self) -> (RequestTorrentSnapshot, PieceRequestOrder) {
+        self.request_contexts.fetch_add(1, Ordering::Relaxed);
         let chunks_per = (PIECE_LEN as u32) / CHUNK;
-        let mut undirtied = Vec::new();
+        let mut undirtied = HashMap::new();
         let mut piece_of = HashMap::new();
         let dirty = self.dirty.lock();
         for p in 0..NUM_PIECES {
@@ -192,7 +198,7 @@ impl PeerTorrent for FakeTorrent {
                     reqs.push(r);
                 }
             }
-            undirtied.push(reqs);
+            undirtied.insert(p, reqs);
         }
         let mut assignments = HashMap::new();
         for (r, (peer, when)) in self.assignments.lock().iter() {
@@ -209,7 +215,7 @@ impl PeerTorrent for FakeTorrent {
             info_hash: self.info_hash,
             piece_length: PIECE_LEN,
             num_pieces: NUM_PIECES,
-            piece_requestable: vec![true; NUM_PIECES as usize],
+            piece_requestable: vec![self.wanted.load(Ordering::Relaxed); NUM_PIECES as usize],
             piece_count_unverified: vec![true; NUM_PIECES as usize],
             undirtied_by_piece: undirtied,
             piece_of_request: piece_of,
@@ -217,6 +223,7 @@ impl PeerTorrent for FakeTorrent {
             focus_request: Some(0),
             has_active_webseed_requests: false,
             limits: StrategyLimits::default(),
+            wanted_pieces: NUM_PIECES,
         };
         let mut order = PieceRequestOrder::with_capacity(NUM_PIECES as usize);
         for i in 0..NUM_PIECES {
@@ -804,9 +811,13 @@ fn peak_capacity_starts_at_zero_and_recovers_after_choke_without_a_floor() {
     peer.on_message(&handle, Message::HaveAll).unwrap();
     peer.on_message(&handle, Message::Unchoke).unwrap();
     assert!(drain(&mut rx).iter().any(|m| matches!(m, Message::Request { .. })));
+    let learned = peer.peer_conn_info().peak_requests;
+    assert!(learned > 0);
     peer.on_message(&handle, Message::Choke).unwrap();
     peer.on_wake(&handle);
-    assert_eq!(peer.peer_conn_info().peak_requests, 0);
+    // A transient choke keeps the learned pipeline (retained-capacity fix);
+    // only rejects and stale requests shrink it.
+    assert_eq!(peer.peer_conn_info().peak_requests, learned);
     // Fast peers acknowledge cancels with Reject before those slots are reusable.
     for msg in drain(&mut rx) {
         if let Message::Cancel { index, begin, length } = msg {
@@ -920,4 +931,170 @@ fn playback_focus_does_not_top_up_busy_queue_every_wake() {
         after_wakes < 64,
         "must not approach the historical 300+ flood, got {after_wakes}"
     );
+}
+
+#[test]
+fn idle_choked_peer_does_not_rebuild_requests_on_every_wake() {
+    let tor = FakeTorrent::new();
+    tor.focused.store(false, Ordering::Relaxed);
+    tor.urgent.store(false, Ordering::Relaxed);
+    let (handle, mut rx) = make_handle("127.0.0.1:4988".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.on_wake(&handle);
+    drain(&mut rx);
+    let before = tor.request_contexts.load(Ordering::Relaxed);
+    for _ in 0..20 {
+        peer.on_wake(&handle);
+        drain(&mut rx);
+    }
+    assert_eq!(tor.request_contexts.load(Ordering::Relaxed), before,
+        "a choked peer with no allowed-fast work must not rebuild the torrent snapshot every idle wake");
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|m| matches!(m, Message::Request { .. })),
+        "unchoking must refill immediately"
+    );
+}
+
+#[test]
+fn selecting_download_after_bitfield_announces_interest_while_choked() {
+    let tor = FakeTorrent::new();
+    tor.focused.store(false, Ordering::Relaxed);
+    tor.wanted.store(false, Ordering::Relaxed);
+    let (handle, mut rx) = make_handle("127.0.0.1:4987".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    assert!(!drain(&mut rx)
+        .iter()
+        .any(|m| matches!(m, Message::Interested)));
+    tor.wanted.store(true, Ordering::Relaxed);
+    peer.on_wake(&handle);
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|m| matches!(m, Message::Interested)),
+        "a newly selected download must become interested before the remote peer unchokes us"
+    );
+}
+
+
+#[test]
+fn irrelevant_have_announcements_do_not_rebuild_request_context() {
+    for completed in [false, true] {
+        let tor = FakeTorrent::new();
+        tor.focused.store(false, Ordering::Relaxed);
+        tor.urgent.store(false, Ordering::Relaxed);
+        // Either unselected, or selected but already complete.
+        tor.wanted.store(completed, Ordering::Relaxed);
+        if completed {
+            tor.complete.lock().extend(0..NUM_PIECES);
+        }
+        let (handle, mut rx) = make_handle("127.0.0.1:4986".parse().unwrap());
+        let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+        // Settle the initial update before measuring Have handling.
+        peer.on_wake(&handle);
+        drain(&mut rx);
+        let before = tor.request_contexts.load(Ordering::Relaxed);
+        for _ in 0..32 {
+            for index in 0..NUM_PIECES {
+                peer.on_message(&handle, Message::Have { index }).unwrap();
+            }
+        }
+        assert_eq!(tor.request_contexts.load(Ordering::Relaxed), before,
+            "completed={completed}: irrelevant and repeated Have messages must not rebuild the torrent snapshot");
+        for index in 0..NUM_PIECES {
+            assert_eq!(tor.availability.lock().get(&index).copied(), Some(1));
+        }
+    }
+}
+
+#[test]
+fn duplicate_wanted_have_does_not_rebuild_request_context() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4985".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.on_message(&handle, Message::Have { index: 0 })
+        .unwrap();
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|msg| matches!(msg, Message::Interested)),
+        "a new wanted Have must still express interest immediately"
+    );
+    let before = tor.request_contexts.load(Ordering::Relaxed);
+    for _ in 0..128 {
+        peer.on_message(&handle, Message::Have { index: 0 })
+            .unwrap();
+    }
+    assert_eq!(
+        tor.request_contexts.load(Ordering::Relaxed),
+        before,
+        "repeated wanted Have messages add no new request work"
+    );
+}
+
+#[test]
+fn repeated_bitfield_does_not_rebuild_request_context() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4984".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    let bf = wt_wire::message::marshal_bitfield(&[true, true, false, false]);
+    peer.on_message(&handle, Message::Bitfield(bf.clone()))
+        .unwrap();
+    drain(&mut rx);
+    let before = tor.request_contexts.load(Ordering::Relaxed);
+    for _ in 0..128 {
+        peer.on_message(&handle, Message::Bitfield(bf.clone()))
+            .unwrap();
+    }
+    assert_eq!(tor.request_contexts.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn replacing_bitfield_and_have_none_remove_stale_availability() {
+    let tor = FakeTorrent::new();
+    let addr = "127.0.0.1:4983".parse().unwrap();
+    let (handle, _rx) = make_handle(addr);
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    for bits in [[true, true, false, false], [false, true, true, false]] {
+        peer.on_message(
+            &handle,
+            Message::Bitfield(wt_wire::message::marshal_bitfield(&bits)),
+        )
+        .unwrap();
+    }
+    assert_eq!(tor.availability.lock().get(&0).copied(), Some(0));
+    assert_eq!(tor.availability.lock().get(&1).copied(), Some(1));
+    assert_eq!(tor.availability.lock().get(&2).copied(), Some(1));
+    assert_eq!(peer.peer_conn_info().peer_completion, 0.5);
+    peer.on_message(&handle, Message::HaveNone).unwrap();
+    assert_eq!(peer.peer_conn_info().peer_completion, 0.0);
+    assert!(tor.availability.lock().values().all(|&n| n == 0));
+}
+
+#[test]
+fn have_none_releases_requests_for_retracted_pieces() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4982".parse().unwrap());
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.on_message(&handle, Message::Have { index: 0 })
+        .unwrap();
+    peer.on_message(&handle, Message::Unchoke).unwrap();
+    let requests = drain(&mut rx);
+    assert!(requests
+        .iter()
+        .any(|msg| matches!(msg, Message::Request { index: 0, .. })));
+    peer.on_message(&handle, Message::HaveNone).unwrap();
+    let messages = drain(&mut rx);
+    assert!(messages
+        .iter()
+        .any(|msg| matches!(msg, Message::Cancel { index: 0, .. })));
+    assert!(!messages
+        .iter()
+        .any(|msg| matches!(msg, Message::Request { .. })));
+    assert_eq!(peer.peer_conn_info().pending_requests, 0);
+    assert!(tor.assignments.lock().is_empty());
 }

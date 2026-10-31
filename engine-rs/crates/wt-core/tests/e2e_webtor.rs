@@ -183,3 +183,39 @@ async fn request_focus_api_smoke() {
     assert!(after >= before);
     client.close();
 }
+
+/// A seek allows a fixed number of eager hedges, not every block read while
+/// its window is open; a failed send gives its hedge back.
+#[test]
+fn seek_hedge_budget_is_per_seek() {
+    use wt_core::peer_conn::PeerTorrent;
+    use wt_core::torrent::SEEK_HEDGES;
+
+    let cfg = wt_core::ClientConfig {
+        no_dht: true,
+        disable_webtorrent: true,
+        listen_port: 0,
+        ..Default::default()
+    };
+    let client = Client::new(cfg).unwrap();
+    let (t, _) = client
+        .add_torrent_spec(TorrentSpec {
+            info_hash: Some(InfoHash([0x5e; 20])),
+            display_name: "budget".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(!t.inner.take_seek_hedge(), "no seek yet");
+    t.refocus_requests();
+    assert!(t.inner.seek_hedge_open());
+    for _ in 0..SEEK_HEDGES {
+        assert!(t.inner.take_seek_hedge());
+    }
+    assert!(!t.inner.seek_hedge_open());
+    assert!(!t.inner.take_seek_hedge());
+    t.inner.refund_seek_hedge();
+    assert!(t.inner.take_seek_hedge());
+    t.refocus_requests();
+    assert!(t.inner.take_seek_hedge(), "the next seek gets a fresh budget");
+    client.close();
+}

@@ -5,6 +5,7 @@
 //! (DHT payloads are bencoded and typically start with `d`).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,60 +102,136 @@ impl AnnounceHandle {
     }
 }
 
+/// How long a bootstrap hostname may take to resolve.
+const BOOTSTRAP_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a lookup waits for a node that is still starting.
+const READY_WAIT: Duration = Duration::from_secs(15);
+
 /// DHT node.
+///
+/// Starts in the background, like Go's DHT bootstrap: `mainline` resolves
+/// bootstrap hostnames with blocking DNS while it is built, which held engine
+/// startup for ~20 s on a slow or broken network. Hostnames are resolved
+/// asynchronously first and `mainline` only receives IP literals.
 pub struct DhtNode {
-    inner: Mutex<Option<mainline::async_dht::AsyncDht>>,
-    id: [u8; 20],
-    local: Mutex<Option<SocketAddr>>,
+    inner: Arc<Mutex<Option<mainline::async_dht::AsyncDht>>>,
+    id: Arc<Mutex<[u8; 20]>>,
+    local: Arc<Mutex<Option<SocketAddr>>>,
     periodic: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Shared datagram IO when coexisting with uTP; `None` in dedicated mode.
     shared_io: Option<Arc<dyn DatagramIo>>,
+    /// Contacts imported while starting; they join the bootstrap list.
+    pending: Arc<Mutex<Option<Vec<String>>>>,
+    /// Becomes true once starting has finished (successfully or not).
+    ready: tokio::sync::watch::Receiver<bool>,
+    closed: Arc<AtomicBool>,
 }
 
 impl DhtNode {
-    /// Create a DHT node on its own UDP socket (via `mainline`).
+    /// Create a DHT node on its own UDP socket (via `mainline`). Returns at
+    /// once; the node becomes usable when its background start finishes.
     pub async fn new(cfg: DhtConfig) -> Result<Self> {
         if cfg.read_only {
             tracing::warn!(
                 "read_only requested but mainline wrapper runs with server_mode for announce_peer"
             );
         }
-        let mut bootstrap: Vec<String> = cfg.bootstrap;
-        for c in &cfg.initial_contacts {
-            bootstrap.push(c.to_bootstrap_string());
-        }
+        let inner = Arc::new(Mutex::new(None));
+        let id = Arc::new(Mutex::new([0u8; 20]));
+        let local = Arc::new(Mutex::new(None));
+        let pending = Arc::new(Mutex::new(Some(
+            cfg.initial_contacts.iter().map(Contact::to_bootstrap_string).collect::<Vec<_>>(),
+        )));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready) = tokio::sync::watch::channel(false);
 
-        let mut builder = mainline::Dht::builder();
-        // server_mode enables storing peers / answering get_peers (needed for announce).
-        builder.server_mode();
-        if cfg.port != 0 {
-            builder.port(cfg.port);
-        }
-        builder.request_timeout(cfg.request_timeout);
-        if !bootstrap.is_empty() {
-            builder.bootstrap(&bootstrap);
-        }
-
-        let dht = builder
-            .build()
-            .map_err(|e| DhtError::Other(e.to_string()))?
-            .as_async();
-
-        let info = dht.info().await;
-        let id = *info.id().as_bytes();
-        let la = info.local_addr();
-        let local = SocketAddr::V4(la);
-
-        // Wait briefly for bootstrap.
-        let _ = tokio::time::timeout(Duration::from_secs(5), dht.bootstrapped()).await;
+        let (inner_t, id_t, local_t, pending_t, closed_t) = (
+            Arc::clone(&inner), Arc::clone(&id), Arc::clone(&local),
+            Arc::clone(&pending), Arc::clone(&closed),
+        );
+        tokio::spawn(async move {
+            let mut addrs = Vec::new();
+            let mut hosts = Vec::new();
+            for entry in cfg.bootstrap {
+                if entry.parse::<SocketAddr>().is_ok() {
+                    addrs.push(entry);
+                } else {
+                    hosts.push(entry);
+                }
+            }
+            let lookups = hosts.into_iter().map(|host| async move {
+                match tokio::time::timeout(BOOTSTRAP_DNS_TIMEOUT, tokio::net::lookup_host(host)).await {
+                    Ok(Ok(found)) => found.filter(SocketAddr::is_ipv4).map(|a| a.to_string()).collect(),
+                    _ => Vec::new(),
+                }
+            });
+            for found in futures::future::join_all(lookups).await {
+                addrs.extend(found);
+            }
+            addrs.extend(pending_t.lock().take().unwrap_or_default());
+            if closed_t.load(Ordering::SeqCst) {
+                let _ = ready_tx.send(true);
+                return;
+            }
+            // `Dht::new` waits for its actor thread; keep it off the runtime.
+            let built = tokio::task::spawn_blocking(move || {
+                let mut builder = mainline::Dht::builder();
+                // server_mode enables storing peers / answering get_peers (needed for announce).
+                builder.server_mode();
+                if cfg.port != 0 {
+                    builder.port(cfg.port);
+                }
+                builder.request_timeout(cfg.request_timeout);
+                // IP literals only: never the hostname defaults.
+                builder.bootstrap(&addrs);
+                builder.build()
+            })
+            .await;
+            match built {
+                Ok(Ok(dht)) => {
+                    let dht = dht.as_async();
+                    let info = dht.info().await;
+                    *id_t.lock() = *info.id().as_bytes();
+                    local_t.lock().get_or_insert(SocketAddr::V4(info.local_addr()));
+                    if !closed_t.load(Ordering::SeqCst) {
+                        *inner_t.lock() = Some(dht.clone());
+                    }
+                    let _ = ready_tx.send(true);
+                    // Warm the routing table (Go `Bootstrap` goroutine).
+                    let _ = tokio::time::timeout(Duration::from_secs(5), dht.bootstrapped()).await;
+                }
+                Ok(Err(e)) => {
+                    // Like Go, a DHT failure is not fatal: trackers keep working.
+                    tracing::warn!("dht disabled: {e}");
+                    let _ = ready_tx.send(true);
+                }
+                Err(e) => {
+                    tracing::warn!("dht start failed: {e}");
+                    let _ = ready_tx.send(true);
+                }
+            }
+        });
 
         Ok(Self {
-            inner: Mutex::new(Some(dht)),
+            inner,
             id,
-            local: Mutex::new(Some(local)),
+            local,
             periodic: Mutex::new(Vec::new()),
             shared_io: None,
+            pending,
+            ready,
+            closed,
         })
+    }
+
+    /// The running node, waiting briefly while it is still starting.
+    async fn running(&self) -> Option<mainline::async_dht::AsyncDht> {
+        if let Some(dht) = self.inner.lock().clone() {
+            return Some(dht);
+        }
+        let mut ready = self.ready.clone();
+        let _ = tokio::time::timeout(READY_WAIT, ready.wait_for(|started| *started)).await;
+        self.inner.lock().clone()
     }
 
     /// Construct against shared datagram IO (core wraps wt-wire non-uTP demux).
@@ -210,7 +287,7 @@ impl DhtNode {
     }
 
     pub fn id(&self) -> [u8; 20] {
-        self.id
+        *self.id.lock()
     }
 
     pub fn local_addr(&self) -> Option<SocketAddr> {
@@ -240,6 +317,10 @@ impl DhtNode {
         // strings are best-effort via find_node against ourselves after adding
         // via a fresh builder is heavy. Ping each by find_node.
         let Some(dht) = self.inner.lock().clone() else {
+            // Still starting: these join the bootstrap list.
+            if let Some(pending) = self.pending.lock().as_mut() {
+                pending.extend(contacts.iter().map(Contact::to_bootstrap_string));
+            }
             return;
         };
         for c in contacts {
@@ -266,7 +347,7 @@ impl DhtNode {
         port: u16,
         implied_port: bool,
     ) -> Result<AnnounceHandle> {
-        let Some(dht) = self.inner.lock().clone() else {
+        let Some(dht) = self.running().await else {
             return Err(DhtError::Other("dht closed".into()));
         };
         let id =
@@ -334,6 +415,7 @@ impl DhtNode {
     }
 
     pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         for h in self.periodic.lock().drain(..) {
             h.abort();
         }

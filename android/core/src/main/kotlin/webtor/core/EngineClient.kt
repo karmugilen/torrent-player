@@ -356,10 +356,10 @@ class EngineClient(
         post("/settings", JSONObject().put("peerExploration", enabled)).optBoolean("peerExploration", enabled)
 
     fun setGhostMode(enabled: Boolean): Boolean =
-        post("/settings", JSONObject().put("ghostMode", enabled)).getBoolean("ghostMode")
+        post("/settings", JSONObject().put("ghostMode", enabled)).optBoolean("ghostMode", enabled)
 
     fun setGhostProMode(enabled: Boolean): Boolean =
-        post("/settings", JSONObject().put("ghostProMode", enabled)).getBoolean("ghostProMode")
+        post("/settings", JSONObject().put("ghostProMode", enabled)).optBoolean("ghostProMode", enabled)
 
     /** Minutes an unattended Direct Play session may stay idle before Android drops it; 0 turns this off. */
     /**
@@ -445,6 +445,9 @@ class EngineClient(
     fun shutdown() {
         post("/shutdown", JSONObject())
     }
+
+    /** Recent engine events and totals, as JSON text for diagnostics. */
+    fun events(): String = get("/events").toString()
 
     private fun get(path: String): JSONObject = execute("GET", path, null)
 

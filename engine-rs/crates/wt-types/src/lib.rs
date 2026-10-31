@@ -218,6 +218,8 @@ pub enum PeerSource {
     WebRtc,
     /// BEP 19 HTTP seed.
     WebSeed,
+    /// BEP 14 Local Service Discovery.
+    Lsd,
 }
 
 impl PeerSource {
@@ -233,6 +235,7 @@ impl PeerSource {
             PeerSource::UtHolepunch => "C",
             PeerSource::WebRtc => "W",
             PeerSource::WebSeed => "WS",
+            PeerSource::Lsd => "L",
         }
     }
 }
@@ -315,8 +318,121 @@ pub trait TorrentStorage: Send + Sync {
 pub trait PieceStorage: Send + Sync {
     fn read_at(&self, buf: &mut [u8], off: i64) -> StorageResult<usize>;
     fn write_at(&self, buf: &[u8], off: i64) -> StorageResult<usize>;
+    /// `write_at` when it only copies into RAM; `None`, having written
+    /// nothing, when it would wait on disk. An async caller runs this in
+    /// place and moves only the `None` case off its worker thread.
+    fn write_at_in_memory(&self, _buf: &[u8], _off: i64) -> Option<StorageResult<usize>> {
+        None
+    }
+    /// `read_at` when the bytes are in RAM; `None`, having read nothing, when
+    /// they need the disk.
+    fn read_at_in_memory(&self, _buf: &mut [u8], _off: i64) -> Option<StorageResult<usize>> {
+        None
+    }
     /// The client believes the data passes the hash check.
     fn mark_complete(&self) -> StorageResult<()>;
     fn mark_not_complete(&self) -> StorageResult<()>;
     fn completion(&self) -> Completion;
+}
+
+/// Hasher for small integer keys (piece and block indexes), which come from
+/// this client's own tables rather than from peers.
+#[derive(Clone, Copy, Default)]
+pub struct IndexHasher(u64);
+
+impl std::hash::Hasher for IndexHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(u64::from(v));
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = v.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+pub type IndexBuild = std::hash::BuildHasherDefault<IndexHasher>;
+pub type IndexMap<K, V> = std::collections::HashMap<K, V, IndexBuild>;
+pub type IndexSet<K> = std::collections::HashSet<K, IndexBuild>;
+
+/// Counters for the per-second transfer log. Reading them resets them.
+pub mod probe {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    macro_rules! counters {
+        ($($name:ident),* $(,)?) => {
+            #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
+            #[derive(Clone, Copy)]
+            enum Id { $($name),*, COUNT }
+            $(pub const $name: usize = Id::$name as usize;)*
+            const NAMES: [&str; Id::COUNT as usize] = [$(stringify!($name)),*];
+        };
+    }
+    counters!(
+        RECV, WASTED, LATE, SLOW_WRITE, REFILLS, REFILL_EMPTY, PICKED, ROOM, OLD_PICKER,
+        OPEN_LIMIT, STARVE_OPEN, REWINDS, CANCELS, CHOKES, STALE_RELEASED, UP_MEM, UP_DISK,
+        CONN_CLOSED, BURST_DROPS, HASH_OK, HASH_FAIL, DISK_WRITES, DISK_WRITE_KIB, DISK_WRITE_MS,
+        DISK_WRITE_MAX_MS, CACHE_FULL, WRITE_THROUGH, EVICT_UNVERIFIED, SYNCS, SYNC_MS,
+        DISK_READ_KIB, LOCK_WAIT_MAX_US, RT_LAG_MAX_MS,
+    );
+
+    static COUNTERS: [AtomicU64; Id::COUNT as usize] =
+        [const { AtomicU64::new(0) }; Id::COUNT as usize];
+
+    pub fn add(id: usize, n: u64) {
+        COUNTERS[id].fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn max(id: usize, n: u64) {
+        COUNTERS[id].fetch_max(n, Ordering::Relaxed);
+    }
+
+    /// Non-zero counters since the last call, as `NAME=value`.
+    pub fn take_line() -> String {
+        let mut line = String::new();
+        for (counter, name) in COUNTERS.iter().zip(NAMES) {
+            let value = counter.swap(0, Ordering::Relaxed);
+            if value != 0 {
+                line.push_str(&format!("{name}={value} "));
+            }
+        }
+        line
+    }
+}
+
+/// Bounded log of engine events, kept in memory and shown in diagnostics.
+pub mod events {
+    use std::collections::VecDeque;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const MAX_EVENTS: usize = 2000;
+
+    static EVENTS: LazyLock<Mutex<VecDeque<(u64, &'static str, String)>>> =
+        LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS)));
+
+    pub fn record(kind: &'static str, detail: impl Into<String>) {
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        if let Ok(mut events) = EVENTS.lock() {
+            if events.len() == MAX_EVENTS {
+                events.pop_front();
+            }
+            events.push_back((at, kind, detail.into()));
+        }
+    }
+
+    pub fn snapshot() -> Vec<(u64, &'static str, String)> {
+        EVENTS.lock().map_or_else(|_| Vec::new(), |events| events.iter().cloned().collect())
+    }
 }

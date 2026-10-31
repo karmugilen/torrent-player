@@ -1,12 +1,11 @@
 //! Torrent state machine, piece management, and reader synchronization.
 
-use bytes::Bytes;
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::sync::LazyLock;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use wt_types::{
@@ -15,16 +14,10 @@ use wt_types::{
 };
 
 use crate::arrival::ArrivalModel;
-use crate::peer_conn::PeerConn;
 use crate::picker::{
-    block_coord_from_req_index, candidate_budget, compute_playback_pipeline_limit, focus_distance,
-    piece_req_index_range, req_index_from_piece_and_offset, should_steal_urgent, ActiveRequest,
-    HEDGES_PER_NUDGE, HOL_RESCUES_PER_NUDGE, HOL_WINDOW_BLOCKS, SLOW_PEER_BYTES_PER_SEC,
+    block_coord_from_req_index, piece_req_index_range, ActiveRequest, HOL_WINDOW_BLOCKS,
 };
 use crate::reader::PieceRange;
-use crate::storage_adapter::verify_piece_hash;
-use crate::tuning::current_seek_tuning;
-use crate::wire::Message;
 use crate::{CoreError, PieceState, Result};
 
 // Go prioritizedPeers uses one random address-hash seed per process to
@@ -41,7 +34,6 @@ pub struct PieceEntry {
     pub partial: bool,
     pub ok: bool,
     pub chunks_total: usize,
-    pub chunks_received: HashSet<u32>, // offsets in piece
 }
 
 pub(crate) struct AttachInfo {
@@ -69,7 +61,6 @@ impl PieceEntry {
             partial: false,
             ok: false,
             chunks_total,
-            chunks_received: HashSet::new(),
         }
     }
 
@@ -95,7 +86,6 @@ pub struct TorrentInner {
     pub default_storage: Arc<dyn ClientStorage>,
 
     pub pieces: RwLock<Vec<PieceEntry>>,
-    pub book: RwLock<Option<crate::piece_state::PieceBook>>,
     pub metadata: RwLock<crate::metadata::MetadataExchange>,
     pub pex: Mutex<crate::pex::PexState>,
     pub pex_last_recv: Mutex<HashMap<SocketAddr, Instant>>,
@@ -104,13 +94,44 @@ pub struct TorrentInner {
     pub hash_seq: AtomicU64,
     pub dht_nodes: RwLock<Vec<SocketAddr>>,
     pub peer_pieces: RwLock<HashMap<u64, HashSet<PieceIndex>>>,
-    pub dirty_chunks: RwLock<HashSet<RequestIndex>>,
-    pub request_state: RwLock<HashMap<RequestIndex, ActiveRequest>>,
-    pub assignments: RwLock<HashMap<RequestIndex, (u64, Instant)>>,
-    pub hedge_peers: RwLock<HashMap<RequestIndex, u64>>,
-    pub hedges: RwLock<HashMap<RequestIndex, SocketAddr>>,
+    pub dirty_chunks: crate::piece_state::ChunkBits,
+    /// Received blocks being written (Go `pendingWrites`). Not readable and
+    /// not requestable. Lock before `dirty_chunks` when both are needed.
+    pub pending_chunk_writes: Mutex<wt_types::IndexSet<RequestIndex>>,
+    pub request_state: RwLock<wt_types::IndexMap<RequestIndex, ActiveRequest>>,
+    pub assignments: RwLock<wt_types::IndexMap<RequestIndex, (u64, Instant)>>,
+    pub hedge_peers: RwLock<wt_types::IndexMap<RequestIndex, u64>>,
+    pub hedges: RwLock<wt_types::IndexMap<RequestIndex, SocketAddr>>,
 
-    pub conns: RwLock<HashMap<SocketAddr, PeerConn>>,
+    /// Peer key to address, so looking up one peer does not scan them all.
+    pub peer_addrs: RwLock<HashMap<u64, SocketAddr>>,
+    /// Peers announcing each piece, excluding have-all peers. Empty until info.
+    pub(crate) piece_availability: std::sync::OnceLock<Box<[AtomicI32]>>,
+    /// Have-all peers, counted once so they join and leave in O(1).
+    pub(crate) have_all_peers: AtomicI32,
+    /// Outstanding requests per peer, for steal ranking; see [`REQUEST_COUNTS_MAX_AGE`].
+    pub(crate) request_counts: Mutex<Option<(Instant, Arc<HashMap<u64, u64>>)>>,
+    /// Threads inside `change_cond`; `notify_progress` skips the lock without any.
+    pub(crate) change_waiters: AtomicUsize,
+    /// Pieces whose last hash failed, and a count of such failures.
+    pub failed_pieces: Mutex<HashSet<PieceIndex>>,
+    pub hash_fail_generation: AtomicU64,
+    /// Connect results per peer source, to dial the likeliest sources first.
+    pub(crate) dial_sources: Mutex<HashMap<wt_types::PeerSource, (u32, u32)>>,
+    /// When a warm-up request last went out, in ms since `warm_epoch`.
+    pub(crate) last_warm_ms: AtomicU64,
+    /// When claims of playhead blocks last woke the swarm, same clock.
+    pub(crate) last_seek_nudge_ms: AtomicU64,
+    pub(crate) warm_epoch: Instant,
+    /// Bumped under the `pieces` write lock; see [`Self::pieces_mut`].
+    pieces_generation: AtomicU64,
+    pub(crate) wanted_pieces: Mutex<Option<Arc<WantedPieces>>>,
+    pub(crate) saved_queue: Mutex<SavedQueue>,
+    /// Saved to the user's files, not Direct Play.
+    pub saved_mode: std::sync::atomic::AtomicBool,
+    pub(crate) last_refocus: Mutex<Option<Instant>>,
+    pub(crate) refocus_seq: AtomicU64,
+    pub(crate) last_read_nudge: Mutex<Option<Instant>>,
     pub known_peers: RwLock<HashSet<PeerInfo>>,
     pub client: RwLock<Weak<crate::client::ClientInner>>,
     pub dialing_peers: Mutex<HashSet<SocketAddr>>,
@@ -121,7 +142,10 @@ pub struct TorrentInner {
     pub swarm_diagnostics: Mutex<crate::stats::SwarmDiagnostics>,
     pub dial_fail_counts: Mutex<HashMap<SocketAddr, u8>>,
     pub conn_handles: RwLock<HashMap<SocketAddr, crate::conn::ConnHandle>>,
+    /// Lifetime totals survive connection churn, like Go torrent.ConnStats.
+    pub(crate) retired_conn_stats: Mutex<crate::stats::ConnStats>,
     pub peer_snapshots: RwLock<HashMap<SocketAddr, crate::stats::PeerConnInfo>>,
+    pub peer_arrivals: RwLock<HashMap<u64, Arc<RwLock<crate::arrival::PeerArrivalState>>>>,
     pub choked_since: RwLock<HashMap<SocketAddr, Instant>>,
     pub peer_notify: tokio::sync::Notify,
     pub trackers: RwLock<Vec<Vec<String>>>,
@@ -150,7 +174,64 @@ pub struct TorrentInner {
 
     pub arrival_model: Arc<RwLock<ArrivalModel>>,
     pub reader_ranges: RwLock<HashMap<u64, PieceRange>>,
+    /// Peer start burst: the connection limit is raised until this instant.
+    pub peer_burst_until: Mutex<Option<Instant>>,
+    /// The next allowed download starts a peer burst.
+    pub peer_burst_armed: AtomicBool,
+    /// Connection limit while bursting; bursts share [`PEER_BURST_CONNS`]
+    /// across all torrents.
+    pub peer_burst_limit: AtomicUsize,
+    /// Last playhead jump and how many of its eager hedges are left.
+    pub seek_hedge: Mutex<Option<(Instant, u32)>>,
 }
+
+/// Connections and connection attempts allowed during a peer start burst,
+/// shared by all torrents bursting at once.
+pub const PEER_BURST_CONNS: usize = 250;
+
+/// The saved-download block queue all peers share. A refill continues where
+/// the last one stopped instead of re-reading every block already taken. Blocks
+/// handed back are found again at the next rewind.
+#[derive(Default)]
+pub(crate) struct SavedQueue {
+    /// Per piece: blocks from its start already handed out or finished.
+    pub(crate) next: Vec<u32>,
+    pub(crate) rewound_at: Option<Instant>,
+    /// Pieces holding RAM: started, or waiting on the hash and the disk.
+    pub(crate) open: usize,
+    pub(crate) generation: u64,
+}
+
+/// One scan of `pieces` shared by every peer's refill.
+pub(crate) struct WantedPieces {
+    pub(crate) generation: u64,
+    /// Being hashed or written; they hold RAM but left `candidates`.
+    pub(crate) checking: usize,
+    built_at: Instant,
+    pub(crate) num_pieces: u32,
+    pub(crate) count: u32,
+    /// Wanted and not complete; unlike `count`, includes pieces being hashed.
+    pub(crate) incomplete: u32,
+    pub(crate) requestable: Vec<bool>,
+    pub(crate) unverified: Vec<bool>,
+    /// `(index, priority, partial, chunks, availability)`, best first.
+    pub(crate) candidates: Vec<(PieceIndex, PiecePriority, bool, usize, i32)>,
+}
+/// Availability moves with every have, so it refreshes on a timer instead of
+/// invalidating [`WantedPieces`].
+const WANTED_MAX_AGE: Duration = Duration::from_secs(1);
+/// Steal ranking only compares queue sizes, so all refills in this window can
+/// share one count instead of each walking the swarm's outstanding requests.
+pub(crate) const REQUEST_COUNTS_MAX_AGE: Duration = Duration::from_millis(25);
+/// How long a peer start burst lasts before trimming to the configured limit.
+pub const PEER_BURST_FOR: Duration = Duration::from_secs(40);
+/// After a seek, the first blocks are hedged without waiting this long.
+pub const SEEK_HEDGE_WINDOW: Duration = Duration::from_secs(2);
+/// Least time between swarm wakes caused by peers claiming playhead blocks.
+pub(crate) const SEEK_NUDGE_GAP_MS: u64 = 10;
+/// Eager hedges per seek. The window alone followed the moving playhead and
+/// duplicated every block read in it (measured: 37% of a seek run wasted).
+pub const SEEK_HEDGES: u32 = 64;
 
 impl TorrentInner {
     pub fn new(
@@ -169,7 +250,6 @@ impl TorrentInner {
             storage: RwLock::new(None),
             default_storage,
             pieces: RwLock::new(Vec::new()),
-            book: RwLock::new(None),
             metadata: RwLock::new(crate::metadata::MetadataExchange::new(
                 Some(info_hash),
                 info_hash_v2,
@@ -181,12 +261,30 @@ impl TorrentInner {
             hash_seq: AtomicU64::new(0),
             dht_nodes: RwLock::new(Vec::new()),
             peer_pieces: RwLock::new(HashMap::new()),
-            dirty_chunks: RwLock::new(HashSet::new()),
-            request_state: RwLock::new(HashMap::new()),
-            assignments: RwLock::new(HashMap::new()),
-            hedge_peers: RwLock::new(HashMap::new()),
-            hedges: RwLock::new(HashMap::new()),
-            conns: RwLock::new(HashMap::new()),
+            dirty_chunks: Default::default(),
+            pending_chunk_writes: Default::default(),
+            request_state: Default::default(),
+            assignments: Default::default(),
+            hedge_peers: Default::default(),
+            hedges: Default::default(),
+            peer_addrs: RwLock::new(HashMap::new()),
+            piece_availability: Default::default(),
+            have_all_peers: AtomicI32::new(0),
+            request_counts: Mutex::new(None),
+            change_waiters: AtomicUsize::new(0),
+            failed_pieces: Default::default(),
+            hash_fail_generation: AtomicU64::new(0),
+            dial_sources: Default::default(),
+            last_warm_ms: AtomicU64::new(0),
+            last_seek_nudge_ms: AtomicU64::new(0),
+            warm_epoch: Instant::now(),
+            pieces_generation: AtomicU64::new(0),
+            wanted_pieces: Mutex::new(None),
+            saved_queue: Mutex::new(SavedQueue::default()),
+            saved_mode: std::sync::atomic::AtomicBool::new(false),
+            last_refocus: Mutex::new(None),
+            refocus_seq: AtomicU64::new(0),
+            last_read_nudge: Mutex::new(None),
             known_peers: RwLock::new(HashSet::new()),
             client: RwLock::new(Weak::new()),
             dialing_peers: Mutex::new(HashSet::new()),
@@ -194,7 +292,9 @@ impl TorrentInner {
             swarm_diagnostics: Mutex::new(Default::default()),
             dial_fail_counts: Mutex::new(HashMap::new()),
             conn_handles: RwLock::new(HashMap::new()),
+            retired_conn_stats: Mutex::new(crate::stats::ConnStats::default()),
             peer_snapshots: RwLock::new(HashMap::new()),
+            peer_arrivals: RwLock::new(HashMap::new()),
             choked_since: RwLock::new(HashMap::new()),
             peer_notify: tokio::sync::Notify::new(),
             trackers: RwLock::new(Vec::new()),
@@ -218,17 +318,289 @@ impl TorrentInner {
             on_write_chunk_error: RwLock::new(None),
             arrival_model,
             reader_ranges: RwLock::new(HashMap::new()),
+            peer_burst_until: Mutex::new(None),
+            peer_burst_armed: AtomicBool::new(true),
+            peer_burst_limit: AtomicUsize::new(0),
+            seek_hedge: Mutex::new(None),
         }
     }
 
+    /// The only way to write `pieces`: invalidates [`WantedPieces`]. The bump
+    /// happens with the lock held, so a reader never pairs new data with an
+    /// old generation or the reverse.
+    pub fn pieces_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Vec<PieceEntry>> {
+        let guard = self.pieces.write();
+        self.pieces_generation.fetch_add(1, Ordering::Relaxed);
+        guard
+    }
+
+    /// One line for the per-second transfer log: the picker's view, how old the
+    /// blocks in flight are, and what each of the fastest peers is doing.
+    pub fn probe_line(&self) -> String {
+        use crate::peer_conn::PeerTorrent;
+        let Some(info) = self.info.read().clone() else {
+            return "no-info".into();
+        };
+        let (piece_length, total_length) = (info.piece_length, info.total_length());
+        let wanted = self.wanted_pieces();
+        let open_limit = (crate::strategy::SAVED_MAX_UNVERIFIED_BYTES / piece_length.max(1))
+            .max(crate::strategy::SAVED_OPEN_MIN_PIECES);
+        let queue_open = self.saved_queue.lock().open;
+        let hash_queued = self.hasher.lock().as_ref().map_or(0, |pool| pool.queued_count());
+        let now = Instant::now();
+        let assignments = self.assignments.read();
+        let mut holders = HashMap::<u64, u32>::new();
+        let (mut over_2s, mut over_5s, mut over_15s, mut oldest) = (0u32, 0u32, 0u32, Duration::ZERO);
+        for &(owner, when) in assignments.values() {
+            let age = now.saturating_duration_since(when);
+            oldest = oldest.max(age);
+            over_2s += u32::from(age >= Duration::from_secs(2));
+            over_15s += u32::from(age >= Duration::from_secs(15));
+            if age >= Duration::from_secs(5) {
+                over_5s += 1;
+                *holders.entry(owner).or_default() += 1;
+            }
+        }
+        // Why open pieces are not finishing: blocks free to take, or held.
+        let (mut partial, mut near_done, mut missing_free, mut missing_held) = (0u32, 0u32, 0u32, 0u32);
+        let live = self.request_state.read();
+        for &(index, _, is_partial, _, _) in &wanted.candidates {
+            if !is_partial {
+                continue;
+            }
+            partial += 1;
+            let (begin, end) = crate::picker::piece_req_index_range(index, piece_length, total_length);
+            let mut missing = 0u32;
+            for req in begin..end {
+                if !self.dirty_chunks.contains(req) {
+                    missing += 1;
+                    if assignments.contains_key(&req) || live.contains_key(&req) {
+                        missing_held += 1;
+                    } else {
+                        missing_free += 1;
+                    }
+                }
+            }
+            near_done += u32::from(missing <= 8);
+        }
+        let inflight = assignments.len();
+        drop(live);
+        drop(assignments);
+        let snapshots = self.peer_snapshots.read();
+        let (mut unchoked, mut choked_wanting, mut idle, mut queued, mut capacity) = (0u32, 0u32, 0u32, 0usize, 0usize);
+        let mut peers: Vec<_> = snapshots.values().collect();
+        for peer in &peers {
+            unchoked += u32::from(!peer.peer_choking);
+            choked_wanting += u32::from(peer.peer_choking && peer.am_interested);
+            idle += u32::from(!peer.peer_choking && peer.am_interested && peer.queued == 0);
+            queued += peer.queued;
+            if !peer.peer_choking {
+                capacity += peer.nominal_max_requests;
+            }
+        }
+        peers.sort_by(|a, b| b.download_rate.total_cmp(&a.download_rate));
+        let mut top = String::new();
+        for peer in peers.iter().take(6) {
+            top.push_str(&format!(
+                "[{}K q{}/{} rtt{} last{}{}] ",
+                (peer.download_rate / 1024.0) as u64,
+                peer.queued,
+                peer.nominal_max_requests,
+                peer.rtt.as_millis(),
+                peer.last_useful_data.map_or(-1, |d| d.as_millis() as i64),
+                if peer.peer_choking { " choked" } else { "" },
+            ));
+        }
+        format!(
+            "focus={} bg={} plen={}K wanted={} checking={} hashq={} open={queue_open}/{open_limit} partial={partial} near_done={near_done} miss_free={missing_free} miss_held={missing_held} inflight={inflight} age2s={over_2s} age5s={over_5s} age15s={over_15s} oldest={}ms slow_holders={} conns={} unchoked={unchoked} choked_wanting={choked_wanting} idle={idle} queued={queued} capacity={capacity} top={top}",
+            self.request_focus_index().is_some(),
+            self.background_only(),
+            piece_length / 1024,
+            wanted.count,
+            wanted.checking,
+            hash_queued,
+            oldest.as_millis(),
+            holders.len(),
+            self.conn_handles.read().len(),
+        )
+    }
+
+    /// The per-piece refill inputs, rebuilt only when `pieces` changed. Every
+    /// peer refills at once after a seek; all of them share one scan.
+    pub(crate) fn wanted_pieces(&self) -> Arc<WantedPieces> {
+        let pieces = self.pieces.read();
+        let generation = self.pieces_generation.load(Ordering::Relaxed);
+        let mut cached = self.wanted_pieces.lock();
+        if let Some(wanted) = cached
+            .as_ref()
+            .filter(|w| w.generation == generation && w.built_at.elapsed() < WANTED_MAX_AGE)
+        {
+            return wanted.clone();
+        }
+        let mut requestable = Vec::with_capacity(pieces.len());
+        let mut unverified = Vec::with_capacity(pieces.len());
+        let mut candidates = Vec::new();
+        let mut count = 0u32;
+        let mut incomplete = 0u32;
+        let mut checking = 0usize;
+        for p in pieces.iter() {
+            checking += usize::from(p.checking);
+            let wanted = !p.complete && !p.checking && p.priority > PiecePriority::None;
+            count += u32::from(wanted);
+            incomplete += u32::from(!p.complete && p.priority > PiecePriority::None);
+            requestable.push(wanted);
+            unverified.push(p.checking || p.partial);
+            if wanted {
+                candidates.push((p.index, p.priority, p.partial, p.chunks_total, self.availability(p.index)));
+            }
+        }
+        // Pieces were collected in index order, so a stable sort keeps index
+        // as the tie-break. Same order as `piece_order_cmp`.
+        candidates.sort_by_key(|c| {
+            (std::cmp::Reverse(c.1), crate::strategy::background_rank(c.1, c.2, c.4))
+        });
+        let wanted = Arc::new(WantedPieces {
+            generation,
+            checking,
+            built_at: Instant::now(),
+            num_pieces: pieces.len() as u32,
+            count,
+            incomplete,
+            requestable,
+            unverified,
+            candidates,
+        });
+        *cached = Some(wanted.clone());
+        wanted
+    }
+
     pub fn bump_change(&self) {
-        self.change_version.fetch_add(1, Ordering::SeqCst);
         self.peer_notify.notify_one();
         for handle in self.conn_handles.read().values() {
             handle.wake();
         }
+        self.notify_progress();
+    }
+
+    /// Wake readers and status waiters only. Received data changes progress
+    /// but creates no request work, so peers are not all rescheduled for
+    /// every block (that cost grew with peers × incoming blocks).
+    pub fn notify_progress(&self) {
+        self.change_version.fetch_add(1, Ordering::SeqCst);
+        // Waiters register before checking the version, so one of the two
+        // SeqCst sides always sees the other.
+        if self.change_waiters.load(Ordering::SeqCst) == 0 {
+            return;
+        }
         let _guard = self.change_mutex.lock();
         self.change_cond.notify_all();
+    }
+
+    /// Wait for `change_version` to pass `after`, up to `timeout`.
+    pub fn wait_version(&self, after: u64, timeout: Duration) -> u64 {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.change_mutex.lock();
+        self.change_waiters.fetch_add(1, Ordering::SeqCst);
+        let version = loop {
+            let cur = self.change_version.load(Ordering::SeqCst);
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if cur > after || wait.is_zero() {
+                break cur;
+            }
+            self.change_cond.wait_for(&mut guard, wait);
+        };
+        self.change_waiters.fetch_sub(1, Ordering::SeqCst);
+        version
+    }
+
+    /// Peers known to have `piece`.
+    pub(crate) fn availability(&self, piece: PieceIndex) -> i32 {
+        let announced = self
+            .piece_availability
+            .get()
+            .and_then(|counts| counts.get(piece as usize))
+            .map_or(0, |count| count.load(Ordering::Relaxed));
+        announced + self.have_all_peers.load(Ordering::Relaxed)
+    }
+
+    /// Established-connection limit now: the configured one, raised while a
+    /// start burst runs (see [`Self::update_peer_burst_limit`]).
+    pub(crate) fn conn_limit(&self) -> usize {
+        let max = self.max_established_conns.load(Ordering::Relaxed);
+        if max > 0 && self.bursting() {
+            max.max(self.peer_burst_limit.load(Ordering::Relaxed))
+        } else {
+            max
+        }
+    }
+
+    /// Raise the burst limit by the connections the whole client may still
+    /// open for bursts: several torrents resuming together must not open
+    /// [`PEER_BURST_CONNS`] each. Called by the dialer without locks held.
+    pub(crate) fn update_peer_burst_limit(&self, client_established: usize) {
+        let mine = self.conn_handles.read().len();
+        let room = PEER_BURST_CONNS.saturating_sub(client_established);
+        self.peer_burst_limit.store((mine + room).min(PEER_BURST_CONNS), Ordering::Relaxed);
+    }
+
+    pub(crate) fn bursting(&self) -> bool {
+        self.peer_burst_until.lock().is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Start a peer burst: connect to many peers while a download starts,
+    /// then keep the most productive ones (see [`Self::end_peer_burst_if_due`]).
+    /// Skipped for resting sessions (limit 0) and complete torrents.
+    pub fn start_peer_burst(&self) {
+        let max = self.max_established_conns.load(Ordering::Relaxed);
+        if max == 0 || max >= PEER_BURST_CONNS || self.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let wanted = self.info.read().is_none()
+            || self.pieces.read().iter().any(|p| !p.complete && p.priority > PiecePriority::None);
+        if !wanted {
+            return;
+        }
+        *self.peer_burst_until.lock() = Some(Instant::now() + PEER_BURST_FOR);
+        // The dialer sets the shared limit on its next pass.
+        self.peer_notify.notify_one();
+    }
+
+    /// When a burst ends, trim to the configured limit, dropping the peers
+    /// that delivered the least useful data during it.
+    pub(crate) fn end_peer_burst_if_due(&self) {
+        {
+            let mut until = self.peer_burst_until.lock();
+            match *until {
+                Some(at) if Instant::now() >= at => *until = None,
+                _ => return,
+            }
+        }
+        let max = self.max_established_conns.load(Ordering::Relaxed);
+        let ranks = self.peer_ranks();
+        let snapshots = self.peer_snapshots.read();
+        let mut peers: Vec<(SocketAddr, f64, bool, bool, i64)> = self.conn_handles.read().iter()
+            .filter(|(_, h)| !h.is_closed())
+            .map(|(addr, h)| {
+                let snap = snapshots.get(addr);
+                (*addr, snap.map_or(0.0, |s| s.download_rate), snap.is_some_and(|s| !s.peer_choking),
+                    ranks.get(addr).is_some_and(|r| r.0),
+                    h.stats().bytes_read_useful_data.load(Ordering::Relaxed))
+            })
+            .collect();
+        drop(snapshots);
+        if peers.len() <= max {
+            return;
+        }
+        // Choked peers first: they send nothing now. Then slowest by current
+        // rate, not total bytes: a peer that only just unchoked us has few
+        // bytes but may be the fastest here.
+        peers.sort_by(|a, b| a.2.cmp(&b.2)
+            .then(a.1.total_cmp(&b.1)).then(a.3.cmp(&b.3)).then(a.4.cmp(&b.4)));
+        let excess = peers.len() - max;
+        for (addr, ..) in peers.into_iter().take(excess) {
+            wt_types::probe::add(wt_types::probe::BURST_DROPS, 1);
+            self.drop_conn_addr(addr, "peer burst ended");
+        }
     }
 
     pub fn wake_all_connections(&self) {
@@ -286,7 +658,7 @@ impl TorrentInner {
         }
         let count = added.len();
         if count > 0 {
-            self.bump_change();
+            self.peer_notify.notify_one();
         }
         count
     }
@@ -309,11 +681,18 @@ impl TorrentInner {
             info.reserved,
             info.source,
         );
-        // Duplicate remote: reject (Go closes the new one / prefers network).
-        if self.conn_handles.read().contains_key(&info.remote) {
+        // One slot per peer: reject a second connection by address or peer ID
+        // (a peer can reach us inbound and outbound from different ports).
+        let peer_id = info.peer_id;
+        let has_id = peer_id.iter().any(|b| *b != 0);
+        let duplicate = |handles: &HashMap<SocketAddr, crate::conn::ConnHandle>| {
+            handles.contains_key(&info.remote)
+                || (has_id && handles.values().any(|h| !h.is_closed() && h.peer_id() == Some(peer_id)))
+        };
+        if duplicate(&self.conn_handles.read()) {
             return Err(CoreError::Other("duplicate peer".into()));
         }
-        let max = self.max_established_conns.load(Ordering::Relaxed);
+        let max = self.conn_limit();
         if self.conn_handles.read().len() >= max {
             // Go: replace worstBadConn when at maxEstablishedConns.
             let outgoing = self
@@ -332,12 +711,16 @@ impl TorrentInner {
             self.drop_conn_addr(victim, "replaced by better peer");
         }
         let mut handles = self.conn_handles.write();
+        if duplicate(&handles) {
+            return Err(CoreError::Other("duplicate peer".into()));
+        }
         if handles.len() >= max {
             // Race: another attach won the slot.
             return Err(CoreError::Other("don't want conn".into()));
         }
         handles.insert(info.remote, handle.clone());
         drop(handles);
+        self.peer_addrs.write().insert(crate::torrent_impls::peer_key_from_addr(info.remote), info.remote);
         self.start_hashing();
         let mut handler = crate::peer_conn::PeerConnHandler::new(Arc::clone(self), &handle);
         handler.start(&handle);
@@ -384,39 +767,43 @@ impl TorrentInner {
             && !result.cancelled
             && result.error.is_none()
             && ps.mark_complete().is_ok();
-        if !valid {
+        wt_types::probe::add(if valid { wt_types::probe::HASH_OK } else { wt_types::probe::HASH_FAIL }, 1);
+        if valid {
+            self.failed_pieces.lock().remove(&piece);
+        } else {
             let _ = ps.mark_not_complete();
+            self.failed_pieces.lock().insert(piece);
+            self.hash_fail_generation.fetch_add(1, Ordering::Relaxed);
+            wt_types::events::record("hash_fail", format!("piece={piece}"));
         }
         {
-            let mut pieces = self.pieces.write();
+            let mut pieces = self.pieces_mut();
             if let Some(entry) = pieces.get_mut(piece as usize) {
                 entry.checking = false;
                 entry.complete = valid;
                 entry.ok = true;
                 if !valid {
                     entry.partial = false;
-                    entry.chunks_received.clear();
                 }
             }
         }
-        if let Some(book) = self.book.write().as_mut() {
-            book.set_complete_cached(piece, true, valid);
-            if !valid {
-                let (begin, end) =
-                    piece_req_index_range(piece, info.piece_length, info.total_length());
-                let mut dirty = self.dirty_chunks.write();
-                for req in begin..end {
-                    dirty.remove(&req);
-                    book.mark_chunk_pending(req);
-                }
-            }
+        if !valid {
+            let (begin, end) = piece_req_index_range(piece, info.piece_length, info.total_length());
+            self.dirty_chunks.remove_range(begin, end);
         }
         if valid {
             for handle in self.conn_handles.read().values() {
                 handle.send_message(wt_wire::message::Message::Have { index: piece });
             }
         }
-        self.bump_change();
+        // A finished piece frees no blocks, so a saved download need not wake
+        // every peer to refill at once. Failures and playback still do.
+        if valid && crate::peer_conn::PeerTorrent::background_only(self) && self.wanted_pieces().count > 0 {
+            self.peer_notify.notify_one();
+            self.notify_progress();
+        } else {
+            self.bump_change();
+        }
     }
 
     fn peer_priority(&self, remote: SocketAddr) -> u32 {
@@ -429,8 +816,8 @@ impl TorrentInner {
 
     /// Go maxHalfOpen: five exploratory slots beyond established headroom.
     pub(crate) fn max_half_open(&self, configured: usize) -> usize {
+        let maximum = self.conn_limit() as i64;
         let handles = self.conn_handles.read();
-        let maximum = self.max_established_conns.load(Ordering::Relaxed) as i64;
         let incoming = handles.values().filter(|h| !h.is_outgoing()).count() as i64;
         (maximum - handles.len() as i64 + 5.max(incoming - maximum / 2))
             .max(0).min(configured as i64) as usize
@@ -443,7 +830,7 @@ impl TorrentInner {
         if self.closed.load(Ordering::Relaxed) {
             return 0;
         }
-        let max = self.max_established_conns.load(Ordering::Relaxed);
+        let max = self.conn_limit();
         let established = self.conn_handles.read().len();
         if established < max {
             return max - established;
@@ -467,33 +854,38 @@ impl TorrentInner {
         }
     }
 
-    /// Go `PeerConn.useful`: metadata peer, seeding interest, or has wanted pieces.
-    fn conn_is_useful(&self, addr: SocketAddr) -> bool {
-        let conns = self.conns.read();
-        let Some(c) = conns.get(&addr) else {
-            return false;
-        };
-        let inner = c.inner.read();
-        if c.closed.load(Ordering::Relaxed) {
-            return false;
+    /// Go `PeerConn.useful()` and `lastHelpful()` for each live connection.
+    /// Live handlers are not in the legacy `conns` map; ranking through that
+    /// map alone made every peer look useless and never helpful, so the
+    /// longest-connected (usually most productive) peers were replaced first.
+    /// Locks are taken one at a time, never nested.
+    fn peer_ranks(&self) -> HashMap<SocketAddr, (bool, Option<Instant>)> {
+        let now = Instant::now();
+        let has_info = self.info.read().is_some();
+        let seeding = self.seeding.load(Ordering::Relaxed);
+        let wanted: Vec<bool> = self.pieces.read().iter()
+            .map(|p| p.priority > PiecePriority::None && !p.complete).collect();
+        let snaps: HashMap<SocketAddr, (Option<Duration>, bool)> = self.peer_snapshots.read()
+            .iter().map(|(a, s)| (*a, (s.last_useful_data, s.peer_interested))).collect();
+        let live: Vec<(SocketAddr, [u8; 8])> = self.conn_handles.read().iter()
+            .filter(|(_, h)| !h.is_closed())
+            .map(|(a, h)| (*a, h.peer_extension_bits())).collect();
+        let mut ranks = HashMap::with_capacity(live.len());
+        for (addr, bits) in live {
+            let (since_useful, interested) = snaps.get(&addr).copied().unwrap_or((None, false));
+            let last = since_useful.and_then(|d| now.checked_sub(d));
+            let useful = if !has_info {
+                wt_wire::handshake::PeerExtensionBits(bits).supports_extended()
+            } else if seeding && interested {
+                true
+            } else {
+                self.peer_pieces.read()
+                    .get(&crate::torrent_impls::peer_key_from_addr(addr))
+                    .is_some_and(|ps| ps.iter().any(|&p| wanted.get(p as usize).copied().unwrap_or(false)))
+            };
+            ranks.insert(addr, (useful, last));
         }
-        if self.info.read().is_none() {
-            return inner.peer_ext_ut_metadata.is_some();
-        }
-        if self.seeding.load(Ordering::Relaxed) && inner.peer_interested {
-            return true;
-        }
-        // Approximate peerHasWantedPieces: any piece we lack that they have.
-        let pieces = self.pieces.read();
-        if inner.peer_sent_have_all {
-            return pieces.iter().any(|p| !p.complete);
-        }
-        inner.peer_pieces.iter().any(|&p| {
-            pieces
-                .get(p as usize)
-                .map(|e| !e.complete)
-                .unwrap_or(true)
-        })
+        ranks
     }
 
     /// Go `worstBadConn` / `worstBadConnFromSlice`: pick a replaceable bad
@@ -503,12 +895,12 @@ impl TorrentInner {
         incoming_is_bad: bool,
         outgoing_is_bad: bool,
     ) -> Option<SocketAddr> {
+        let ranks = self.peer_ranks();
         let handles = self.conn_handles.read();
         if handles.is_empty() {
             return None;
         }
-        let max = self.max_established_conns.load(Ordering::Relaxed);
-        let conns = self.conns.read();
+        let max = self.conn_limit();
 
         struct Cand {
             addr: SocketAddr,
@@ -529,17 +921,11 @@ impl TorrentInner {
             let outgoing = handle.is_outgoing();
             let bad_direction = (incoming_is_bad && !outgoing) || (outgoing_is_bad && outgoing);
             let stats = handle.stats().snapshot();
-            let (last_helpful, _) = conns
-                .get(addr)
-                .map(|c| {
-                    let i = c.inner.read();
-                    (i.last_useful_chunk_received, i.connected_at)
-                })
-                .unwrap_or((None, handle.connected_at()));
+            let (useful, last_helpful) = ranks.get(addr).copied().unwrap_or((false, None));
             cands.push(Cand {
                 addr: *addr,
                 bad_direction,
-                useful: self.conn_is_useful(*addr),
+                useful,
                 last_helpful,
                 completed_handshake: handle.connected_at(),
                 wasted: stats.chunks_read_wasted,
@@ -547,7 +933,6 @@ impl TorrentInner {
                 peer_prio: self.peer_priority(*addr),
             });
         }
-        drop(conns);
         drop(handles);
 
         // worseConnInput.Less / heap order: worst first (bad-dir, !useful,
@@ -612,20 +997,17 @@ impl TorrentInner {
 
     /// Absolute worst connection by Go worseConn ordering (for SetMaxEstablishedConns).
     pub(crate) fn worst_conn_addr(&self) -> Option<SocketAddr> {
+        let ranks = self.peer_ranks();
         let handles = self.conn_handles.read();
         if handles.is_empty() {
             return None;
         }
-        let conns = self.conns.read();
         let mut best: Option<(SocketAddr, bool, bool, Option<Instant>, Instant, u32)> = None;
         for (addr, handle) in handles.iter() {
             if handle.is_closed() {
                 continue;
             }
-            let useful = self.conn_is_useful(*addr);
-            let last_helpful = conns
-                .get(addr)
-                .and_then(|c| c.inner.read().last_useful_chunk_received);
+            let (useful, last_helpful) = ranks.get(addr).copied().unwrap_or((false, None));
             let completed = handle.connected_at();
             let prio = self.peer_priority(*addr);
             let cand = (*addr, false, useful, last_helpful, completed, prio);
@@ -658,7 +1040,7 @@ impl TorrentInner {
     /// Close and detach a connection (Go `dropConnection` / deletePeerConn).
     /// Frees the established slot immediately; records the close reason.
     pub(crate) fn drop_conn_addr(&self, addr: SocketAddr, reason: &str) {
-        if let Some(handle) = self.conn_handles.write().remove(&addr) {
+        if let Some(handle) = self.retire_connection(addr) {
             handle.close(reason);
             *self
                 .swarm_diagnostics
@@ -666,6 +1048,7 @@ impl TorrentInner {
                 .closes
                 .entry(crate::stats::failure_kind(reason).into())
                 .or_default() += 1;
+            #[cfg(not(target_os = "android"))]
             eprintln!(
                 "peer_closed addr={} out={} src={:?} reason={}",
                 addr,
@@ -674,56 +1057,94 @@ impl TorrentInner {
                 reason.chars().take(120).collect::<String>()
             );
         }
-        self.conns.write().remove(&addr);
         self.peer_pieces
             .write()
             .remove(&crate::torrent_impls::peer_key_from_addr(addr));
         self.peer_snapshots.write().remove(&addr);
+        self.forget_peer_playback_state(addr);
         self.choked_since.write().remove(&addr);
         self.bump_change();
     }
 
+    pub(crate) fn forget_peer_playback_state(&self, addr: SocketAddr) {
+        let key = crate::torrent_impls::peer_key_from_addr(addr);
+        self.peer_arrivals.write().remove(&key);
+        let mut peers = self.hedge_peers.write();
+        peers.retain(|_, peer| *peer != key);
+        self.hedges.write().retain(|_, peer| *peer != addr);
+    }
+
+    pub(crate) fn retire_connection(&self, addr: SocketAddr) -> Option<crate::conn::ConnHandle> {
+        // Transfer counters under the same registry lock used by stats(), so
+        // a snapshot counts a connection exactly once, whether live or closed.
+        let mut handles = self.conn_handles.write();
+        let handle = handles.remove(&addr)?;
+        self.peer_addrs.write().remove(&crate::torrent_impls::peer_key_from_addr(addr));
+        self.retired_conn_stats.lock().add(&handle.stats().snapshot());
+        Some(handle)
+    }
+
+    pub(crate) fn note_dial_source(&self, source: wt_types::PeerSource, ok: bool) {
+        let mut sources = self.dial_sources.lock();
+        let entry = sources.entry(source).or_default();
+        if ok {
+            entry.0 += 1;
+        } else {
+            entry.1 += 1;
+        }
+    }
+
     pub(crate) fn take_dial_candidates(&self, max: usize) -> Vec<PeerInfo> {
+        if max == 0 {
+            return Vec::new();
+        }
         // Go prioritizedPeers.PopMax is trust then BEP 40. Pure Pop without
         // rediscovery drains the pool faster than tracker/DHT refill on Ubuntu
         // (pool 220→<40, dialFailures.timeout≈400). Failed dials are re-queued
         // with exp backoff; among ready peers prefer lower fail_counts so
         // recirculated dead contacts do not starve never-tried addrs.
-        let handles = self.conn_handles.read();
-        let mut dialing = self.dialing_peers.lock();
-        let backoff = self.dial_backoff.lock();
-        let fail_counts = self.dial_fail_counts.lock();
         let now = Instant::now();
-        let mut known = self.known_peers.write();
-        let mut eligible: Vec<PeerInfo> = known
-            .iter()
-            .filter(|p| {
-                !handles.contains_key(&p.addr)
-                    && !dialing.contains(&p.addr)
-                    && backoff.get(&p.addr).is_none_or(|until| *until <= now)
-            })
-            .cloned()
+        let mut eligible: Vec<PeerInfo> = {
+            let handles = self.conn_handles.read();
+            let dialing = self.dialing_peers.lock();
+            let backoff = self.dial_backoff.lock();
+            let known = self.known_peers.read();
+            let mut seen = HashSet::new();
+            // The same endpoint can arrive from tracker, DHT and PEX. Go checks
+            // connectingToPeerAddr before starting each attempt; reserve it once.
+            known
+                .iter()
+                .filter(|p| {
+                    !handles.contains_key(&p.addr)
+                        && !dialing.contains(&p.addr)
+                        && backoff.get(&p.addr).is_none_or(|until| *until <= now)
+                        && seen.insert(p.addr)
+                })
+                .cloned()
+                .collect()
+        };
+        // Sort with no peer table locked: the pool can hold hundreds.
+        let fail_counts = self.dial_fail_counts.lock().clone();
+        // Smoothed connect rate per thousand, so an untried source starts even.
+        let source_rates: HashMap<_, _> = self.dial_sources.lock().iter()
+            .map(|(&source, &(ok, failed))| (source, (ok + 1) * 1000 / (ok + failed + 2)))
             .collect();
-        // The same endpoint can arrive from tracker, DHT and PEX. Go checks
-        // connectingToPeerAddr before starting each attempt; reserve it once.
-        let mut seen = HashSet::new();
-        eligible.retain(|p| seen.insert(p.addr));
         eligible.sort_by_cached_key(|p| {
             let fails = fail_counts.get(&p.addr).copied().unwrap_or(0);
             (
                 fails,
                 std::cmp::Reverse((
                     p.trusted,
+                    source_rates.get(&p.source).copied().unwrap_or(500),
                     self.peer_priority(p.addr),
-                    PEER_ADDRESS_HASH.hash_one(p.addr.to_string()),
+                    PEER_ADDRESS_HASH.hash_one(p.addr),
                 )),
             )
         });
         eligible.truncate(max);
-        for p in &eligible {
-            known.retain(|x| x.addr != p.addr);
-            dialing.insert(p.addr);
-        }
+        let taken: HashSet<SocketAddr> = eligible.iter().map(|p| p.addr).collect();
+        self.known_peers.write().retain(|p| !taken.contains(&p.addr));
+        self.dialing_peers.lock().extend(taken);
         eligible
     }
 
@@ -772,7 +1193,8 @@ impl TorrentInner {
                 .lock()
                 .insert(addr, Instant::now() + Duration::from_secs(secs));
         }
-        self.bump_change();
+        // Only the dialer cares; waking every peer per failed dial is a herd.
+        self.peer_notify.notify_one();
     }
 
     /// Wipe dial fail/backoff after the peer proves helpful (useful chunk).
@@ -844,8 +1266,11 @@ impl TorrentInner {
             entry.complete = completion.ok && completion.complete;
         }
         *self.storage.write() = Some(storage);
-        *self.pieces.write() = piece_entries;
-        crate::torrent_impls::init_book_and_glue(self, &info);
+        *self.pieces_mut() = piece_entries;
+        let blocks = crate::picker::piece_req_index_range(0, piece_len, piece_len).1
+            .saturating_mul(info.num_pieces());
+        self.dirty_chunks.init(blocks);
+        crate::torrent_impls::init_availability(self, info.num_pieces());
         *self.info.write() = Some(info);
         self.bump_change();
         Ok(())
@@ -880,7 +1305,7 @@ impl TorrentInner {
     }
 
     pub fn is_block_arrived(&self, req: RequestIndex) -> bool {
-        if self.dirty_chunks.read().contains(&req) {
+        if self.dirty_chunks.contains(req) {
             return true;
         }
         let info_guard = self.info.read();
@@ -916,568 +1341,33 @@ impl TorrentInner {
         (focus..end).find(|&r| !self.is_block_arrived(r))
     }
 
-    pub fn rescue_head_of_line(&self) -> usize {
-        let tuning = current_seek_tuning();
-        if !tuning.hol_rescue {
-            return 0;
-        }
-        let Some(head) = self.head_of_line() else {
-            return 0;
-        };
-        let Some(focus) = self.request_focus_index() else {
-            return 0;
-        };
-        let info_guard = self.info.read();
-        let Some(info) = &*info_guard else {
-            return 0;
-        };
-
-        let total_reqs = self.max_end_request();
-        let end = (focus + HOL_WINDOW_BLOCKS).min(total_reqs);
-        let after = Duration::from_secs_f64(tuning.hol_after_ms / 1000.0);
-        let mut moved = 0;
-
-        let mut req_state_lock = self.request_state.write();
-        let conns_lock = self.conns.read();
-
-        for r in head..end {
-            if moved >= HOL_RESCUES_PER_NUDGE {
-                break;
-            }
-            if self.is_block_arrived(r) {
-                continue;
-            }
-            let Some(holder_state) = req_state_lock.get(&r) else {
-                continue;
-            };
-            let Some(holder_conn) = conns_lock.get(&holder_state.peer) else {
-                continue;
-            };
-
-            let holder_rtt = holder_conn.inner.read().rtt.estimate;
-            if holder_state.when.elapsed() < after.max(2 * holder_rtt) {
-                continue;
-            }
-
-            let coord = block_coord_from_req_index(r, info.piece_length, info.total_length());
-            let piece = coord.piece;
-
-            let mut best_conn: Option<PeerConn> = None;
-            let mut best_arrival = f64::MAX;
-            let holder_arrival =
-                holder_conn.expected_arrival(BLOCK_SIZE as usize, tuning.learned_arrival, None);
-
-            for conn in conns_lock.values() {
-                if conn.inner.read().remote_addr == holder_state.peer || conn.is_closed() {
-                    continue;
-                }
-                let c_inner = conn.inner.read();
-                if c_inner.peer_choking || !c_inner.peer_pieces.contains(&piece) {
-                    continue;
-                }
-                drop(c_inner);
-                let arrival =
-                    conn.expected_arrival(BLOCK_SIZE as usize, tuning.learned_arrival, None);
-                if arrival < best_arrival {
-                    best_arrival = arrival;
-                    best_conn = Some(conn.clone());
-                }
-            }
-
-            if let Some(best) = best_conn {
-                if best_arrival < holder_arrival {
-                    // Steal/rescue
-                    holder_conn.send_message(Message::Cancel {
-                        index: piece,
-                        begin: coord.offset,
-                        length: coord.length,
-                    });
-                    best.send_message(Message::Request {
-                        index: piece,
-                        begin: coord.offset,
-                        length: coord.length,
-                    });
-                    req_state_lock.insert(
-                        r,
-                        ActiveRequest {
-                            peer: best.inner.read().remote_addr,
-                            when: Instant::now(),
-                            cancelled: false,
-                        },
-                    );
-                    self.rescues.fetch_add(1, Ordering::Relaxed);
-                    moved += 1;
-                }
-            }
-        }
-
-        moved
-    }
-
-    pub fn hedge_head_of_line(&self) -> usize {
-        let tuning = current_seek_tuning();
-        if !tuning.hedge {
-            return 0;
-        }
-        let Some(head) = self.head_of_line() else {
-            return 0;
-        };
-        let Some(focus) = self.request_focus_index() else {
-            return 0;
-        };
-        let info_guard = self.info.read();
-        let Some(info) = &*info_guard else {
-            return 0;
-        };
-
-        let total_reqs = self.max_end_request();
-        let end = (focus + HOL_WINDOW_BLOCKS).min(total_reqs);
-        let after = Duration::from_secs_f64(tuning.hol_after_ms / 1000.0);
-        let mut sent = 0;
-
-        let req_state_lock = self.request_state.read();
-        let mut hedges_lock = self.hedges.write();
-        let conns_lock = self.conns.read();
-
-        for r in head..end {
-            if sent >= HEDGES_PER_NUDGE {
-                break;
-            }
-            if self.is_block_arrived(r) {
-                continue;
-            }
-            let Some(holder_state) = req_state_lock.get(&r) else {
-                continue;
-            };
-            if hedges_lock.contains_key(&r) {
-                continue;
-            }
-            let Some(holder_conn) = conns_lock.get(&holder_state.peer) else {
-                continue;
-            };
-
-            let overdue = if tuning.learned_arrival {
-                holder_conn.block_overdue(r, Duration::from_millis(100), true)
-            } else {
-                let rtt = holder_conn.inner.read().rtt.estimate;
-                holder_state.when.elapsed() >= after.max(2 * rtt)
-            };
-
-            if !overdue {
-                continue;
-            }
-
-            let coord = block_coord_from_req_index(r, info.piece_length, info.total_length());
-            let piece = coord.piece;
-
-            let mut best_conn: Option<PeerConn> = None;
-            let mut best_arrival = f64::MAX;
-
-            for conn in conns_lock.values() {
-                if conn.inner.read().remote_addr == holder_state.peer || conn.is_closed() {
-                    continue;
-                }
-                let c_inner = conn.inner.read();
-                if c_inner.peer_choking || !c_inner.peer_pieces.contains(&piece) {
-                    continue;
-                }
-                drop(c_inner);
-                let arrival =
-                    conn.expected_arrival(BLOCK_SIZE as usize, tuning.learned_arrival, None);
-                if arrival < best_arrival {
-                    best_arrival = arrival;
-                    best_conn = Some(conn.clone());
-                }
-            }
-
-            if let Some(best) = best_conn {
-                best.send_message(Message::Request {
-                    index: piece,
-                    begin: coord.offset,
-                    length: coord.length,
-                });
-                hedges_lock.insert(r, best.inner.read().remote_addr);
-                self.hedges_sent.fetch_add(1, Ordering::Relaxed);
-                sent += 1;
-            }
-        }
-
-        sent
-    }
-
+    /// Go `NudgeUrgentRequests`: wake every peer and have those with spare
+    /// slots recompute requests now rather than when their queue runs low,
+    /// which is also where stuck playhead blocks get rescued and hedged.
+    /// Returns how many peers were asked.
     pub fn nudge_urgent_requests(&self) -> usize {
         if self.closed.load(Ordering::Relaxed)
             || self.data_download_disallowed.load(Ordering::Relaxed)
+            || self.info.read().is_none()
         {
             return 0;
         }
-        for handle in self.conn_handles.read().values() {
-            handle.wake();
+        let urgent = self.pieces.read().iter()
+            .any(|p| !p.complete && p.priority >= PiecePriority::Now);
+        let handles = self.conn_handles.read();
+        for handle in handles.values() {
+            if urgent {
+                handle.request_update();
+            } else {
+                handle.wake();
+            }
         }
-        self.rescue_head_of_line();
-        self.hedge_head_of_line();
-
-        let pieces = self.pieces.read();
-        let urgent_pieces: Vec<PieceIndex> = pieces
-            .iter()
-            .filter(|p| !p.complete && p.priority >= PiecePriority::Now)
-            .map(|p| p.index)
-            .collect();
-        drop(pieces);
-
-        if urgent_pieces.is_empty() {
-            return 0;
-        }
-
-        let eligible: Vec<PeerConn> = {
-            let conns = self.conns.read();
-            conns
-                .values()
-                .filter_map(|conn| {
-                    if conn.is_closed() {
-                        return None;
-                    }
-                    let c_inner = conn.inner.read();
-                    if c_inner.outstanding_requests.len() >= c_inner.max_requests {
-                        return None;
-                    }
-                    let has_urgent = urgent_pieces.iter().any(|&i| {
-                        (c_inner.peer_pieces.contains(&i) || c_inner.peer_sent_have_all)
-                            && (!c_inner.peer_choking || c_inner.peer_allowed_fast.contains(&i))
-                    });
-                    if has_urgent {
-                        Some(conn.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        let mut nudged = 0;
-        for conn in eligible {
-            self.refill_peer_requests(&conn);
-            nudged += 1;
-        }
-        nudged
+        if urgent { handles.len() } else { 0 }
     }
 
-    pub fn refill_peer_requests(&self, conn: &PeerConn) {
-        if self.closed.load(Ordering::Relaxed)
-            || self.data_download_disallowed.load(Ordering::Relaxed)
-            || conn.is_closed()
-        {
-            return;
-        }
-        let info_guard = self.info.read();
-        let Some(info) = &*info_guard else {
-            return;
-        };
-
-        let tuning = current_seek_tuning();
-        let c_inner = conn.inner.read();
-        if c_inner.peer_choking && c_inner.peer_allowed_fast.is_empty() {
-            return;
-        }
-
-        let pipeline_limit = compute_playback_pipeline_limit(
-            c_inner.download_rate.rate(),
-            c_inner.rtt.estimate,
-            self.request_focus.load(Ordering::Relaxed) > 0,
-        );
-        // Match Go `nominalMaxRequests`: peak*2 and LTEP reqq, with pipeline
-        // as an extra cap. Never use bare max_requests (250) — that flooded
-        // seeds with 100–228 outstanding and left downloaded=0.
-        const NOMINAL_CEILING: usize = crate::peer_conn::MAX_LOCAL_TO_REMOTE_REQUESTS;
-        let peak_cap = c_inner
-            .peak_requests
-            .max(1)
-            .saturating_mul(2)
-            .clamp(1, NOMINAL_CEILING);
-        let max_reqs = if pipeline_limit > 0 {
-            pipeline_limit.min(peak_cap).min(c_inner.max_requests.max(1))
-        } else {
-            peak_cap.min(c_inner.max_requests.max(1))
-        };
-
-        if c_inner.outstanding_requests.len() >= max_reqs {
-            return;
-        }
-
-        let slots_available = max_reqs - c_inner.outstanding_requests.len();
-        let budget = candidate_budget(max_reqs);
-        let budget_limit = if budget > 0 { budget } else { usize::MAX };
-        drop(c_inner);
-
-        let focus_opt = self.request_focus_index();
-        let sorted_pieces: Vec<(PieceIndex, PiecePriority)> = {
-            let pieces_guard = self.pieces.read();
-            let mut list: Vec<(PieceIndex, PiecePriority)> = pieces_guard
-                .iter()
-                .filter(|p| !p.complete && p.priority > PiecePriority::None)
-                .map(|p| (p.index, p.priority))
-                .collect();
-            drop(pieces_guard);
-
-            let focus_piece = focus_opt
-                .map(|r| {
-                    let coord =
-                        block_coord_from_req_index(r, info.piece_length, info.total_length());
-                    coord.piece
-                })
-                .unwrap_or(0);
-
-            list.sort_by(|a, b| {
-                // First by priority descending
-                b.1.cmp(&a.1).then_with(|| {
-                    // If priority is Now, order by distance from playhead
-                    if a.1 >= PiecePriority::Now {
-                        focus_distance(a.0, focus_piece).cmp(&focus_distance(b.0, focus_piece))
-                    } else {
-                        a.0.cmp(&b.0)
-                    }
-                })
-            });
-            list
-        };
-
-        let mut sent = 0;
-        let mut candidates_scanned = 0;
-        let mut req_state_lock = self.request_state.write();
-        let urgent_steal_age = Duration::from_secs(1); // default 1s for urgent stealing
-
-        if !conn.inner.read().am_interested {
-            conn.inner.write().am_interested = true;
-            conn.send_message(Message::Interested);
-        }
-
-        for (piece, priority) in sorted_pieces {
-            if sent >= slots_available || candidates_scanned >= budget_limit {
-                break;
-            }
-            let c_inner = conn.inner.read();
-            if !c_inner.peer_pieces.contains(&piece) && !c_inner.peer_sent_have_all {
-                continue;
-            }
-            if c_inner.peer_choking && !c_inner.peer_allowed_fast.contains(&piece) {
-                continue;
-            }
-
-            // SlowPeerYield: skip only non-urgent Next pieces, and only after
-            // this peer has already delivered useful data (matches peer_conn).
-            // `>= Next` previously starved new peers on Now at rate=0.
-            if tuning.slow_peer_yield
-                && priority == PiecePriority::Next
-                && c_inner.last_useful_chunk_received.is_some()
-                && c_inner.download_rate.rate() < SLOW_PEER_BYTES_PER_SEC
-            {
-                let conns_lock = self.conns.read();
-                let faster_exists = conns_lock.values().any(|other| {
-                    if other.inner.read().remote_addr == c_inner.remote_addr || other.is_closed() {
-                        return false;
-                    }
-                    let o_inner = other.inner.read();
-                    !o_inner.peer_choking
-                        && (o_inner.peer_pieces.contains(&piece) || o_inner.peer_sent_have_all)
-                        && o_inner.download_rate.rate() > SLOW_PEER_BYTES_PER_SEC
-                });
-                drop(conns_lock);
-                if faster_exists {
-                    continue;
-                }
-            }
-            drop(c_inner);
-
-            let (start_req, end_req) =
-                piece_req_index_range(piece, info.piece_length, info.total_length());
-            for r in start_req..end_req {
-                if sent >= slots_available || candidates_scanned >= budget_limit {
-                    break;
-                }
-                candidates_scanned += 1;
-                if self.is_block_arrived(r) {
-                    continue;
-                }
-
-                let coord = block_coord_from_req_index(r, info.piece_length, info.total_length());
-
-                // Check if already requested
-                if let Some(active) = req_state_lock.get(&r) {
-                    if active.peer == conn.inner.read().remote_addr {
-                        continue;
-                    }
-                    // Check urgent stealing
-                    let conns_lock = self.conns.read();
-                    let existing_last_useful = conns_lock
-                        .get(&active.peer)
-                        .and_then(|c| c.inner.read().last_useful_chunk_received);
-                    let stealer_last_useful = conn.inner.read().last_useful_chunk_received;
-                    drop(conns_lock);
-
-                    if should_steal_urgent(
-                        r,
-                        priority,
-                        existing_last_useful,
-                        stealer_last_useful,
-                        active.when,
-                        urgent_steal_age,
-                        focus_opt,
-                    ) {
-                        // Cancel from existing peer
-                        let conns_lock = self.conns.read();
-                        if let Some(existing) = conns_lock.get(&active.peer) {
-                            existing.send_message(Message::Cancel {
-                                index: piece,
-                                begin: coord.offset,
-                                length: coord.length,
-                            });
-                        }
-                        drop(conns_lock);
-
-                        conn.send_message(Message::Request {
-                            index: piece,
-                            begin: coord.offset,
-                            length: coord.length,
-                        });
-                        conn.note_request_sent(r, BLOCK_SIZE as usize, None);
-                        req_state_lock.insert(
-                            r,
-                            ActiveRequest {
-                                peer: conn.inner.read().remote_addr,
-                                when: Instant::now(),
-                                cancelled: false,
-                            },
-                        );
-                        sent += 1;
-                    }
-                } else {
-                    // Not requested yet!
-                    conn.send_message(Message::Request {
-                        index: piece,
-                        begin: coord.offset,
-                        length: coord.length,
-                    });
-                    conn.note_request_sent(r, BLOCK_SIZE as usize, None);
-                    req_state_lock.insert(
-                        r,
-                        ActiveRequest {
-                            peer: conn.inner.read().remote_addr,
-                            when: Instant::now(),
-                            cancelled: false,
-                        },
-                    );
-                    sent += 1;
-                }
-            }
-        }
-    }
-
-    pub fn on_block_received(
-        &self,
-        from_peer: SocketAddr,
-        piece: PieceIndex,
-        begin: u32,
-        data: Bytes,
-    ) {
-        let info_guard = self.info.read();
-        let Some(info) = &*info_guard else {
-            return;
-        };
-
-        let storage_guard = self.storage.read();
-        let Some(storage) = &*storage_guard else {
-            return;
-        };
-
-        let piece_obj = info.piece(piece);
-        let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece));
-
-        // Write block to storage
-        if let Err(err) = piece_storage.write_at(&data, begin as i64) {
-            let error = CoreError::Storage(err);
-            if let Some(cb) = &*self.on_write_chunk_error.read() {
-                cb(&error);
-            }
-            return;
-        }
-
-        let req_idx = req_index_from_piece_and_offset(piece, begin, info.piece_length);
-
-        // Update stats
-        self.dirty_chunks.write().insert(req_idx);
-        self.request_state.write().remove(&req_idx);
-
-        let conns = self.conns.read();
-        if let Some(conn) = conns.get(&from_peer) {
-            conn.note_block_received(req_idx, Some(&mut *self.arrival_model.write()));
-            conn.inner
-                .read()
-                .stats
-                .bytes_read_data
-                .fetch_add(data.len() as i64, Ordering::Relaxed);
-            conn.inner
-                .read()
-                .stats
-                .bytes_read_useful_data
-                .fetch_add(data.len() as i64, Ordering::Relaxed);
-            conn.inner
-                .read()
-                .stats
-                .chunks_read
-                .fetch_add(1, Ordering::Relaxed);
-            conn.inner
-                .read()
-                .stats
-                .chunks_read_useful
-                .fetch_add(1, Ordering::Relaxed);
-        }
-
-        // Cancel hedge if hedged
-        if let Some(hedged_peer) = self.hedges.write().remove(&req_idx) {
-            if hedged_peer != from_peer {
-                if let Some(other_conn) = conns.get(&hedged_peer) {
-                    other_conn.send_message(Message::Cancel {
-                        index: piece,
-                        begin,
-                        length: data.len() as u32,
-                    });
-                }
-            }
-        }
-        drop(conns);
-
-        // Check if piece is complete
-        let mut pieces_lock = self.pieces.write();
-        if let Some(piece_entry) = pieces_lock.get_mut(piece as usize) {
-            piece_entry.partial = true;
-            piece_entry.chunks_received.insert(begin);
-            if piece_entry.chunks_received.len() >= piece_entry.chunks_total {
-                piece_entry.checking = true;
-                let expected_hash = info.piece_hash_v1(piece);
-                let valid =
-                    verify_piece_hash(&*piece_storage, piece_obj.length as usize, expected_hash);
-                piece_entry.checking = false;
-                if valid {
-                    let _ = piece_storage.mark_complete();
-                    piece_entry.complete = true;
-                    piece_entry.ok = true;
-                    drop(pieces_lock);
-                    // Broadcast Have to all peers
-                    let conns = self.conns.read();
-                    for conn in conns.values() {
-                        conn.send_message(Message::Have { index: piece });
-                    }
-                } else {
-                    let _ = piece_storage.mark_not_complete();
-                    piece_entry.complete = false;
-                    piece_entry.ok = false;
-                    piece_entry.chunks_received.clear();
-                    piece_entry.partial = false;
-                }
-            }
-        }
-
-        self.bump_change();
+    /// Go `NudgeUrgentRequests` (Claude seek); see [`Self::nudge_urgent_requests`].
+    pub fn nudge_urgent_peers(&self) {
+        self.nudge_urgent_requests();
     }
 }
 
@@ -1489,6 +1379,29 @@ mod dial_parity_tests {
         TorrentInner::new(InfoHash([7; 20]), None, "dial-parity".into(),
             Arc::new(crate::storage_adapter::MemoryClientStorage::new()),
             Arc::new(RwLock::new(crate::arrival::ArrivalModel::default())))
+    }
+
+    #[test]
+    fn peer_burst_shares_its_connections_across_torrents() {
+        let t = torrent();
+        t.max_established_conns.store(50, Ordering::Relaxed);
+        assert_eq!(t.conn_limit(), 50);
+        t.start_peer_burst();
+        assert!(t.bursting());
+        t.update_peer_burst_limit(0);
+        assert_eq!(t.conn_limit(), PEER_BURST_CONNS);
+        // Other torrents already hold most of the burst connections.
+        t.update_peer_burst_limit(240);
+        assert_eq!(t.conn_limit(), 50, "never below the configured limit");
+        // A limit at or above the burst size, or a resting session, never bursts.
+        let big = torrent();
+        big.max_established_conns.store(PEER_BURST_CONNS, Ordering::Relaxed);
+        big.start_peer_burst();
+        assert!(!big.bursting());
+        let resting = torrent();
+        resting.max_established_conns.store(0, Ordering::Relaxed);
+        resting.start_peer_burst();
+        assert!(!resting.bursting());
     }
 
     #[test]
