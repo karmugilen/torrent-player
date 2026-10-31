@@ -206,6 +206,10 @@ impl Drop for PieceHasherPool {
     }
 }
 
+/// Queueing a job and shutting down both notify; this is only a safety net. A
+/// short wait here woke every worker of every torrent all day with no work.
+const IDLE_WAIT: Duration = Duration::from_secs(5);
+
 fn worker_loop(shared: Arc<Shared>) {
     // Reusable buffer — no per-piece allocation churn.
     let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
@@ -222,14 +226,14 @@ fn worker_loop(shared: Arc<Shared>) {
                         shared.queued.fetch_sub(1, Ordering::SeqCst);
                         emit_cancelled(&shared, entry.job);
                     }
-                    let _ = shared.cv.wait_for(&mut q, Duration::from_millis(50));
+                    let _ = shared.cv.wait_for(&mut q, IDLE_WAIT);
                     continue;
                 }
                 if let Some(entry) = q.pop() {
                     shared.queued.fetch_sub(1, Ordering::SeqCst);
                     break entry.job;
                 }
-                let _ = shared.cv.wait_for(&mut q, Duration::from_millis(50));
+                let _ = shared.cv.wait_for(&mut q, IDLE_WAIT);
             }
         };
 

@@ -29,6 +29,8 @@ class PlayService : Service() {
     private var playbackOnly: Boolean = false
     // Live playback stats (seek time, arrival estimates), shown expanded.
     private var stats: String = ""
+    // Off once nothing has moved for a while, so a stalled download sleeps.
+    private var holdLocks: Boolean = true
     // With the screen off Android lets the CPU sleep and puts Wi-Fi into
     // power save, which throttles transfers. Held only while this runs.
     private var wakeLock: PowerManager.WakeLock? = null
@@ -123,6 +125,7 @@ class PlayService : Service() {
         if (intent?.hasExtra(EXTRA_PAUSED) == true) {
             paused = intent.getBooleanExtra(EXTRA_PAUSED, false)
         }
+        if (intent?.hasExtra(EXTRA_HOLD_LOCKS) == true) holdLocks = intent.getBooleanExtra(EXTRA_HOLD_LOCKS, true)
         if (intent?.hasExtra(EXTRA_STATS) == true) stats = intent.getStringExtra(EXTRA_STATS).orEmpty()
         if (intent?.hasExtra(EXTRA_PLAYBACK_ONLY) == true) playbackOnly = intent.getBooleanExtra(EXTRA_PLAYBACK_ONLY, false)
         if (intent?.hasExtra(EXTRA_MULTIPLE) == true) {
@@ -136,7 +139,7 @@ class PlayService : Service() {
         } else {
             startForeground(NOTIF_ID, value)
         }
-        holdTransferLocks()
+        if (holdLocks) holdTransferLocks() else releaseTransferLocks()
         true
     }.getOrElse {
         stopSelf()
@@ -232,6 +235,7 @@ class PlayService : Service() {
         const val EXTRA_PAUSED = "paused"
         const val EXTRA_MULTIPLE = "multiple"
         private const val EXTRA_PLAYBACK_ONLY = "playbackOnly"
+        private const val EXTRA_HOLD_LOCKS = "holdLocks"
         private const val EXTRA_STATS = "stats"
         private const val CHANNEL = "webtor-downloads"
         private const val NOTIF_ID = 42
@@ -249,8 +253,10 @@ class PlayService : Service() {
             multiple: Boolean = false,
             playbackOnly: Boolean = false,
             stats: String = "",
+            holdLocks: Boolean = true,
         ) {
             val intent = Intent(ctx, PlayService::class.java)
+                .putExtra(EXTRA_HOLD_LOCKS, holdLocks)
                 .putExtra(EXTRA_TITLE, title)
                 .putExtra(EXTRA_PROGRESS, progress)
                 .putExtra(EXTRA_PAUSED, paused)

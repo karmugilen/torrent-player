@@ -1036,10 +1036,12 @@ impl ClientInner {
                     tasks.retain(|t| !t.is_finished());
                     tasks.push(task);
                 }
-                // Poll half-open turnover faster than 1s (Go openNewConns is event-driven).
+                // Poll half-open turnover faster than 1s (Go openNewConns is event-driven),
+                // but only while dialing. Otherwise new peers wake this anyway.
+                let dialing = torrent.bursting() || !torrent.dialing_peers.lock().is_empty();
                 tokio::select! {
                     _ = torrent.peers_changed().notified() => {},
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+                    _ = tokio::time::sleep(Duration::from_millis(if dialing { 100 } else { 1000 })) => {},
                 }
             }
         });

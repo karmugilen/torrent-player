@@ -75,6 +75,8 @@ use crate::{ClientConfig, CoreError, Result, StatusEvent, TorrentSpec};
 /// Fallback poll when a torrent does not currently want connections (Go waits
 /// on `cl.event`; we poll so want_conns flips wake us without a condvar).
 pub const DHT_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Least time from the start of one DHT traversal to the next.
+pub const DHT_ANNOUNCE_MIN_GAP: Duration = Duration::from_secs(30);
 /// Go `dhtAnnouncer` sleeps 5 minutes after an announce error (DNS etc.).
 pub const DHT_ANNOUNCE_ERROR_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// Go `timeboxedAnnounceToDht` keeps one get_peers traversal open this long.
@@ -670,6 +672,7 @@ impl Sources {
                 }
                 // Go `timeboxedAnnounceToDht`: one traversal up to 15m, then
                 // immediately again while want_conns.
+                let started = std::time::Instant::now();
                 let ok = announce_to_dht(&dht, &keys, port, &sink, PeerSource::DhtGetPeers).await;
                 if !ok {
                     tracing::warn!(
@@ -679,8 +682,9 @@ impl Sources {
                     tokio::time::sleep(DHT_ANNOUNCE_ERROR_BACKOFF).await;
                     continue;
                 }
-                // Brief yield so a stuck announce cannot spin the runtime.
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                // A traversal that ends at once, as with few nodes, must not restart
+                // at once: that keeps the radio up for no new peers.
+                tokio::time::sleep(DHT_ANNOUNCE_MIN_GAP.saturating_sub(started.elapsed())).await;
             }
         });
         entry.lock().dht_announcer = Some(handle);

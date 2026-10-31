@@ -1686,8 +1686,10 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if added == 0 && room > 0 {
             wt_types::probe::add(wt_types::probe::REFILL_EMPTY, 1);
         }
-        // A refill costs little here, so an empty one need not lock the next out.
-        self.idle_refill_at = None;
+        // A peer still receiving refills freely. One with nothing to do and nothing
+        // on the way rests, or a stalled download polls every peer all night.
+        self.idle_refill_at =
+            (added == 0 && self.state.outstanding_requests.is_empty()).then(Instant::now);
     }
 
     /// Go `PeerConn.expectingChunks` + `Peer.updateExpectingChunks`: the
@@ -2537,6 +2539,9 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             return Some(Duration::from_millis(100));
         }
         if self.torrent.any_wanted_incomplete() {
+            if self.idle_refill_at.is_some() && self.torrent.background_only() {
+                return Some(IDLE_CHOKED_WAKE);
+            }
             return Some(Duration::from_millis(100));
         }
         if self.state.peer_ext_ut_pex.is_some() && !self.torrent.pex_disabled() {

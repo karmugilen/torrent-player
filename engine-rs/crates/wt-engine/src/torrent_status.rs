@@ -151,6 +151,14 @@ impl EngineServer {
     fn log_transfer_probe(&self, tick: u64) {
         let counters = wt_types::probe::take_line();
         let records: Vec<_> = self.records.read().values().cloned().collect();
+        // Nothing moving, nothing to record: an idle phone must not write a file
+        // every second.
+        if !records.iter().any(|r| {
+            let rec = r.read();
+            rec.rates.down > 0 || rec.rates.up > 0
+        }) {
+            return;
+        }
         // Written before any torrent lock: a silent gap after it means a hang.
         if tick % 5 == 0 {
             write_probe_line(&format!("alive torrents={} {counters}", records.len()));

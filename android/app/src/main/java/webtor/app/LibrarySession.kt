@@ -63,6 +63,8 @@ class LibrarySession(
     private var storageStatsJob: Job? = null
     private var eventJob: Job? = null
     private var lastServiceUpdate = 0L
+    private var lastServiceSent: List<Any>? = null
+    private var lastTrafficAt = 0L
     private var lastStatsRefresh = 0L
     private var draftGeneration = 0L
     private var commitInProgress = false
@@ -2753,12 +2755,16 @@ class LibrarySession(
         if (serviceSuppressed || isShuttingDown.get()) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
+            lastServiceSent = null
             return
         }
-        val notification = downloadNotification(_ui.value.library, (app as? WebtorApp)?.playbackLeases?.activeKeys().orEmpty())
+        val library = _ui.value.library
+        val playbackKeys = (app as? WebtorApp)?.playbackLeases?.activeKeys().orEmpty()
+        val notification = downloadNotification(library, playbackKeys)
         if (notification == null) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
+            lastServiceSent = null
             return
         }
         val now = android.os.SystemClock.elapsedRealtime()
@@ -2767,7 +2773,21 @@ class LibrarySession(
             lastStatsRefresh = now
             refreshSeekStats()
         }
-        if (force || now - lastServiceUpdate >= 1000) {
+        // The wake and Wi-Fi locks are for data that is moving. A download with no
+        // peers would otherwise keep the CPU and radio up all night for nothing.
+        val moving = lastServiceSent == null || playbackKeys.isNotEmpty() || library.any {
+            it.checking || (it.liveDownloadSpeed() ?: 0L) > 0L || (it.liveUploadSpeed() ?: 0L) > 0L
+        }
+        if (moving) lastTrafficAt = now
+        val holdLocks = now - lastTrafficAt < TRANSFER_LOCK_GRACE_MS
+        val sent = listOf<Any>(
+            notification.title, notification.progress, notification.text, notification.multiple,
+            notification.playbackOnly, playbackStatsLine(_ui.value), holdLocks,
+        )
+        // An unchanged notification is not redrawn every second, which costs the
+        // system more than the app. The slow refresh restores one lost to a restart.
+        val due = now - lastServiceUpdate >= if (sent == lastServiceSent) SERVICE_REFRESH_MS else 1000L
+        if (force || due) {
             PlayService.start(
                 app,
                 notification.title,
@@ -2777,8 +2797,10 @@ class LibrarySession(
                 multiple = notification.multiple,
                 playbackOnly = notification.playbackOnly,
                 stats = playbackStatsLine(_ui.value),
+                holdLocks = holdLocks,
             )
             lastServiceUpdate = now
+            lastServiceSent = sent
         }
     }
 
@@ -2842,6 +2864,9 @@ internal fun nextEpisodeToWarm(entry: DownloadEntry, playing: SavedFile, playNex
 }
 
 /** The engine signals readiness only after a rest with no player open; the app still checks its own state. */
+private const val TRANSFER_LOCK_GRACE_MS = 180_000L
+private const val SERVICE_REFRESH_MS = 60_000L
+
 internal fun shouldDropIdleDirectPlay(entry: DownloadEntry, status: TorrentStatus, idleMinutes: Int): Boolean =
     idleMinutes > 0 && entry.directPlay && status.idleDropReady && status.playbackReaders == 0 &&
         entry.engineId == status.id && !entry.paused && !entry.controlsBusy()

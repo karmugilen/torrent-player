@@ -204,18 +204,6 @@ impl EngineServer {
         let weak = Arc::downgrade(server);
         server.client.inner.tokio_handle.spawn(async move {
             let mut previous = None;
-            // How late a timer fires on the peers' runtime: are peers starved of CPU?
-            if let Some(server) = weak.upgrade() {
-                let lag_weak = weak.clone();
-                server.client.inner.tokio_handle.spawn(async move {
-                    while lag_weak.strong_count() > 0 {
-                        let asleep = Instant::now();
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        let late = asleep.elapsed().saturating_sub(Duration::from_millis(50));
-                        wt_types::probe::max(wt_types::probe::RT_LAG_MAX_MS, late.as_millis() as u64);
-                    }
-                });
-            }
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let Some(server) = weak.upgrade() else {
