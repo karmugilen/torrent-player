@@ -172,10 +172,11 @@ impl EngineHostApi for AndroidEngineHost {
                 None => return -1,
             }
         };
-        // ProxyFileDescriptorCallback accepts short reads. Return available
-        // bytes rather than holding the player's callback until its entire
-        // (up to 1 MiB) buffer has arrived from the swarm.
-        match reader.read_some(buf, offset) {
+        // ProxyFileDescriptorCallback must return the exact size asked for unless
+        // the file ends. AppFuse opens files without direct I/O, so the kernel
+        // takes a short read for the end of the file and shrinks it, and the
+        // player sees a truncated video.
+        match reader.read_at(buf, offset) {
             Ok(n) => n as i32,
             Err(err) => {
                 log_error(&format!("playback read: {err}"));
