@@ -227,13 +227,14 @@ impl EngineServer {
             )).collect();
             let stats = rec.torrent.stats();
             crate::jni::log_info(&format!(
-                "wt_second peers={} unchoked={} pending={} utp={utp}/{:.1}MB/s tcp={tcp}/{:.1}MB/s top={} wasted_chunks={} useful_chunks={} half_open={} known={} piece={}KiB previews={new_previews}",
+                "wt_second peers={} unchoked={} pending={} utp={utp}/{:.1}MB/s tcp={tcp}/{:.1}MB/s top={} wasted_chunks={} read_mb={} useful_mb={} half_open={} known={} piece={}KiB previews={new_previews}",
                 peers.len(),
                 peers.iter().filter(|peer| !peer.peer_choking).count(),
                 peers.iter().map(|peer| peer.pending_requests).sum::<usize>(),
                 utp_rate / 1e6, tcp_rate / 1e6,
                 top.join(","),
-                stats.conn_stats.chunks_read_wasted, stats.conn_stats.chunks_read_useful,
+                stats.conn_stats.chunks_read_wasted,
+                stats.conn_stats.bytes_read_data >> 20, stats.conn_stats.bytes_read_useful_data >> 20,
                 stats.half_open_peers, stats.pending_peers,
                 rec.torrent.info().map_or(0, |info| info.piece_length / 1024),
             ));

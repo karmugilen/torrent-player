@@ -421,7 +421,7 @@ pub mod events {
             Free,
             /// A peer had been asked and had not answered.
             Held,
-            /// It had arrived and was being written.
+            /// It had arrived, and was being written or not yet readable.
             Writing,
         }
 

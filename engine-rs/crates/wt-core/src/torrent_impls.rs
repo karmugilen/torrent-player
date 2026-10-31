@@ -1021,7 +1021,7 @@ impl ReaderHost for TorrentInner {
 
 impl TorrentInner {
     /// Seek timing: what the block this read is waiting for is doing.
-    fn trace_read_wait(&self, torrent_offset: i64) {
+    pub(crate) fn trace_read_wait(&self, torrent_offset: i64) {
         use wt_types::events::seek_trace::{self, Wait};
         let Some(piece_length) = self.info.read().as_ref().map(|info| info.piece_length) else { return };
         if piece_length <= 0 {
@@ -1030,7 +1030,7 @@ impl TorrentInner {
         let piece = (torrent_offset / piece_length) as u32;
         let block = (torrent_offset % piece_length) / i64::from(BLOCK_SIZE) * i64::from(BLOCK_SIZE);
         let req = req_index_from_piece_and_offset(piece, block as u32, piece_length);
-        if self.blocks.is_writing(req) {
+        if self.blocks.is_writing(req) || self.dirty_chunks.contains(req) {
             seek_trace::note_wait(Wait::Writing);
             return;
         }

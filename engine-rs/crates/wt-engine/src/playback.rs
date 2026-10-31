@@ -1171,10 +1171,13 @@ impl PlaybackSession {
             }
             self.cursor = offset + n as i64;
             if let Some((started, bytes)) = &mut self.seek_sprint {
-                wt_types::events::seek_trace::note_read(
-                    self.read_began.elapsed().as_micros() as u64,
-                    self.read_began.saturating_duration_since(self.last_read_end).as_micros() as u64,
-                );
+                // The read that delivered the first bytes is `player=`, not part of this.
+                if *bytes > 0 {
+                    wt_types::events::seek_trace::note_read(
+                        self.read_began.elapsed().as_micros() as u64,
+                        self.read_began.saturating_duration_since(self.last_read_end).as_micros() as u64,
+                    );
+                }
                 *bytes += n;
                 if *bytes >= SEEK_SPRINT_BYTES {
                     wt_types::events::record("seek_2mib", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));
