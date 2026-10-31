@@ -833,9 +833,6 @@ pub struct PlaybackSession {
     first_byte_logged: bool,
     /// Since the last seek: when it began, and bytes delivered so far.
     seek_sprint: Option<(Instant, usize)>,
-    /// When this read began and the previous one returned, for seek timing.
-    read_began: Instant,
-    last_read_end: Instant,
     _fast_core: wt_wire::fast_core::PlaybackHold,
     /// Window and keyframe count last published, and when.
     last_applied: Option<(PlaybackWindow, usize, Instant)>,
@@ -980,8 +977,6 @@ impl PlaybackSession {
             opened_at: Instant::now(),
             first_byte_logged: false,
             seek_sprint: None,
-            read_began: Instant::now(),
-            last_read_end: Instant::now(),
             _fast_core: wt_wire::fast_core::PlaybackHold::new(),
             last_applied: None,
         };
@@ -999,8 +994,6 @@ impl PlaybackSession {
         {
             let now = Instant::now();
             sess.seek_started = Some(now);
-            wt_types::events::seek_trace::begin();
-            sess.trace_seek_target(resume_offset, resume_offset - resumed_at);
             sess.scrubbing = true;
             sess.last_scrub = Some(now);
         }
@@ -1087,8 +1080,6 @@ impl PlaybackSession {
             opened_at: Instant::now(),
             first_byte_logged: false,
             seek_sprint: None,
-            read_began: Instant::now(),
-            last_read_end: Instant::now(),
             _fast_core: wt_wire::fast_core::PlaybackHold::new(),
             last_applied: None,
         };
@@ -1112,7 +1103,6 @@ impl PlaybackSession {
     /// Go `defer srv.beginPlaybackRead(rec)()`: idle Direct Play sees the
     /// read as activity for its whole duration, including the wait.
     fn read(&mut self, buf: &mut [u8], offset: i64, partial: bool) -> io::Result<usize> {
-        self.read_began = Instant::now();
         let host = self.host.clone();
         if let Some(host) = &host {
             host.begin_playback_read(&self.torrent_id);
@@ -1121,7 +1111,6 @@ impl PlaybackSession {
         if let Some(host) = &host {
             host.end_playback_read(&self.torrent_id);
         }
-        self.last_read_end = Instant::now();
         result
     }
 
@@ -1172,18 +1161,9 @@ impl PlaybackSession {
             }
             self.cursor = offset + n as i64;
             if let Some((started, bytes)) = &mut self.seek_sprint {
-                // The read that delivered the first bytes is `player=`, not part of this.
-                if *bytes > 0 {
-                    wt_types::events::seek_trace::note_read(
-                        self.read_began.elapsed().as_micros() as u64,
-                        self.read_began.saturating_duration_since(self.last_read_end).as_micros() as u64,
-                    );
-                }
                 *bytes += n;
                 if *bytes >= SEEK_SPRINT_BYTES {
                     wt_types::events::record("seek_2mib", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));
-                    let stages = wt_types::events::seek_trace::finish(started.elapsed().as_millis());
-                    crate::jni::log_trace(&format!("seek_stages {stages}"));
                     self.seek_sprint = None;
                 }
             }
@@ -1217,7 +1197,6 @@ impl PlaybackSession {
         if let Some(started) = self.seek_started.take() {
             if let Some(host) = &self.host {
                 host.record_seek(started.elapsed());
-                wt_types::events::seek_trace::mark(wt_types::events::seek_trace::Stage::Player);
                 wt_types::events::record("seek", format!("{}ms file={}", started.elapsed().as_millis(), self.file_index));
                 self.seek_sprint = Some((started, 0));
             }
@@ -1288,8 +1267,6 @@ impl PlaybackSession {
             if !self.open_phase && (!(0..PLAYBACK_SCRUB_JUMP_BYTES).contains(&delta) || on_keyframe) {
                 self.focus_pending = true;
                 self.seek_started = Some(now);
-                wt_types::events::seek_trace::begin();
-                self.trace_seek_target(offset, delta);
                 self.scrubbing = true;
                 self.last_scrub = Some(now);
                 refocus = true;
@@ -1530,48 +1507,6 @@ impl PlaybackSession {
                 host.refocus_requests(&self.torrent_id);
             }
         }
-    }
-
-    /// Seek timing: was the place this seek landed already fetched, and if not,
-    /// was the keyframe prefetch going to fetch it?
-    fn trace_seek_target(&self, offset: i64, jump: i64) {
-        let Some(host) = &self.host else { return };
-        if self.piece_length <= 0 {
-            return;
-        }
-        let piece = ((self.torrent_offset + offset) / self.piece_length) as u32;
-        let plan = self.coordinator.inner.lock().seek_pieces.get(&self.file_index).cloned();
-        let plan = plan.as_ref().and_then(|pieces| pieces.get());
-        let cached = host.piece_complete(&self.torrent_id, piece);
-        let planned = plan.is_some_and(|plan| plan.pieces.contains(&piece));
-        let state = match (cached, planned) {
-            (true, true) => "cached_keyframe",
-            (true, false) => "cached",
-            (false, true) => "planned_not_fetched",
-            (false, false) => "not_planned",
-        };
-        let window = if self.window.urgent.contains(piece) {
-            "urgent"
-        } else if self.window.readahead.contains(piece) {
-            "readahead"
-        } else if self.window.lookahead.contains(piece) {
-            "lookahead"
-        } else {
-            "none"
-        };
-        let prefetch = plan.map_or_else(|| "no_index".to_string(), |plan| {
-            let fetched = plan.pieces.iter().filter(|&&p| host.piece_complete(&self.torrent_id, p)).count();
-            let on_keyframe = plan.offsets.binary_search(&offset).is_ok();
-            format!(
-                "fetched={fetched}/{} keyframes={} on_keyframe={on_keyframe}",
-                plan.pieces.len(), plan.offsets.len(),
-            )
-        });
-        let ram_mib = host.playback_cache_budget(&self.torrent_id).map_or(0, |bytes| bytes >> 20);
-        wt_types::events::seek_trace::note_target(format!(
-            "target={state} window={window} jump={}MiB {prefetch} ram={ram_mib}MiB",
-            jump >> 20,
-        ));
     }
 
     /// Once per file, after opening: read the video's index in the background

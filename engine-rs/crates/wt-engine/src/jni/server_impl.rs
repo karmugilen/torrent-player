@@ -226,7 +226,6 @@ impl EngineHostApi for AndroidEngineHost {
     }
 
     fn read_preview(&self, handle: i64, offset: i64, buf: &mut [u8]) -> i32 {
-        wt_types::events::seek_trace::note_preview_read();
         if buf.len() > 1024 * 1024 {
             return -1;
         }

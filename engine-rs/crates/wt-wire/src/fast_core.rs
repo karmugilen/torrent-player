@@ -5,10 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static PLAYBACK_STREAMS: AtomicUsize = AtomicUsize::new(0);
 
-pub fn playback_streams() -> usize {
-    PLAYBACK_STREAMS.load(Ordering::Relaxed)
-}
-
 /// Held by an open playback stream.
 pub struct PlaybackHold(());
 

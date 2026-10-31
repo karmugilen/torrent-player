@@ -1005,9 +1005,6 @@ impl ReaderHost for TorrentInner {
     fn on_read_waiting(&self, torrent_offset: i64) {
         self.request_focus
             .store(torrent_offset + 1, Ordering::Relaxed);
-        if wt_types::events::seek_trace::sprint_active() {
-            self.trace_read_wait(torrent_offset);
-        }
         // This runs for every block that arrives while a read waits; each
         // nudge has every peer with spare slots rescan the torrent.
         let mut last = self.last_read_nudge.lock();
@@ -1016,40 +1013,6 @@ impl ReaderHost for TorrentInner {
             drop(last);
             self.nudge_urgent_requests();
         }
-    }
-}
-
-impl TorrentInner {
-    /// Seek timing: what the block this read is waiting for is doing.
-    pub(crate) fn trace_read_wait(&self, torrent_offset: i64) {
-        use wt_types::events::seek_trace::{self, Wait};
-        let Some(piece_length) = self.info.read().as_ref().map(|info| info.piece_length) else { return };
-        if piece_length <= 0 {
-            return;
-        }
-        let piece = (torrent_offset / piece_length) as u32;
-        let block = (torrent_offset % piece_length) / i64::from(BLOCK_SIZE) * i64::from(BLOCK_SIZE);
-        let req = req_index_from_piece_and_offset(piece, block as u32, piece_length);
-        if self.blocks.is_writing(req) || self.dirty_chunks.contains(req) {
-            seek_trace::note_wait(Wait::Writing);
-            return;
-        }
-        let Some((holder, asked)) = self.blocks.owner(req) else {
-            seek_trace::note_wait(Wait::Free);
-            return;
-        };
-        seek_trace::note_wait(Wait::Held);
-        let age_ms = asked.elapsed().as_millis() as u64;
-        if age_ms <= seek_trace::worst_hold_ms() {
-            return;
-        }
-        let addr = self.peer_addrs.read().get(&holder).copied();
-        let detail = addr.and_then(|addr| self.peer_snapshots.read().get(&addr).map(|peer| format!(
-            "rate={}KB/s rtt={}ms pending={} choking={} {:?} copy={}",
-            (peer.download_rate / 1000.0) as u64, peer.rtt.as_millis(), peer.pending_requests,
-            peer.peer_choking, peer.transport, self.blocks.second(req).is_some(),
-        )));
-        seek_trace::note_worst_hold(age_ms, detail.unwrap_or_else(|| "peer unknown".into()));
     }
 }
 

@@ -741,11 +741,6 @@ impl Torrent {
         }
     }
 
-    /// Seek timing: note what the block a waiting read needs is doing.
-    pub fn trace_read_wait(&self, torrent_offset: i64) {
-        self.inner.trace_read_wait(torrent_offset);
-    }
-
     /// See [`TorrentInner::route_changed`].
     pub fn route_changed(&self) {
         self.inner.route_changed();

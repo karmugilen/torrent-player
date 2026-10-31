@@ -65,37 +65,6 @@ pub(crate) fn log_info(msg: &str) {
     }
 }
 
-/// A diagnostics line: to logcat, and on Android to `files/wtseek.log` in the
-/// app's external folder, which adb can pull. Logcat here keeps only minutes.
-pub(crate) fn log_trace(msg: &str) {
-    log_info(msg);
-    #[cfg(target_os = "android")]
-    {
-        use std::io::Write;
-        use std::sync::{LazyLock, Mutex};
-        const PATH: &str = "/storage/emulated/0/Android/data/webtor.app/files/wtseek.log";
-        const KEEP_BYTES: u64 = 8 << 20;
-        static FILE: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
-            let long = std::fs::metadata(PATH).is_ok_and(|meta| meta.len() > KEEP_BYTES);
-            Mutex::new(std::fs::OpenOptions::new()
-                .create(true)
-                .append(!long)
-                .write(long)
-                .truncate(long)
-                .open(PATH)
-                .ok())
-        });
-        if let Ok(mut file) = FILE.lock() {
-            if let Some(file) = file.as_mut() {
-                let at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis());
-                let _ = writeln!(file, "{at} {msg}");
-            }
-        }
-    }
-}
-
 pub(crate) fn log_error(msg: &str) {
     #[cfg(target_os = "android")]
     {

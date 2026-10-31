@@ -191,9 +191,6 @@ impl CoreReaderBackend {
                     torrent.nudge_urgent_requests();
                     last_refresh = std::time::Instant::now();
                 }
-                if wt_types::events::seek_trace::sprint_active() {
-                    torrent.trace_read_wait(abs);
-                }
                 if let Some(ready) = ready {
                     let generation = ready.generation();
                     // Bounded: nothing wakes this wait when a newer seek cancels

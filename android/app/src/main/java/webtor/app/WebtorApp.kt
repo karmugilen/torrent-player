@@ -34,7 +34,6 @@ class WebtorApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        getExternalFilesDir(null) // Creates the folder the engine's seek log goes in.
         engine = EngineHost(this)
         engineClient = EngineClient(engine)
         session = LibrarySession(this, engineClient, engine)
