@@ -108,6 +108,7 @@ fun LibraryScreen(
                         Text(
                             "${selectedKeys.size} selected",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            maxLines = 1,
                         )
                     },
                     navigationIcon = {
@@ -116,17 +117,25 @@ fun LibraryScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = {
-                            onPauseBatch?.invoke(selectedKeys)
-                            selectedKeys = emptySet()
-                        }) {
-                            Text("Pause", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        TextButton(
+                            onClick = {
+                                onPauseBatch?.invoke(selectedKeys)
+                                selectedKeys = emptySet()
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onPrimaryContainer),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                        ) {
+                            Text("Pause", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                         }
-                        IconButton(onClick = {
-                            onResumeBatch?.invoke(selectedKeys)
-                            selectedKeys = emptySet()
-                        }) {
-                            Text("Resume", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        TextButton(
+                            onClick = {
+                                onResumeBatch?.invoke(selectedKeys)
+                                selectedKeys = emptySet()
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onPrimaryContainer),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                        ) {
+                            Text("Resume", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                         }
                         IconButton(onClick = { showBatchDeleteDialog = true }) {
                             Icon(Icons.Default.Delete, contentDescription = "Delete selected")
