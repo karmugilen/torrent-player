@@ -1,5 +1,15 @@
 # Glossary
 
+## Ziyron and latest state (2026-11-01)
+- Engine extracted to public repo `karmugilen/ziyron` (MPL-2.0, because it derives from anacrolix/torrent), local at `~/funProjects/ziyron`. The app still uses its own `engine-rs`. The app's MIT licence on this code must be settled before 2.4.0.
+- `zmpv 'MAGNET'` (`~/.local/bin`, runs `ziyron play`): plays in mpv, with speed, peers and grid in the terminal. Code is local only, branch `feature/zmpv` (`fcad60b`).
+- Ziyron `main` (saved downloads keep no pieces in RAM; system allocator on desktop): peak RAM 374 to 46 MiB. One of two benchmark runs did not finish in 200 s, and downloads split into about 20 s or about 45 s. Cause unknown; 30 s save timer suspected, not tested.
+- `zyproto` APK: prototype engine in the app (zero RAM saved downloads, inline writes, 8 workers, WebRTC off). Not installed or run on a phone. Code on local branch `prototype/ziyron-engine` (`406f326`); the desktop prototype is `prototype/lower-cpu` (`cea3f79`). Both worktrees removed.
+- User's phone: Nothing A015 (MT6878, Android 16). `taskfix` installed; `taskfix` and `zyproto` APKs are in `Download/torrentapp test`. Proposed adb tweaks not applied.
+- This branch is not on GitHub; only this computer has it.
+- Testing: keep test data in RAM (`/tmp`), not on disk. Do not test unless asked.
+- Cleanup: all APKs in `artifacts/` deleted except `taskfix`, `seekclean` and `zyproto`, so older entries here may name missing APKs. Worktrees `wt-go-apk`, `wt-apk/src`, `grok-native` and `agy-ui` removed. Rebuild an old build from its commit if needed.
+
 ## What we're doing
 - The app ships only the Rust engine (`engine-rs/`, packaged as `libengine.so`). Go was removed from the repo; its history is on the `go-engine` branch.
 - Last speedup measured with `wt-parity`: 189 to about 423 MiB/s, versus Go's 296 at the time.
