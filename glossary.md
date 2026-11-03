@@ -10,6 +10,13 @@
 - Testing: keep test data in RAM (`/tmp`), not on disk. Do not test unless asked.
 - Cleanup: all APKs in `artifacts/` deleted except `taskfix`, `seekclean` and `zyproto`, so older entries here may name missing APKs. Worktrees `wt-go-apk`, `wt-apk/src`, `grok-native` and `agy-ui` removed. Rebuild an old build from its commit if needed.
 
+## Release 2.4.0 (2026-11-03)
+- Commit `9fdaaf5` on `karmugilen/rust-engine`, pushed to GitHub (branch now public, tracks `origin`); no tag or release yet. Code is `taskfix` plus: version 2.4.0 (100), changelog `100.txt`, store text and privacy policy without Go or the learned model, `engine-rs` MPL-2.0 (`LICENSE`, `NOTICE.md`), privacy link to `blob/v2.4.0/PRIVACY.md`.
+- `build-android.sh`: cache under `$HOME/.cache`, rustup's cargo when Gradle lacks it, `cargo build --locked`, `--remap-path-prefix` (local `libengine.so` went from 109 `/home/kar` strings to 0). Local check build passed; not run on the phone.
+- F-Droid: `webtor.app.yml` has the Rust 2.4.0 block (`rustup@1.29.2` srclib, Rust 1.99.1, NDK r26b); `fdroid-release.sh` uses it. Not yet built in F-Droid's image (needs `sudo docker`, run by the user), no fdroiddata merge request yet. Recipe `License` left `MIT`.
+- Before the GitHub release: Go-to-Rust upgrade never tested; Go's `files/webtorrent` is left behind on upgrade (nothing deletes it).
+- Local Gradle from Claude's bash: put `~/.cargo/bin` before `/usr/bin` (Arch Rust has no Android std) and use `--no-configuration-cache`, or Gradle reuses a stored PATH.
+
 ## What we're doing
 - The app ships only the Rust engine (`engine-rs/`, packaged as `libengine.so`). Go was removed from the repo; its history is on the `go-engine` branch.
 - Last speedup measured with `wt-parity`: 189 to about 423 MiB/s, versus Go's 296 at the time.
