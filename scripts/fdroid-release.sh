@@ -32,15 +32,23 @@ mkdir -p "$WORK"
 git clone -q --depth 1 https://gitlab.com/fdroid/fdroiddata.git "$WORK/fdroiddata"
 
 # Add this version as a copy of the recipe's last build, as checkupdates would.
-python3 - "$WORK/fdroiddata/metadata/webtor.app.yml" "$NAME" "$CODE" "$COMMIT" <<'PY'
+# When the build steps change, the repo's webtor.app.yml carries this version's
+# block and that block is used instead.
+python3 - "$WORK/fdroiddata/metadata/webtor.app.yml" "$NAME" "$CODE" "$COMMIT" "$ROOT/webtor.app.yml" <<'PY'
 import re, sys
-path, name, code, commit = sys.argv[1:]
+path, name, code, commit, ours = sys.argv[1:]
 text = open(path).read()
 if re.search(rf"^    versionCode: {code}$", text, re.M):
     sys.exit(0)
-builds = list(re.finditer(r"^  - versionName: .*?(?=^\S|^  - )", text, re.M | re.S))
+def blocks(t):
+    return list(re.finditer(r"^  - versionName: .*?(?=^\S|^  - )", t, re.M | re.S))
+builds = blocks(text)
 last = builds[-1]
 block = last.group(0).rstrip("\n") + "\n"
+for b in blocks(open(ours).read()):
+    if re.search(rf"^    versionCode: {code}$", b.group(0), re.M):
+        block = b.group(0).rstrip("\n") + "\n"
+        print(f"Using the build steps for {code} from webtor.app.yml")
 block = re.sub(r"^  - versionName: .*$", f"  - versionName: {name}", block, flags=re.M)
 block = re.sub(r"^    versionCode: .*$", f"    versionCode: {code}", block, flags=re.M)
 block = re.sub(r"^    commit: .*$", f"    commit: {commit}", block, flags=re.M)

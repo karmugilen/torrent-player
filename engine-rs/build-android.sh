@@ -36,7 +36,7 @@ AR="$TOOLCHAIN/bin/llvm-ar"
 STRIP_BIN="$TOOLCHAIN/bin/llvm-strip"
 OUT="$ROOT/android/app/src/main/jniLibs/$ABI"
 OUT_SO="$OUT/libengine.so"
-CACHE_ROOT="${WT_CARGO_CACHE_ROOT:-/home/kar/.cache/wt-targets}"
+CACHE_ROOT="${WT_CARGO_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/wt-targets}"
 # Never use /tmp (RAM-backed tmpfs); keep Android builds on disk.
 TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE_ROOT/android-$ABI}"
 LOCK_FILE="$CACHE_ROOT/android-release.lock"
@@ -56,6 +56,10 @@ fi
 echo "Building Rust engine for Android $ABI (version=$VERSION)..."
 echo "CARGO_TARGET_DIR=$TARGET_DIR CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-3}"
 
+# F-Droid installs Rust with rustup, which Gradle's PATH does not include.
+if ! command -v cargo >/dev/null && [ -x "$HOME/.cargo/bin/cargo" ]; then
+    PATH="$HOME/.cargo/bin:$PATH"
+fi
 # Ensure the Android Rust target is installed.
 rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true
 
@@ -64,6 +68,8 @@ export WEBTOR_APP_VERSION="$VERSION"
 export APP_VERSION="$VERSION"
 # 16 KB page alignment required by Google Play for Android 15+ devices.
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,-z,max-page-size=16384"
+# Keep build paths out of libengine.so so release builds are reproducible.
+RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$ROOT=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 
 # Linker / C toolchain for crates with C code (e.g. ring).
 export "${CARGO_TARGET_PREFIX}_LINKER=$CC"
@@ -80,7 +86,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
 
 cd "$ENGINE_RS"
 # One Android release build at a time across ABIs/workers.
-flock "$LOCK_FILE" cargo build --release -p wt-engine --lib --target "$RUST_TARGET"
+flock "$LOCK_FILE" cargo build --locked --release -p wt-engine --lib --target "$RUST_TARGET"
 
 SRC_SO="$TARGET_DIR/$RUST_TARGET/release/libengine.so"
 if [ ! -f "$SRC_SO" ]; then

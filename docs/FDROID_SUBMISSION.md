@@ -12,9 +12,14 @@ The recipe uses `UpdateCheckMode: Tags` and `AutoUpdateMode: Version`. F-Droid's
 checkupdates bot finds a new `v*` tag, reads `versionName` and `versionCode`
 from `android/app/build.gradle.kts` at that tag and adds a build that copies the
 previous one. Nothing needs to be submitted by hand as long as the build steps
-stay the same: Debian `golang-go` (1.24), NDK r26b, `go mod download` and
-`go mod verify`, then Gradle in `android/app`. The engine must therefore stay
-pure Go (no Rust or other toolchains) and `go.mod` must stay at `go 1.24`.
+stay the same. Since 2.4.0 (100) they are: the `rustup@1.29.2` srclib installs
+Rust 1.99.1 with the `aarch64-linux-android` target, NDK r26b, then Gradle in
+`android/app`, which runs `engine-rs/build-android.sh` (`cargo build --locked`).
+Up to 2.3.0 (99) the engine was Go (Debian `golang-go`, `go mod download`).
+
+When the build steps change, add the new version's block to
+[`webtor.app.yml`](../webtor.app.yml) here; `scripts/fdroid-release.sh` builds
+with that block, and the same block goes into an fdroiddata merge request.
 
 The builds are reproducible. `Binaries:` points at
 `https://github.com/karmugilen/torrent-player/releases/download/v%v/torrent-player-%v.apk`
@@ -50,6 +55,9 @@ runs F-Droid's own `verify_apks` check before it reports success.
 
 ## History
 
+- 2.4.0 (100): the engine moved from Go to Rust (`engine-rs/`, MPL-2.0 because
+  it derives from anacrolix/torrent). Needs an fdroiddata merge request for the
+  new build steps.
 - 2.2.0 (98), 2026-10-25: first update after inclusion. The Android engine stopped
   linking the Rust helpers, so the recipe stayed Go-only, and trackers and peers
   see the real app version. Built and signed with `scripts/fdroid-release.sh`;

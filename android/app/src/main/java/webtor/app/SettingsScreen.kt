@@ -942,7 +942,7 @@ private fun DangerOutlineButton(text: String, onClick: () -> Unit) {
     }
 }
 
-private const val PRIVACY_POLICY_URL = "https://github.com/karmugilen/torrent-player/blob/go-engine/PRIVACY.md"
+private const val PRIVACY_POLICY_URL = "https://github.com/karmugilen/torrent-player/blob/v2.4.0/PRIVACY.md"
 private const val SOURCE_CODE_URL = "https://github.com/karmugilen/torrent-player"
 
 /** One-line seek comparison for the current mode's measurement window. */

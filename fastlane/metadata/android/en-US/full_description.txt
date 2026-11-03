@@ -8,17 +8,17 @@
   <li><b>In-Progress Video Streaming:</b> Stream growing video files directly to external players such as VLC, Nova Video Player, MPV, or Just Player without waiting for downloads to finish.</li>
   <li><b>Selective File Downloading:</b> Choose specific files to prioritize or download in multi-file swarms.</li>
   <li><b>Bitfield Piece Visualizer:</b> Interactive real-time visualizer showing piece distribution and swarm availability.</li>
-  <li><b>Optimized Resource & Battery Usage:</b> Adaptive polling back-off and a native Go engine with bounded preparation storage.</li>
+  <li><b>Optimized Resource & Battery Usage:</b> Adaptive polling back-off and a native Rust engine with bounded preparation storage.</li>
   <li><b>Modern Material 3 Interface:</b> Intuitive UI with dynamic colors, dark theme support, and animated video preview cards.</li>
   <li><b>Direct Play:</b> Stream a video from RAM without saving the whole file. Only each video's start and end are kept (up to 1 GB) so episodes reopen fast.</li>
   <li><b>Continue Watching and Play Next:</b> Resume where you left off and move on to the next episode, with its start fetched in advance.</li>
-  <li><b>Fast Seeking:</b> A small model learned on your phone predicts when each peer will deliver a block, so the data at the play position is requested from the peers likely to send it first. It runs and is stored only on the device.</li>
+  <li><b>Fast Seeking:</b> A seek fetches the new play position first and moves late blocks to faster peers. For MP4 and MKV files, nearby keyframes are fetched ahead.</li>
   <li><b>Peer Map:</b> Shows peer countries using an offline database bundled with the app (DB-IP Lite, CC BY 4.0). No lookup requests are made.</li>
 </ul>
 
 <p><b>Privacy & Freedom:</b></p>
 <ul>
-  <li>100% Free and Open Source Software (MIT License).</li>
+  <li>100% Free and Open Source Software (MIT License; the engine is MPL-2.0).</li>
   <li>No advertising trackers, analytics, or telemetry.</li>
   <li>Zero advertisements.</li>
   <li>Direct peer-to-peer swarm connectivity (DHT, UDP trackers, TCP, uTP, WebSockets, and WebRTC).</li>

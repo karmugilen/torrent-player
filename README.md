@@ -9,8 +9,8 @@
   <p align="center">
     <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 8.0+ (API 26+)"></a>
     <a href="https://m3.material.io"><img src="https://img.shields.io/badge/Material%20Design-3-795548?style=flat-square&logo=materialdesign&logoColor=white" alt="Material Design 3"></a>
-    <a href="https://github.com/anacrolix/torrent"><img src="https://img.shields.io/badge/Engine-Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Native Go torrent engine"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
+    <a href="engine-rs"><img src="https://img.shields.io/badge/Engine-Rust-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Native Rust torrent engine"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2B%20MPL--2.0-blue.svg?style=flat-square" alt="License: MIT, engine MPL-2.0"></a>
     <a href="https://github.com/karmugilen/torrent-player/releases"><img src="https://img.shields.io/github/v/release/karmugilen/torrent-player?style=flat-square&color=orange" alt="Release"></a>
     <a href="https://f-droid.org/packages/webtor.app/"><img src="https://img.shields.io/f-droid/v/webtor.app?style=flat-square&logo=f-droid" alt="F-Droid"></a>
   </p>
@@ -38,14 +38,14 @@
 
 - **Two storage choices**: Download selected files to `Downloads/Webtor` for offline use, or choose **Direct Play** to keep video in bounded RAM and save only a small verified startup cache. Choose the default in Settings; both actions remain available when adding a torrent.
   - Settings offers Auto RAM or a manual cache limit from 16 MiB to 1 GiB per transfer, and a peer connection limit from 8 to 500 (default 55). Auto chooses 64–512 MiB from available memory and active transfers when starting, returning to the app, or configuring a transfer. Both settings survive restarts and apply to active and future transfers. Cache reductions take effect as pieces are replaced; preview tasks retain their separate memory budget. Peer selection uses the original usefulness and recency rules.
-- **Fast seeking**: A seek stops every download for the old place and fetches the new spot first, then the following blocks in order. A small network learned on the phone predicts when each peer will deliver a block, so the play position is requested from the peers likely to send it first. It runs and is stored only on the device.
+- **Fast seeking**: A seek stops every download for the old place and fetches the new spot first, then the following blocks in order. Late blocks move to faster peers, and for MP4 and MKV files nearby keyframes are fetched ahead.
 - **Continue watching & Play next**: Saved positions for every episode, and the next selected video starts when one ends, with its start fetched in advance.
 - **Seeding on by default**: Completed downloads share their verified pieces until a share ratio of 1.0 or 60 minutes, at up to 256 KiB/s, only on Wi-Fi, and paused during playback. All limits, or seeding itself, can be changed in Settings.
 - **In-Progress Streaming & Per-File Playback**: Launch directly into your favorite Android video player (VLC, Nova Player, Just Player, MPV, etc.) while downloading progresses, or play finished videos anytime.
 - **External-player extras**: Naturally ordered episode playlists, matching selected subtitle files, and saved resume positions for players that support the corresponding Android intent/result contracts.
 - **Selective File Downloads**: Choose exactly which files, episodes, or bonus materials to download from multi-file torrents.
 - **Battery-Friendly & Low-RAM Stability**:
-  - Native Go engine with bounded preparation and piece-boundary storage. Direct Play prioritizes opening/container pieces, adapts forward buffering to reader consumption, parks idle probes, and retries stalled reads through the existing peer scheduler.
+  - Native Rust engine with bounded preparation and piece-boundary storage. Direct Play prioritizes opening/container pieces, adapts forward buffering to reader consumption, parks idle probes, and retries stalled reads through the existing peer scheduler.
   - CPU-sized background workers validate startup caches and hash independent pieces across the available CPU cores. Direct Play entries stay paused on app startup. See [playback and cache behavior](docs/DIRECT_PLAY.md).
   - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's existing one-second sampling clock.
 - **Dynamic Material You UI**: Wallpaper-based colours on Android 12+, light/dark appearance and four themes (Aero, Antiquity, Retro and Wada). Search/filter/batch controls and persistent previews from verified cached video data.
@@ -145,4 +145,7 @@ Use this application only with torrents and media content that you have the lega
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+The app is licensed under the [MIT License](LICENSE). The torrent engine in
+`engine-rs/` is licensed under the [Mozilla Public License 2.0](engine-rs/LICENSE),
+because it derives from [anacrolix/torrent](https://github.com/anacrolix/torrent);
+see [engine-rs/NOTICE.md](engine-rs/NOTICE.md).

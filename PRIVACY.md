@@ -15,8 +15,7 @@ telemetry, and it sends nothing to the developer. There is no developer server.
 ## What stays on your phone
 
 Your torrent list, settings, playback positions, downloaded files, caches
-(peer addresses, DHT contacts, video previews) and a small learned model of
-how fast peers deliver data are stored only on your device. Android's backup
+(peer addresses, DHT contacts, video previews) are stored only on your device. Android's backup
 covers only the app's settings file. Uninstalling the app deletes its private
 data; files you saved to a shared folder stay where you put them.
 
