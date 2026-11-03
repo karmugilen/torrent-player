@@ -47,6 +47,9 @@ Builds:
     versionCode: 100
     commit: v2.4.0
     subdir: android/app
+    sudo:
+      - apt-get update
+      - apt-get install -y gcc libc6-dev
     srclibs:
       - rustup@1.29.2
     gradle:

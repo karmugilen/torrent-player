@@ -12,7 +12,7 @@ The recipe uses `UpdateCheckMode: Tags` and `AutoUpdateMode: Version`. F-Droid's
 checkupdates bot finds a new `v*` tag, reads `versionName` and `versionCode`
 from `android/app/build.gradle.kts` at that tag and adds a build that copies the
 previous one. Nothing needs to be submitted by hand as long as the build steps
-stay the same. Since 2.4.0 (100) they are: the `rustup@1.29.2` srclib installs
+stay the same. Since 2.4.0 (100) they are: Debian `gcc` for Rust build scripts, the `rustup@1.29.2` srclib installs
 Rust 1.99.1 with the `aarch64-linux-android` target, NDK r26b, then Gradle in
 `android/app`, which runs `engine-rs/build-android.sh` (`cargo build --locked`).
 Up to 2.3.0 (99) the engine was Go (Debian `golang-go`, `go mod download`).
