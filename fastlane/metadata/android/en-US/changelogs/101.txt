@@ -1,1 +1,1 @@
-Adds .torrent files and download links from other apps. Free space follows the folder you chose, including an SD card. Settings are simpler. Pause on low battery starts off. Seek comparison toggle and seek-time readout removed; seeking uses the released method.
+Adds .torrent files and http(s) download links (background fetch). Free space follows the folder you chose, including an SD card (#3). Settings regrouped with one Clear action; pause on low battery defaults off. Temporary seek method toggle and seek-ms readout removed.
