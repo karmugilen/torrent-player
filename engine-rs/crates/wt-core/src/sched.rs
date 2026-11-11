@@ -32,6 +32,10 @@ const SEEK_COPY_BLOCKS: u32 = 64;
 const OVERDUE_AFTER: Duration = Duration::from_millis(150);
 /// Unmeasured round trip when estimating arrivals.
 const DEFAULT_RTT: f64 = 0.2;
+/// Deadline seek: how late a peer may be for a block and still take it, and
+/// how fast that allowance grows after the seek so no block is left waiting.
+const DEADLINE_SLACK: f64 = 0.03;
+const DEADLINE_SLACK_PER_SEC: f64 = 0.5;
 /// An idle peer takes a block held this long from a holder under half its rate.
 /// Queues hold 3 s of rate and mobile round trips reach 2.4 s.
 const STALLED_AFTER: Duration = Duration::from_secs(8);
@@ -464,6 +468,16 @@ impl TorrentInner {
             other.has_room() && other.has_piece(piece)
         };
         let now = Instant::now();
+        // Deadline seek, for the first moments after a seek only.
+        let since_seek = if tuning.deadline {
+            self.seek_hedge.lock().map(|(at, _)| at.elapsed())
+                .filter(|&age| age < crate::torrent::SEEK_HEDGE_WINDOW)
+        } else {
+            None
+        };
+        // Per piece: the soonest any peer could deliver, and the swarm's rate.
+        let mut swarm: Option<(PieceIndex, f64, f64)> = None;
+        let mut taken_free = 0u32;
         for req in window {
             if pick.blocks.len() >= want {
                 break;
@@ -484,13 +498,40 @@ impl TorrentInner {
             }
             let holder = self.blocks.owner(req).filter(|&(owner, _)| owner != peer.key);
             let Some((holder, asked)) = holder else {
-                let leave_it = req < focus + FOCUS_BLOCKS
-                    && !steal_after.is_zero()
-                    && peers.iter().any(|other| other.key != peer.key
-                        && can_serve(other, piece)
-                        && other.arrival() < mine / QUICKER_RATIO);
+                // A peer with no measured rate cannot be timed; it follows the
+                // released rule below instead of being shut out of the window.
+                let leave_it = if let Some(age) = since_seek.filter(|_| peer.rate > 0.0) {
+                    if swarm.is_none_or(|(cached, ..)| cached != piece) {
+                        let mut soonest = mine;
+                        let mut rate = peer.rate.max(0.0);
+                        for other in peers.iter().filter(|other| other.key != peer.key) {
+                            if other.choking.load(Ordering::Relaxed) || !other.has_piece(piece) {
+                                continue;
+                            }
+                            rate += other.rate().max(0.0);
+                            if other.has_room() {
+                                soonest = soonest.min(other.arrival());
+                            }
+                        }
+                        swarm = Some((piece, soonest, rate));
+                    }
+                    let (_, soonest, rate) = swarm.unwrap_or((piece, mine, peer.rate));
+                    // When this peer's next block would land, against when the
+                    // stream reaches this block if the whole swarm feeds it.
+                    let block = f64::from(BLOCK_SIZE);
+                    let lands = if peer.rate > 0.0 { mine + f64::from(taken_free) * block / peer.rate } else { f64::MAX };
+                    let needed = if rate > 0.0 { soonest + f64::from(req - focus) * block / rate } else { f64::MAX };
+                    lands > needed + DEADLINE_SLACK + DEADLINE_SLACK_PER_SEC * age.as_secs_f64()
+                } else {
+                    req < focus + FOCUS_BLOCKS
+                        && !steal_after.is_zero()
+                        && peers.iter().any(|other| other.key != peer.key
+                            && can_serve(other, piece)
+                            && other.arrival() < mine / QUICKER_RATIO)
+                };
                 if !leave_it {
                     pick.blocks.push((req, Take::Free));
+                    taken_free += 1;
                 }
                 continue;
             };

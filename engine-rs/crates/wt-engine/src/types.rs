@@ -305,6 +305,7 @@ pub struct SettingsResponse {
     pub hedge_requests: bool,
     pub slow_peer_yield: bool,
     pub drop_chokers: bool,
+    pub deadline_seek: bool,
     pub idle_drop_minutes: i64,
     pub ram_cache_bytes: i64,
     pub seeding_enabled: bool,
@@ -334,6 +335,8 @@ pub struct SettingsRequest {
     pub slow_peer_yield: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drop_chokers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_seek: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_drop_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

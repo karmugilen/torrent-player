@@ -15,7 +15,7 @@ class SettingsDefaultsTest {
         assertTrue(state.playBoost)
         assertTrue(state.playNext)
         assertTrue(state.fileOnlyPlayback)
-        assertTrue(state.pauseOnLowBattery)
+        assertFalse(state.pauseOnLowBattery)
         assertTrue(state.claudeSeekMode)
         assertTrue(state.hedgeRequests)
         assertTrue(state.slowPeerYield)

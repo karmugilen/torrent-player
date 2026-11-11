@@ -52,6 +52,7 @@ fun LibraryScreen(
     state: UiState,
     onAdd: () -> Unit,
     onSettings: () -> Unit,
+    onOpenFile: (() -> Unit)? = null,
     onPause: (DownloadEntry) -> Unit,
     onResume: (DownloadEntry) -> Unit,
     onPlay: (DownloadEntry, Int?) -> Unit,
@@ -196,7 +197,7 @@ fun LibraryScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = if (inSelectionMode) 8.dp else 88.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (!state.engineReady || state.restoring) item { LibraryNotice(state.statusLine) }
@@ -215,7 +216,8 @@ fun LibraryScreen(
                 }
             }
 
-            if (state.library.isNotEmpty()) item {
+            // A short list needs no search box or filters.
+            if (state.library.size >= 4 || query.isNotEmpty() || filter != LibraryFilter.ALL) item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = query,
@@ -325,11 +327,16 @@ fun LibraryScreen(
                                         textAlign = TextAlign.Center,
                                     )
                                     Text(
-                                        text = "Add a magnet link or torrent file to get started.",
+                                        text = "Add a magnet link, a link to a .torrent file, or a .torrent file from your device.",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = colors.onSurfaceVariant,
                                         textAlign = TextAlign.Center,
                                     )
+                                    if (onOpenFile != null) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Button(onClick = onAdd, enabled = state.engineReady) { Text("Paste a link") }
+                                        OutlinedButton(onClick = onOpenFile, enabled = state.engineReady) { Text("Open torrent file") }
+                                    }
                                 }
                                 query.isNotBlank() -> {
                                     Text(
@@ -516,6 +523,15 @@ private fun TorrentRow(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    entry.leftOffCaption()?.let { caption ->
+                        Text(
+                            text = caption,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
             if (!entry.complete && !entry.directPlay) {
@@ -561,7 +577,7 @@ private fun TorrentRow(
                         ) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
-                            Text(if (isVideo) "Play" else "Open")
+                            Text(if (playsResume || (!isMultiVideo && entry.resumeFile() != null)) "Continue" else if (isVideo) "Play" else "Open")
                         }
                     }
 

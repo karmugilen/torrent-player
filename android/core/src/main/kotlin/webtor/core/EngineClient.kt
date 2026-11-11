@@ -381,6 +381,10 @@ class EngineClient(
     fun setDropChokers(enabled: Boolean): Boolean =
         post("/settings", JSONObject().put("dropChokers", enabled)).optBoolean("dropChokers", enabled)
 
+    /** Seek method: blocks at a new position go to peers in the order they can deliver them. */
+    fun setDeadlineSeek(enabled: Boolean): Boolean =
+        post("/settings", JSONObject().put("deadlineSeek", enabled)).optBoolean("deadlineSeek", enabled)
+
     /** Null when the engine predates seek statistics. */
     fun seekStats(): SeekStats? {
         val settings = get("/settings")

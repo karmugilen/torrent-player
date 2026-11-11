@@ -168,7 +168,6 @@ class MainActivity : ComponentActivity() {
                                 onPickFolder = session::pickFolder,
                                 onClearFolder = session::clearFolder,
                                 onIdleDropMinutes = session::setIdleDropMinutes,
-                                onRefreshSeekStats = session::refreshSeekStats,
                                 onNetworkPolicy = session::setNetworkPolicy,
                                 onDownloadRateKiB = session::setDownloadRateKiB,
                                 onPauseOnLowBattery = session::setPauseOnLowBattery,
@@ -194,15 +193,17 @@ class MainActivity : ComponentActivity() {
                     if (state.addSheetOpen) {
                         val prefetch = state.prepare?.takeIf {
                             it.source == state.magnetDraft.trim() ||
-                                (state.magnetDraft.isBlank() && it.source.startsWith("${cacheDir.absolutePath}/import-"))
+                                (state.magnetDraft.isBlank() && isTorrentFileSource(it.source))
                         }
                         val existing = existingLibraryEntry(state)
                         AddSheet(
                             magnet = state.magnetDraft,
                             engineReady = state.engineReady,
                             error = state.error,
-                            status = prefetchStatus(prefetch),
-                            connecting = prefetch != null && prefetch.torrent?.ready != true && existing == null,
+                            status = state.sourceStatus ?: prefetchStatus(prefetch),
+                            connecting = state.sourceStatus != null ||
+                                prefetch != null && prefetch.torrent?.ready != true && existing == null,
+                            sourceFileName = prefetch?.source?.takeIf(::isTorrentFileSource)?.let(::torrentFileName),
                             onMagnet = session::setMagnet,
                             onAdd = session::addCurrent,
                             onOpenFile = {
@@ -261,6 +262,7 @@ class MainActivity : ComponentActivity() {
         LibraryScreen(
             state = state,
             onAdd = session::openAddSheet,
+            onOpenFile = ::pickTorrentFile,
             onSettings = session::openSettings,
             onPause = session::pause,
             onResume = session::resume,
@@ -328,7 +330,7 @@ class MainActivity : ComponentActivity() {
             }
             // Never let an exported activity import another app's chosen private file path.
             val text = source?.toString() ?: intent?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
-            val supported = supportedTorrentLink(text)
+            val supported = extractTorrentLink(text)
             if (supported != null) {
                 val hash = infoHashFromMagnet(supported)
                 val existing = hash?.let { h -> session.ui.value.library.find { it.key.equals(h, true) } }
@@ -338,7 +340,10 @@ class MainActivity : ComponentActivity() {
                     session.add(supported)
                 }
             } else {
-                session.showError("Open a magnet link, an HTTP(S) torrent URL, or share a .torrent file.")
+                session.showError(
+                    if (source?.scheme == "file") "Torrent Player cannot read files sent this way. Tap Add download, then Open torrent file."
+                    else "Open a magnet link, a link to a .torrent file, or share a .torrent file.",
+                )
             }
         } catch (_: RuntimeException) {
             session.showError("Cannot read this shared item. Try opening it with the torrent file picker.")

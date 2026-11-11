@@ -42,6 +42,7 @@ fun AddSheet(
     onDirectPlay: (() -> Unit)? = null, directPlayDefault: Boolean = false,
     destination: String = "Downloads/Webtor",
     existingEntry: DownloadEntry? = null, onOpenExisting: (() -> Unit)? = null,
+    sourceFileName: String? = null,
 ) {
     val busy = draft?.busy == true
     BackHandler(enabled = !busy, onBack = onDismiss)
@@ -59,7 +60,8 @@ fun AddSheet(
     val hiddenByVideosOnly = if (videosOnly) files.count { !it.name.isVideoName() } else 0
     val storageKnown = freeBytes >= 0
     val insufficientSpace = storageKnown && freeBytes < selectedBytes
-    val canAddPending = !ready && draft != null && !busy && existingEntry == null && onDownload != null && engineReady
+    // Only a magnet can be saved before its file list arrives.
+    val canAddPending = !ready && draft != null && isMagnetLink(draft.source.trim()) && !busy && existingEntry == null && onDownload != null && engineReady
     val canDownload = !busy && (ready && selection.isNotEmpty() && !insufficientSpace || canAddPending) && existingEntry == null && onDownload != null
     Scaffold(
         modifier = Modifier.imePadding(),
@@ -138,7 +140,7 @@ fun AddSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item {
-                SourceInput(magnet, engineReady, connecting && existingEntry == null, ready, busy, status, onMagnet, onAdd, onOpenFile, existingEntry != null)
+                SourceInput(magnet, engineReady, connecting && existingEntry == null, ready, busy, status, onMagnet, onAdd, onOpenFile, existingEntry != null, sourceFileName)
             }
             (error ?: draft?.error)?.let { message -> item {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer), shape = MaterialTheme.shapes.medium) {
@@ -166,7 +168,7 @@ fun AddSheet(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        OutlinedTextField(
+                        if (files.size >= 8 || query.isNotEmpty()) OutlinedTextField(
                             value = query, onValueChange = { query = it }, singleLine = true,
                             modifier = Modifier.fillMaxWidth(), label = { Text("Search files") },
                             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
@@ -211,14 +213,29 @@ fun AddSheet(
 private fun SourceInput(
     magnet: String, engineReady: Boolean, connecting: Boolean, ready: Boolean, busy: Boolean, status: String?,
     onMagnet: (String) -> Unit, onAdd: () -> Unit, onOpenFile: () -> Unit, alreadyAdded: Boolean = false,
+    sourceFileName: String? = null,
 ) {
     val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     var pastedSourceToHide by remember { mutableStateOf<String?>(null) }
+    var pasteHint by remember { mutableStateOf<String?>(null) }
     fun hideInput() {
         keyboard?.hide()
         focusManager.clearFocus()
+    }
+    fun pasteFromClipboard() {
+        val clipText = clipboard.getText()?.text?.trim().orEmpty()
+        val link = extractTorrentLink(clipText)
+        pasteHint = when {
+            clipText.isEmpty() -> "The clipboard is empty. Copy a magnet link or a .torrent link first."
+            link == null -> "The clipboard has no magnet link or .torrent link."
+            else -> null
+        }
+        if (link != null) {
+            hideInput()
+            onMagnet(link)
+        }
     }
     LaunchedEffect(pastedSourceToHide) {
         val pasted = pastedSourceToHide ?: return@LaunchedEffect
@@ -228,12 +245,30 @@ private fun SourceInput(
         if (magnet == pasted) hideInput()
         pastedSourceToHide = null
     }
+    val fromFile = sourceFileName != null && magnet.isEmpty()
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (!ready && !alreadyAdded) Text("Paste a magnet link or torrent URL, or open a .torrent file from your device.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        OutlinedTextField(
+        if (!ready && !alreadyAdded && !fromFile) Text("Paste a magnet link or a link to a .torrent file, or open a .torrent file from your device.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (fromFile) {
+            // A torrent opened from a file has no link to show; name the file instead.
+            OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Torrent file", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(sourceFileName.orEmpty(), style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    IconButton(onClick = { onMagnet("") }, enabled = !busy) {
+                        Icon(Icons.Default.Clear, contentDescription = "Remove this torrent file")
+                    }
+                }
+            }
+        } else OutlinedTextField(
             value = magnet,
             onValueChange = { value ->
                 val fullLinkWasPasted = shouldHideKeyboardAfterPaste(magnet, value)
+                pasteHint = null
                 onMagnet(value)
                 if (fullLinkWasPasted) pastedSourceToHide = value
             },
@@ -242,19 +277,10 @@ private fun SourceInput(
             trailingIcon = {
                 if (magnet.isNotEmpty()) {
                     IconButton(onClick = { onMagnet("") }, enabled = !busy) {
-                        Icon(Icons.Default.Clear, contentDescription = "Clear magnet link")
+                        Icon(Icons.Default.Clear, contentDescription = "Clear link")
                     }
                 } else {
-                    IconButton(
-                        onClick = {
-                            val clipText = clipboard.getText()?.text?.trim().orEmpty()
-                            if (clipText.isNotEmpty()) {
-                                val supported = supportedTorrentLink(clipText) ?: clipText
-                                onMagnet(supported)
-                            }
-                        },
-                        enabled = !busy,
-                    ) {
+                    IconButton(onClick = ::pasteFromClipboard, enabled = !busy) {
                         Icon(
                             painter = painterResource(R.drawable.ic_content_paste),
                             contentDescription = "Paste from clipboard",
@@ -273,17 +299,44 @@ private fun SourceInput(
                 if (engineReady && looksLikeTorrentSource(magnet) && !connecting && !busy) onAdd()
             }),
         )
+        pasteHint?.takeIf { magnet.isEmpty() }?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         if (!engineReady) Text("Starting download engine…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (!alreadyAdded && (connecting || status != null && !ready)) Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (connecting) LinearProgressIndicator(Modifier.fillMaxWidth())
             Text(status ?: "Finding torrent metadata…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!ready && !alreadyAdded) Button(
-            onClick = onAdd, enabled = engineReady && looksLikeTorrentSource(magnet) && !connecting && !busy,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-        ) { Text(if (connecting) "Reading torrent…" else "Find files") }
-        OutlinedButton(onClick = onOpenFile, enabled = engineReady && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            Text(if (ready) "Choose another torrent file" else "Open torrent file")
+        when {
+            alreadyAdded || ready || fromFile -> Unit
+            // Nothing entered yet: offer the two ways to bring a torrent in.
+            magnet.isBlank() -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = ::pasteFromClipboard, enabled = !busy,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                ) {
+                    Icon(painterResource(R.drawable.ic_content_paste), contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Paste link", maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onOpenFile, enabled = engineReady && !busy,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                ) { Text("Open file", maxLines = 1) }
+            }
+            else -> {
+                if (magnet.isNotBlank() && !looksLikeTorrentSource(magnet)) Text(
+                    "This is not a magnet link or a link to a .torrent file.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                )
+                Button(
+                    onClick = onAdd, enabled = engineReady && looksLikeTorrentSource(magnet) && !connecting && !busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) { Text(if (connecting) "Reading torrent…" else "Find files") }
+                TextButton(onClick = onOpenFile, enabled = engineReady && !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Open a torrent file instead")
+                }
+            }
         }
     }
 }

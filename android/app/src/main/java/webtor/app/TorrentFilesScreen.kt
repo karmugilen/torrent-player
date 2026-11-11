@@ -156,7 +156,7 @@ fun TorrentFilesScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Download details", style = MaterialTheme.typography.titleLarge) },
+                title = { Text("Details", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -187,7 +187,7 @@ fun TorrentFilesScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.surface,
+                    containerColor = colors.background,
                     titleContentColor = colors.onBackground,
                     navigationIconContentColor = colors.onBackground,
                     actionIconContentColor = colors.onBackground,
@@ -204,6 +204,7 @@ fun TorrentFilesScreen(
             item {
                 DownloadSummary(
                     entry, error,
+                    onPlay = onPlay,
                     magnetAvailable = magnetUri != null,
                     copiedMagnet = copiedMagnet,
                     onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
@@ -220,12 +221,14 @@ fun TorrentFilesScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionTitle("Files", "${entry.selected.size} of ${files.size} selected")
-                    OutlinedTextField(
+                    // A handful of files needs no search box or filters.
+                    if (files.size >= 8 || fileQuery.isNotEmpty()) OutlinedTextField(
                         value = fileQuery,
                         onValueChange = { fileQuery = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        placeholder = { Text("Search files & episodes", style = MaterialTheme.typography.bodyMedium) },
+                        shape = RoundedCornerShape(12.dp),
+                        placeholder = { Text("Search files and episodes", style = MaterialTheme.typography.bodyMedium) },
                         leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                         trailingIcon = if (fileQuery.isNotEmpty()) {
                             {
@@ -235,7 +238,7 @@ fun TorrentFilesScreen(
                             }
                         } else null,
                     )
-                    Row(
+                    if (files.size >= 4 || fileFilter != DetailFileFilter.ALL) Row(
                         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -311,6 +314,7 @@ fun TorrentFilesScreen(
 private fun DownloadSummary(
     entry: DownloadEntry,
     error: String?,
+    onPlay: (Int) -> Unit,
     magnetAvailable: Boolean,
     copiedMagnet: Boolean,
     onShareMagnet: () -> Unit,
@@ -371,30 +375,40 @@ private fun DownloadSummary(
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
             entry.status?.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.tertiary) }
+            // The video most people came here for: where they left off, else the main file.
+            val resume = entry.resumeFile()
+            val playIndex = resume?.index ?: pickPlayIndex(entry)
+            val isVideo = mediaType(entry) == "Video"
+            if (playIndex != null && entry.canPlay()) {
+                Button(
+                    onClick = { onPlay(playIndex) },
+                    enabled = !entry.checking || completedPlayFile(entry, playIndex) != null,
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp).heightIn(min = 48.dp),
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        when {
+                            resume != null -> "Continue at ${playbackTime(resume.playbackPositionMs)}"
+                            isVideo -> "Play"
+                            else -> "Open"
+                        },
+                        maxLines = 1,
+                    )
+                }
+            }
             Row(
-                Modifier.fillMaxWidth().padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FilledTonalButton(
-                    onClick = onShareMagnet,
-                    enabled = magnetAvailable,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                ) {
+                TextButton(onClick = onShareMagnet, enabled = magnetAvailable) {
                     Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Share magnet")
                 }
-                OutlinedButton(
-                    onClick = onCopyMagnet,
-                    enabled = magnetAvailable,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                ) {
-                    Text(if (copiedMagnet) "Copied!" else "Copy link")
+                TextButton(onClick = onCopyMagnet, enabled = magnetAvailable) {
+                    Text(if (copiedMagnet) "Copied" else "Copy magnet")
                 }
             }
             if (!magnetAvailable) {

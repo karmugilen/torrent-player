@@ -51,6 +51,7 @@ class LibrarySession(
     private val initialized = CompletableDeferred<Unit>()
     private val isShuttingDown = AtomicBoolean(false)
     private var serviceSuppressed = false
+    @Volatile private var serviceTimedOut = false
     private val recentlyInvalidatedIds = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     )
@@ -65,7 +66,7 @@ class LibrarySession(
     private var lastServiceUpdate = 0L
     private var lastServiceSent: List<Any>? = null
     private var lastTrafficAt = 0L
-    private var lastStatsRefresh = 0L
+
     private var draftGeneration = 0L
     private var commitInProgress = false
     private val retryStates = mutableMapOf<String, RetryState>()
@@ -87,8 +88,22 @@ class LibrarySession(
     private val _events = Channel<UiEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    /**
+     * Android stopped the transfer service at its daily background limit. Asking
+     * for it again before the app is opened fails, so wait for the user.
+     */
+    fun onServiceTimeout() {
+        serviceTimedOut = true
+        lastServiceUpdate = 0L
+        lastServiceSent = null
+    }
+
     fun onForeground() {
         reopenAfterShutdown()
+        if (serviceTimedOut) {
+            serviceTimedOut = false
+            syncService(force = true)
+        }
         scope.launchCommand {
             runCatching { refreshAutoRamCache() }.onFailure {
                 if (it is CancellationException) throw it
@@ -212,6 +227,8 @@ class LibrarySession(
                             withContext(io) { client.setHedgeRequests(_ui.value.hedgeRequests) }
                             withContext(io) { client.setSlowPeerYield(_ui.value.slowPeerYield) }
                             withContext(io) { client.setDropChokers(_ui.value.dropChokers) }
+                            // Always the released seek method; the A/B toggle was removed.
+                            withContext(io) { client.setDeadlineSeek(false) }
                             withContext(io) { client.setIdleDropMinutes(_ui.value.idleDropMinutes) }
                         }
                     }
@@ -249,7 +266,7 @@ class LibrarySession(
         if (commitInProgress || !reopenAfterShutdown()) return
         draftGeneration++
         prefetchJob?.cancel()
-        _ui.update { it.copy(magnetDraft = value, error = null) }
+        _ui.update { it.copy(magnetDraft = value, error = null, sourceStatus = null) }
         debounceJob?.cancel()
         debounceJob = scope.launch {
             val src = _ui.value.magnetDraft.trim()
@@ -270,7 +287,8 @@ class LibrarySession(
         if (commitInProgress) return
         draftGeneration++
         debounceJob?.cancel()
-        _ui.update { it.copy(addSheetOpen = false, error = null) }
+        prefetchJob?.cancel()
+        _ui.update { it.copy(addSheetOpen = false, error = null, sourceStatus = null) }
         dropUncommittedPrefetch()
     }
     suspend fun awaitInitialization() { initialized.await() }
@@ -373,14 +391,6 @@ class LibrarySession(
         }
         stop(entry)
         if (idle) _ui.update { it.copy(message = "Stopped idle Direct Play: ${entry.title}") }
-    }
-
-    fun refreshSeekStats() {
-        if (!_ui.value.engineReady) return
-        scope.launch {
-            val stats = runCatching { withContext(io) { client.seekStats() } }.getOrNull() ?: return@launch
-            _ui.update { it.copy(seekStats = stats) }
-        }
     }
 
     /** A player return or failed launch releases the saved torrent's file filter. */
@@ -692,7 +702,7 @@ class LibrarySession(
     fun dismissClearAll() = _ui.update { it.copy(clearAllConfirm = false) }
     fun pickTorrent() { _events.trySend(UiEvent.PickTorrent) }
     fun exportDiagnostics() {
-        _ui.update { it.copy(diagnosticsPreview = buildDiagnosticsReport(it.library, "1.4.5")) }
+        _ui.update { it.copy(diagnosticsPreview = buildDiagnosticsReport(it.library, BuildConfig.VERSION_NAME)) }
         scope.launch {
             val events = withContext(io) { runCatching { client.events() }.getOrNull() } ?: return@launch
             _ui.update { state -> state.copy(diagnosticsPreview = state.diagnosticsPreview?.let { "$it\n\nengine events\n$events" }) }
@@ -736,48 +746,42 @@ class LibrarySession(
         debounceJob?.cancel()
         prefetchJob?.cancel()
         draftGeneration++
-        _ui.update { it.copy(addSheetOpen = true, magnetDraft = id, error = null) }
+        _ui.update { it.copy(addSheetOpen = true, magnetDraft = id, error = null, sourceStatus = null) }
         prefetchJob = scope.launch { addTorrent(id, commit = false) }
     }
 
+    /** Reads a .torrent the user picked or another app sent, and shows its files. */
     fun openTorrent(uri: Uri) {
         if (commitInProgress || !beginUserWork()) return
         debounceJob?.cancel()
         prefetchJob?.cancel()
         val generation = ++draftGeneration
-        _ui.update { it.copy(addSheetOpen = true, magnetDraft = "", error = null) }
+        _ui.update { it.copy(addSheetOpen = true, magnetDraft = "", error = null, sourceStatus = "Reading torrent file…") }
         prefetchJob = scope.launch {
             try {
-                val file = withContext(io) {
-                    val dest = File.createTempFile("import-", ".torrent", app.cacheDir)
-                    try {
-                        app.contentResolver.openInputStream(uri)?.use { input ->
-                            dest.outputStream().use { output ->
-                                val buffer = ByteArray(8192)
-                                var total = 0L
-                                while (true) {
-                                    val count = input.read(buffer)
-                                    if (count == -1) break
-                                    total += count
-                                    check(total <= 8 * 1024 * 1024) { "Torrent files must be smaller than 8 MB." }
-                                    output.write(buffer, 0, count)
-                                }
-                            }
-                        } ?: error("Cannot open torrent file")
-                        dest
-                    } catch (t: Throwable) {
-                        dest.delete()
-                        throw t
-                    }
+                val (name, bytes) = withContext(io) {
+                    val name = runCatching {
+                        app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                    }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
+                    val bytes = app.contentResolver.openInputStream(uri)?.use(::readTorrentBytes)
+                        ?: error("Cannot open this torrent file.")
+                    check(looksLikeTorrentFile(bytes)) { "This is not a torrent file. Choose a file ending in .torrent." }
+                    name to bytes
                 }
-                try {
-                    if (generation == draftGeneration) addTorrent(file.absolutePath, commit = false)
-                } finally {
-                    file.delete()
-                }
+                if (generation != draftGeneration) return@launch
+                addTorrent(torrentFileSource(name), encodeTorrentData(bytes), commit = false)
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                _ui.update { it.copy(error = readableError(t), addSheetOpen = true) }
+                if (generation != draftGeneration) return@launch
+                val message = when (t) {
+                    is SecurityException, is java.io.FileNotFoundException ->
+                        "Torrent Player cannot read this file. Open it with the torrent file button instead."
+                    else -> readableError(t)
+                }
+                _ui.update { it.copy(error = message, addSheetOpen = true) }
+            } finally {
+                if (generation == draftGeneration) _ui.update { it.copy(sourceStatus = null) }
             }
         }
     }
@@ -927,6 +931,10 @@ class LibrarySession(
                 if (torrent?.ready != true) {
                     if (directPlay) { setPrepareError("Waiting for file information. You can save the magnet as a download meanwhile."); return@withLock }
                     val source = draft.source.trim()
+                    if (!isMagnetLink(source)) {
+                        setPrepareError("Still reading this torrent. Try again in a moment.")
+                        return@withLock
+                    }
                     val key = infoHashFromMagnet(source) ?: draft.engineId
                     if (_ui.value.library.any { it.key.equals(key, true) || it.engineId == draft.engineId }) {
                         setPrepareError("This torrent is already in your library.")
@@ -935,8 +943,10 @@ class LibrarySession(
                     val pending = DownloadEntry(
                         key = key,
                         generation = withContext(io) { storage.nextGeneration(key) },
+                        // The name in a magnet is URL-encoded ("Big+Buck+Bunny").
                         title = source.substringAfter("dn=", "").substringBefore('&')
-                            .ifBlank { key.take(12) },
+                            .let { name -> runCatching { java.net.URLDecoder.decode(name, "UTF-8") }.getOrDefault(name) }
+                            .trim().ifBlank { key.take(12) },
                         source = source,
                         metadata = "",
                         engineId = draft.engineId,
@@ -2008,8 +2018,51 @@ class LibrarySession(
         }
     }
 
-    private suspend fun addTorrent(torrentId: String, torrentData: String? = null, commit: Boolean = true) {
+    /**
+     * Downloads the .torrent behind an http(s) link off the main thread. Returns the
+     * source and torrent data to add, or null when the draft was replaced or it failed.
+     */
+    private suspend fun fetchLinkedTorrent(link: String, generation: Long): Pair<String, String?>? {
+        _ui.update { it.copy(sourceStatus = "Downloading torrent file…", error = null) }
+        try {
+            val fetched = withContext(io) {
+                fetchTorrentLink(link, "TorrentPlayer/${BuildConfig.VERSION_NAME}")
+            }
+            if (generation != draftGeneration) return null
+            return when (fetched) {
+                is FetchedTorrent.File -> link to encodeTorrentData(fetched.bytes)
+                is FetchedTorrent.Magnet -> {
+                    // The magnet is what gets saved and restored, so show it.
+                    _ui.update { if (it.magnetDraft.trim() == link) it.copy(magnetDraft = fetched.link) else it }
+                    fetched.link to null
+                }
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (generation != draftGeneration) return null
+            val message = when (t) {
+                is java.net.UnknownHostException -> "Cannot reach this site. Check the link and your connection."
+                is java.net.SocketTimeoutException -> "The site took too long to send the torrent file. Try again."
+                is javax.net.ssl.SSLException -> "This site has no secure (https) connection, so the torrent file was not downloaded. Download the .torrent in your browser and open it here."
+                is java.io.IOException -> "Could not download the torrent file. Check your connection and try again."
+                else -> t.message ?: "Could not download the torrent file."
+            }
+            _ui.update { it.copy(error = message) }
+            return null
+        } finally {
+            if (generation == draftGeneration) _ui.update { it.copy(sourceStatus = null) }
+        }
+    }
+
+    private suspend fun addTorrent(source: String, sourceData: String? = null, commit: Boolean = true) {
         val generation = draftGeneration
+        var torrentId = source
+        var torrentData = sourceData
+        if (torrentData == null && isHttpTorrentLink(source) && _ui.value.prepare?.source != source) {
+            val fetched = fetchLinkedTorrent(source, generation) ?: return
+            torrentId = fetched.first
+            torrentData = fetched.second
+        }
         // Adding a torrent back right after deleting it waits for that delete,
         // instead of being taken for a duplicate of the entry on its way out.
         infoHashFromMagnet(torrentId)?.let { hash ->
@@ -2056,13 +2109,27 @@ class LibrarySession(
                 }
                 // Capture the returned ID even when cancellation arrives during blocking HTTP.
                 val added = withContext(io + NonCancellable) {
-                    client.add(torrentId, prepare = true, torrentData = torrentData).also { createdId = it.id }
+                    // The engine reads inline torrent data, magnets and info hashes only.
+                    client.add(if (torrentData != null) "" else torrentId, prepare = true, torrentData = torrentData).also { createdId = it.id }
                 }
                 if (generation != draftGeneration || isShuttingDown.get()) throw CancellationException("Draft replaced")
-                if (_ui.value.library.any { it.engineId == added.id || it.key.equals(added.infoHash, true) }) {
+                val existing = _ui.value.library.find { it.engineId == added.id || it.key.equals(added.infoHash, true) }
+                if (existing != null) {
                     runCatching { releasePreparedEngine(added.id) }
                     createdId = null
-                    _ui.update { it.copy(prepare = null, addSheetOpen = true, error = null) }
+                    if (isMagnetLink(torrentId)) {
+                        // The sheet matches the magnet's hash and offers the existing entry.
+                        _ui.update { it.copy(prepare = null, addSheetOpen = true, error = null) }
+                    } else {
+                        // A file or link carries no hash to match, so go straight to the entry.
+                        _ui.update {
+                            it.copy(
+                                prepare = null, addSheetOpen = false, magnetDraft = "", error = null,
+                                screen = Screen.Files, openTorrentKey = existing.key,
+                            )
+                        }
+                        warmDirectPlay(existing.key)
+                    }
                     return
                 }
                 _ui.update {
@@ -2752,7 +2819,7 @@ class LibrarySession(
     }
 
     private fun syncService(force: Boolean = false) {
-        if (serviceSuppressed || isShuttingDown.get()) {
+        if (serviceSuppressed || isShuttingDown.get() || serviceTimedOut) {
             PlayService.stop(app)
             lastServiceUpdate = 0L
             lastServiceSent = null
@@ -2768,11 +2835,6 @@ class LibrarySession(
             return
         }
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastStatsRefresh >= 2000) {
-            // The notification shows them while a video plays elsewhere.
-            lastStatsRefresh = now
-            refreshSeekStats()
-        }
         // The wake and Wi-Fi locks are for data that is moving. A download with no
         // peers would otherwise keep the CPU and radio up all night for nothing.
         val moving = lastServiceSent == null || playbackKeys.isNotEmpty() || library.any {

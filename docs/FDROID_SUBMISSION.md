@@ -55,9 +55,12 @@ runs F-Droid's own `verify_apks` check before it reports success.
 
 ## History
 
+- 2.4.1 (101): .torrent files and links, free-space fix for chosen folders,
+  settings cleanup, seek A/B UI removed. Same Rust build steps as 2.4.0;
+  F-Droid checkupdates picks up the `v2.4.1` tag.
 - 2.4.0 (100): the engine moved from Go to Rust (`engine-rs/`, MPL-2.0 because
-  it derives from anacrolix/torrent). Needs an fdroiddata merge request for the
-  new build steps.
+  it derives from anacrolix/torrent). Live fdroiddata uses Debian `rustup`
+  with toolchain 1.99.1 and `aarch64-linux-android`.
 - 2.2.0 (98), 2026-10-25: first update after inclusion. The Android engine stopped
   linking the Rust helpers, so the recipe stayed Go-only, and trackers and peers
   see the real app version. Built and signed with `scripts/fdroid-release.sh`;

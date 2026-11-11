@@ -162,9 +162,21 @@ class DownloadStorage(private val context: Context) {
         set(value) { prefs.edit().putString("folderName", value).commit() }
     var loadWarning: String? = null
         private set
-    val freeBytes get() = runCatching {
+    /** Free space where downloads are saved: the chosen folder's volume (an SD card), else internal storage. */
+    val freeBytes get() = chosenFolderFreeBytes() ?: runCatching {
         StatFs(Environment.getExternalStorageDirectory().absolutePath).availableBytes
     }.getOrDefault(-1L)
+
+    private fun chosenFolderFreeBytes(): Long? {
+        val tree = folder?.let { runCatching { Uri.parse(it) }.getOrNull() } ?: return null
+        return runCatching {
+            val document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+            resolver.openFileDescriptor(document, "r")?.use { descriptor ->
+                val stats = Os.fstatvfs(descriptor.fileDescriptor)
+                stats.f_bavail * stats.f_frsize
+            }
+        }.getOrNull()?.takeIf { it >= 0L }
+    }
     private val engineDir get() = engineDownloadDir(context)
     val engineBytes get() = engineDir.walkTopDown().filter { it.isFile }.sumOf {
         runCatching { Os.stat(it.absolutePath).st_blocks * 512L }.getOrDefault(it.length())

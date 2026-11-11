@@ -35,6 +35,8 @@ class EngineHost(private val context: Context) : EngineTransport {
                 check(startEngine(downloadDir().absolutePath.toByteArray(StandardCharsets.UTF_8), maxPeers) == 0) { "Native engine initialization failed" }
                 Log.i(TAG, "native engine ready")
                 ready.complete(true)
+                // The Go engine before 2.4.0 kept its state here. Nothing reads it now.
+                runCatching { File(context.filesDir, "webtorrent").takeIf { it.exists() }?.deleteRecursively() }
                 // A memory-mapped country database keeps peer lookup offline.
                 // Geo data is optional; a damaged asset must not stop downloads.
                 runCatching {

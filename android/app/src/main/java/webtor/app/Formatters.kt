@@ -229,9 +229,33 @@ fun tooDarkLuma(pixels: IntArray): Boolean {
 fun previewUpdateBucket(progress: Double, complete: Boolean): Int =
     if (complete || progress >= 1.0) 20 else (progress * 20).toInt().coerceIn(0, 19)
 
+/**
+ * The 40-character hex info hash of a magnet. The engine reports hashes in hex,
+ * so a base32 magnet is converted to match library keys.
+ */
 fun infoHashFromMagnet(value: String): String? {
     val match = Regex("xt=urn:btih:([a-zA-Z0-9]+)", RegexOption.IGNORE_CASE).find(value) ?: return null
-    return match.groupValues[1].lowercase()
+    val hash = match.groupValues[1].lowercase()
+    return if (hash.length == 32) base32ToHex(hash) ?: hash else hash
+}
+
+private fun base32ToHex(text: String): String? {
+    val alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+    var bits = 0L
+    var count = 0
+    val out = StringBuilder(text.length * 5 / 4)
+    for (char in text) {
+        val digit = alphabet.indexOf(char)
+        if (digit < 0) return null
+        bits = (bits shl 5) or digit.toLong()
+        count += 5
+        while (count >= 4) {
+            count -= 4
+            out.append(Character.forDigit(((bits shr count) and 0xF).toInt(), 16))
+        }
+        bits = bits and ((1L shl count) - 1)
+    }
+    return out.toString()
 }
 
 fun looksLikeTorrentSource(value: String): Boolean = supportedTorrentLink(value) != null
@@ -325,13 +349,5 @@ internal fun playbackStatsLine(ui: UiState): String {
                 (entry.liveStatus()?.uploadSpeed?.takeIf { it > 0 }?.let { " · ↑ ${formatSpeed(it)}" } ?: "")
         }
     }
-    val seek = ui.seekStats
-    if (seek != null && seek.count > 0) {
-        val stalls = if (seek.stalls == 1) "1 stall" else "${seek.stalls} stalls"
-        parts += "Seeks ${seek.count} · usually ${formatMs(seek.medianMs)} · last ${formatMs(seek.lastMs)} · $stalls"
-    }
     return parts.joinToString("\n")
 }
-
-/** 640 ms, 1.3 s. */
-internal fun formatMs(ms: Long): String = if (ms < 1000) "$ms ms" else String.format(Locale.US, "%.1f s", ms / 1000.0)

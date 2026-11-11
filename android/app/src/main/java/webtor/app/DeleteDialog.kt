@@ -1,5 +1,6 @@
 package webtor.app
 
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -16,13 +17,18 @@ fun DeleteDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text("Remove “$title”?", style = MaterialTheme.typography.titleLarge) },
-        text = { Text("Keep the files in Downloads, or delete them too.") },
+        title = { Text("Remove this download?", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Text("“${if (title.length > 80) title.take(80) + "…" else title}” leaves the library. Keep its files on the phone, or delete them too.")
+        },
         confirmButton = {
-            TextButton(onClick = onEraseFiles) { Text("Delete files") }
+            TextButton(onClick = onEraseFiles) { Text("Delete files", color = MaterialTheme.colorScheme.error) }
         },
         dismissButton = {
-            TextButton(onClick = onKeepFiles) { Text("Keep files") }
+            Row {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                TextButton(onClick = onKeepFiles) { Text("Keep files") }
+            }
         },
     )
 }

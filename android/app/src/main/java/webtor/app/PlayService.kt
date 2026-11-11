@@ -67,6 +67,8 @@ class PlayService : Service() {
     // Stop in time or the system kills the app; opening the app resets it.
     override fun onTimeout(startId: Int, fgsType: Int) {
         notifyTimedOut(this)
+        // Without this the session asks for the service again a second later.
+        runCatching { (application as? WebtorApp)?.session?.onServiceTimeout() }
         stopSelf()
     }
 

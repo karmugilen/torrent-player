@@ -241,7 +241,7 @@ impl EngineServer {
         let _ = wt_storage::delete_resume_window(&self.download_dir, info_hash);
     }
 
-    fn protected_resume_hashes(&self) -> HashSet<String> {
+    pub(super) fn protected_resume_hashes(&self) -> HashSet<String> {
         let reader_ids: HashSet<_> = self
             .playback_readers
             .lock()

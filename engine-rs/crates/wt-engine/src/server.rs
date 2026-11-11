@@ -132,6 +132,8 @@ pub struct EngineServer {
     pub hedge_requests: AtomicBool,
     pub slow_peer_yield: AtomicBool,
     pub drop_chokers: AtomicBool,
+    /// Seek method: deadline order instead of first to ask.
+    pub deadline_seek: AtomicBool,
     pub idle_drop_minutes: AtomicI64,
     pub ram_cache_bytes: AtomicI64,
     pub seeding_enabled: AtomicBool,
@@ -378,6 +380,7 @@ impl EngineServer {
             hedge_requests: AtomicBool::new(true),
             slow_peer_yield: AtomicBool::new(true),
             drop_chokers: AtomicBool::new(true),
+            deadline_seek: AtomicBool::new(false),
             idle_drop_minutes: AtomicI64::new(0),
             ram_cache_bytes: AtomicI64::new(64 * 1024 * 1024),
             seeding_enabled: AtomicBool::new(false),
@@ -419,6 +422,7 @@ impl EngineServer {
         wt_core::set_seek_tuning(wt_core::SeekTuning {
             hedge: self.hedge_requests.load(Ordering::SeqCst),
             slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
+            deadline: self.deadline_seek.load(Ordering::SeqCst),
         });
     }
 
@@ -889,11 +893,16 @@ impl EngineServer {
         };
 
         let mut torrent_data_bytes = None;
-        if let Some(ref b64) = req.torrent_data {
-            if let Ok(bytes) =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-            {
-                torrent_data_bytes = Some(bytes);
+        if let Some(b64) = req.torrent_data.as_deref().filter(|data| !data.is_empty()) {
+            // Go: damaged data is an error, not a fall back to torrentId.
+            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
+                Ok(bytes) => torrent_data_bytes = Some(bytes),
+                Err(_) => {
+                    return (
+                        400,
+                        serde_json::to_vec(&json!({"error": "invalid torrentData base64"})).unwrap(),
+                    )
+                }
             }
         }
 
@@ -1868,6 +1877,7 @@ impl EngineServer {
             hedge_requests: self.hedge_requests.load(Ordering::SeqCst),
             slow_peer_yield: self.slow_peer_yield.load(Ordering::SeqCst),
             drop_chokers: self.drop_chokers.load(Ordering::SeqCst),
+            deadline_seek: self.deadline_seek.load(Ordering::SeqCst),
             idle_drop_minutes: self.idle_drop_minutes.load(Ordering::SeqCst),
             ram_cache_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
             seeding_enabled: self.seeding_enabled.load(Ordering::SeqCst),
@@ -1996,6 +2006,13 @@ impl EngineServer {
         if let Some(d) = req.drop_chokers {
             self.drop_chokers.store(d, Ordering::SeqCst);
         }
+        if let Some(deadline) = req.deadline_seek {
+            if self.deadline_seek.swap(deadline, Ordering::SeqCst) != deadline {
+                retune = true;
+                // Seek times restart so the two methods can be compared.
+                self.seek_stats.lock().reset();
+            }
+        }
         if retune
             || req.hedge_requests.is_some()
             || req.slow_peer_yield.is_some()
@@ -2100,24 +2117,14 @@ impl EngineServer {
 
     fn handle_get_bypass(&self) -> (u16, Vec<u8>) {
         let enabled = self.bypass_enabled.load(Ordering::SeqCst);
+        // Nothing wraps peer or tracker sockets in this engine yet, so the
+        // switch is remembered and reported as not running.
         let status = BypassStatus {
             enabled,
-            active: enabled,
-            mode: if enabled {
-                "tcp-write-split".to_string()
-            } else {
-                "off".to_string()
-            },
-            coverage: if enabled {
-                Some(vec![
-                    "outgoing-tcp-peers".into(),
-                    "http-trackers".into(),
-                    "websocket-trackers".into(),
-                ])
-            } else {
-                None
-            },
-            error: None,
+            active: false,
+            mode: wt_policy::BYPASS_MODE_OFF.to_string(),
+            coverage: None,
+            error: enabled.then(|| "Anti-DPI is not available in this version".to_string()),
         };
         (200, serde_json::to_vec(&status).unwrap())
     }
@@ -2140,31 +2147,43 @@ impl EngineServer {
         self.handle_get_bypass()
     }
 
+    /// Go `cacheStatus`: on-disk size of each cache, and how much of it a
+    /// clear would free now. Caches of sessions in use are kept by a clear.
     fn handle_get_cache(&self) -> (u16, Vec<u8>) {
+        use wt_storage::cache_store::{dht_contacts_path, dir_bytes, peer_hints_path};
+        let base = &self.download_dir;
+        let file_bytes = |path: PathBuf| std::fs::metadata(path).map_or(0, |m| m.len() as i64);
+        let hashes: Vec<String> = self.records.read().values()
+            .map(|r| r.read().info_hash.clone()).collect();
+        let mut memory = 0i64;
+        let mut startup_kept = 0i64;
+        for hash in &hashes {
+            if let Some(storage) = self.storage.get_storage(hash) {
+                memory += storage.cache_bytes();
+                if storage.stream_mode() {
+                    startup_kept += dir_bytes(&base.join(".startup").join(hash));
+                }
+            }
+        }
+        let resume_kept: i64 = self.protected_resume_hashes().iter()
+            .map(|hash| dir_bytes(&wt_storage::resume_window_dir(base, hash))).sum();
+        let startup = dir_bytes(&base.join(".startup"));
+        let resume = dir_bytes(&base.join(".cache").join("resume"));
+        let peers = file_bytes(peer_hints_path(base));
+        let dht = file_bytes(dht_contacts_path(base));
+        let category = |id: &str, bytes: i64, reclaimable: i64| CacheCategoryView {
+            id: id.to_string(),
+            bytes,
+            reclaimable_bytes: reclaimable.clamp(0, bytes.max(0)),
+        };
         let resp = CacheStatusResponse {
             categories: vec![
-                CacheCategoryView {
-                    id: "startup".to_string(),
-                    bytes: 0,
-                    reclaimable_bytes: 0,
-                },
-                CacheCategoryView {
-                    id: "resume".into(),
-                    bytes: 0,
-                    reclaimable_bytes: 0,
-                },
-                CacheCategoryView {
-                    id: "peers".into(),
-                    bytes: 0,
-                    reclaimable_bytes: 0,
-                },
-                CacheCategoryView {
-                    id: "dht".into(),
-                    bytes: 0,
-                    reclaimable_bytes: 0,
-                },
+                category("startup", startup, startup - startup_kept),
+                category("resume", resume, resume - resume_kept),
+                category("peers", peers, peers),
+                category("dht", dht, dht),
             ],
-            memory_bytes: self.ram_cache_bytes.load(Ordering::SeqCst),
+            memory_bytes: memory,
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }

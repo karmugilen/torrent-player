@@ -30,6 +30,8 @@ data class UiState(
     val library: List<DownloadEntry> = emptyList(),
     val addSheetOpen: Boolean = false,
     val magnetDraft: String = "",
+    /** What the add sheet is doing before the engine has the torrent, such as downloading a .torrent link. */
+    val sourceStatus: String? = null,
     val prepare: PrepareDraft? = null,
     val deleteRequest: DeleteRequest? = null,
     val message: String? = null,
@@ -84,11 +86,10 @@ data class UiState(
     val dropChokers: Boolean = true,
     /** Minutes before an idle Direct Play session is dropped; 0 is off. */
     val idleDropMinutes: Int = 15,
-    val seekStats: webtor.core.SeekStats? = null,
     val fileOnlyPlayback: Boolean = true,
     val downloadRateKiB: Int = 0,
     val fastPeerSearch: Boolean = false,
-    val pauseOnLowBattery: Boolean = true,
+    val pauseOnLowBattery: Boolean = false,
     val batteryPaused: Boolean = false,
     val playNext: Boolean = true,
     val preloadStart: Boolean = false,

@@ -2,7 +2,7 @@ package webtor.app
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.border
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -43,13 +43,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlin.math.roundToInt
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,7 +61,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -91,27 +92,25 @@ fun SettingsScreen(
     onRamCache: (Int) -> Unit = {},
     onAutoRamCache: () -> Unit = {},
     onPlaybackMethod: (PlaybackMethod) -> Unit = {},
-    onRefreshSeekStats: () -> Unit = {},
     onNetworkPolicy: (TransferNetworkPolicy) -> Unit = {},
     onDownloadRateKiB: (Int) -> Unit = {},
     onPauseOnLowBattery: (Boolean) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
-    val context = LocalContext.current
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = colors.background,
         topBar = {
             TopAppBar(
-                title = { Text("Settings", style = MaterialTheme.typography.titleLarge) },
+                title = { Text("Settings", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.surface,
+                    containerColor = colors.background,
                     titleContentColor = colors.onBackground,
                     navigationIconContentColor = colors.onBackground,
                 ),
@@ -119,222 +118,134 @@ fun SettingsScreen(
         },
     ) { padding ->
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            item {
-                SettingsSection("Playback") {
-                    ListItem(
-                        headlineContent = { Text("Prefer Direct Play") },
-                        supportingContent = {
-                            Text("On: video stays in RAM. Only each video's start and end (its length and index) are saved, up to 1 GB in total, so episodes open fast. Off: selected files are saved for offline play. Both choices stay available when you add a torrent.")
-                        },
-                        trailingContent = {
-                            Switch(checked = state.directPlayDefault, onCheckedChange = onDirectPlayDefault)
-                        },
-                        colors = settingsListColors(),
-                    )
-                    SectionDivider()
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("Stop idle Direct Play", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            "After 2 minutes without playback, peers are released and reconnect when you play again. " +
-                                "Once the player is closed and nothing has played for this long, the session stops and its RAM is freed. Play starts it again.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(0 to "Off", 5 to "5 min", 15 to "15 min", 30 to "30 min").forEach { (minutes, label) ->
-                                FilterChip(
-                                    selected = state.idleDropMinutes == minutes,
-                                    onClick = { onIdleDropMinutes(minutes) },
-                                    label = { Text(label) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            item {
-                SettingsSection("Appearance") {
-                    ListItem(
-                        headlineContent = { Text("Dynamic Material colors") },
-                        supportingContent = {
-                            Text("On Android 12 and newer, colors follow the wallpaper. Older versions, and this switch off, use the palette below.")
-                        },
-                        trailingContent = {
-                            Switch(checked = state.dynamicColors, onCheckedChange = onDynamicColors)
-                        },
-                        colors = settingsListColors(),
-                    )
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            "Color palette",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = colors.onSurface,
-                        )
-                        Text(
-                            "Used when dynamic colors are off.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(
-                                AppTheme.AERO to "Aero",
-                                AppTheme.ANTIQUITY to "Antiquity",
-                                AppTheme.RETRO to "Retro",
-                                AppTheme.WADA to "Wada",
-                            ).forEach { (theme, label) ->
-                                FilterChip(
-                                    selected = state.appTheme == theme && !state.dynamicColors,
-                                    enabled = !state.dynamicColors,
-                                    onClick = { onAppTheme(theme) },
-                                    label = { Text(label) },
-                                )
-                            }
-                        }
-                        if (state.appTheme == AppTheme.WADA && !state.dynamicColors) {
-                            Text(
-                                "Wada: Grenadine Pink, Naples Yellow and Deep Slate Green, combination 166 in Sanzo Wada's A Dictionary of Color Combinations.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    SectionDivider()
-                    SwitchRow(
-                        title = "Dark appearance",
-                        supporting = "Use the dark variant of the current colors.",
-                        checked = state.darkTheme,
-                        onCheckedChange = onDarkTheme,
-                    )
-                    SectionDivider()
-                    SwitchRow(
-                        title = "Reduce motion",
-                        supporting = "Reduce nonessential connection and interface animations.",
-                        checked = state.reducedEffects,
-                        onCheckedChange = onReducedEffects,
-                    )
-                }
-            }
-            item {
-                SettingsSection("Storage") {
+            item(key = "downloads") {
+                SettingsGroup("Downloads") {
                     val storageKnown = state.freeBytes >= 0L
                     val totalStorage = (state.managedBytes + state.freeBytes).coerceAtLeast(1L)
                     val storageFraction = if (storageKnown) {
                         (state.managedBytes.toFloat() / totalStorage.toFloat()).coerceIn(0f, 1f)
-                    } else {
-                        0f
-                    }
+                    } else 0f
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Save folder", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(state.storageFolderName, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            OutlinedButton(onClick = onPickFolder, contentPadding = CompactButtonPadding) { Text("Change") }
+                        }
+                        if (storageKnown) {
+                            LinearProgressIndicator(
+                                progress = { storageFraction },
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(MaterialTheme.shapes.small),
+                                color = colors.primary,
+                                trackColor = colors.surfaceVariant,
+                            )
+                        }
                         Text(
-                            "Saved downloads go in this folder. Direct Play keeps the video in RAM and does not write the full file here.",
+                            if (storageKnown) "${formatBytes(state.managedBytes)} used by downloads · ${formatBytes(state.freeBytes)} free"
+                            else "Free space unavailable",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
-                        )
-                        Text(
-                            "Location: ${state.storageFolderName}",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = colors.onSurface,
                         )
                         if (state.storageAccessWarning != null) {
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = colors.errorContainer),
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    Text(
-                                        state.storageAccessWarning,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = colors.onErrorContainer,
-                                    )
+                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(state.storageAccessWarning, style = MaterialTheme.typography.bodySmall, color = colors.onErrorContainer)
                                     OutlinedButton(
                                         onClick = onPickFolder,
                                         colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.onErrorContainer),
-                                    ) {
-                                        Text("Reselect folder to restore access")
-                                    }
+                                    ) { Text("Choose the folder again") }
                                 }
                             }
                         }
-                        if (storageKnown) {
-                            LinearProgressIndicator(
-                                progress = { storageFraction },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(6.dp)
-                                    .clip(MaterialTheme.shapes.small),
-                                color = colors.primary,
-                                trackColor = colors.surface,
-                            )
-                        }
-                        Text(
-                            if (storageKnown) {
-                                "${formatBytes(state.freeBytes)} free · ${formatBytes(state.managedBytes)} used"
-                            } else {
-                                "Free space unavailable"
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.onSurfaceVariant,
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Button(onClick = onPickFolder) {
-                                Text("Change folder")
-                            }
-                            if (state.hasCustomFolder) {
-                                OutlinedButton(onClick = onClearFolder) {
-                                    Text("Reset to default")
-                                }
-                            }
+                        if (state.hasCustomFolder) {
+                            TextButton(onClick = onClearFolder, contentPadding = PaddingValues(0.dp)) { Text("Use Downloads/Webtor again") }
                         }
                     }
+                    GroupDivider()
+                    ChoiceSetting(
+                        title = "When adding a torrent",
+                        supporting = if (state.directPlayDefault) {
+                            "Direct Play streams the video from RAM and saves only what makes it open fast."
+                        } else {
+                            "Download saves the selected files for offline play."
+                        } + " Both stay available each time.",
+                        options = listOf(false to "Download", true to "Direct Play"),
+                        selected = state.directPlayDefault,
+                        onSelect = onDirectPlayDefault,
+                    )
                 }
             }
-            item {
-                SettingsSection("Connections") {
+            item(key = "playback") {
+                SettingsGroup("Playback") {
+                    ChoiceSetting(
+                        title = "Stop idle Direct Play",
+                        supporting = "Frees memory when the player is closed and nothing has played for this long. Play starts it again.",
+                        options = listOf(0 to "Off", 5 to "5 min", 15 to "15 min", 30 to "30 min"),
+                        selected = state.idleDropMinutes,
+                        onSelect = onIdleDropMinutes,
+                    )
+                    GroupDivider()
+                    ChoiceSetting(
+                        title = "How players get the video",
+                        supporting = if (state.playbackMethod == PlaybackMethod.CONTENT_URI) {
+                            "File proxy: the older way, through Android's file access. Try it if a player cannot open the stream."
+                        } else {
+                            "Stream: the player reads from the engine on this phone. Fastest seeking."
+                        } + " Finished downloads always open from the saved file.",
+                        options = listOf(PlaybackMethod.HTTP to "Stream", PlaybackMethod.CONTENT_URI to "File proxy"),
+                        selected = state.playbackMethod,
+                        onSelect = onPlaybackMethod,
+                    )
+                }
+            }
+            item(key = "network") {
+                SettingsGroup("Network") {
+                    ChoiceSetting(
+                        title = "Transfer on",
+                        supporting = state.networkReason?.takeIf { !state.networkAllowed }
+                            ?: "Torrent data waits until the network matches.",
+                        options = listOf(
+                            TransferNetworkPolicy.ANY to "Any network",
+                            TransferNetworkPolicy.WIFI_ONLY to "Wi-Fi",
+                            TransferNetworkPolicy.UNMETERED to "Unmetered",
+                        ),
+                        selected = state.networkPolicy,
+                        onSelect = onNetworkPolicy,
+                    )
+                    GroupDivider()
+                    ChoiceSetting(
+                        title = "Download speed limit",
+                        supporting = null,
+                        options = listOf(0 to "None", 1024 to "1 MB/s", 4096 to "4 MB/s", 8192 to "8 MB/s"),
+                        selected = state.downloadRateKiB,
+                        onSelect = onDownloadRateKiB,
+                    )
+                    GroupDivider()
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Max connections", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text("Peers per torrent", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
                                 Text(
-                                    "Peer connection limit per transfer.",
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    "More peers can be faster and use more battery.",
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = colors.onSurfaceVariant,
                                 )
                             }
-                            Text(
-                                text = "${state.maxPeers}",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = colors.onSurfaceVariant,
-                            )
+                            ValueBadge("${state.maxPeers}")
                         }
                         Slider(
                             value = state.maxPeers.toFloat(),
@@ -343,36 +254,98 @@ fun SettingsScreen(
                             valueRange = 8f..500f,
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        SectionDivider()
-                        // The slider moves freely; the engine applies the size when it is released.
-                        var ramStep by remember(state.ramCacheMiB, state.ramCacheAuto) {
-                            mutableFloatStateOf(ramCacheStepIndex(state.ramCacheMiB).toFloat())
-                        }
-                        val ramDraft = RAM_CACHE_STEPS_MIB[ramStep.roundToInt().coerceIn(RAM_CACHE_STEPS_MIB.indices)]
-                        Text(
-                            "RAM cache · ${if (state.ramCacheAuto) "Auto · " else ""}${formatRamCacheMiB(ramDraft)}",
-                            style = MaterialTheme.typography.bodyLarge,
+                    }
+                    GroupDivider()
+                    SwitchSetting(
+                        title = "Anti-DPI",
+                        supporting = when {
+                            !state.antiDpiEnabled ->
+                                "Experimental, for networks that block torrents. Not working in this version yet."
+                            state.bypassStatus?.error != null -> "Not running: ${state.bypassStatus.error}."
+                            state.bypassStatus?.active == true -> "On for new TCP peer connections. It does not hide your address."
+                            else -> "Turning on…"
+                        },
+                        checked = state.antiDpiEnabled,
+                        onCheckedChange = onAntiDpi,
+                    )
+                    GroupDivider()
+                    SettingRow(
+                        title = "Incoming port",
+                        supporting = if (state.listenPort > 0) "${state.listenPort}, forwarded by the router when it allows it."
+                        else "Not ready yet.",
+                    )
+                }
+            }
+            item(key = "seeding") {
+                SettingsGroup("Seeding") {
+                    SwitchSetting(
+                        title = "Seed finished downloads",
+                        supporting = "Shares what you downloaded until a limit below is reached. Pauses while a video plays.",
+                        checked = state.seedingEnabled,
+                        onCheckedChange = onSeeding,
+                    )
+                    if (state.seedingEnabled) {
+                        GroupDivider()
+                        ChoiceSetting(
+                            title = "Stop at share ratio",
+                            supporting = null,
+                            options = listOf(500 to "0.5×", 1000 to "1×", 2000 to "2×"),
+                            selected = state.seedRatioMilli,
+                            onSelect = onSeedRatio,
                         )
-                        Text(
-                            if (state.ramCacheAuto) {
-                                "Auto chooses a limit from available memory and active transfers. Used for downloads and Direct Play."
-                            } else {
-                                "Cache limit per transfer for downloads and Direct Play. Total memory use grows with active transfers."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
+                        GroupDivider()
+                        ChoiceSetting(
+                            title = "Or after seeding for",
+                            supporting = null,
+                            options = listOf(15 to "15 min", 60 to "1 hour", 180 to "3 hours"),
+                            selected = state.seedTimeMinutes,
+                            onSelect = onSeedTime,
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = state.ramCacheAuto,
-                                onClick = onAutoRamCache,
-                                label = { Text("Auto") },
-                            )
-                            Text(
-                                if (state.ramCacheAuto) "Move the slider to set a size" else "Manual",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
+                        GroupDivider()
+                        ChoiceSetting(
+                            title = "Upload speed limit",
+                            supporting = null,
+                            options = listOf(128 to "128 KiB/s", 256 to "256 KiB/s", 512 to "512 KiB/s"),
+                            selected = state.seedUploadKiB,
+                            onSelect = onSeedUpload,
+                        )
+                        GroupDivider()
+                        SwitchSetting("Only on Wi-Fi", null, state.seedWiFiOnly, onSeedWiFi)
+                        GroupDivider()
+                        SwitchSetting("Only while charging", null, state.seedChargingOnly, onSeedCharging)
+                    }
+                }
+            }
+            item(key = "device") {
+                SettingsGroup("Battery and memory") {
+                    SwitchSetting(
+                        title = "Pause on low battery",
+                        supporting = if (state.batteryPaused) "Paused now: battery is under 15% and the phone is not charging."
+                        else "Stops torrent data and playback under 15% battery unless the phone is charging.",
+                        checked = state.pauseOnLowBattery,
+                        onCheckedChange = onPauseOnLowBattery,
+                    )
+                    GroupDivider()
+                    // The slider moves freely; the engine applies the size when it is released.
+                    var ramStep by remember(state.ramCacheMiB, state.ramCacheAuto) {
+                        mutableFloatStateOf(ramCacheStepIndex(state.ramCacheMiB).toFloat())
+                    }
+                    val ramDraft = RAM_CACHE_STEPS_MIB[ramStep.roundToInt().coerceIn(RAM_CACHE_STEPS_MIB.indices)]
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Memory per torrent", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+                                Text(
+                                    if (state.ramCacheAuto) "Auto picks a size from free memory. Move the slider to set your own."
+                                    else "Used for downloads and Direct Play. Smaller keeps seeking quick.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            ValueBadge(formatRamCacheMiB(ramDraft))
                         }
                         Slider(
                             value = ramStep,
@@ -382,508 +355,119 @@ fun SettingsScreen(
                             steps = RAM_CACHE_STEPS_MIB.size - 2,
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        Row(Modifier.fillMaxWidth()) {
-                            Text("16 MiB", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
-                            Text("1 GiB", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        }
-                        if (ramDraft < 64) {
-                            Text(
-                                "Small caches keep seeking quick and use little memory. Direct Play always keeps at least " +
-                                    "four pieces, so a torrent with large pieces may use more than this.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
+                        FilterChip(selected = state.ramCacheAuto, onClick = onAutoRamCache, label = { Text("Auto") })
                     }
                 }
             }
-            item {
-                SettingsSection("Seeding") {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+            item(key = "appearance") {
+                SettingsGroup("Appearance") {
+                    SwitchSetting("Dark mode", null, state.darkTheme, onDarkTheme)
+                    GroupDivider()
+                    SwitchSetting(
+                        title = "Wallpaper colors",
+                        supporting = "Android 12 and newer. Off uses the palette below.",
+                        checked = state.dynamicColors,
+                        onCheckedChange = onDynamicColors,
+                    )
+                    GroupDivider()
+                    ChoiceSetting(
+                        title = "Palette",
+                        supporting = when {
+                            state.dynamicColors -> "Turn off wallpaper colors to choose one."
+                            state.appTheme == AppTheme.WADA ->
+                                "Grenadine Pink, Naples Yellow and Deep Slate Green, combination 166 in Sanzo Wada's A Dictionary of Color Combinations."
+                            else -> null
+                        },
+                        options = listOf(
+                            AppTheme.AERO to "Aero",
+                            AppTheme.ANTIQUITY to "Antiquity",
+                            AppTheme.RETRO to "Retro",
+                            AppTheme.WADA to "Wada",
+                        ),
+                        selected = state.appTheme.takeIf { !state.dynamicColors },
+                        enabled = !state.dynamicColors,
+                        onSelect = onAppTheme,
+                    )
+                    GroupDivider()
+                    SwitchSetting("Reduce motion", "Fewer animations.", state.reducedEffects, onReducedEffects)
+                }
+            }
+            item(key = "data") {
+                SettingsGroup("Data") {
+                    // One button clears everything that is safe to clear.
+                    val reclaimable = state.cacheBytes +
+                        (state.nativeCacheSummary?.categories?.sumOf { it.reclaimableBytes } ?: 0L)
+                    SettingRow(
+                        title = "Cache",
+                        supporting = "${formatBytes(reclaimable)} of previews and engine caches. Saved downloads are kept.",
                     ) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Seed completed downloads", style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    "Shares verified saved pieces after completion. Pauses during playback.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.seedingEnabled, onCheckedChange = onSeeding)
-                        }
-                        if (state.seedingEnabled) {
-                            Text(
-                                "Stops at the share ratio or the active seeding time, whichever comes first.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                            Text("Share ratio", style = MaterialTheme.typography.labelLarge)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(500, 1000, 2000).forEach { ratio ->
-                                    FilterChip(
-                                        selected = state.seedRatioMilli == ratio,
-                                        onClick = { onSeedRatio(ratio) },
-                                        label = { Text("${ratio / 1000.0}×") },
-                                    )
-                                }
-                            }
-                            Text("Active seeding time per torrent", style = MaterialTheme.typography.labelLarge)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(15, 60, 180).forEach { minutes ->
-                                    FilterChip(
-                                        selected = state.seedTimeMinutes == minutes,
-                                        onClick = { onSeedTime(minutes) },
-                                        label = { Text("$minutes min") },
-                                    )
-                                }
-                            }
-                            Text("Upload cap", style = MaterialTheme.typography.labelLarge)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(128, 256, 512).forEach { speed ->
-                                    FilterChip(
-                                        selected = state.seedUploadKiB == speed,
-                                        onClick = { onSeedUpload(speed) },
-                                        label = { Text("$speed KiB/s") },
-                                    )
-                                }
-                            }
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("Seed on Wi-Fi only", Modifier.weight(1f))
-                                Switch(checked = state.seedWiFiOnly, onCheckedChange = onSeedWiFi)
-                            }
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("Seed while charging only", Modifier.weight(1f))
-                                Switch(checked = state.seedChargingOnly, onCheckedChange = onSeedCharging)
-                            }
-                            Text(
-                                "Upload totals and ratio survive restarts. The peer connection limit is not changed here.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
+                        OutlinedButton(onClick = onCleanup, enabled = reclaimable > 0L, contentPadding = CompactButtonPadding) { Text("Clear") }
+                    }
+                    GroupDivider()
+                    SettingRow(title = "Stop all transfers", supporting = "Disconnects peers. Saved files are kept.") {
+                        OutlinedButton(
+                            onClick = onStopAll,
+                            enabled = state.library.any { it.engineId != null && !it.isDeleting },
+                            contentPadding = CompactButtonPadding,
+                        ) { Text("Stop") }
+                    }
+                    GroupDivider()
+                    SettingRow(title = "Shut down", supporting = "Stops transfers and closes the app.") {
+                        OutlinedButton(onClick = onStopAllAndExit, contentPadding = CompactButtonPadding) { Text("Exit") }
+                    }
+                    GroupDivider()
+                    SettingRow(
+                        title = "Delete downloaded files",
+                        titleColor = colors.error,
+                        supporting = "Erases every saved download from the phone. The library list stays.",
+                    ) {
+                        OutlinedButton(
+                            onClick = onClearAll,
+                            contentPadding = CompactButtonPadding,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.error),
+                            border = BorderStroke(1.dp, colors.error),
+                        ) { Text("Delete") }
                     }
                 }
             }
-            item {
-                SettingsSection("Experimental", outlined = true) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            "Optional controls for playback and transfers. Some can use more data and battery.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        SectionDivider()
-                        Text("Playback", style = MaterialTheme.typography.titleMedium, color = colors.onSurface)
-                        Text(
-                            "One built-in mode, like YouTube: a seek stops every download for the old place and fetches the new spot first, then the next blocks in order, filling your RAM setting ahead. Nothing behind the playhead is fetched.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        LaunchedEffect(Unit) {
-                            while (true) {
-                                onRefreshSeekStats()
-                                delay(2_000)
-                            }
-                        }
-                        Text(
-                            seekStatsLine(state.seekStats),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                    }
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("Playback method", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            "Completed downloads still open from the saved file. This choice is for incomplete video and Direct Play.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        Column(Modifier.selectableGroup()) {
-                            listOf(PlaybackMethod.HTTP, PlaybackMethod.CONTENT_URI).forEach { method ->
-                                val selected = state.playbackMethod == method
-                                Row(
-                                    modifier = Modifier.fillMaxWidth()
-                                        .selectable(
-                                            selected = selected,
-                                            role = Role.RadioButton,
-                                            onClick = { onPlaybackMethod(method) },
-                                        )
-                                        .padding(vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    RadioButton(selected = selected, onClick = null)
-                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        Text(
-                                            if (method == PlaybackMethod.CONTENT_URI) "Content URI" else "HTTP stream (default)",
-                                            style = MaterialTheme.typography.bodyLarge,
-                                        )
-                                        Text(
-                                            if (method == PlaybackMethod.CONTENT_URI) {
-                                                "Older method: the player reads through Android's file proxy."
-                                            } else {
-                                                "The player streams from the engine on this phone. Faster seeking."
-                                            },
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = colors.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SectionDivider()
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("Network and battery", style = MaterialTheme.typography.titleMedium, color = colors.onSurface)
-                    }
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Anti-DPI (experimental)", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    "Experimental. Splits the start of some outgoing TCP writes to peers and HTTP or WebSocket trackers. UDP, uTP, and WebRTC are not changed. Not anonymity, and not a promise that a connection succeeds.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.antiDpiEnabled, onCheckedChange = onAntiDpi)
-                        }
-                        if (state.antiDpiEnabled) {
-                            val status = state.bypassStatus
-                            if (status == null) {
-                                Text(
-                                    if (state.engineReady) "Connecting to backend…" else "Engine starting…",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.secondary,
-                                )
-                            } else if (status.error != null) {
-                                Text(
-                                    "Backend error: ${status.error}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.error,
-                                )
-                            } else {
-                                Text(
-                                    if (status.active) "Active (mode: ${status.mode})" else "Inactive (mode: ${status.mode})",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (status.active) colors.primary else colors.error,
-                                )
-                                if (status.coverage.isNotEmpty()) {
-                                    Text(
-                                        "Adapted paths: ${status.coverage.joinToString(", ")}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = colors.onSurfaceVariant,
-                                    )
-                                } else if (status.active) {
-                                    Text(
-                                        "No adapted paths reported.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = colors.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                            Text(
-                                "Active means the adapter in this app is running. It does not mean a peer or tracker accepted the connection, and it does not hide your network address.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.outline,
-                            )
-                        }
-                    }
-                    SectionDivider()
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("More peers", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            "Raises the same connection limit as Connections. More peers can start a transfer faster and use more battery.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(100, 200, 500).forEach { peers ->
-                                FilterChip(
-                                    selected = state.maxPeers == peers,
-                                    onClick = {
-                                        onMaxPeers(peers)
-                                        onMaxPeersCommit()
-                                    },
-                                    label = { Text("$peers") },
-                                )
-                            }
-                        }
-                        SectionDivider()
-                        Text("Transfer network", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            "Pauses torrent payload until the network matches. Metadata can still be fetched. Any is the normal choice.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(
-                                TransferNetworkPolicy.ANY to "Any",
-                                TransferNetworkPolicy.WIFI_ONLY to "Wi-Fi",
-                                TransferNetworkPolicy.UNMETERED to "Unmetered",
-                            ).forEach { (policy, label) ->
-                                FilterChip(
-                                    selected = state.networkPolicy == policy,
-                                    onClick = { onNetworkPolicy(policy) },
-                                    label = { Text(label) },
-                                )
-                            }
-                        }
-                        SectionDivider()
-                        Text("Download cap", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            "Limits download speed only. Seeding upload is unchanged. Unlimited is the normal choice.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(
-                                0 to "Unlimited",
-                                1024 to "1 MB/s",
-                                4096 to "4 MB/s",
-                                8192 to "8 MB/s",
-                            ).forEach { (rate, label) ->
-                                FilterChip(
-                                    selected = state.downloadRateKiB == rate,
-                                    onClick = { onDownloadRateKiB(rate) },
-                                    label = { Text(label) },
-                                )
-                            }
-                        }
-                        SectionDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("Pause on low battery", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                                Text(
-                                    if (state.batteryPaused) {
-                                        "Paused now. Battery is under 15% and the phone is not charging."
-                                    } else {
-                                        "Pauses torrent data under 15% battery unless the phone is charging. Playback pauses too."
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Switch(checked = state.pauseOnLowBattery, onCheckedChange = onPauseOnLowBattery)
-                        }
-                        SectionDivider()
-                        Text("Incoming port", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        Text(
-                            if (state.listenPort > 0) {
-                                "Listening on ${state.listenPort}. The engine already asks the router to forward this port."
-                            } else {
-                                "The listen port is not ready yet. Incoming peers and port forwarding stay on."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-            item {
-                SettingsSection("About") {
+            item(key = "about") {
+                SettingsGroup("About") {
                     val uri = LocalUriHandler.current
-                    ListItem(
-                        headlineContent = { Text("Privacy policy") },
-                        supportingContent = { Text("Nothing is collected. Lists every network connection the app makes.") },
-                        modifier = Modifier.clickable { runCatching { uri.openUri(PRIVACY_POLICY_URL) } },
-                        colors = settingsListColors(),
+                    SettingRow(
+                        title = "Privacy policy",
+                        supporting = "Nothing is collected. Lists every connection the app makes.",
+                        onClick = { runCatching { uri.openUri(PRIVACY_POLICY_URL) } },
                     )
-                    SectionDivider()
-                    ListItem(
-                        headlineContent = { Text("Source code") },
-                        supportingContent = { Text("Free and open source under the MIT license") },
-                        modifier = Modifier.clickable { runCatching { uri.openUri(SOURCE_CODE_URL) } },
-                        colors = settingsListColors(),
+                    GroupDivider()
+                    SettingRow(
+                        title = "Source code",
+                        supporting = "Free and open source.",
+                        onClick = { runCatching { uri.openUri(SOURCE_CODE_URL) } },
                     )
-                    SectionDivider()
-                    ListItem(
-                        headlineContent = { Text("Version") },
-                        supportingContent = { Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})") },
-                        colors = settingsListColors(),
-                    )
-                }
-            }
-            item {
-                SettingsSection("Maintenance") {
-                    ListItem(
-                        headlineContent = {
-                            Text("Stop transfers", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-                        },
-                        supportingContent = {
-                            Text(
-                                "Disconnects peers and keeps saved files.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colors.onSurfaceVariant,
-                            )
-                        },
-                        trailingContent = {
-                            OutlinedButton(
-                                onClick = onStopAll,
-                                enabled = state.library.any { it.engineId != null && !it.isDeleting },
-                                modifier = Modifier.heightIn(min = 36.dp),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                            ) {
-                                Text("Stop all")
-                            }
-                        },
-                        colors = settingsListColors(),
-                    )
-                    SectionDivider()
-                    ListItem(
-                        headlineContent = {
-                            Text("Shut down", style = MaterialTheme.typography.bodyLarge, color = colors.error)
-                        },
-                        supportingContent = {
-                            Text(
-                                "Stops transfers and exits the app. Saved downloads are not deleted.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colors.onSurfaceVariant,
-                            )
-                        },
-                        trailingContent = {
-                            DangerOutlineButton("Shutdown", onStopAllAndExit)
-                        },
-                        colors = settingsListColors(),
-                    )
-                    SectionDivider()
-                    ListItem(
-                        headlineContent = {
-                            Text(
-                                "Temporary cache · ${formatBytes(state.cacheBytes)}",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = colors.error,
-                            )
-                        },
-                        supportingContent = {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(
-                                    "Thumbnails, temporary imports, and engine caches. Does not delete saved downloads.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colors.onSurfaceVariant,
-                                )
-                                state.nativeCacheSummary?.let { summary ->
-                                    if (summary.categories.isNotEmpty()) {
-                                        Text(
-                                            "Engine categories: " + summary.categories.joinToString(" · ") {
-                                                "${cacheCategoryLabel(it.id)}: ${formatBytes(it.bytes)}"
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = colors.outline,
-                                        )
-                                    }
-                                }
-                            }
-                        },
-                        trailingContent = {
-                            DangerOutlineButton("Clear all cache", onCleanup)
-                        },
-                        colors = settingsListColors(),
-                    )
-                    state.nativeCacheSummary?.categories?.filter { it.reclaimableBytes > 0 }?.forEach { cat ->
-                        SectionDivider()
-                        ListItem(
-                            headlineContent = {
-                                Text(
-                                    "Reclaim ${cacheCategoryLabel(cat.id)} (${formatBytes(cat.reclaimableBytes)})",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
-                            },
-                            trailingContent = {
-                                if (onClearNativeCategory != null) {
-                                    TextButton(
-                                        onClick = { onClearNativeCategory(cat.id) },
-                                        colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
-                                    ) {
-                                        Text("Clear")
-                                    }
-                                }
-                            },
-                            colors = settingsListColors(),
-                        )
-                    }
-                    SectionDivider()
-                    ListItem(
-                        headlineContent = {
-                            Text(
-                                "Delete all downloads",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = colors.error,
-                            )
-                        },
-                        supportingContent = {
-                            Text(
-                                "Permanently removes saved download files. Library rows stay. Direct Play rows are left as they are.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colors.onSurfaceVariant,
-                            )
-                        },
-                        trailingContent = {
-                            Button(
-                                onClick = onClearAll,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = colors.errorContainer,
-                                    contentColor = colors.onErrorContainer,
-                                ),
-                                modifier = Modifier.heightIn(min = 36.dp),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                            ) {
-                                Text("Delete downloaded files")
-                            }
-                        },
-                        colors = settingsListColors(),
-                    )
+                    GroupDivider()
+                    SettingRow(title = "Version", supporting = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                 }
             }
         }
     }
 }
 
+private val CompactButtonPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+
+/** A titled card of related settings. */
 @Composable
-private fun SettingsSection(title: String, outlined: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = if (outlined) Modifier.fillMaxWidth()
-            .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.medium)
-            .padding(12.dp) else Modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = title,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(start = 4.dp),
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 16.dp),
         )
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-            shape = MaterialTheme.shapes.medium,
+            shape = MaterialTheme.shapes.large,
         ) {
             content()
         }
@@ -891,71 +475,109 @@ private fun SettingsSection(title: String, outlined: Boolean = false, content: @
 }
 
 @Composable
-private fun SectionDivider() {
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+private fun GroupDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(horizontal = 16.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+    )
 }
 
 @Composable
-private fun settingsListColors() = ListItemDefaults.colors(containerColor = Color.Transparent)
-
-@Composable
-private fun SwitchRow(
-    title: String,
-    supporting: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
-) {
+private fun SettingText(title: String, supporting: String?, modifier: Modifier = Modifier, titleColor: Color = Color.Unspecified) {
     val colors = MaterialTheme.colorScheme
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, style = MaterialTheme.typography.bodyLarge, color = if (titleColor == Color.Unspecified) colors.onSurface else titleColor)
+        if (!supporting.isNullOrBlank()) {
+            Text(supporting, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+    }
+}
+
+/** A setting with an optional control at the end; the whole row is tappable when [onClick] is set. */
+@Composable
+private fun SettingRow(
+    title: String,
+    supporting: String? = null,
+    titleColor: Color = Color.Unspecified,
+    onClick: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
+) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.bodyLarge,
-                color = if (enabled) colors.onSurface else colors.onSurface.copy(alpha = 0.38f),
-            )
-            Text(
-                supporting,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (enabled) colors.onSurfaceVariant else colors.onSurfaceVariant.copy(alpha = 0.38f),
-            )
+        SettingText(title, supporting, Modifier.weight(1f), titleColor)
+        if (trailing != null) {
+            Spacer(Modifier.width(12.dp))
+            trailing()
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
+/** Tapping anywhere on the row flips the switch. */
 @Composable
-private fun DangerOutlineButton(text: String, onClick: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    OutlinedButton(
-        onClick = onClick,
-        modifier = Modifier.heightIn(min = 36.dp),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = scheme.error),
-        border = BorderStroke(1.dp, scheme.error),
+private fun SwitchSetting(title: String, supporting: String?, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text)
+        SettingText(title, supporting, Modifier.weight(1f))
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = null)
     }
+}
+
+/** One choice from a short list, shown as chips under the title. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun <T> ChoiceSetting(
+    title: String,
+    supporting: String?,
+    options: List<Pair<T, String>>,
+    selected: T?,
+    enabled: Boolean = true,
+    onSelect: (T) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        SettingText(title, supporting)
+        FlowRow(
+            modifier = Modifier.selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            options.forEach { (value, label) ->
+                FilterChip(
+                    selected = selected == value,
+                    enabled = enabled,
+                    onClick = { onSelect(value) },
+                    label = { Text(label) },
+                )
+            }
+        }
+    }
+}
+
+/** The current value of a slider. */
+@Composable
+private fun ValueBadge(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    )
 }
 
 private const val PRIVACY_POLICY_URL = "https://github.com/karmugilen/torrent-player/blob/v2.4.0/PRIVACY.md"
 private const val SOURCE_CODE_URL = "https://github.com/karmugilen/torrent-player"
-
-/** One-line seek comparison for the current mode's measurement window. */
-internal fun seekStatsLine(stats: webtor.core.SeekStats?): String {
-    if (stats == null || stats.count == 0) return "Seek time · seek in a video to measure it."
-    val stalls = if (stats.stalls == 1) "1 stall" else "${stats.stalls} stalls"
-    return "Seek time · ${stats.count} seeks · median ${stats.medianMs} ms · last ${stats.lastMs} ms · $stalls"
-}
-
-private fun cacheCategoryLabel(id: String): String = when (id) {
-    "startup" -> "startup cache"
-    "resume" -> "resume data"
-    "peers" -> "peer cache"
-    "dht" -> "DHT contacts"
-    else -> id
-}
