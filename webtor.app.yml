@@ -59,7 +59,7 @@ Builds:
 
   - versionName: 2.4.1
     versionCode: 101
-    commit: v2.4.1
+    commit: 58cc5da6a6631e945cd6f73c632ea6e664f3c18d
     subdir: android/app
     sudo:
       - apt-get update

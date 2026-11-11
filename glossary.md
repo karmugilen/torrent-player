@@ -25,8 +25,13 @@
 - `wt-core` unit test `choking::seed_policy::tests::tit_for_tat_headroom` fails on unchanged v2.4.0 code (`seed_policy.rs:82`).
 - Open: which Seek method the user had on when seeking felt slow; whether they pressed Clear, which now really deletes saved peers and DHT contacts.
 
+## Release 2.4.1 (2026-11-11)
+- Released on GitHub: https://github.com/karmugilen/torrent-player/releases/tag/v2.4.1, tag `v2.4.1` on commit `58cc5da` (branch `karmugilen/rust-engine`). APK `artifacts/torrent-player-2.4.1.apk`, sha256 `da27dbae3e253be2fbb295138dc33b795ec676dcdc27fba8f260739cd1496716`, built by `fdroid-release.sh` in F-Droid's image, release key, F-Droid `verify_apks` OK. Never replace it; fix problems in 2.4.2.
+- F-Droid: same Rust build steps as 2.4.0 (`rustup` 1.99.1 + `aarch64-linux-android`); `UpdateCheckMode: Tags` should pick up `v2.4.1` without a recipe MR. Reference copy updated in `webtor.app.yml`.
+- Includes: .torrent files/links (`TorrentFetch`), free-space on chosen folder (issue #3), settings cleanup, pause-on-low-battery default off, seek A/B UI removed (released seek path only).
+
 ## Seek method toggle removed (2026-11-11, Grok resume)
-- User asked to remove Claude seeking and the ms timings, then prepare the next release locally (no push). Done in this worktree: Seek method / Seek speed Settings rows gone; notification seek-ms suffix gone; `deadlineSeek` pref retired; app always posts `deadlineSeek=false`. Version bumped to 2.4.1 (101). Draft notes: `artifacts/RELEASE-2.4.1.md`, F-Droid `fastlane/metadata/android/en-US/changelogs/101.txt`. Not committed, not tagged, not pushed.
+- User asked to remove Claude seeking and the ms timings, then prepare the next release locally (no push). Done: Seek method / Seek speed Settings rows gone; notification seek-ms suffix gone; `deadlineSeek` pref retired; app always posts `deadlineSeek=false`. Shipped in 2.4.1.
 - Historical: `seekab` had Settings, Playback, Seek method Yours/Claude's (`deadlineSeek`). Kept below for archaeology.
 
 ## Seek method toggle (2026-11-11)
