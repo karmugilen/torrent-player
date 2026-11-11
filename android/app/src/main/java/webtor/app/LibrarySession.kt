@@ -770,7 +770,7 @@ class LibrarySession(
                     name to bytes
                 }
                 if (generation != draftGeneration) return@launch
-                addTorrent(torrentFileSource(name), encodeTorrentData(bytes), commit = false)
+                addTorrent(torrentFileSource(name), sourceBytes = bytes, commit = false)
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 if (generation != draftGeneration) return@launch
@@ -2020,9 +2020,9 @@ class LibrarySession(
 
     /**
      * Downloads the .torrent behind an http(s) link off the main thread. Returns the
-     * source and torrent data to add, or null when the draft was replaced or it failed.
+     * source and raw torrent bytes to add, or null when the draft was replaced or it failed.
      */
-    private suspend fun fetchLinkedTorrent(link: String, generation: Long): Pair<String, String?>? {
+    private suspend fun fetchLinkedTorrent(link: String, generation: Long): Pair<String, ByteArray?>? {
         _ui.update { it.copy(sourceStatus = "Downloading torrent file…", error = null) }
         try {
             val fetched = withContext(io) {
@@ -2030,7 +2030,7 @@ class LibrarySession(
             }
             if (generation != draftGeneration) return null
             return when (fetched) {
-                is FetchedTorrent.File -> link to encodeTorrentData(fetched.bytes)
+                is FetchedTorrent.File -> link to fetched.bytes
                 is FetchedTorrent.Magnet -> {
                     // The magnet is what gets saved and restored, so show it.
                     _ui.update { if (it.magnetDraft.trim() == link) it.copy(magnetDraft = fetched.link) else it }
@@ -2054,18 +2054,27 @@ class LibrarySession(
         }
     }
 
-    private suspend fun addTorrent(source: String, sourceData: String? = null, commit: Boolean = true) {
+    private suspend fun resolveLibraryHash(torrentId: String): String? {
+        if (_ui.value.engineReady) {
+            runCatching {
+                withContext(io) { client.normalize(torrentId).infoHash }
+            }.getOrNull()?.let { return it }
+        }
+        return normalizeTorrentIdLocal(torrentId).second ?: infoHashFromMagnet(torrentId)
+    }
+
+    private suspend fun addTorrent(source: String, sourceBytes: ByteArray? = null, commit: Boolean = true) {
         val generation = draftGeneration
         var torrentId = source
-        var torrentData = sourceData
-        if (torrentData == null && isHttpTorrentLink(source) && _ui.value.prepare?.source != source) {
+        var torrentBytes = sourceBytes
+        if (torrentBytes == null && isHttpTorrentLink(source) && _ui.value.prepare?.source != source) {
             val fetched = fetchLinkedTorrent(source, generation) ?: return
             torrentId = fetched.first
-            torrentData = fetched.second
+            torrentBytes = fetched.second
         }
         // Adding a torrent back right after deleting it waits for that delete,
         // instead of being taken for a duplicate of the entry on its way out.
-        infoHashFromMagnet(torrentId)?.let { hash ->
+        resolveLibraryHash(torrentId)?.let { hash ->
             withTimeoutOrNull(10_000) {
                 _ui.first { state -> state.library.none { it.isDeleting && it.key.equals(hash, true) } }
             }
@@ -2075,7 +2084,7 @@ class LibrarySession(
             val addedId = mutex.withLock {
                 if (isShuttingDown.get() || generation != draftGeneration) return
                 val prev = _ui.value.prepare
-                if (prev != null && prev.source == torrentId && torrentData == null) {
+                if (prev != null && prev.source == torrentId && torrentBytes == null) {
                     if (commit) {
                         _ui.update {
                             it.copy(
@@ -2092,7 +2101,7 @@ class LibrarySession(
                     runCatching { withContext(io) { client.remove(prev.engineId, true) } }
                     _ui.update { it.copy(prepare = null) }
                 }
-                val hash = infoHashFromMagnet(torrentId)
+                val hash = resolveLibraryHash(torrentId)
                 if (hash != null && _ui.value.library.any { it.key.equals(hash, true) }) {
                     _ui.update { it.copy(addSheetOpen = true, error = null) }
                     return
@@ -2109,8 +2118,11 @@ class LibrarySession(
                 }
                 // Capture the returned ID even when cancellation arrives during blocking HTTP.
                 val added = withContext(io + NonCancellable) {
-                    // The engine reads inline torrent data, magnets and info hashes only.
-                    client.add(if (torrentData != null) "" else torrentId, prepare = true, torrentData = torrentData).also { createdId = it.id }
+                    if (torrentBytes != null) {
+                        client.addBytes(torrentBytes, prepare = true)
+                    } else {
+                        client.add(torrentId, prepare = true)
+                    }.also { createdId = it.id }
                 }
                 if (generation != draftGeneration || isShuttingDown.get()) throw CancellationException("Draft replaced")
                 val existing = _ui.value.library.find { it.engineId == added.id || it.key.equals(added.infoHash, true) }

@@ -72,11 +72,29 @@ impl EngineServer {
     }
 
     pub(crate) fn piece_telemetry(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
+        match self.build_piece_telemetry(id, query) {
+            Ok(response) => (200, serde_json::to_vec(&response).unwrap()),
+            Err(err) => err,
+        }
+    }
+
+    pub(crate) fn piece_telemetry_bin(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
+        match self.build_piece_telemetry(id, query) {
+            Ok(response) => (200, crate::pieces_bin::encode_pieces_bin(&response)),
+            Err(err) => err,
+        }
+    }
+
+    fn build_piece_telemetry(
+        &self,
+        id: &str,
+        query: &str,
+    ) -> Result<PieceTelemetryResponse, (u16, Vec<u8>)> {
         let Some(record) = self.records.read().get(id).cloned() else {
-            return (
+            return Err((
                 404,
                 serde_json::to_vec(&serde_json::json!({"error":"torrent not found"})).unwrap(),
-            );
+            ));
         };
         let windows = self.playback_windows(id);
         let mut rec = record.write();
@@ -129,10 +147,10 @@ impl EngineServer {
         let buckets = match buckets {
             Ok(b) => b,
             Err(e) => {
-                return (
+                return Err((
                     500,
                     serde_json::to_vec(&serde_json::json!({"error":e.to_string()})).unwrap(),
-                )
+                ))
             }
         };
         let mut response = PieceTelemetryResponse {
@@ -217,6 +235,6 @@ impl EngineServer {
                 });
             }
         }
-        (200, serde_json::to_vec(&response).unwrap())
+        Ok(response)
     }
 }

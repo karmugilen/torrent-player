@@ -8,8 +8,19 @@ data class EngineResponse(
     val body: String,
 )
 
+data class EngineBytesResponse(
+    val statusCode: Int,
+    val body: ByteArray,
+)
+
 fun interface EngineTransport {
     fun request(method: String, path: String, body: String?): EngineResponse
+
+    /** Raw body/response path used by `/add-bytes` and `/pieces-bin`. */
+    fun requestRaw(method: String, path: String, body: ByteArray?): EngineBytesResponse {
+        val response = request(method, path, body?.toString(Charsets.UTF_8))
+        return EngineBytesResponse(response.statusCode, response.body.toByteArray(Charsets.UTF_8))
+    }
 }
 
 data class EngineStats(
@@ -94,6 +105,8 @@ data class PlayInfo(
 )
 
 data class AddResult(val id: String, val infoHash: String?)
+
+data class NormalizedTorrentId(val id: String, val infoHash: String?)
 
 data class PeerConnection(
     val address: String,
@@ -203,6 +216,29 @@ class EngineClient(
         return AddResult(json.getString("id"), json.nullableString("infoHash"))
     }
 
+    /** Adds a `.torrent` file without Base64-wrapping it in JSON. */
+    fun addBytes(torrentBytes: ByteArray, prepare: Boolean = false): AddResult {
+        val path = if (prepare) "/add-bytes?prepare=true" else "/add-bytes"
+        val response = transport.requestRaw("POST", path, torrentBytes)
+        val json = runCatching { JSONObject(String(response.body, Charsets.UTF_8)) }.getOrNull()
+        if (response.statusCode !in 200..299) {
+            val err = json?.optString("error").orEmpty().ifEmpty { String(response.body, Charsets.UTF_8) }
+            throw EngineException("Engine ${response.statusCode}: $err", statusCode = response.statusCode)
+        }
+        val body = json ?: throw EngineException("The download engine returned an invalid response.")
+        return AddResult(body.getString("id"), body.nullableString("infoHash"))
+    }
+
+    /**
+     * Canonical magnet / info-hash form used for library keys.
+     * Base32 magnets become hex; bare hashes become lowercase hex.
+     */
+    fun normalize(id: String): NormalizedTorrentId {
+        val encoded = java.net.URLEncoder.encode(id, Charsets.UTF_8.name())
+        val json = get("/normalize?id=$encoded")
+        return NormalizedTorrentId(json.getString("id"), json.nullableString("infoHash"))
+    }
+
     fun torrent(id: String): TorrentStatus {
         val json = get("/torrent/$id")
         return parseTorrent(json)
@@ -243,6 +279,14 @@ class EngineClient(
 
     fun pieces(id: String, maxBuckets: Int? = null): PieceTelemetry {
         val query = if (maxBuckets != null) "?maxBuckets=$maxBuckets" else ""
+        val binary = runCatching {
+            val response = transport.requestRaw("GET", "/pieces-bin/$id$query", null)
+            if (response.statusCode !in 200..299) {
+                throw EngineException("Engine ${response.statusCode}", statusCode = response.statusCode)
+            }
+            parsePiecesBin(response.body)
+        }
+        if (binary.isSuccess) return binary.getOrThrow()
         val json = get("/pieces/$id$query")
         return parsePieces(json)
     }
@@ -472,6 +516,122 @@ class EngineClient(
             medianMs = json.optLong("medianMs").coerceAtLeast(0L),
             stalls = json.optInt("stalls").coerceAtLeast(0),
         )
+
+        fun parsePiecesBin(bytes: ByteArray): PieceTelemetry {
+            require(bytes.size >= 72) { "truncated pieces-bin payload" }
+            require(bytes[0] == 'W'.code.toByte() && bytes[1] == 'T'.code.toByte() &&
+                bytes[2] == 'P'.code.toByte() && bytes[3] == 'C'.code.toByte()) {
+                "bad pieces-bin magic"
+            }
+            fun u16(offset: Int): Int =
+                (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
+            fun u32(offset: Int): Int {
+                val b0 = bytes[offset].toInt() and 0xff
+                val b1 = bytes[offset + 1].toInt() and 0xff
+                val b2 = bytes[offset + 2].toInt() and 0xff
+                val b3 = bytes[offset + 3].toInt() and 0xff
+                return b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
+            }
+            fun i64(offset: Int): Long {
+                var value = 0L
+                for (i in 0 until 8) {
+                    value = value or ((bytes[offset + i].toLong() and 0xffL) shl (8 * i))
+                }
+                return value
+            }
+            val version = u16(4)
+            require(version == 1) { "unsupported pieces-bin version $version" }
+            val flags = u16(6)
+            val generation = i64(8)
+            val timestamp = i64(16)
+            val totalPieces = u32(24)
+            val maxBuckets = u32(28)
+            val pieceLength = i64(32)
+            val lastPieceLength = i64(40)
+            val idLen = u16(48)
+            val infoHashLen = u16(50)
+            val bucketCount = u16(52)
+            val playbackCount = u16(54)
+            val playheadCount = u16(56)
+            val detailStatesLen = u16(58)
+            val detailStart = u32(60)
+            val detailPlayhead = u32(64)
+            var offset = 72
+            fun take(len: Int): ByteArray {
+                require(offset + len <= bytes.size) { "truncated pieces-bin payload" }
+                val slice = bytes.copyOfRange(offset, offset + len)
+                offset += len
+                return slice
+            }
+            val id = String(take(idLen), Charsets.UTF_8)
+            val infoHash = if (infoHashLen == 0) null else String(take(infoHashLen), Charsets.UTF_8)
+            val buckets = ArrayList<PieceBucket>(bucketCount)
+            repeat(bucketCount) {
+                val start = u32(offset)
+                val end = u32(offset + 4)
+                val total = u32(offset + 8)
+                val selected = u32(offset + 12)
+                val verified = u32(offset + 16)
+                val receiving = u32(offset + 20)
+                val selectedVerified = u32(offset + 24)
+                val selectedReceiving = u32(offset + 28)
+                offset += 32
+                buckets.add(
+                    PieceBucket(
+                        start = start,
+                        end = end,
+                        total = total,
+                        selected = selected,
+                        verified = verified,
+                        receiving = receiving,
+                        selectedVerified = selectedVerified,
+                        selectedReceiving = selectedReceiving,
+                    ),
+                )
+            }
+            val playback = ArrayList<PlaybackPieceRange>(playbackCount)
+            repeat(playbackCount) {
+                val start = u32(offset)
+                val end = u32(offset + 4)
+                val priority = when (bytes[offset + 8].toInt().toChar()) {
+                    'U' -> "U"
+                    'N' -> "N"
+                    'R' -> "R"
+                    'L' -> "L"
+                    'B' -> "B"
+                    else -> error("invalid playback priority")
+                }
+                offset += 12
+                playback.add(PlaybackPieceRange(start, end, priority))
+            }
+            val playheads = ArrayList<Int>(playheadCount)
+            repeat(playheadCount) {
+                playheads.add(u32(offset))
+                offset += 4
+            }
+            val detail = if (detailStatesLen == 0) {
+                null
+            } else {
+                val states = String(take(detailStatesLen), Charsets.UTF_8)
+                PlaybackDetail(detailStart, states, detailPlayhead)
+            }
+            require(offset == bytes.size) { "pieces-bin length mismatch" }
+            return PieceTelemetry(
+                id = id,
+                infoHash = infoHash,
+                generation = generation,
+                timestamp = timestamp,
+                totalPieces = totalPieces,
+                pieceLength = pieceLength,
+                lastPieceLength = lastPieceLength,
+                maxBuckets = maxBuckets,
+                buckets = buckets,
+                ghostProMode = flags and 1 != 0,
+                playback = playback,
+                playheads = playheads,
+                playbackDetail = detail,
+            )
+        }
 
         fun parsePieces(json: JSONObject): PieceTelemetry {
             val buckets = ArrayList<PieceBucket>()

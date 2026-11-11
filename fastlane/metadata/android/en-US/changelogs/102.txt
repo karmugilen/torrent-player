@@ -1,0 +1,1 @@
+Phone-sideload build candidate. Cuts Kotlin↔Rust waist: raw .torrent bytes on add (no Base64 JSON), shared magnet/info-hash normalize in the engine for library keys, and a compact binary pieces snapshot for the heat-grid refresh (JSON /pieces kept as fallback).

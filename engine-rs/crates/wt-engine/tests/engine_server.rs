@@ -429,3 +429,59 @@ fn test_concurrent_adds_share_one_record_and_remove_readd_gets_new_identity() {
     assert_eq!(code, 200);
     assert_ne!(serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["id"], ids[0]);
 }
+
+#[test]
+fn test_add_bytes_raw_torrent_and_pieces_bin_round_trip() {
+    let eng = TestEngine::new();
+    let (torrent, _, hash) = support::build_single_file_torrent("tiny", 4096, 2);
+    let (status, raw) = eng.dispatch_bytes("POST", "/add-bytes?prepare=true", &torrent);
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&raw));
+    let added: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let id = added["id"].as_str().unwrap();
+    assert_eq!(added["infoHash"].as_str().unwrap(), hash);
+
+    let (json_code, json_body) = eng.dispatch("GET", &format!("/pieces/{id}?maxBuckets=4"), "");
+    assert_eq!(json_code, 200, "{}", String::from_utf8_lossy(&json_body));
+    let json_telemetry: engine::types::PieceTelemetryResponse =
+        serde_json::from_slice(&json_body).unwrap();
+
+    let (bin_code, bin_body) = eng.dispatch("GET", &format!("/pieces-bin/{id}?maxBuckets=4"), "");
+    assert_eq!(bin_code, 200, "pieces-bin failed: {}", String::from_utf8_lossy(&bin_body));
+    assert_eq!(&bin_body[..4], b"WTPC");
+    let decoded = engine::pieces_bin::decode_pieces_bin(&bin_body).expect("decode pieces-bin");
+    assert_eq!(decoded.id, json_telemetry.id);
+    assert_eq!(decoded.info_hash, json_telemetry.info_hash);
+    assert_eq!(decoded.total_pieces, json_telemetry.total_pieces);
+    assert_eq!(decoded.buckets, json_telemetry.buckets);
+    assert_eq!(decoded.max_buckets, json_telemetry.max_buckets);
+}
+
+#[test]
+fn test_normalize_magnet_base32_and_hex() {
+    let eng = TestEngine::new();
+    let hex = "51340689c960f0778a4387aef9b4b52fd08390cd";
+    let (code, raw) = eng.dispatch("GET", &format!("/normalize?id=magnet:?xt=urn:btih:{hex}"), "");
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+    let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(body["infoHash"], hex);
+    assert!(body["id"].as_str().unwrap().starts_with("magnet:?xt=urn:btih:"));
+
+    let base32 = "ZOCMZQIPFFW7OLLMIC5HUB6BPCSDEOQU";
+    let (code, raw) = eng.dispatch(
+        "POST",
+        "/normalize",
+        &serde_json::json!({"id": format!("magnet:?xt=urn:btih:{base32}")}).to_string(),
+    );
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+    let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let info_hash = body["infoHash"].as_str().unwrap();
+    assert_eq!(info_hash.len(), 40);
+    assert!(info_hash.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(body["id"].as_str().unwrap().contains(&format!("btih:{info_hash}")));
+
+    let (code, raw) = eng.dispatch("GET", &format!("/normalize?id={base32}"), "");
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+    let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(body["id"], info_hash);
+    assert_eq!(body["infoHash"], info_hash);
+}

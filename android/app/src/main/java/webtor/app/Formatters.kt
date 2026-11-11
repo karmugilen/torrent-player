@@ -232,11 +232,32 @@ fun previewUpdateBucket(progress: Double, complete: Boolean): Int =
 /**
  * The 40-character hex info hash of a magnet. The engine reports hashes in hex,
  * so a base32 magnet is converted to match library keys.
+ *
+ * Prefer [webtor.core.EngineClient.normalize] when the engine is ready; this
+ * local helper remains for offline/library-key checks before start.
  */
 fun infoHashFromMagnet(value: String): String? {
     val match = Regex("xt=urn:btih:([a-zA-Z0-9]+)", RegexOption.IGNORE_CASE).find(value) ?: return null
     val hash = match.groupValues[1].lowercase()
     return if (hash.length == 32) base32ToHex(hash) ?: hash else hash
+}
+
+/** Local fallback when [webtor.core.EngineClient.normalize] is unavailable. */
+fun normalizeTorrentIdLocal(value: String): Pair<String, String?> {
+    val trimmed = value.trim()
+    if (trimmed.startsWith("magnet:", ignoreCase = true)) {
+        val hash = infoHashFromMagnet(trimmed)
+        return trimmed to hash
+    }
+    val lower = trimmed.lowercase()
+    if (lower.length == 40 && lower.all { it in '0'..'9' || it in 'a'..'f' }) {
+        return lower to lower
+    }
+    if (lower.length == 32) {
+        val hex = base32ToHex(lower)
+        if (hex != null) return hex to hex
+    }
+    return trimmed to null
 }
 
 private fun base32ToHex(text: String): String? {

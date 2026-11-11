@@ -241,7 +241,7 @@ pub struct PieceBucket {
     pub selected_receiving: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackDetail {
     pub start: usize,
@@ -249,7 +249,7 @@ pub struct PlaybackDetail {
     pub playhead: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackPieceRange {
     pub start: usize,
@@ -257,7 +257,7 @@ pub struct PlaybackPieceRange {
     pub priority: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PieceTelemetryResponse {
     pub id: String,

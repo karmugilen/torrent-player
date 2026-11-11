@@ -9,6 +9,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+import webtor.core.EngineBytesResponse
 import webtor.core.EngineResponse
 import webtor.core.EngineTransport
 
@@ -73,11 +74,18 @@ class EngineHost(private val context: Context) : EngineTransport {
         withTimeoutOrNull(timeoutMillis) { changeVersion.first { it != afterVersion } } ?: afterVersion
 
     override fun request(method: String, path: String, body: String?): EngineResponse {
-        val payload = requestEngine(method, path, body.orEmpty().toByteArray(StandardCharsets.UTF_8)).toString(StandardCharsets.UTF_8)
-        val separator = payload.indexOf('\n')
-        if (separator <= 0) return EngineResponse(500, "{\"error\":\"invalid native engine response\"}")
-        val status = payload.substring(0, separator).toIntOrNull() ?: 500
-        return EngineResponse(status, payload.substring(separator + 1))
+        val response = requestRaw(method, path, body?.toByteArray(StandardCharsets.UTF_8))
+        return EngineResponse(response.statusCode, response.body.toString(StandardCharsets.UTF_8))
+    }
+
+    override fun requestRaw(method: String, path: String, body: ByteArray?): EngineBytesResponse {
+        val payload = requestEngine(method, path, body ?: ByteArray(0))
+        val separator = payload.indexOf('\n'.code.toByte())
+        if (separator <= 0) {
+            return EngineBytesResponse(500, "{\"error\":\"invalid native engine response\"}".toByteArray(StandardCharsets.UTF_8))
+        }
+        val status = payload.copyOfRange(0, separator).toString(StandardCharsets.UTF_8).toIntOrNull() ?: 500
+        return EngineBytesResponse(status, payload.copyOfRange(separator + 1, payload.size))
     }
 
     private external fun startEngine(downloadDir: ByteArray, maxPeers: Int): Int

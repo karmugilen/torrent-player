@@ -128,27 +128,36 @@ async fn handle_control(
             ));
         }
     };
-    let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
     let is_shutdown = method == Method::POST.as_str()
         && (path == "/shutdown" || path == "shutdown" || path.ends_with("/shutdown"));
+    let binary_response = path.contains("/pieces-bin/");
 
     // Control handlers may wait for magnet metadata or perform storage IO.
     // Keep runtime workers available to actually acquire that metadata.
     let worker = engine.clone();
-    let (status, resp) =
-        match tokio::task::spawn_blocking(move || worker.request(&method, &path, &body)).await {
-            Ok(response) => response,
-            Err(_) => {
-                return Ok(json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    br#"{"error":"control request failed"}"#,
-                ))
-            }
-        };
+    let body = body_bytes.to_vec();
+    let (status, resp) = match tokio::task::spawn_blocking(move || {
+        worker.request_bytes(&method, &path, &body)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return Ok(json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"error":"control request failed"}"#,
+            ))
+        }
+    };
+    let content_type = if binary_response && status == 200 {
+        "application/octet-stream"
+    } else {
+        "application/json"
+    };
     let response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .header(hyper::header::CONTENT_TYPE, content_type)
         .body(Full::new(Bytes::from(resp)))
         .unwrap_or_else(|_| {
             Response::builder()

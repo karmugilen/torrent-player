@@ -773,6 +773,10 @@ impl EngineServer {
     }
 
     pub fn dispatch_control(&self, method: &str, path: &str, body: &str) -> (u16, Vec<u8>) {
+        self.dispatch_control_bytes(method, path, body.as_bytes())
+    }
+
+    pub fn dispatch_control_bytes(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
         if self.shutting_down.load(Ordering::SeqCst) {
             return (
                 503,
@@ -787,6 +791,8 @@ impl EngineServer {
             (clean_path, "")
         };
         let parts: Vec<&str> = endpoint.split('/').collect();
+        let body_text = String::from_utf8_lossy(body);
+        let body_str = body_text.as_ref();
 
         let response = match (method, parts.as_slice()) {
             ("GET", ["stats"]) => self.handle_stats(),
@@ -795,28 +801,64 @@ impl EngineServer {
                 200,
                 serde_json::to_vec(&json!({"version": crate::version::app_version()})).unwrap(),
             ),
-            ("POST", ["add"]) => self.handle_add(body),
+            ("POST", ["add"]) => self.handle_add(body_str),
+            ("POST", ["add-bytes"]) => self.handle_add_bytes(query, body),
+            ("GET", ["normalize"]) => {
+                let id = url::form_urlencoded::parse(query.as_bytes())
+                    .find_map(|(k, v)| (k == "id").then(|| v.into_owned()));
+                match id {
+                    Some(id) => self.handle_normalize(&id),
+                    None => (
+                        400,
+                        serde_json::to_vec(&json!({"error":"missing id"})).unwrap(),
+                    ),
+                }
+            }
+            ("POST", ["normalize"]) => {
+                let id = match serde_json::from_slice::<serde_json::Value>(body) {
+                    Ok(v) => v
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            let trimmed = body_str.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                        }),
+                    Err(_) => {
+                        let trimmed = body_str.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                    }
+                };
+                match id {
+                    Some(id) => self.handle_normalize(&id),
+                    None => (
+                        400,
+                        serde_json::to_vec(&json!({"error":"missing id"})).unwrap(),
+                    ),
+                }
+            }
             ("GET", ["torrent", id]) => self.handle_get_torrent(id),
-            ("POST", ["play"]) => self.handle_play(body),
-            ("POST", ["file-only"]) => self.handle_file_only(body),
-            ("POST", ["focus"]) => self.handle_focus(body),
-            ("POST", ["configure"]) => self.handle_configure(body),
-            ("POST", ["select"]) => self.handle_select(body),
-            ("POST", ["pause"]) => self.handle_pause_resume(body, true),
-            ("POST", ["resume"]) => self.handle_pause_resume(body, false),
-            ("POST", ["remove"]) => self.handle_remove(body),
-            ("POST", ["forget-peers"]) => self.handle_forget_peers(body),
+            ("POST", ["play"]) => self.handle_play(body_str),
+            ("POST", ["file-only"]) => self.handle_file_only(body_str),
+            ("POST", ["focus"]) => self.handle_focus(body_str),
+            ("POST", ["configure"]) => self.handle_configure(body_str),
+            ("POST", ["select"]) => self.handle_select(body_str),
+            ("POST", ["pause"]) => self.handle_pause_resume(body_str, true),
+            ("POST", ["resume"]) => self.handle_pause_resume(body_str, false),
+            ("POST", ["remove"]) => self.handle_remove(body_str),
+            ("POST", ["forget-peers"]) => self.handle_forget_peers(body_str),
             ("GET", ["pieces", id]) => self.handle_pieces(id, query),
+            ("GET", ["pieces-bin", id]) => self.handle_pieces_bin(id, query),
             ("GET", ["preview-state", id]) => self.handle_preview_state(id, query),
             ("GET", ["connections", id]) => self.handle_connections(id),
             ("GET", ["metadata", id]) => self.handle_metadata(id),
             ("GET", ["settings"]) => self.handle_get_settings(),
-            ("POST", ["settings"]) => self.handle_post_settings(body),
-            ("POST", ["network"]) => self.handle_network_change(body),
+            ("POST", ["settings"]) => self.handle_post_settings(body_str),
+            ("POST", ["network"]) => self.handle_network_change(body_str),
             ("GET", ["bypass"]) => self.handle_get_bypass(),
-            ("POST", ["bypass"]) => self.handle_post_bypass(body),
+            ("POST", ["bypass"]) => self.handle_post_bypass(body_str),
             ("GET", ["cache"]) => self.handle_get_cache(),
-            ("POST", ["cache", "clear"]) => self.handle_clear_cache(body),
+            ("POST", ["cache", "clear"]) => self.handle_clear_cache(body_str),
             ("POST", ["shutdown"]) => {
                 self.close();
                 (
@@ -869,6 +911,89 @@ impl EngineServer {
         (200, serde_json::to_vec(&resp).unwrap())
     }
 
+    fn handle_add_bytes(&self, query: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        if body.is_empty() {
+            return (
+                400,
+                serde_json::to_vec(&json!({"error":"empty torrent bytes"})).unwrap(),
+            );
+        }
+        let prepare = url::form_urlencoded::parse(query.as_bytes()).any(|(k, v)| {
+            k == "prepare" && (v == "1" || v.eq_ignore_ascii_case("true"))
+        });
+        self.add_from_torrent_bytes(body, prepare)
+    }
+
+    fn handle_normalize(&self, raw: &str) -> (u16, Vec<u8>) {
+        let id = raw.trim();
+        if id.is_empty() {
+            return (
+                400,
+                serde_json::to_vec(&json!({"error":"missing id"})).unwrap(),
+            );
+        }
+        let result = if id.starts_with("magnet:") {
+            match wt_meta::parse_magnet(id) {
+                Ok(m) => {
+                    let info_hash = m
+                        .info_hash
+                        .as_ref()
+                        .map(|h| h.to_hex())
+                        .or_else(|| m.info_hash_v2.as_ref().map(|h| h.to_hex()));
+                    let canonical = wt_meta::magnet_uri(&m);
+                    Ok((canonical, info_hash))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        } else if let Some(hash) = wt_core::InfoHash::from_hex(id) {
+            let hex = hash.to_hex();
+            Ok((hex.clone(), Some(hex)))
+        } else if id.len() == 32 {
+            match wt_meta::parse_magnet(&format!("magnet:?xt=urn:btih:{id}")) {
+                Ok(m) => {
+                    let hex = m.info_hash.as_ref().map(|h| h.to_hex());
+                    match hex {
+                        Some(hex) => Ok((hex.clone(), Some(hex))),
+                        None => Err("missing infohash".into()),
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            Err("invalid torrent id".into())
+        };
+        match result {
+            Ok((canonical, info_hash)) => (
+                200,
+                serde_json::to_vec(&json!({"id": canonical, "infoHash": info_hash})).unwrap(),
+            ),
+            Err(e) => (400, serde_json::to_vec(&json!({"error": e})).unwrap()),
+        }
+    }
+
+    fn add_from_torrent_bytes(&self, bytes: &[u8], prepare: bool) -> (u16, Vec<u8>) {
+        let mi = match wt_meta::parse_metainfo(bytes) {
+            Ok(mi) => mi,
+            Err(e) => {
+                return (
+                    400,
+                    serde_json::to_vec(&json!({"error": e.to_string()})).unwrap(),
+                )
+            }
+        };
+        let mut spec = wt_core::TorrentSpec::default();
+        spec.info_hash = Some(wt_meta::info_hash_v1(&mi.info_bytes));
+        spec.info_bytes = Some(mi.info_bytes);
+        spec.trackers = mi.announce_list;
+        if spec.trackers.is_empty() && !mi.announce.is_empty() {
+            spec.trackers.push(vec![mi.announce]);
+        }
+        spec.web_seeds = mi.url_list;
+        spec.dht_nodes = mi.nodes;
+        spec.piece_layers = mi.piece_layers;
+        self.register_torrent_spec(spec, Vec::new(), Vec::new(), prepare, Some(bytes.to_vec()))
+    }
+
     fn handle_add(&self, body: &str) -> (u16, Vec<u8>) {
         let mut value: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -906,29 +1031,14 @@ impl EngineServer {
             }
         }
 
+        if let Some(ref bytes) = torrent_data_bytes {
+            return self.add_from_torrent_bytes(bytes, req.prepare);
+        }
+
         let mut spec = wt_core::TorrentSpec::default();
         let mut peers = Vec::new();
         let mut metadata_sources = Vec::new();
-        if let Some(ref bytes) = torrent_data_bytes {
-            let mi = match wt_meta::parse_metainfo(bytes) {
-                Ok(mi) => mi,
-                Err(e) => {
-                    return (
-                        400,
-                        serde_json::to_vec(&json!({"error": e.to_string()})).unwrap(),
-                    )
-                }
-            };
-            spec.info_hash = Some(wt_meta::info_hash_v1(&mi.info_bytes));
-            spec.info_bytes = Some(mi.info_bytes);
-            spec.trackers = mi.announce_list;
-            if spec.trackers.is_empty() && !mi.announce.is_empty() {
-                spec.trackers.push(vec![mi.announce]);
-            }
-            spec.web_seeds = mi.url_list;
-            spec.dht_nodes = mi.nodes;
-            spec.piece_layers = mi.piece_layers;
-        } else if req.torrent_id.starts_with("magnet:") {
+        if req.torrent_id.starts_with("magnet:") {
             let m = match wt_meta::parse_magnet(&req.torrent_id) {
                 Ok(m) => m,
                 Err(e) => {
@@ -965,11 +1075,27 @@ impl EngineServer {
                 );
             }
         }
+        self.register_torrent_spec(spec, peers, metadata_sources, req.prepare, None)
+    }
+
+    fn register_torrent_spec(
+        &self,
+        mut spec: wt_core::TorrentSpec,
+        peers: Vec<std::net::SocketAddr>,
+        metadata_sources: Vec<String>,
+        prepare: bool,
+        torrent_bytes: Option<Vec<u8>>,
+    ) -> (u16, Vec<u8>) {
         if let Some(hash) = spec.info_hash {
             if let Some(existing) = self.records_by_hash.read().get(&hash.to_hex()) {
-                return (200, serde_json::to_vec(&AddResponse {
-                    id: existing.read().id.clone(), info_hash: Some(hash.to_hex()),
-                }).unwrap());
+                return (
+                    200,
+                    serde_json::to_vec(&AddResponse {
+                        id: existing.read().id.clone(),
+                        info_hash: Some(hash.to_hex()),
+                    })
+                    .unwrap(),
+                );
             }
         }
         spec.trackers = crate::trackers::clean_supplied_trackers(&spec.trackers);
@@ -1038,7 +1164,7 @@ impl EngineServer {
             info_hash: info_hash.clone(),
             name: info.as_ref().map(|i| i.name.clone()),
             magnet_uri: Some(magnet.to_string()),
-            prepared: req.prepare,
+            prepared: prepare,
             configured: false,
             direct_play: false,
             selected: Vec::new(),
@@ -1056,7 +1182,7 @@ impl EngineServer {
             supplemental_trackers: 0,
             seeding: false,
             seed_base: self.seeding.get_account(&info_hash),
-            torrent_bytes: torrent_data_bytes,
+            torrent_bytes,
             total_pieces,
             piece_length,
             last_piece_length,
@@ -1082,9 +1208,14 @@ impl EngineServer {
             let mut records = self.records.write();
             let mut by_hash = self.records_by_hash.write();
             if let Some(existing) = by_hash.get(&info_hash) {
-                return (200, serde_json::to_vec(&AddResponse {
-                    id: existing.read().id.clone(), info_hash: Some(info_hash),
-                }).unwrap());
+                return (
+                    200,
+                    serde_json::to_vec(&AddResponse {
+                        id: existing.read().id.clone(),
+                        info_hash: Some(info_hash),
+                    })
+                    .unwrap(),
+                );
             }
             records.insert(id.clone(), rec.clone());
             by_hash.insert(info_hash.clone(), rec.clone());
@@ -1715,6 +1846,10 @@ impl EngineServer {
         self.piece_telemetry(id, query)
     }
 
+    fn handle_pieces_bin(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
+        self.piece_telemetry_bin(id, query)
+    }
+
     fn handle_preview_state(&self, id: &str, query: &str) -> (u16, Vec<u8>) {
         let records = self.records.read();
         let Some(r) = records.get(id) else {
@@ -2217,6 +2352,11 @@ impl EngineServer {
     /// and `body` (JSON string or empty), and returns `(http_status_code, response_body_bytes)`.
     pub fn request(&self, method: &str, path: &str, body: &str) -> (u16, Vec<u8>) {
         self.dispatch_control(method, path, body)
+    }
+
+    /// Same as [`Self::request`] but keeps a raw byte body (for `POST /add-bytes`).
+    pub fn request_bytes(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        self.dispatch_control_bytes(method, path, body)
     }
 
     pub fn open_playback(&self, id: &str, index: usize) -> std::io::Result<Arc<PlaybackReader>> {

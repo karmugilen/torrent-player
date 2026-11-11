@@ -115,8 +115,7 @@ impl EngineHostApi for AndroidEngineHost {
         let Some(server) = self.current_server() else {
             return b"503\n{\"error\":\"engine is starting\"}".to_vec();
         };
-        let body = String::from_utf8_lossy(body);
-        let (status, response) = server.dispatch_control(method, path, body.as_ref());
+        let (status, response) = server.dispatch_control_bytes(method, path, body);
         let mut payload = format!("{status}\n").into_bytes();
         payload.extend_from_slice(&response);
         payload

@@ -25,6 +25,10 @@
 - `wt-core` unit test `choking::seed_policy::tests::tit_for_tat_headroom` fails on unchanged v2.4.0 code (`seed_policy.rs:82`).
 - Open: which Seek method the user had on when seeking felt slow; whether they pressed Clear, which now really deletes saved peers and DHT contacts.
 
+## Waist / perf 2.4.2 (2026-11-11)
+- Phone-sideload candidate (versionCode 102). Control waist cuts: `POST /add-bytes` takes raw `.torrent` bytes (compat `POST /add` + base64 `torrentData` kept); `GET|POST /normalize` canonicalizes magnets/base32/hex via `wt_meta::parse_magnet`; `GET /pieces-bin/{id}` returns little-endian `WTPC` v1 buckets (Kotlin prefers it, falls back to JSON `/pieces`).
+- App: `EngineClient.addBytes` / `normalize` / binary `pieces` parse; `LibrarySession` and `TorrentFetch` file/link adds use raw bytes; saved-metadata restore decodes Base64 then `addBytes`.
+
 ## Release 2.4.1 (2026-11-11)
 - Released on GitHub: https://github.com/karmugilen/torrent-player/releases/tag/v2.4.1, tag `v2.4.1` on commit `58cc5da` (branch `karmugilen/rust-engine`). APK `artifacts/torrent-player-2.4.1.apk`, sha256 `da27dbae3e253be2fbb295138dc33b795ec676dcdc27fba8f260739cd1496716`, built by `fdroid-release.sh` in F-Droid's image, release key, F-Droid `verify_apks` OK. Never replace it; fix problems in 2.4.2.
 - F-Droid: same Rust build steps as 2.4.0 (`rustup` 1.99.1 + `aarch64-linux-android`); `UpdateCheckMode: Tags` should pick up `v2.4.1` without a recipe MR. Reference copy updated in `webtor.app.yml`.

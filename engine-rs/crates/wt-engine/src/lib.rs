@@ -11,6 +11,7 @@ pub mod ctl_http;
 pub mod jni;
 pub mod live_preview;
 pub mod network;
+pub mod pieces_bin;
 pub mod playback;
 pub mod playback_core;
 pub mod preview;

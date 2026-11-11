@@ -1,5 +1,8 @@
 package webtor.core
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.text.Charsets
 import org.json.JSONObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -28,15 +31,24 @@ private data class RecordedRequest(
 
 private class FakeEngineTransport : EngineTransport {
     private val responses = ArrayDeque<TestResponse>()
+    private val rawResponses = ArrayDeque<EngineBytesResponse>()
     private val requests = ArrayDeque<RecordedRequest>()
 
     fun enqueue(response: TestResponse) { responses.addLast(response) }
+    fun enqueueRaw(response: EngineBytesResponse) { rawResponses.addLast(response) }
     fun takeRequest(): RecordedRequest = requests.removeFirst()
 
     override fun request(method: String, path: String, body: String?): EngineResponse {
         requests.addLast(RecordedRequest(path, RecordedBody(body.orEmpty())))
         val response = responses.removeFirst()
         return EngineResponse(response.statusCode, response.body)
+    }
+
+    override fun requestRaw(method: String, path: String, body: ByteArray?): EngineBytesResponse {
+        requests.addLast(RecordedRequest(path, RecordedBody(body?.toString(Charsets.UTF_8).orEmpty())))
+        if (rawResponses.isNotEmpty()) return rawResponses.removeFirst()
+        // Unit tests that only enqueue JSON keep using /pieces fallback.
+        return EngineBytesResponse(404, ByteArray(0))
     }
 }
 
@@ -575,7 +587,89 @@ class EngineClientTest {
         assertEquals(0, second.receiving)
         assertEquals(1, second.selectedVerified)
         assertEquals(0, second.selectedReceiving)
+        assertEquals("/pieces-bin/abc?maxBuckets=256", transport.takeRequest().path)
         assertEquals("/pieces/abc?maxBuckets=256", transport.takeRequest().path)
+    }
+
+    @Test
+    fun piecesPrefersBinarySnapshot() {
+        val encoded = encodePiecesBinForTest(
+            id = "abc",
+            infoHash = "dead",
+            generation = 3,
+            timestamp = 1_700_000_000_000L,
+            totalPieces = 4,
+            pieceLength = 16_384,
+            lastPieceLength = 1024,
+            maxBuckets = 256,
+            ghostPro = true,
+            buckets = listOf(
+                PieceBucket(0, 1, 2, 2, 1, 1, 1, 1),
+                PieceBucket(2, 3, 2, 1, 2, 0, 1, 0),
+            ),
+            playback = listOf(PlaybackPieceRange(0, 0, "U")),
+            playheads = listOf(0),
+            detail = PlaybackDetail(0, "vr", 0),
+        )
+        transport.enqueueRaw(EngineBytesResponse(200, encoded))
+        val t = client.pieces("abc", 256)
+        assertEquals("/pieces-bin/abc?maxBuckets=256", transport.takeRequest().path)
+        assertEquals("abc", t.id)
+        assertEquals("dead", t.infoHash)
+        assertEquals(3L, t.generation)
+        assertEquals(2, t.buckets.size)
+        assertEquals(listOf(PlaybackPieceRange(0, 0, "U")), t.playback)
+        assertEquals(listOf(0), t.playheads)
+        assertEquals(PlaybackDetail(0, "vr", 0), t.playbackDetail)
+        assertTrue(t.ghostProMode)
+    }
+
+    @Test
+    fun addBytesPostsRawTorrentBody() {
+        transport.enqueueRaw(EngineBytesResponse(200, """{"id":"abc","infoHash":"dead"}""".toByteArray(Charsets.UTF_8)))
+        val bytes = "d8:announce0:4:infod4:name1:aee".toByteArray(Charsets.UTF_8)
+        val added = client.addBytes(bytes, prepare = true)
+        assertEquals("abc", added.id)
+        assertEquals("dead", added.infoHash)
+        val request = transport.takeRequest()
+        assertEquals("/add-bytes?prepare=true", request.path)
+        assertEquals(String(bytes, Charsets.UTF_8), request.body.readUtf8())
+    }
+
+    @Test
+    fun normalizeHitsEngineHelper() {
+        transport.enqueue(TestResponse().setBody("""{"id":"magnet:?xt=urn:btih:deadbeef","infoHash":"deadbeef"}"""))
+        val normalized = client.normalize("magnet:?xt=urn:btih:DEADBEEF")
+        assertEquals("/normalize?id=magnet%3A%3Fxt%3Durn%3Abtih%3ADEADBEEF", transport.takeRequest().path)
+        assertEquals("magnet:?xt=urn:btih:deadbeef", normalized.id)
+        assertEquals("deadbeef", normalized.infoHash)
+    }
+
+    @Test
+    fun parsePiecesBinRoundTripMatchesEncoder() {
+        val encoded = encodePiecesBinForTest(
+            id = "x",
+            infoHash = null,
+            generation = 1,
+            timestamp = 2,
+            totalPieces = 0,
+            pieceLength = 0,
+            lastPieceLength = 0,
+            maxBuckets = 8,
+            ghostPro = false,
+            buckets = emptyList(),
+            playback = emptyList(),
+            playheads = emptyList(),
+            detail = null,
+        )
+        val parsed = EngineClient.parsePiecesBin(encoded)
+        assertEquals("x", parsed.id)
+        assertNull(parsed.infoHash)
+        assertEquals(1L, parsed.generation)
+        assertEquals(2L, parsed.timestamp)
+        assertEquals(8, parsed.maxBuckets)
+        assertTrue(parsed.buckets.isEmpty())
+        assertNull(parsed.playbackDetail)
     }
 
     @Test
@@ -673,4 +767,68 @@ class EngineClientTest {
         transport.enqueue(TestResponse().setBody("""{"maxPeers":55}"""))
         assertNull(client.seekStats())
     }
+}
+
+private fun encodePiecesBinForTest(
+    id: String,
+    infoHash: String?,
+    generation: Long,
+    timestamp: Long,
+    totalPieces: Int,
+    pieceLength: Long,
+    lastPieceLength: Long,
+    maxBuckets: Int,
+    ghostPro: Boolean,
+    buckets: List<PieceBucket>,
+    playback: List<PlaybackPieceRange>,
+    playheads: List<Int>,
+    detail: PlaybackDetail?,
+): ByteArray {
+    val idBytes = id.toByteArray(Charsets.UTF_8)
+    val hashBytes = infoHash?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+    val detailStates = detail?.states?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+    val buffer = ByteBuffer.allocate(
+        72 + idBytes.size + hashBytes.size + buckets.size * 32 + playback.size * 12 + playheads.size * 4 + detailStates.size,
+    ).order(ByteOrder.LITTLE_ENDIAN)
+    buffer.put("WTPC".toByteArray(Charsets.US_ASCII))
+    buffer.putShort(1)
+    buffer.putShort(if (ghostPro) 1 else 0)
+    buffer.putLong(generation)
+    buffer.putLong(timestamp)
+    buffer.putInt(totalPieces)
+    buffer.putInt(maxBuckets)
+    buffer.putLong(pieceLength)
+    buffer.putLong(lastPieceLength)
+    buffer.putShort(idBytes.size.toShort())
+    buffer.putShort(hashBytes.size.toShort())
+    buffer.putShort(buckets.size.toShort())
+    buffer.putShort(playback.size.toShort())
+    buffer.putShort(playheads.size.toShort())
+    buffer.putShort(detailStates.size.toShort())
+    buffer.putInt(detail?.start ?: 0)
+    buffer.putInt(detail?.playhead ?: 0)
+    buffer.putInt(0)
+    buffer.put(idBytes)
+    buffer.put(hashBytes)
+    for (bucket in buckets) {
+        buffer.putInt(bucket.start)
+        buffer.putInt(bucket.end)
+        buffer.putInt(bucket.total)
+        buffer.putInt(bucket.selected)
+        buffer.putInt(bucket.verified)
+        buffer.putInt(bucket.receiving)
+        buffer.putInt(bucket.selectedVerified)
+        buffer.putInt(bucket.selectedReceiving)
+    }
+    for (range in playback) {
+        buffer.putInt(range.start)
+        buffer.putInt(range.end)
+        buffer.put(range.priority[0].code.toByte())
+        buffer.put(0)
+        buffer.put(0)
+        buffer.put(0)
+    }
+    for (head in playheads) buffer.putInt(head)
+    buffer.put(detailStates)
+    return buffer.array()
 }

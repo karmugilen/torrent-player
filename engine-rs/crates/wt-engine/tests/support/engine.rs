@@ -44,6 +44,10 @@ impl TestEngine {
         self.server.dispatch_control(method, path, body)
     }
 
+    pub fn dispatch_bytes(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        self.server.dispatch_control_bytes(method, path, body)
+    }
+
     pub fn dispatch_str(&self, method: &str, path: &str, body: &str) -> (u16, String) {
         let (code, raw) = self.dispatch(method, path, body);
         (code, String::from_utf8_lossy(&raw).into_owned())

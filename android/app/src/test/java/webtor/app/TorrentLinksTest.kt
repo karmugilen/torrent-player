@@ -28,6 +28,18 @@ class TorrentLinksTest {
         )
     }
 
+    @Test fun normalizeTorrentIdLocalMatchesLibraryHexKeys() {
+        val hex = "51340689c960f0778a4387aef9b4b52fd08390cd"
+        assertEquals(hex to hex, normalizeTorrentIdLocal(hex.uppercase()))
+        val base32 = "ZOCMZQIPFFW7OLLMIC5HUB6BPCSDEOQU"
+        val normalized = normalizeTorrentIdLocal(base32)
+        assertEquals(40, normalized.first.length)
+        assertEquals(normalized.first, normalized.second)
+        val magnet = normalizeTorrentIdLocal("magnet:?xt=urn:btih:$base32")
+        assertEquals("magnet:?xt=urn:btih:$base32", magnet.first)
+        assertEquals(normalized.second, magnet.second)
+    }
+
     @Test fun keyboardHidesOnlyAfterACompleteLinkIsPasted() {
         val magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
         assertTrue(shouldHideKeyboardAfterPaste("", magnet))

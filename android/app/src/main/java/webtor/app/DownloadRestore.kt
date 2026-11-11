@@ -8,11 +8,15 @@ fun shouldRestoreAtStartup(entry: DownloadEntry): Boolean =
         (!entry.metadataReady || entry.files.any { it.uri != null })
 
 /** Shared by startup, manual resume and retry; prepare keeps discovery alive without destinations. */
-fun EngineClient.addSavedDownload(entry: DownloadEntry) = add(
-    entry.source.ifBlank { entry.key },
-    prepare = true,
-    torrentData = entry.metadata.takeIf { it.isNotBlank() },
-)
+fun EngineClient.addSavedDownload(entry: DownloadEntry): webtor.core.AddResult {
+    val metadata = entry.metadata.takeIf { it.isNotBlank() }
+    if (metadata != null) {
+        val bytes = decodeTorrentData(metadata)
+        if (bytes != null) return addBytes(bytes, prepare = true)
+        return add(entry.source.ifBlank { entry.key }, prepare = true, torrentData = metadata)
+    }
+    return add(entry.source.ifBlank { entry.key }, prepare = true)
+}
 
 fun restoredPendingDiscovery(entry: DownloadEntry, id: String, status: TorrentStatus?, startPaused: Boolean) =
     entry.copy(

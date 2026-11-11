@@ -24,8 +24,11 @@ pub trait EngineHostApi: Send + Sync + 'static {
     /// Go: `Java_webtor_app_EngineHost_requestEngine`.
     ///
     /// Returns a byte payload framed as `"{status}\\n{body}"` where `status` is
-    /// a decimal HTTP status and `body` is the raw response bytes (usually
-    /// JSON). Kotlin splits on the first `\\n` (`EngineHost.request`).
+    /// a decimal HTTP status and `body` is the raw response bytes (JSON for most
+    /// routes; binary for `GET /pieces-bin/{id}`). Body bytes are passed through
+    /// unchanged so `POST /add-bytes` can carry raw `.torrent` metainfo.
+    /// Kotlin splits on the first `\\n` (`EngineHost.request` /
+    /// `EngineHost.requestRaw`).
     ///
     /// When the engine is not yet started, Go returns
     /// `b"503\\n{\"error\":\"engine is starting\"}"`.

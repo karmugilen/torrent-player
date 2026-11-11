@@ -27,7 +27,12 @@ internal fun isMagnetLink(value: String): Boolean = value.startsWith("magnet:", 
 internal fun looksLikeTorrentFile(bytes: ByteArray): Boolean =
     bytes.size >= 20 && bytes[0] == 'd'.code.toByte() && bytes.any { it == ':'.code.toByte() }
 
+/** Kept for stored library metadata that still arrives as Base64 from `/metadata`. */
 internal fun encodeTorrentData(bytes: ByteArray): String = Base64.getEncoder().encodeToString(bytes)
+
+internal fun decodeTorrentData(encoded: String): ByteArray? = runCatching {
+    Base64.getDecoder().decode(encoded)
+}.getOrNull()
 
 /** Finds the magnet or torrent link in text shared from another app, which may carry a title too. */
 internal fun extractTorrentLink(text: String?): String? {
