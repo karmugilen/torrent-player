@@ -60,39 +60,45 @@
 
 Torrent Player (**Mine**) vs [LibreTorrent](https://github.com/proninyaroslav/libretorrent), [Transmission for Android](https://github.com/AndreyPavlenko/transmissionbtc), and [Transdroid](https://github.com/erickok/transdroid).
 
-Yes / No only. Transdroid has no local swarm (it controls a PC/NAS client), so many rows are **No** there.
+**Yes / No only**, checked against each project’s README plus this repo’s engine/app code (2026-11-12).
+
+Notes:
+- **Transdroid** has no BitTorrent engine on the phone (remote control only). Feature rows that the *app* can do through a remote client are Yes; protocol rows are No because the phone never speaks BitTorrent itself.
+- **Transmission** is on Google Play / IzzyOnDroid, not the main F-Droid repo → F-Droid **No**.
+- **Seek-first** means the swarm fetches the new playhead first and can move late blocks to faster peers — not the same as sequential streaming.
 
 ### Features
 
 | Feature | Mine | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
 | Local swarm on the phone | Yes | Yes | Yes | No |
-| Magnets | Yes | Yes | Yes | No |
-| `.torrent` files | Yes | Yes | Yes | No |
-| Selective file download | Yes | Yes | Yes | No |
-| Stream while downloading | Yes | Yes | Yes | No |
+| Magnets | Yes | Yes | Yes | Yes |
+| `.torrent` files | Yes | Yes | Yes | Yes |
+| Selective file download | Yes | Yes | Yes | Yes |
+| Stream while downloading to a player | Yes | Yes | Yes | No |
 | Seek-first for external players | Yes | No | No | No |
 | Direct Play (RAM + small disk cache) | Yes | No | No | No |
-| Continue watching | Yes | No | No | No |
-| Play next + prefetch | Yes | No | No | No |
+| Continue watching (saved positions) | Yes | No | No | No |
+| Play next + prefetch next episode | Yes | No | No | No |
 | Episode playlist + selected subtitles | Yes | No | No | No |
 | Offline peer world map | Yes | No | No | No |
-| Piece heat / swarm details | Yes | No | No | No |
-| Seeding limits | Yes | Yes | Yes | No |
+| Piece heat / swarm details UI | Yes | No | No | No |
+| Seeding limits (ratio / time / speed) | Yes | Yes | Yes | Yes |
 | Create torrents | No | Yes | No | No |
 | RSS / auto-download | No | Yes | No | Yes |
 | Download scheduling | No | Yes | No | No |
 | IP filtering | No | Yes | No | No |
 | Tracker / peer proxy | No | Yes | Yes | No |
-| Android TV | No | Yes | No | No |
-| Cast / DLNA / UPnP to TV | No | No | Yes | No |
+| Android TV / leanback | No | Yes | No | No |
+| Cast / DLNA / UPnP media server | No | No | Yes | No |
 | 35+ UI languages | No | Yes | No | Yes |
 | Remote-control PC/NAS client | No | No | No | Yes |
+| BitTorrent 2.0 | No | Yes | No | No |
 | Native Rust engine | Yes | No | No | No |
-| F-Droid | Yes | Yes | No | Yes |
+| F-Droid (f-droid.org) | Yes | Yes | No | Yes |
 | No ads | Yes | Yes | Yes | Yes |
 | No telemetry | Yes | Yes | Yes | Yes |
-| GitHub and F-Droid same signing key | Yes | No | No | No |
+| GitHub APK and F-Droid same signing key | Yes | No | No | No |
 
 ### Protocols (find peers + move data)
 
@@ -108,7 +114,7 @@ Yes / No only. Transdroid has no local swarm (it controls a PC/NAS client), so m
 | TCP | Yes | Yes | Yes | No |
 | uTP (µTP) | Yes | Yes | Yes | No |
 | WebRTC | Yes | Yes | No | No |
-| WebSeed (HTTP(S) piece URLs) | Yes | Yes | No | No |
+| WebSeed (HTTP(S) `url-list`) | Yes | Yes | Yes | No |
 | Encryption (MSE/PE) | Yes | Yes | Yes | No |
 | LTEP extension protocol | Yes | Yes | Yes | No |
 | Fast extension | Yes | Yes | Yes | No |
