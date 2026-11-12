@@ -25,7 +25,7 @@
   <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2.png" width="19%" alt="Add a magnet and choose files" />
   <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3.png" width="19%" alt="Live swarm world map and pieces" />
   <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4.png" width="19%" alt="Connected peers by protocol" />
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="19%" alt="Experimental playback settings" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="19%" alt="Settings" />
 </p>
 <p align="center">
   <sub>Library and previews · Add a torrent · Swarm map and pieces · Peers · Settings<br>
@@ -53,6 +53,54 @@
 - **Cached public trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled.
 - **Full swarm connectivity**: Seeds and peers via DHT, UDP trackers, and WebTorrent WebSocket trackers; data over TCP, native uTP, and WebRTC data channels.
 - **Live connection maps**: Download details offers a world map of approximate peer countries and an expandable device/protocol/peer diagram. Country lookup uses a bundled offline DB-IP database; unknown and local addresses stay unlocated. Maps refresh once per second while details is open; pause clears peer connections.
+
+---
+
+## Compared with other Android torrent apps
+
+Torrent Player is a **streamer/player that also downloads**. Most FOSS Android clients are **download managers that can stream**. The table below is a practical feature map against common open alternatives (not a ranking).
+
+> [!TIP]
+> **What this app supports that the others typically do not**
+>
+> | Unique / rare here | Why it matters |
+> | --- | --- |
+> | **Direct Play (bounded RAM)** | Watch with only a small verified startup cache on disk; the rest stays in RAM |
+> | **Seek-first for external players** | Skip ahead and the swarm fetches that spot first; late blocks move to faster peers; MP4/MKV keyframe hints |
+> | **Offline peer world map** | Approximate peer countries from a bundled DB-IP Lite DB — no online geo lookup |
+> | **Play next + prefetch** | Next selected episode starts with its beginning already requested |
+> | **Native Rust engine on phone** | One FOSS stack for TCP, uTP, WebRTC/WebTorrent, DHT, and PEX aimed at playback |
+> | **GitHub ↔ F-Droid same signing key** | Sideload and F-Droid update each other in place |
+
+### Feature comparison
+
+| Capability | **Torrent Player** | [LibreTorrent](https://github.com/proninyaroslav/libretorrent) | [Transmission (Android)](https://github.com/AndreyPavlenko/transmissionbtc) | [Transdroid](https://github.com/erickok/transdroid) |
+| --- | :---: | :---: | :---: | :---: |
+| Runs a local swarm on the phone | Yes | Yes | Yes | No (remote control only) |
+| Magnets / `.torrent` files | Yes | Yes | Yes | Via remote client |
+| Selective file download | Yes | Yes | Yes | Via remote client |
+| Stream while downloading to VLC / MPV / etc. | Yes | Sequential | Sequential + UPnP | Via remote client |
+| **Seek-first / steal late blocks for players** | **Yes** | No | No | — |
+| **Direct Play (RAM + small disk cache)** | **Yes** | No | No | — |
+| Continue watching + play next | Yes | Limited | Limited | — |
+| Episode playlist + selected subtitles | Yes | No | M3U / UPnP | — |
+| **Offline peer country map** | **Yes** | No | No | — |
+| Piece heat / swarm details | Yes | Basic | Basic | Client UI |
+| WebRTC / WebTorrent peers | Yes | Yes | No | — |
+| DHT · PEX · uTP | Yes | Yes | Yes | Via remote client |
+| Seeding limits (ratio / time / Wi‑Fi / pause while playing) | Yes | Yes (full client) | Yes | Via remote client |
+| Create torrents | No | Yes | No | — |
+| RSS / auto-download | No | Yes | No | Full version |
+| Scheduling | No | Yes | No | — |
+| IP filter / tracker·peer proxy | No | Yes | Proxy | Via remote client |
+| Android TV / leanback | No | Yes | TV-box friendly | — |
+| Cast / DLNA / LAN media server | No | No | **Yes (UPnP + M3U)** | — |
+| Many UI languages | Limited | **35+** | Limited | Yes |
+| F-Droid | Yes | Yes | Varies | Yes |
+| No ads / no telemetry | Yes | Yes | Yes | Yes |
+| Engine | Native **Rust** | libtorrent4j | Transmission | None on device |
+
+**How to read the table:** LibreTorrent wins as a full download manager (RSS, create torrents, TV, filters). Transmission (Android) wins if you want the phone to feed a TV over the LAN. Transdroid wins if the swarm already runs on a PC/NAS. Torrent Player wins when you care about **watching on the phone with fast seeks, Direct Play, and swarm visibility**, without building a desktop client stack.
 
 ---
 
