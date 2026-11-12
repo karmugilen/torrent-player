@@ -62,6 +62,8 @@ Torrent Player (**Mine**) vs [LibreTorrent](https://github.com/proninyaroslav/li
 
 Yes / No only. Transdroid has no local swarm (it controls a PC/NAS client), so many rows are **No** there.
 
+### Features
+
 | Feature | Mine | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
 | Local swarm on the phone | Yes | Yes | Yes | No |
@@ -76,18 +78,6 @@ Yes / No only. Transdroid has no local swarm (it controls a PC/NAS client), so m
 | Episode playlist + selected subtitles | Yes | No | No | No |
 | Offline peer world map | Yes | No | No | No |
 | Piece heat / swarm details | Yes | No | No | No |
-| HTTP(S) trackers | Yes | Yes | Yes | No |
-| UDP trackers | Yes | Yes | Yes | No |
-| WebSocket trackers | Yes | Yes | No | No |
-| DHT | Yes | Yes | Yes | No |
-| PEX | Yes | Yes | Yes | No |
-| LSD (LAN peers) | Yes | Yes | Yes | No |
-| Public tracker list cache | Yes | No | No | No |
-| TCP peer data | Yes | Yes | Yes | No |
-| uTP (µTP) peer data | Yes | Yes | Yes | No |
-| WebRTC peer data | Yes | Yes | No | No |
-| WebSeed (HTTP(S) piece URLs) | Yes | Yes | No | No |
-| Hole punching (BEP 55) | No | Yes | No | No |
 | Seeding limits | Yes | Yes | Yes | No |
 | Create torrents | No | Yes | No | No |
 | RSS / auto-download | No | Yes | No | Yes |
@@ -103,6 +93,27 @@ Yes / No only. Transdroid has no local swarm (it controls a PC/NAS client), so m
 | No ads | Yes | Yes | Yes | Yes |
 | No telemetry | Yes | Yes | Yes | Yes |
 | GitHub and F-Droid same signing key | Yes | No | No | No |
+
+### Protocols (find peers + move data)
+
+| Protocol | Mine | LibreTorrent | Transmission | Transdroid |
+| --- | :---: | :---: | :---: | :---: |
+| HTTP(S) trackers | Yes | Yes | Yes | No |
+| UDP trackers | Yes | Yes | Yes | No |
+| WebSocket trackers (WebTorrent) | Yes | Yes | No | No |
+| DHT | Yes | Yes | Yes | No |
+| PEX (peer exchange) | Yes | Yes | Yes | No |
+| LSD (LAN / same Wi‑Fi) | Yes | Yes | Yes | No |
+| Public tracker list cache | Yes | No | No | No |
+| TCP | Yes | Yes | Yes | No |
+| uTP (µTP) | Yes | Yes | Yes | No |
+| WebRTC | Yes | Yes | No | No |
+| WebSeed (HTTP(S) piece URLs) | Yes | Yes | No | No |
+| Encryption (MSE/PE) | Yes | Yes | Yes | No |
+| LTEP extension protocol | Yes | Yes | Yes | No |
+| Fast extension | Yes | Yes | Yes | No |
+| UPnP / NAT-PMP port mapping | Yes | Yes | Yes | No |
+| Hole punching (BEP 55) | No | Yes | No | No |
 
 ## Installation
 
