@@ -51,7 +51,7 @@
   - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's one-second sampling clock.
 - **Material You UI**: Wallpaper-based colours on Android 12+, light/dark appearance, and four themes (Aero, Antiquity, Retro, Wada). Settings are grouped into Downloads, Playback, Network, Seeding, Battery and memory, Appearance, Data, and About. One Clear action covers engine caches.
 - **Cached public trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled.
-- **Full swarm connectivity**: Seeds and peers via DHT, UDP trackers, and WebTorrent WebSocket trackers; data over TCP, native uTP, and WebRTC data channels.
+- **Full swarm connectivity**: Finds peers via DHT, PEX, LSD, HTTP(S)/UDP trackers, and WebTorrent WebSocket trackers; moves data over TCP, native uTP, and WebRTC data channels (plus HTTP(S) web seeds when listed).
 - **Live connection maps**: Download details offers a world map of approximate peer countries and an expandable device/protocol/peer diagram. Country lookup uses a bundled offline DB-IP database; unknown and local addresses stay unlocated. Maps refresh once per second while details is open; pause clears peer connections.
 
 ---
@@ -72,6 +72,27 @@ Torrent Player is a **streamer/player that also downloads**. Most FOSS Android c
 > | **Native Rust engine on phone** | One FOSS stack for TCP, uTP, WebRTC/WebTorrent, DHT, and PEX aimed at playback |
 > | **GitHub ↔ F-Droid same signing key** | Sideload and F-Droid update each other in place |
 
+### Protocols — finding peers and moving data
+
+Two layers matter: **discovery** (how the app learns peer addresses) and **transport** (how bytes move once connected). More working paths means more peers can join the swarm, including browser WebTorrent peers over WebRTC.
+
+| Layer | Protocol / mechanism | **Torrent Player** | What it does |
+| --- | --- | :---: | --- |
+| Discovery | **HTTP(S) trackers** | Yes | Classic announce; gets peer lists from torrent/magnet trackers |
+| Discovery | **UDP trackers** (BEP 15) | Yes | Same role over UDP; often faster on mobile |
+| Discovery | **WebSocket trackers** | Yes | WebTorrent-style signaling so browser peers can meet you |
+| Discovery | **DHT** (BEP 5) | Yes | Finds peers with no tracker; announces the info hash to the DHT |
+| Discovery | **PEX** (peer exchange) | Yes | Connected peers share other peer addresses |
+| Discovery | **LSD** (local service discovery) | Yes | Multicast find peers on the same LAN/Wi‑Fi |
+| Discovery | **Cached public tracker list** | Yes | Daily refresh of a public best-trackers list; last good cache works offline; never added to private torrents |
+| Discovery | Hole punching (BEP 55) | Flag only | Not fully implemented yet |
+| Transport | **TCP** | Yes | Default BitTorrent data path |
+| Transport | **uTP** (BEP 29, µTP) | Yes | UDP-based peer data; shares one UDP socket with DHT/trackers |
+| Transport | **WebRTC data channels** | Yes | Talks to WebTorrent / browser peers; uses public STUN for NAT |
+| Transport | WebSeed (HTTP(S) URL list) | Yes | Fetches pieces from HTTP(S) web seeds when the torrent lists them |
+
+**In short:** peers can arrive from trackers, the DHT, PEX, LSD, or WebTorrent signaling; data can flow over **TCP**, **uTP**, or **WebRTC**. Details → Peers shows which transport each connection uses.
+
 ### Feature comparison
 
 | Capability | **Torrent Player** | [LibreTorrent](https://github.com/proninyaroslav/libretorrent) | [Transmission (Android)](https://github.com/AndreyPavlenko/transmissionbtc) | [Transdroid](https://github.com/erickok/transdroid) |
@@ -86,8 +107,14 @@ Torrent Player is a **streamer/player that also downloads**. Most FOSS Android c
 | Episode playlist + selected subtitles | Yes | No | M3U / UPnP | — |
 | **Offline peer country map** | **Yes** | No | No | — |
 | Piece heat / swarm details | Yes | Basic | Basic | Client UI |
-| WebRTC / WebTorrent peers | Yes | Yes | No | — |
-| DHT · PEX · uTP | Yes | Yes | Yes | Via remote client |
+| **TCP peer data** | Yes | Yes | Yes | Via remote client |
+| **uTP (µTP) peer data** | Yes | Yes | Yes | Via remote client |
+| **WebRTC / WebTorrent peers** | **Yes** | Yes | No | — |
+| **DHT** | Yes | Yes | Yes | Via remote client |
+| **PEX** | Yes | Yes | Yes | Via remote client |
+| **LSD (LAN peers)** | Yes | Yes | Yes | — |
+| **UDP + HTTP(S) + WebSocket trackers** | **Yes** | Yes | UDP + HTTP(S) | Via remote client |
+| WebSeed (HTTP(S) piece URLs) | Yes | Yes | Limited | — |
 | Seeding limits (ratio / time / Wi‑Fi / pause while playing) | Yes | Yes (full client) | Yes | Via remote client |
 | Create torrents | No | Yes | No | — |
 | RSS / auto-download | No | Yes | No | Full version |
@@ -100,7 +127,7 @@ Torrent Player is a **streamer/player that also downloads**. Most FOSS Android c
 | No ads / no telemetry | Yes | Yes | Yes | Yes |
 | Engine | Native **Rust** | libtorrent4j | Transmission | None on device |
 
-**How to read the table:** LibreTorrent wins as a full download manager (RSS, create torrents, TV, filters). Transmission (Android) wins if you want the phone to feed a TV over the LAN. Transdroid wins if the swarm already runs on a PC/NAS. Torrent Player wins when you care about **watching on the phone with fast seeks, Direct Play, and swarm visibility**, without building a desktop client stack.
+**How to read the tables:** LibreTorrent wins as a full download manager (RSS, create torrents, TV, filters). Transmission (Android) wins if you want the phone to feed a TV over the LAN. Transdroid wins if the swarm already runs on a PC/NAS. Torrent Player wins when you care about **watching on the phone with fast seeks, Direct Play, WebTorrent/WebRTC peers, and swarm visibility**, without building a desktop client stack.
 
 ---
 
