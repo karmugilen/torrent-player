@@ -60,12 +60,14 @@
 
 Torrent Player (**Mine**) vs [LibreTorrent](https://github.com/proninyaroslav/libretorrent), [Transmission for Android](https://github.com/AndreyPavlenko/transmissionbtc), and [Transdroid](https://github.com/erickok/transdroid).
 
-**Yes / No only**, checked against each project’s README plus this repo’s engine/app code (2026-11-12).
+**Yes / No only.** Re-checked with four parallel agents (2026-11-12): Mine against this repo’s code; others against their READMEs, manifests, and (where needed) upstream engine docs.
 
 Notes:
-- **Transdroid** has no BitTorrent engine on the phone (remote control only). Feature rows that the *app* can do through a remote client are Yes; protocol rows are No because the phone never speaks BitTorrent itself.
-- **Transmission** is on Google Play / IzzyOnDroid, not the main F-Droid repo → F-Droid **No**.
+- **Transdroid** has no BitTorrent engine on the phone. Feature rows the *app* can do through a remote client are Yes; **all protocol rows are No**.
+- **Transmission for Android** is on **IzzyOnDroid / GitHub** (not main f-droid.org; no longer on Google Play).
 - **Seek-first** means the swarm fetches the new playhead first and can move late blocks to faster peers — not the same as sequential streaming.
+- **Seeding limits**: Mine supports ratio, time, and speed. LibreTorrent/Transdroid here mean speed (and related) controls, not full ratio/time auto-stop like Mine.
+- **BitTorrent 2.0**: Mine can parse v2/hybrid metainfo; piece download/verify is still v1-only → **No**.
 
 ### Features
 
@@ -89,9 +91,9 @@ Notes:
 | Download scheduling | No | Yes | No | No |
 | IP filtering | No | Yes | No | No |
 | Tracker / peer proxy | No | Yes | Yes | No |
-| Android TV / leanback | No | Yes | No | No |
+| Android TV / leanback | No | Yes | Yes | Yes |
 | Cast / DLNA / UPnP media server | No | No | Yes | No |
-| 35+ UI languages | No | Yes | No | Yes |
+| 35+ UI languages | No | Yes | No | No |
 | Remote-control PC/NAS client | No | No | No | Yes |
 | BitTorrent 2.0 | No | Yes | No | No |
 | Native Rust engine | Yes | No | No | No |
