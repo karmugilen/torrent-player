@@ -58,76 +58,73 @@
 
 ## Compared with other Android torrent apps
 
-Torrent Player is a **streamer/player that also downloads**. Most FOSS Android clients are **download managers that can stream**. The table below is a practical feature map against common open alternatives (not a ranking).
+Torrent Player is a **streamer/player that also downloads**. Apps like [LibreTorrent](https://github.com/proninyaroslav/libretorrent), [Transmission for Android](https://github.com/AndreyPavlenko/transmissionbtc), and [Transdroid](https://github.com/erickok/transdroid) are mostly **download managers** (or remote controls). Simple split:
 
-> [!TIP]
-> **What this app supports that the others typically do not**
->
-> | Unique / rare here | Why it matters |
-> | --- | --- |
-> | **Direct Play (bounded RAM)** | Watch with only a small verified startup cache on disk; the rest stays in RAM |
-> | **Seek-first for external players** | Skip ahead and the swarm fetches that spot first; late blocks move to faster peers; MP4/MKV keyframe hints |
-> | **Offline peer world map** | Approximate peer countries from a bundled DB-IP Lite DB — no online geo lookup |
-> | **Play next + prefetch** | Next selected episode starts with its beginning already requested |
-> | **Native Rust engine on phone** | One FOSS stack for TCP, uTP, WebRTC/WebTorrent, DHT, and PEX aimed at playback |
-> | **GitHub ↔ F-Droid same signing key** | Sideload and F-Droid update each other in place |
+### Mine has · others usually don’t
 
-### Protocols — finding peers and moving data
+| Feature | Mine (Torrent Player) | Others |
+| --- | --- | --- |
+| Direct Play (watch from RAM, small disk cache) | Yes | No |
+| Seek-first for external players (VLC / MPV / …) | Yes — fetch new spot first, steal late blocks, MP4/MKV keyframe hints | Sequential download only, or none |
+| Offline peer world map (bundled DB-IP, no online geo) | Yes | No |
+| Play next + prefetch next episode start | Yes | Rare / limited |
+| Piece heat map + live swarm details | Yes | Basic or none |
+| WebSocket trackers (WebTorrent signaling) | Yes | LibreTorrent yes · Transmission no · Transdroid n/a |
+| WebRTC peer data (browser / WebTorrent peers) | Yes | LibreTorrent yes · Transmission no · Transdroid n/a |
+| Native Rust engine on the phone | Yes | libtorrent4j / Transmission daemon / no local engine |
+| GitHub APK and F-Droid same signing key | Yes — either updates the other | Often different keys / channels |
 
-Two layers matter: **discovery** (how the app learns peer addresses) and **transport** (how bytes move once connected). More working paths means more peers can join the swarm, including browser WebTorrent peers over WebRTC.
+### Others have · mine doesn’t
 
-| Layer | Protocol / mechanism | **Torrent Player** | What it does |
-| --- | --- | :---: | --- |
-| Discovery | **HTTP(S) trackers** | Yes | Classic announce; gets peer lists from torrent/magnet trackers |
-| Discovery | **UDP trackers** (BEP 15) | Yes | Same role over UDP; often faster on mobile |
-| Discovery | **WebSocket trackers** | Yes | WebTorrent-style signaling so browser peers can meet you |
-| Discovery | **DHT** (BEP 5) | Yes | Finds peers with no tracker; announces the info hash to the DHT |
-| Discovery | **PEX** (peer exchange) | Yes | Connected peers share other peer addresses |
-| Discovery | **LSD** (local service discovery) | Yes | Multicast find peers on the same LAN/Wi‑Fi |
-| Discovery | **Cached public tracker list** | Yes | Daily refresh of a public best-trackers list; last good cache works offline; never added to private torrents |
-| Discovery | Hole punching (BEP 55) | Flag only | Not fully implemented yet |
-| Transport | **TCP** | Yes | Default BitTorrent data path |
-| Transport | **uTP** (BEP 29, µTP) | Yes | UDP-based peer data; shares one UDP socket with DHT/trackers |
-| Transport | **WebRTC data channels** | Yes | Talks to WebTorrent / browser peers; uses public STUN for NAT |
-| Transport | WebSeed (HTTP(S) URL list) | Yes | Fetches pieces from HTTP(S) web seeds when the torrent lists them |
+| Feature | Others | Mine |
+| --- | --- | --- |
+| Create torrents | LibreTorrent | No |
+| RSS / auto-download | LibreTorrent · Transdroid (full) | No |
+| Download scheduling | LibreTorrent | No |
+| IP filtering | LibreTorrent | No |
+| Tracker / peer proxy | LibreTorrent · Transmission | No |
+| Android TV / leanback UI | LibreTorrent | No |
+| Cast / DLNA / UPnP / M3U to TV | Transmission | No |
+| 35+ UI languages | LibreTorrent | Limited |
+| Remote-control a PC/NAS client | Transdroid | No (runs the swarm on the phone) |
 
-**In short:** peers can arrive from trackers, the DHT, PEX, LSD, or WebTorrent signaling; data can flow over **TCP**, **uTP**, or **WebRTC**. Details → Peers shows which transport each connection uses.
+### Protocols — mine vs others
 
-### Feature comparison
+How peers are **found** (discovery) and how **data moves** (transport):
 
-| Capability | **Torrent Player** | [LibreTorrent](https://github.com/proninyaroslav/libretorrent) | [Transmission (Android)](https://github.com/AndreyPavlenko/transmissionbtc) | [Transdroid](https://github.com/erickok/transdroid) |
+| Protocol | Mine | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| Runs a local swarm on the phone | Yes | Yes | Yes | No (remote control only) |
-| Magnets / `.torrent` files | Yes | Yes | Yes | Via remote client |
-| Selective file download | Yes | Yes | Yes | Via remote client |
-| Stream while downloading to VLC / MPV / etc. | Yes | Sequential | Sequential + UPnP | Via remote client |
-| **Seek-first / steal late blocks for players** | **Yes** | No | No | — |
-| **Direct Play (RAM + small disk cache)** | **Yes** | No | No | — |
-| Continue watching + play next | Yes | Limited | Limited | — |
-| Episode playlist + selected subtitles | Yes | No | M3U / UPnP | — |
-| **Offline peer country map** | **Yes** | No | No | — |
-| Piece heat / swarm details | Yes | Basic | Basic | Client UI |
-| **TCP peer data** | Yes | Yes | Yes | Via remote client |
-| **uTP (µTP) peer data** | Yes | Yes | Yes | Via remote client |
-| **WebRTC / WebTorrent peers** | **Yes** | Yes | No | — |
-| **DHT** | Yes | Yes | Yes | Via remote client |
-| **PEX** | Yes | Yes | Yes | Via remote client |
-| **LSD (LAN peers)** | Yes | Yes | Yes | — |
-| **UDP + HTTP(S) + WebSocket trackers** | **Yes** | Yes | UDP + HTTP(S) | Via remote client |
+| HTTP(S) trackers | Yes | Yes | Yes | Via remote |
+| UDP trackers | Yes | Yes | Yes | Via remote |
+| WebSocket trackers | Yes | Yes | No | Via remote |
+| DHT | Yes | Yes | Yes | Via remote |
+| PEX | Yes | Yes | Yes | Via remote |
+| LSD (same Wi‑Fi / LAN) | Yes | Yes | Yes | — |
+| Public tracker list cache | Yes | — | — | — |
+| TCP peer data | Yes | Yes | Yes | Via remote |
+| uTP (µTP) peer data | Yes | Yes | Yes | Via remote |
+| WebRTC peer data | Yes | Yes | No | — |
 | WebSeed (HTTP(S) piece URLs) | Yes | Yes | Limited | — |
-| Seeding limits (ratio / time / Wi‑Fi / pause while playing) | Yes | Yes (full client) | Yes | Via remote client |
-| Create torrents | No | Yes | No | — |
-| RSS / auto-download | No | Yes | No | Full version |
-| Scheduling | No | Yes | No | — |
-| IP filter / tracker·peer proxy | No | Yes | Proxy | Via remote client |
-| Android TV / leanback | No | Yes | TV-box friendly | — |
-| Cast / DLNA / LAN media server | No | No | **Yes (UPnP + M3U)** | — |
-| Many UI languages | Limited | **35+** | Limited | Yes |
-| F-Droid | Yes | Yes | Varies | Yes |
-| No ads / no telemetry | Yes | Yes | Yes | Yes |
-| Engine | Native **Rust** | libtorrent4j | Transmission | None on device |
+| Hole punching (BEP 55) | Not yet | Yes | — | — |
 
-**How to read the tables:** LibreTorrent wins as a full download manager (RSS, create torrents, TV, filters). Transmission (Android) wins if you want the phone to feed a TV over the LAN. Transdroid wins if the swarm already runs on a PC/NAS. Torrent Player wins when you care about **watching on the phone with fast seeks, Direct Play, WebTorrent/WebRTC peers, and swarm visibility**, without building a desktop client stack.
+**In short:** mine finds peers via trackers (HTTP/UDP/WebSocket), DHT, PEX, and LSD, then moves data over **TCP**, **uTP**, or **WebRTC**. Details → Peers shows each peer’s transport.
+
+### Full side‑by‑side
+
+| | **Mine** | LibreTorrent | Transmission | Transdroid |
+| --- | :---: | :---: | :---: | :---: |
+| Local swarm on phone | Yes | Yes | Yes | No |
+| Magnets / `.torrent` | Yes | Yes | Yes | Via remote |
+| Selective files | Yes | Yes | Yes | Via remote |
+| Stream to external player | Yes | Sequential | Sequential + UPnP | Via remote |
+| Seek-first playback | **Yes** | No | No | — |
+| Direct Play (RAM) | **Yes** | No | No | — |
+| Continue watching / play next | Yes | Limited | Limited | — |
+| Playlist + selected subtitles | Yes | No | M3U / UPnP | — |
+| Offline peer map | **Yes** | No | No | — |
+| Seeding limits (mobile-friendly) | Yes | Yes | Yes | Via remote |
+| Create / RSS / schedule / IP filter | No | Yes | Partial | Partial |
+| F-Droid · no ads · no telemetry | Yes | Yes | Varies / Yes | Yes |
 
 ---
 
