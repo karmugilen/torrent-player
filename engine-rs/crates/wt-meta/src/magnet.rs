@@ -133,8 +133,10 @@ fn parse_encoded_v1_infohash(encoded: &str) -> Result<InfoHash> {
                 .map_err(|e| Error::Magnet(format!("error decoding xt hex: {e}")))?;
         }
         32 => {
+            // RFC 4648 base32 is case-insensitive in magnets (libtorrent
+            // accepts lowercase); `BASE32` only decodes uppercase.
             let decoded = BASE32
-                .decode(encoded.as_bytes())
+                .decode(encoded.to_ascii_uppercase().as_bytes())
                 .map_err(|e| Error::Magnet(format!("error decoding xt base32: {e}")))?;
             if decoded.len() != 20 {
                 return Err(Error::Magnet(format!(
@@ -207,16 +209,18 @@ fn percent_decode(s: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                let h = &s[i + 1..i + 3];
-                if let Ok(b) = u8::from_str_radix(h, 16) {
-                    out.push(b);
+            // Work on bytes: slicing `s` here panicked when a multi-byte UTF-8
+            // char followed '%' (e.g. "%aé"), since a hostile magnet is user input.
+            b'%' if i + 2 < bytes.len() => match (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                (Some(hi), Some(lo)) => {
+                    out.push(hi << 4 | lo);
                     i += 3;
-                } else {
+                }
+                _ => {
                     out.push(bytes[i]);
                     i += 1;
                 }
-            }
+            },
             b => {
                 out.push(b);
                 i += 1;
@@ -224,6 +228,15 @@ fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Encode like Go `url.Values.Encode`: keys sorted, values in insertion order
@@ -331,6 +344,69 @@ mod tests {
         assert!(parse_magnet("").is_err());
         assert!(parse_magnet("magnet:?xt=urn:sha1:YNCKHTQCWBTRNJIV4WNAE52SJUQCZO5C").is_err());
         assert!(parse_magnet("magnet:?xt=urn:btih:this hash is really broken").is_err());
+    }
+
+    /// Regression: '%' followed by a hex digit and a multi-byte char used to
+    /// slice inside a UTF-8 char and panic.
+    #[test]
+    fn percent_before_multibyte_char_does_not_panic() {
+        for dn in ["%a\u{e9}", "%\u{e9}", "%\u{1f600}x", "%", "%4", "%zz", "%41"] {
+            let uri = format!(
+                "magnet:?xt=urn:btih:51340689c960f0778a4387aef9b4b52fd08390cd&dn={dn}"
+            );
+            let m = parse_magnet(&uri).unwrap();
+            if dn == "%41" {
+                assert_eq!(m.display_name, "A");
+            }
+        }
+    }
+
+    #[test]
+    fn base32_btih_is_case_insensitive() {
+        let upper = parse_magnet("magnet:?xt=urn:btih:ZOCMZQIPFFW7OLLMIC5HUB6BPCSDEOQU").unwrap();
+        let lower = parse_magnet("magnet:?xt=urn:btih:zocmzqipffw7ollmic5hub6bpcsdeoqu").unwrap();
+        assert_eq!(upper.info_hash, lower.info_hash);
+        assert!(upper.info_hash.is_some());
+    }
+
+    #[test]
+    fn btmh_rejects_malformed_multihash() {
+        let digest = "caf1e1c30e81cb361b9ee167c4aa64228a7fa4fa9f6105232b28ad099f3a302e";
+        let ok = format!("magnet:?xt=urn:btmh:1220{digest}");
+        assert!(parse_magnet(&ok).is_ok());
+        // Uppercase hex is still valid hex.
+        assert!(parse_magnet(&format!("magnet:?xt=urn:btmh:1220{}", digest.to_uppercase())).is_ok());
+        for bad in [
+            format!("1120{digest}"),           // sha1 multihash code
+            format!("1320{digest}"),           // sha2-512 code
+            format!("1214{digest}"),           // declared length 20
+            format!("1220{}", &digest[..62]),  // digest one byte short
+            format!("1220{digest}00"),         // digest one byte long
+            format!("12{digest}"),             // missing length byte
+            "12".to_string(),
+            String::new(),
+            format!("1220{}zz", &digest[..62]), // non-hex
+            digest.to_string(),                 // bare sha256 without multihash prefix
+        ] {
+            assert!(
+                parse_magnet(&format!("magnet:?xt=urn:btmh:{bad}")).is_err(),
+                "accepted bad btmh {bad}"
+            );
+        }
+        // Two v2 hashes are ambiguous.
+        assert!(parse_magnet(&format!("{ok}&xt=urn:btmh:1220{digest}")).is_err());
+    }
+
+    #[test]
+    fn btmh_roundtrips_through_magnet_uri() {
+        let uri = "magnet:?xt=urn:btih:631a31dd0a46257d5078c0dee4e66e26f73e42ac&xt=urn:btmh:1220d8dd32ac93357c368556af3ac1d95c9d76bd0dff6fa9833ecdac3d53134efabb&dn=bittorrent-v1-v2-hybrid-test";
+        let m = parse_magnet(uri).unwrap();
+        assert_eq!(magnet_uri(&m), uri);
+        // The DHT/tracker/handshake key for a v2 swarm is the truncated hash.
+        assert_eq!(
+            m.info_hash_v2.unwrap().to_short().to_hex(),
+            "d8dd32ac93357c368556af3ac1d95c9d76bd0dff"
+        );
     }
 
     #[test]

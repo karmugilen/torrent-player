@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import webtor.core.EngineClient
+import webtor.core.HolepunchStats
 import webtor.core.PeerConnection
 import webtor.core.TorrentConnections
 
@@ -92,7 +93,7 @@ fun ConnectionMapSection(entry: DownloadEntry, client: EngineClient) {
         unavailable -> "Connection map unavailable"
         snapshot == null -> "Finding connections…"
         peers.isEmpty() -> "Waiting for peers"
-        else -> "${peers.size} peers connected"
+        else -> swarmPeerSummary(peers)
     }
     val connected = peers.isNotEmpty()
     val hud = SwarmHud(MaterialTheme.colorScheme)
@@ -140,6 +141,74 @@ fun ConnectionMapSection(entry: DownloadEntry, client: EngineClient) {
                             Text(protocol, color = hud.muted, style = MaterialTheme.typography.labelSmall)
                             Text("$count", color = hud.text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
                         }
+                    }
+                }
+            }
+            // Per torrent only: this open download's counters from its own
+            // connections snapshot. Never the client-wide `/stats` counters.
+            if (!entry.paused && entry.engineId != null) {
+                snapshot?.holepunch?.let { HolepunchBlock(holepunchRows(it, peers), hud) }
+            }
+        }
+    }
+}
+
+/**
+ * "N peers · BT1 X · BT2 Y · Z hole-punched". An engine that predates these
+ * fields sends no `bittorrentVersion` or `source`; its peers are not counted
+ * as BT1 or as direct, the parts it cannot know are left out instead.
+ */
+internal fun swarmPeerSummary(peers: List<PeerConnection>): String = buildString {
+    append(if (peers.size == 1) "1 peer" else "${peers.size} peers")
+    // Web seeds are HTTP sources, not swarm peers: the engine still tags them
+    // "v1", so they must not count toward BT1 (or BT2).
+    val swarm = peers.filter { !it.transport.equals("WebSeed", ignoreCase = true) }
+    if (swarm.any { it.bittorrentVersion != null }) {
+        val bt1 = swarm.count { it.bittorrentVersion == "v1" }
+        val bt2 = swarm.count { it.isBt2 }
+        append(" · BT1 $bt1 · BT2 $bt2")
+    }
+    if (peers.any { it.source != null }) {
+        append(" · ${holePunchedNow(peers)} hole-punched")
+    }
+}
+
+/** Peers on this torrent reached by BEP 55 (source "C"); the swarm line and the block share it. */
+internal fun holePunchedNow(peers: List<PeerConnection>): Int = peers.count { it.holePunched }
+
+/**
+ * The hole punching block for one torrent: "Hole-punched now" is the same count
+ * as the swarm line's "Z hole-punched", then this torrent's monotonic counters.
+ */
+internal fun holepunchRows(stats: HolepunchStats, peers: List<PeerConnection>): List<Pair<String, Long>> =
+    listOf("Hole-punched now" to holePunchedNow(peers).toLong()) + stats.rows()
+
+/** Label and value rows for the BEP 55 counters, in display order. */
+internal fun HolepunchStats.rows(): List<Pair<String, Long>> = listOf(
+    "Rendezvous sent" to rendezvousSent,
+    "Connects received" to connectReceived,
+    "Relayed for others" to relayedForOthers,
+    "Errors received" to errorsReceived,
+    "Punch dials" to punchDialsAttempted,
+    "Punched peers" to punchDialsSucceeded,
+)
+
+@Composable
+private fun HolepunchBlock(rows: List<Pair<String, Long>>, hud: SwarmHud) {
+    Column(
+        Modifier.fillMaxWidth().background(hud.background, RoundedCornerShape(10.dp)).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Hole punching (BEP 55)", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = hud.text)
+            Text("this torrent", color = hud.muted, style = MaterialTheme.typography.labelSmall)
+        }
+        rows.chunked(2).forEach { pair ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                pair.forEach { (label, value) ->
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, Modifier.weight(1f), color = hud.muted, style = MaterialTheme.typography.labelSmall)
+                        Text("$value", color = hud.text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }

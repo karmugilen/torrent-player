@@ -33,6 +33,20 @@ data class EngineStats(
     val streamPort: Int,
     val path: String,
     val listenPort: Int = 0,
+    val holepunch: HolepunchStats = HolepunchStats(),
+)
+
+/**
+ * BEP 55 hole punching counters, monotonic. On [EngineStats] they are client-wide
+ * (every torrent); on [TorrentConnections] they cover that one torrent only.
+ */
+data class HolepunchStats(
+    val rendezvousSent: Long = 0L,
+    val connectReceived: Long = 0L,
+    val relayedForOthers: Long = 0L,
+    val errorsReceived: Long = 0L,
+    val punchDialsAttempted: Long = 0L,
+    val punchDialsSucceeded: Long = 0L,
 )
 
 data class TorrentFile(
@@ -115,12 +129,27 @@ data class PeerConnection(
     val downloaded: Long,
     val uploaded: Long,
     val country: String? = null,
-)
+    /** How the engine found the peer, as a PeerSource code ("C" = BEP 55 hole punch). */
+    val source: String? = null,
+    /** `"v1"` or `"v2"`: which BitTorrent swarm this connection is on. */
+    val bittorrentVersion: String? = null,
+) {
+    val holePunched: Boolean get() = source == PEER_SOURCE_HOLEPUNCH
+    val isBt2: Boolean get() = bittorrentVersion == "v2"
+}
+
+const val PEER_SOURCE_HOLEPUNCH = "C"
 
 data class TorrentConnections(
     val id: String,
     val paused: Boolean,
     val peers: List<PeerConnection>,
+    /**
+     * This torrent's BEP 55 counters from `GET /connections/{id}`. Null when the
+     * engine does not report them per torrent (older engines): callers must then
+     * show nothing rather than the client-wide `/stats` counters.
+     */
+    val holepunch: HolepunchStats? = null,
 )
 
 data class PieceBucket(
@@ -206,6 +235,7 @@ class EngineClient(
             streamPort = json.optInt("streamPort"),
             path = json.optString("path"),
             listenPort = json.optInt("listenPort"),
+            holepunch = parseHolepunchStats(json.optJSONObject("holepunch")),
         )
     }
 
@@ -298,25 +328,7 @@ class EngineClient(
 
     fun metadata(id: String): String = get("/metadata/$id").getString("torrentData")
 
-    fun connections(id: String): TorrentConnections {
-        val json = get("/connections/$id")
-        val peers = json.optJSONArray("peers") ?: JSONArray()
-        return TorrentConnections(
-            id = json.getString("id"),
-            paused = json.optBoolean("paused"),
-            peers = List(peers.length()) { index ->
-                val peer = peers.getJSONObject(index)
-                PeerConnection(
-                    address = peer.getString("address"),
-                    transport = peer.optString("transport", "Unknown"),
-                    client = peer.optString("client"),
-                    downloaded = peer.optLong("downloaded"),
-                    uploaded = peer.optLong("uploaded"),
-                    country = peer.nullableString("country"),
-                )
-            },
-        )
-    }
+    fun connections(id: String): TorrentConnections = parseConnections(get("/connections/$id"))
 
     fun configure(
         id: String,
@@ -509,6 +521,42 @@ class EngineClient(
             length = json.optLong("length"),
             streamUrl = json.getString("streamUrl"),
         )
+
+        /** A missing object (older engines) reads as all zeros. */
+        fun parseHolepunchStats(json: JSONObject?): HolepunchStats {
+            if (json == null) return HolepunchStats()
+            fun count(key: String) = json.optLong(key).coerceAtLeast(0L)
+            return HolepunchStats(
+                rendezvousSent = count("rendezvousSent"),
+                connectReceived = count("connectReceived"),
+                relayedForOthers = count("relayedForOthers"),
+                errorsReceived = count("errorsReceived"),
+                punchDialsAttempted = count("punchDialsAttempted"),
+                punchDialsSucceeded = count("punchDialsSucceeded"),
+            )
+        }
+
+        fun parseConnections(json: JSONObject): TorrentConnections {
+            val peers = json.optJSONArray("peers") ?: JSONArray()
+            return TorrentConnections(
+                id = json.getString("id"),
+                paused = json.optBoolean("paused"),
+                peers = List(peers.length()) { index ->
+                    val peer = peers.getJSONObject(index)
+                    PeerConnection(
+                        address = peer.getString("address"),
+                        transport = peer.optString("transport", "Unknown"),
+                        client = peer.optString("client"),
+                        downloaded = peer.optLong("downloaded"),
+                        uploaded = peer.optLong("uploaded"),
+                        country = peer.nullableString("country"),
+                        source = peer.nullableString("source"),
+                        bittorrentVersion = peer.nullableString("bittorrentVersion"),
+                    )
+                },
+                holepunch = json.optJSONObject("holepunch")?.let { parseHolepunchStats(it) },
+            )
+        }
 
         fun parseSeekStats(json: JSONObject): SeekStats = SeekStats(
             count = json.optInt("count").coerceAtLeast(0),

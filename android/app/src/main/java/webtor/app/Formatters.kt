@@ -230,16 +230,37 @@ fun previewUpdateBucket(progress: Double, complete: Boolean): Int =
     if (complete || progress >= 1.0) 20 else (progress * 20).toInt().coerceIn(0, 19)
 
 /**
- * The 40-character hex info hash of a magnet. The engine reports hashes in hex,
- * so a base32 magnet is converted to match library keys.
+ * A 40-character hex info-hash key for a magnet. Prefers v1 `btih`; for pure
+ * v2 `btmh` (SHA-256 multihash `1220…`) returns the truncated 20-byte form
+ * used for DHT/tracker short hashes. Base32 `btih` is converted to hex.
  *
  * Prefer [webtor.core.EngineClient.normalize] when the engine is ready; this
  * local helper remains for offline/library-key checks before start.
  */
 fun infoHashFromMagnet(value: String): String? {
-    val match = Regex("xt=urn:btih:([a-zA-Z0-9]+)", RegexOption.IGNORE_CASE).find(value) ?: return null
-    val hash = match.groupValues[1].lowercase()
-    return if (hash.length == 32) base32ToHex(hash) ?: hash else hash
+    Regex("xt=urn:btih:([a-zA-Z0-9]+)", RegexOption.IGNORE_CASE).find(value)?.let { match ->
+        val hash = match.groupValues[1].lowercase()
+        return if (hash.length == 32) base32ToHex(hash) ?: hash else hash
+    }
+    Regex("xt=urn:btmh:([a-fA-F0-9]+)", RegexOption.IGNORE_CASE).find(value)?.let { match ->
+        val mh = match.groupValues[1].lowercase()
+        // 1220 + 64-hex SHA-256 → first 40 hex of the digest (truncated info-hash).
+        if (mh.length == 68 && mh.startsWith("1220")) return mh.substring(4, 44)
+    }
+    return null
+}
+
+/**
+ * Library key for an info hash the engine reported. A running pure-v2 torrent
+ * is keyed by its truncated 20-byte hash (what the engine's torrent list and
+ * add response report), but `/normalize` on a pure `btmh` magnet returns the
+ * full 64-hex SHA-256. Map that to the same 40-hex key so duplicate checks
+ * match.
+ */
+fun libraryKeyForInfoHash(hash: String?): String? {
+    val lower = hash?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+    val isHex = lower.all { it in '0'..'9' || it in 'a'..'f' }
+    return if (isHex && lower.length == 64) lower.take(40) else lower
 }
 
 /** Local fallback when [webtor.core.EngineClient.normalize] is unavailable. */

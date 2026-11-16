@@ -5,6 +5,16 @@ use std::collections::BTreeMap;
 use super::Value;
 use crate::error::{Error, Result};
 
+/// Maximum list/dict nesting accepted by the decoder.
+///
+/// Bencode arrives from untrusted peers (extension handshakes, ut_metadata,
+/// PEX, holepunch) and from .torrent files. Without a bound, a payload such as
+/// `llll…eeee` recurses once per byte and aborts the whole process with a
+/// stack overflow. libtorrent's default limit is 100; BEP 52 file trees nest
+/// one dict per path component plus the `""` properties dict, so 256 leaves
+/// ample room for real torrents while keeping the stack use trivially small.
+pub const MAX_DEPTH: usize = 256;
+
 /// Decode a complete bencode value. Trailing bytes are an error.
 pub fn decode(data: &[u8]) -> Result<Value> {
     let (v, consumed) = decode_prefix(data)?;
@@ -20,7 +30,11 @@ pub fn decode(data: &[u8]) -> Result<Value> {
 /// the number of bytes consumed. Extra trailing bytes are allowed (used by
 /// ut_metadata messages that append a payload after the bencode dict).
 pub fn decode_prefix(data: &[u8]) -> Result<(Value, usize)> {
-    let mut d = Decoder { data, pos: 0 };
+    let mut d = Decoder {
+        data,
+        pos: 0,
+        depth: 0,
+    };
     let v = d.parse_value()?;
     Ok((v, d.pos))
 }
@@ -57,6 +71,8 @@ pub fn extract_dict_key_raw<'a>(data: &'a [u8], key: &[u8]) -> Result<Option<&'a
 struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Current list/dict nesting depth (bounded by `MAX_DEPTH`).
+    depth: usize,
 }
 
 impl<'a> Decoder<'a> {
@@ -70,11 +86,32 @@ impl<'a> Decoder<'a> {
         Ok(b)
     }
 
+    fn enter(&mut self) -> Result<()> {
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::Bencode {
+                offset: self.pos,
+                message: format!("nesting deeper than {MAX_DEPTH}"),
+            });
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
     fn parse_value(&mut self) -> Result<Value> {
         match self.peek()? {
             b'i' => self.parse_int(),
-            b'l' => self.parse_list(),
-            b'd' => self.parse_dict(),
+            b'l' => {
+                self.enter()?;
+                let v = self.parse_list();
+                self.depth -= 1;
+                v
+            }
+            b'd' => {
+                self.enter()?;
+                let v = self.parse_dict();
+                self.depth -= 1;
+                v
+            }
             b'0'..=b'9' => Ok(Value::Bytes(self.parse_bytes()?.to_vec())),
             other => Err(Error::Bencode {
                 offset: self.pos,
@@ -240,13 +277,22 @@ impl<'a> Decoder<'a> {
 }
 
 fn parse_bytes_at(data: &[u8], pos: usize) -> Result<(&[u8], usize)> {
-    let mut d = Decoder { data, pos };
+    let mut d = Decoder {
+        data,
+        pos,
+        depth: 0,
+    };
     let b = d.parse_bytes()?;
     Ok((b, d.pos))
 }
 
 fn skip_value(data: &[u8], pos: usize) -> Result<usize> {
-    let mut d = Decoder { data, pos };
+    // `extract_dict_key_raw` is already one level inside the outer dict.
+    let mut d = Decoder {
+        data,
+        pos,
+        depth: 1,
+    };
     d.parse_value()?;
     Ok(d.pos)
 }
@@ -307,6 +353,35 @@ mod tests {
             decode(b"i1ei2e"),
             Err(Error::TrailingBytes { unused: 3 })
         ));
+    }
+
+    /// Regression: deep nesting from a hostile peer used to overflow the stack
+    /// and abort the process (SIGABRT), not just return an error.
+    #[test]
+    fn deep_nesting_is_an_error_not_a_stack_overflow() {
+        for open in [b'l', b'd'] {
+            let n = 1_000_000;
+            let mut v = vec![open; n];
+            v.extend(std::iter::repeat_n(b'e', n));
+            assert!(decode(&v).is_err());
+            assert!(decode_prefix(&v).is_err());
+        }
+        // Wrapped inside a dict value, through the raw-extract path too.
+        let mut v = b"d4:info".to_vec();
+        v.extend(std::iter::repeat_n(b'l', 100_000));
+        v.extend(std::iter::repeat_n(b'e', 100_000));
+        v.push(b'e');
+        assert!(extract_dict_key_raw(&v, b"info").is_err());
+    }
+
+    #[test]
+    fn nesting_at_limit_is_accepted() {
+        let mut v = vec![b'l'; MAX_DEPTH];
+        v.extend(std::iter::repeat_n(b'e', MAX_DEPTH));
+        assert!(decode(&v).is_ok());
+        let mut v = vec![b'l'; MAX_DEPTH + 1];
+        v.extend(std::iter::repeat_n(b'e', MAX_DEPTH + 1));
+        assert!(decode(&v).is_err());
     }
 
     #[test]

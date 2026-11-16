@@ -2058,7 +2058,7 @@ class LibrarySession(
         if (_ui.value.engineReady) {
             runCatching {
                 withContext(io) { client.normalize(torrentId).infoHash }
-            }.getOrNull()?.let { return it }
+            }.getOrNull()?.let { return libraryKeyForInfoHash(it) }
         }
         return normalizeTorrentIdLocal(torrentId).second ?: infoHashFromMagnet(torrentId)
     }

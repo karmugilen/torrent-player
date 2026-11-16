@@ -300,6 +300,7 @@ impl EngineServer {
             disable_tcp: false,
             disable_webtorrent: false,
             disable_pex: false,
+            disable_holepunch: false,
             dial_for_peer_conns: true,
             accept_peer_connections: true,
             download_rate: None,
@@ -511,13 +512,7 @@ impl EngineServer {
             .filter(|h| wt_storage::parse_time(&h.expires).is_some_and(|t| t > now))
             .filter_map(|h| {
                 let addr = h.addr.parse::<std::net::SocketAddr>().ok()?;
-                let source = [
-                    wt_core::PeerSource::Tracker, wt_core::PeerSource::Incoming,
-                    wt_core::PeerSource::DhtGetPeers, wt_core::PeerSource::DhtAnnouncePeer,
-                    wt_core::PeerSource::Pex, wt_core::PeerSource::UtHolepunch,
-                    wt_core::PeerSource::WebRtc, wt_core::PeerSource::WebSeed,
-                    wt_core::PeerSource::Lsd,
-                ].into_iter().find(|s| s.code() == h.source).unwrap_or(wt_core::PeerSource::Direct);
+                let source = hint_peer_source(&h.source);
                 Some(wt_core::PeerInfo {
                     id: None,
                     addr,
@@ -907,6 +902,7 @@ impl EngineServer {
             path: self.download_dir.to_string_lossy().to_string(),
             payload_transfers_allowed: self.payload_transfers_allowed.load(Ordering::SeqCst),
             listen_port: self.client.local_port(),
+            holepunch: self.client.holepunch_stats(),
         };
         (200, serde_json::to_vec(&resp).unwrap())
     }
@@ -939,7 +935,7 @@ impl EngineServer {
                         .info_hash
                         .as_ref()
                         .map(|h| h.to_hex())
-                        .or_else(|| m.info_hash_v2.as_ref().map(|h| h.to_hex()));
+                        .or_else(|| m.info_hash_v2.as_ref().map(|h| h.to_short().to_hex()));
                     let canonical = wt_meta::magnet_uri(&m);
                     Ok((canonical, info_hash))
                 }
@@ -982,7 +978,7 @@ impl EngineServer {
             }
         };
         let mut spec = wt_core::TorrentSpec::default();
-        spec.info_hash = Some(wt_meta::info_hash_v1(&mi.info_bytes));
+        (spec.info_hash, spec.info_hash_v2) = torrent_file_hashes(&mi.info_bytes);
         spec.info_bytes = Some(mi.info_bytes);
         spec.trackers = mi.announce_list;
         if spec.trackers.is_empty() && !mi.announce.is_empty() {
@@ -1152,7 +1148,7 @@ impl EngineServer {
                 i.piece((total_pieces - 1) as u32).length
             }
         });
-        let mut magnet = url::Url::parse(&format!("magnet:?xt=urn:btih:{info_hash}")).unwrap();
+        let mut magnet = url::Url::parse(&record_magnet_base(&torrent)).unwrap();
         for tracker in original_trackers.iter().flatten() {
             magnet.query_pairs_mut().append_pair("tr", tracker);
         }
@@ -1944,15 +1940,19 @@ impl EngineServer {
                     nominal_max_requests: Some(peer.nominal_max_requests),
                     peer_max_requests: Some(peer.peer_max_requests),
                     peak_requests: Some(peer.peak_requests),
+                    source: Some(peer.source.code().to_string()),
+                    bittorrent_version: Some(if peer.v2 { "v2" } else { "v1" }.to_string()),
                 });
             }
         }
         sort_peer_connections(&mut peers);
 
+        let holepunch = rec.torrent.holepunch_stats();
         let resp = ConnectionsResponse {
             id: rec.id.clone(),
             paused: rec.paused,
             peers,
+            holepunch,
             diagnostics: std::env::var_os("WT_SWARM_DIAGNOSTICS").map(|_| rec.torrent.swarm_diagnostics()),
         };
         (200, serde_json::to_vec(&resp).unwrap())
@@ -2636,9 +2636,140 @@ impl crate::playback::PlaybackHost for EngineServer {
     }
 }
 
+/// Source of a restored peer hint. A hint saved from a hole-punched
+/// connection comes back as PEX (where punchable peers are learned): a later
+/// ordinary dial to it is no punch, and must not count as one in
+/// `/connections` (`source == "C"`).
+pub(crate) fn hint_peer_source(code: &str) -> wt_core::PeerSource {
+    use wt_core::PeerSource as S;
+    if code == S::UtHolepunch.code() {
+        return S::Pex;
+    }
+    [
+        S::Tracker, S::Incoming, S::DhtGetPeers, S::DhtAnnouncePeer, S::Pex,
+        S::WebRtc, S::WebSeed, S::Lsd,
+    ]
+    .into_iter()
+    .find(|s| s.code() == code)
+    .unwrap_or(S::Direct)
+}
+
+/// Swarm keys of a `.torrent` file's info dict (BEP 52): the SHA-1 for a
+/// v1 or hybrid info, the SHA-256 for a v2 or hybrid one. A pure v2 torrent
+/// has no v1 swarm, so its 20-byte key is the truncated SHA-256 (as for a
+/// pure `btmh` magnet), never a SHA-1 no peer announces under.
+pub(crate) fn torrent_file_hashes(
+    info_bytes: &[u8],
+) -> (Option<wt_core::InfoHash>, Option<wt_core::InfoHashV2>) {
+    let v1 = wt_meta::info_hash_v1(info_bytes);
+    let Ok(info) = wt_meta::parse_info(info_bytes) else {
+        return (Some(v1), None);
+    };
+    if !info.has_v2() {
+        return (Some(v1), None);
+    }
+    let v2 = wt_meta::info_hash_v2(info_bytes);
+    if info.has_v1() {
+        (Some(v1), Some(v2))
+    } else {
+        (Some(v2.to_short()), Some(v2))
+    }
+}
+
+/// `magnet:?xt=…` for a record: `btih` for the v1 swarm, `btmh` (SHA-256
+/// multihash) for the v2 one; both for a hybrid. A pure v2 torrent's 20-byte
+/// key is a truncated SHA-256, which as a `btih` would name no swarm.
+pub(crate) fn record_magnet_base(torrent: &wt_core::Torrent) -> String {
+    let v1 = torrent.info_hash();
+    match torrent.info_hash_v2() {
+        Some(v2) if v2.to_short() == v1 => format!("magnet:?xt=urn:btmh:1220{}", v2.to_hex()),
+        Some(v2) => format!("magnet:?xt=urn:btih:{}&xt=urn:btmh:1220{}", v1.to_hex(), v2.to_hex()),
+        None => format!("magnet:?xt=urn:btih:{}", v1.to_hex()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PURE_V2: &[u8] = include_bytes!("../../wt-meta/testdata/bittorrent-v2-test.torrent");
+    const HYBRID: &[u8] = include_bytes!("../../wt-meta/testdata/bittorrent-v2-hybrid-test.torrent");
+
+    fn info_bytes(file: &[u8]) -> Vec<u8> {
+        wt_meta::parse_metainfo(file).unwrap().info_bytes
+    }
+
+    #[test]
+    fn restored_hole_punch_hint_is_not_reported_as_hole_punched() {
+        assert_eq!(hint_peer_source("C"), wt_core::PeerSource::Pex);
+        assert_eq!(hint_peer_source("Tr"), wt_core::PeerSource::Tracker);
+        assert_eq!(hint_peer_source("L"), wt_core::PeerSource::Lsd);
+        assert_eq!(hint_peer_source("??"), wt_core::PeerSource::Direct);
+    }
+
+    /// `/normalize` of a pure `btmh` magnet reports the same 40-hex key the
+    /// running torrent and `/add` use (the truncated SHA-256).
+    #[test]
+    fn normalize_pure_btmh_reports_truncated_hash() {
+        let (_dir, server) = settings_tests::test_server();
+        let v2 = "caf1e1c30e81cb361b9ee167c4aa64228a7fa4fa9f6105232b28ad099f3a302e";
+        let magnet = format!("magnet:?xt=urn:btmh:1220{v2}&dn=x");
+        let (code, raw) = server.handle_normalize(&magnet);
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+        let json: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(json["infoHash"], &v2[..40]);
+    }
+
+    #[test]
+    fn torrent_file_hashes_follow_bep52_swarm_keys() {
+        let ib = info_bytes(PURE_V2);
+        let v2 = wt_meta::info_hash_v2(&ib);
+        assert_eq!(torrent_file_hashes(&ib), (Some(v2.to_short()), Some(v2)), "pure v2");
+
+        let ib = info_bytes(HYBRID);
+        assert_eq!(
+            torrent_file_hashes(&ib),
+            (Some(wt_meta::info_hash_v1(&ib)), Some(wt_meta::info_hash_v2(&ib))),
+            "hybrid"
+        );
+    }
+
+    fn add_torrent_file(server: &EngineServer, file: &[u8]) -> serde_json::Value {
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, file);
+        let body = serde_json::json!({"torrentId": "", "torrentData": b64}).to_string();
+        let (code, raw) = server.request("POST", "/add", &body);
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&raw));
+        serde_json::from_slice(&raw).unwrap()
+    }
+
+    /// A pure v2 `.torrent` must join the v2 swarm (truncated SHA-256 key)
+    /// and its record magnet must be a `btmh`, not a `btih` of that key.
+    #[test]
+    fn pure_v2_torrent_file_adds_on_the_v2_swarm() {
+        let (_dir, server) = settings_tests::test_server();
+        let added = add_torrent_file(&server, PURE_V2);
+        let v2 = wt_meta::info_hash_v2(&info_bytes(PURE_V2));
+        assert_eq!(added["infoHash"], v2.to_short().to_hex());
+        let rec = server.record_by_id(added["id"].as_str().unwrap()).unwrap();
+        let rec = rec.read();
+        assert_eq!(rec.torrent.info_hash_v2(), Some(v2));
+        let magnet = rec.magnet_uri.clone().unwrap();
+        let parsed = wt_meta::parse_magnet(&magnet).unwrap();
+        assert_eq!(parsed.info_hash_v2, Some(v2), "{magnet}");
+        assert!(!magnet.contains("btih"), "{magnet}");
+    }
+
+    #[test]
+    fn hybrid_torrent_file_record_magnet_names_both_swarms() {
+        let (_dir, server) = settings_tests::test_server();
+        let added = add_torrent_file(&server, HYBRID);
+        let ib = info_bytes(HYBRID);
+        assert_eq!(added["infoHash"], wt_meta::info_hash_v1(&ib).to_hex());
+        let rec = server.record_by_id(added["id"].as_str().unwrap()).unwrap();
+        let parsed = wt_meta::parse_magnet(rec.read().magnet_uri.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed.info_hash, Some(wt_meta::info_hash_v1(&ib)));
+        assert_eq!(parsed.info_hash_v2, Some(wt_meta::info_hash_v2(&ib)));
+    }
 
     #[test]
     fn test_server_stats_and_version() {

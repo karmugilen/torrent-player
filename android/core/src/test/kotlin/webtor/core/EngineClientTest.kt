@@ -91,6 +91,16 @@ class EngineClientTest {
         val paused = client.connections("abc")
         assertTrue(paused.paused)
         assertTrue(paused.peers.isEmpty())
+        assertEquals(null, paused.holepunch)
+    }
+
+    @Test
+    fun connectionsCarriesPerTorrentHolepunch() {
+        transport.enqueue(TestResponse().setBody(
+            """{"id":"abc","paused":false,"peers":[],"holepunch":{"rendezvousSent":1,"punchDialsAttempted":2,"punchDialsSucceeded":1}}""",
+        ))
+        val snapshot = client.connections("abc")
+        assertEquals(HolepunchStats(rendezvousSent = 1, punchDialsAttempted = 2, punchDialsSucceeded = 1), snapshot.holepunch)
     }
 
     @Test

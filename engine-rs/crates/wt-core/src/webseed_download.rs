@@ -53,6 +53,7 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
                         .saturating_sub(1)
                         .max(0)
                         / info.piece_length;
+                    let geometry = torrent.geometry();
                     let next = {
                         let pieces = torrent.pieces.read();
                         let dirty = &torrent.dirty_chunks;
@@ -65,7 +66,7 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
                                 let (begin, end) = piece_req_index_range(
                                     p.index,
                                     info.piece_length,
-                                    info.total_length(),
+                                    &geometry,
                                 );
                                 let first = (begin..end)
                                     .find(|r| !dirty.contains(*r) && !pending.contains(r))?;
@@ -135,8 +136,19 @@ pub(crate) async fn run(client: Weak<ClientInner>, torrent: Weak<TorrentInner>) 
                                         if !torrent.begin_chunk_write(req) {
                                             continue;
                                         }
+                                        // BEP 52 leaf check, as for peer blocks: bad
+                                        // web seed data is never written.
+                                        let leaf = torrent.check_leaf(piece, at, chunk);
+                                        if leaf == crate::hashing::LeafCheck::Bad {
+                                            torrent.finish_chunk_write(req, false);
+                                            break;
+                                        }
                                         let written = torrent.write_chunk(piece, at, chunk).is_ok();
-                                        torrent.finish_chunk_write(req, written);
+                                        if written && leaf == crate::hashing::LeafCheck::Verified {
+                                            torrent.finish_verified_chunk_write(req);
+                                        } else {
+                                            torrent.finish_chunk_write(req, written);
+                                        }
                                         if !written {
                                             break;
                                         }

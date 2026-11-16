@@ -62,6 +62,9 @@ impl PeerExtensionBits {
         self.get_bit(EXTENSION_BIT_FAST)
     }
 
+    pub fn supports_v2_upgrade(&self) -> bool {
+        self.get_bit(EXTENSION_BIT_V2_UPGRADE)
+    }
 }
 
 pub fn default_peer_extension_bytes() -> PeerExtensionBits {

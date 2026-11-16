@@ -241,15 +241,22 @@ impl ExtendedHandshake {
             }
         }
 
-        if let Some(reqq) = dict.get(b"reqq".as_slice()).and_then(|v| v.as_int()) {
-            handshake.reqq = Some(reqq as u32);
+        // Peer-controlled integers: out-of-range values are dropped rather
+        // than wrapped (`-1 as u32` or `2^32 + 100 as u32` gave a bogus size).
+        if let Some(reqq) = dict
+            .get(b"reqq".as_slice())
+            .and_then(|v| v.as_int())
+            .and_then(|n| u32::try_from(n).ok())
+        {
+            handshake.reqq = Some(reqq);
         }
 
         if let Some(size) = dict
             .get(b"metadata_size".as_slice())
             .and_then(|v| v.as_int())
+            .and_then(|n| u32::try_from(n).ok())
         {
-            handshake.metadata_size = Some(size as u32);
+            handshake.metadata_size = Some(size);
         }
 
         if let Some(ro) = dict.get(b"upload_only".as_slice()).and_then(|v| v.as_int()) {

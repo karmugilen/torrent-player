@@ -263,6 +263,15 @@ private fun RectangularPeerTile(
                 Text(peer.client.ifBlank { "Unknown client" }, Modifier.weight(1f),
                     style = MaterialTheme.typography.bodyMedium, color = hud.text,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (peer.holePunched) {
+                    // Reached through a BEP 55 relay rather than a direct dial.
+                    Surface(color = hud.tertiary.copy(alpha = 0.12f), shape = RoundedCornerShape(6.dp)) {
+                        Text("PUNCHED", Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            .semantics { contentDescription = "Reached by hole punching" },
+                            color = hud.tertiary, fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 1.sp,
+                            maxLines = 1, softWrap = false)
+                    }
+                }
             }
             Text(peer.address, Modifier.fillMaxWidth(),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),

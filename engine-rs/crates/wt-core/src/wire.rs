@@ -15,3 +15,4 @@ pub use wt_wire::message::{marshal_bitfield, unmarshal_bitfield, Message, Messag
 pub const EXT_HANDSHAKE_ID: u8 = 0;
 pub const DEFAULT_UT_METADATA_ID: u8 = 1;
 pub const DEFAULT_UT_PEX_ID: u8 = 2;
+pub const DEFAULT_UT_HOLEPUNCH_ID: u8 = 3;

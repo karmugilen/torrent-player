@@ -1,1 +1,1 @@
-Phone-sideload build candidate. Cuts Kotlin↔Rust waist: raw .torrent bytes on add (no Base64 JSON), shared magnet/info-hash normalize in the engine for library keys, and a compact binary pieces snapshot for the heat-grid refresh (JSON /pieces kept as fallback).
+BitTorrent 2.0 (hybrid + pure v2 magnets, piece layers, hash exchange). BEP 55 hole punching over uTP with per-torrent Details counters. Thinner Kotlin↔Rust waist (raw .torrent add, magnet normalize, binary pieces snapshot). Swarm map shows BT1/BT2 and hole-punched peers.

@@ -20,6 +20,7 @@ use wt_wire::ext::{
     ExtendedHandshake, MetadataMsg, MetadataMsgType, PexMsg, EXTENSION_NAME_METADATA,
     EXTENSION_NAME_PEX,
 };
+use wt_wire::holepunch::{HolepunchError, HolepunchMsg, EXTENSION_NAME_HOLEPUNCH};
 use wt_wire::message::Message;
 
 const PIECE_LEN: i64 = 32 * 1024;
@@ -48,6 +49,9 @@ struct FakeTorrent {
     focused: AtomicBool,
     urgent: AtomicBool,
     seeding: AtomicBool,
+    holepunch: AtomicBool,
+    hp_support: Mutex<Vec<(SocketAddr, Option<u8>)>>,
+    hp_msgs: Mutex<Vec<(SocketAddr, HolepunchMsg)>>,
 }
 
 impl FakeTorrent {
@@ -74,6 +78,9 @@ impl FakeTorrent {
             focused: AtomicBool::new(true),
             urgent: AtomicBool::new(true),
             seeding: AtomicBool::new(false),
+            holepunch: AtomicBool::new(false),
+            hp_support: Mutex::new(Vec::new()),
+            hp_msgs: Mutex::new(Vec::new()),
         })
     }
 }
@@ -273,6 +280,15 @@ impl PeerTorrent for FakeTorrent {
         self.bumps.fetch_add(1, Ordering::Relaxed);
     }
     fn on_chunk_received(&self, _peer: PeerKey, _req: RequestIndex, _len: usize) {}
+    fn holepunch_enabled(&self) -> bool {
+        self.holepunch.load(Ordering::Relaxed)
+    }
+    fn note_holepunch_support(&self, addr: SocketAddr, ext_id: Option<u8>) {
+        self.hp_support.lock().push((addr, ext_id));
+    }
+    fn on_holepunch(&self, from: SocketAddr, msg: HolepunchMsg) {
+        self.hp_msgs.lock().push((from, msg));
+    }
 }
 
 fn make_handle(addr: SocketAddr) -> (ConnHandle, mpsc::UnboundedReceiver<Message>) {
@@ -320,7 +336,7 @@ fn start_sends_ltep_havenone_like_go_send_initial_messages() {
         _ => None,
     });
     let ext = ext.expect("expected LTEP handshake");
-    assert_eq!(ext.reqq, Some(1024));
+    assert_eq!(ext.reqq, Some(wt_core::peer_conn::LOCAL_CLIENT_REQQ));
     assert!(ext.m.contains_key(EXTENSION_NAME_METADATA));
     assert!(ext.m.contains_key(EXTENSION_NAME_PEX));
     assert!(
@@ -1036,4 +1052,527 @@ fn have_none_releases_requests_for_retracted_pieces() {
         .any(|msg| matches!(msg, Message::Request { .. })));
     assert_eq!(peer.peer_conn_info().pending_requests, 0);
     assert!(tor.assignments.lock().is_empty());
+}
+
+#[test]
+fn hash_request_is_rejected_without_layers() {
+    let tor = FakeTorrent::new();
+    let addr: SocketAddr = "127.0.0.1:4099".parse().unwrap();
+    let (handle, mut rx) = make_handle(addr);
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+
+    let root = [0xabu8; 32];
+    peer.on_message(
+        &handle,
+        Message::HashRequest {
+            pieces_root: root,
+            base_layer: 0,
+            index: 1,
+            length: 2,
+            proof_layers: 0,
+        },
+    )
+    .unwrap();
+    let msgs = drain(&mut rx);
+    assert!(
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::HashReject {
+                pieces_root,
+                base_layer: 0,
+                index: 1,
+                length: 2,
+                proof_layers: 0,
+            } if pieces_root == &root
+        )),
+        "HashRequest must get HashReject: {msgs:?}"
+    );
+}
+
+/// Minimal v2 PeerTorrent double for hash-exchange round-trips.
+struct V2HashTorrent {
+    pieces_root: [u8; 32],
+    layer: Mutex<Vec<[u8; 32]>>,
+    applied: Mutex<Vec<[u8; 32]>>,
+    v2_short: [u8; 20],
+    missing: AtomicBool,
+}
+
+impl V2HashTorrent {
+    fn new(root: [u8; 32], layer: Vec<[u8; 32]>) -> Arc<Self> {
+        let mut short = [0u8; 20];
+        short.copy_from_slice(&root[..20]);
+        Arc::new(Self {
+            pieces_root: root,
+            layer: Mutex::new(layer),
+            applied: Mutex::new(Vec::new()),
+            v2_short: short,
+            missing: AtomicBool::new(true),
+        })
+    }
+}
+
+impl PeerTorrent for V2HashTorrent {
+    fn peer_key(&self, addr: SocketAddr) -> PeerKey {
+        let p = addr.port() as u64;
+        let ip = match addr.ip() {
+            std::net::IpAddr::V4(v) => u32::from(v) as u64,
+            std::net::IpAddr::V6(_) => 1,
+        };
+        (ip << 16) | p
+    }
+    fn have_info(&self) -> bool {
+        true
+    }
+    fn num_pieces(&self) -> u32 {
+        self.layer.lock().len() as u32
+    }
+    fn piece_length(&self) -> i64 {
+        256 * 1024
+    }
+    fn total_length(&self) -> i64 {
+        self.piece_length() * i64::from(self.num_pieces())
+    }
+    fn info_hash_bytes(&self) -> [u8; 20] {
+        self.v2_short
+    }
+    fn data_download_disallowed(&self) -> bool {
+        false
+    }
+    fn data_upload_disallowed(&self) -> bool {
+        false
+    }
+    fn is_seeding(&self) -> bool {
+        false
+    }
+    fn closed(&self) -> bool {
+        false
+    }
+    fn piece_complete(&self, _piece: u32) -> bool {
+        false
+    }
+    fn piece_priority(&self, _piece: u32) -> PiecePriority {
+        PiecePriority::Normal
+    }
+    fn chunk_dirty(&self, _req: RequestIndex) -> bool {
+        false
+    }
+    fn mark_chunk_dirty(&self, _req: RequestIndex) {}
+    fn piece_all_dirty(&self, _piece: u32) -> bool {
+        false
+    }
+    fn note_availability(&self, _piece: u32, _delta: i32) {}
+    fn write_chunk(&self, _piece: u32, _begin: u32, _data: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    fn read_chunk(&self, _piece: u32, _begin: u32, length: u32) -> Result<Bytes> {
+        Ok(Bytes::from(vec![0u8; length as usize]))
+    }
+    fn queue_piece_hash(&self, _piece: u32) {}
+    fn requesting_peer(&self, _req: RequestIndex) -> Option<PeerKey> {
+        None
+    }
+    fn request_when(&self, _req: RequestIndex) -> Option<Instant> {
+        None
+    }
+    fn clear_assignment(&self, _req: RequestIndex) {}
+    fn claim_request(&self, _req: RequestIndex, _peer: PeerKey, _when: Instant) -> bool {
+        true
+    }
+    fn request_focus_index(&self) -> Option<RequestIndex> {
+        None
+    }
+    fn hedge_peer(&self, _req: RequestIndex) -> Option<PeerKey> {
+        None
+    }
+    fn claim_hedge(&self, _req: RequestIndex, _peer: PeerKey) -> bool {
+        false
+    }
+    fn clear_hedge(&self, _req: RequestIndex) {}
+    fn on_metadata_data(&self, _piece: u32, _total_size: u32, _data: Bytes) -> Result<bool> {
+        Ok(false)
+    }
+    fn metadata_piece(&self, _piece: u32) -> Option<(u32, Bytes)> {
+        None
+    }
+    fn metadata_size(&self) -> Option<u32> {
+        None
+    }
+    fn has_metadata(&self) -> bool {
+        true
+    }
+    fn ingest_pex(&self, _from: SocketAddr, _msg: &PexMsg) -> Result<()> {
+        Ok(())
+    }
+    fn add_dht_node(&self, _addr: SocketAddr) {}
+    fn on_peer_listen_port(&self, _peer_addr: SocketAddr, _port: u16) {}
+    fn choke_config(&self) -> ChokeConfig {
+        ChokeConfig::default()
+    }
+    fn bump_change(&self) {}
+    fn on_chunk_received(&self, _peer: PeerKey, _req: RequestIndex, _len: usize) {}
+
+    fn has_v2(&self) -> bool {
+        true
+    }
+    fn is_v2_handshake_hash(&self, ih: &[u8; 20]) -> bool {
+        *ih == self.v2_short
+    }
+    fn missing_piece_layer_files(&self) -> Vec<wt_core::hashing::MissingLayerFile> {
+        if !self.missing.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        vec![wt_core::hashing::MissingLayerFile {
+            pieces_root: self.pieces_root,
+            begin_piece: 0,
+            num_pieces: self.layer.lock().len() as u32,
+        }]
+    }
+    fn apply_peer_piece_hashes(
+        &self,
+        pieces_root: [u8; 32],
+        index: u32,
+        hashes: &[[u8; 32]],
+    ) -> Result<bool> {
+        if pieces_root != self.pieces_root {
+            return Ok(false);
+        }
+        let layer = self.layer.lock();
+        for (i, h) in hashes.iter().enumerate() {
+            let fi = index as usize + i;
+            if fi < layer.len() && layer[fi] != *h {
+                return Ok(false);
+            }
+        }
+        if index == 0 && hashes.len() >= layer.len() && hashes[..layer.len()] == layer[..] {
+            *self.applied.lock() = layer.clone();
+            self.missing.store(false, Ordering::Relaxed);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    fn serve_piece_hashes(
+        &self,
+        pieces_root: [u8; 32],
+        index: u32,
+        length: u32,
+        proof_layers: u32,
+    ) -> std::result::Result<Vec<[u8; 32]>, String> {
+        if proof_layers != 0 {
+            return Err("proof layers".into());
+        }
+        if pieces_root != self.pieces_root {
+            return Err("unknown root".into());
+        }
+        let layer = self.layer.lock();
+        let pad = [0xeeu8; 32];
+        let mut out = Vec::with_capacity(length as usize);
+        for i in 0..length as usize {
+            let fi = index as usize + i;
+            if fi < layer.len() {
+                out.push(layer[fi]);
+            } else {
+                out.push(pad);
+            }
+        }
+        Ok(out)
+    }
+    fn requeue_dirty_for_v2_hash(&self) {}
+}
+
+fn make_v2_handle(
+    addr: SocketAddr,
+    v2_short: [u8; 20],
+) -> (ConnHandle, mpsc::UnboundedReceiver<Message>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let waker = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let stats = Arc::new(wt_core::stats::AtomicConnStats::default());
+    let handle = ConnHandle::new(
+        addr,
+        true,
+        Transport::Tcp,
+        false,
+        InfoHash(v2_short),
+        Some([9u8; 20]),
+        PeerSource::Direct,
+        default_peer_extension_bytes().0,
+        tx,
+        waker,
+        closed,
+        stats,
+    );
+    (handle, rx)
+}
+
+#[test]
+fn hash_request_hashes_round_trip() {
+    let root = [0x11u8; 32];
+    let layer = vec![[0x21u8; 32], [0x22u8; 32], [0x23u8; 32], [0x24u8; 32]];
+    let seeder = V2HashTorrent::new(root, layer.clone());
+    seeder.missing.store(false, Ordering::Relaxed);
+    let leecher = V2HashTorrent::new(root, layer.clone());
+
+    let (seed_handle, mut seed_rx) =
+        make_v2_handle("127.0.0.1:5100".parse().unwrap(), seeder.v2_short);
+    let mut seed_peer = PeerConnHandler::new(seeder.clone(), &seed_handle);
+
+    let (leech_handle, mut leech_rx) =
+        make_v2_handle("127.0.0.1:5101".parse().unwrap(), leecher.v2_short);
+    let mut leech_peer = PeerConnHandler::new(leecher.clone(), &leech_handle);
+    leech_peer
+        .on_message(&leech_handle, Message::HaveAll)
+        .unwrap();
+    leech_peer.update_requests(&leech_handle);
+    let reqs = drain(&mut leech_rx);
+    let hash_req = reqs
+        .iter()
+        .find_map(|m| match m {
+            Message::HashRequest {
+                pieces_root,
+                index,
+                length,
+                base_layer,
+                proof_layers,
+            } if pieces_root == &root => Some((*index, *length, *base_layer, *proof_layers)),
+            _ => None,
+        })
+        .expect("leecher must send HashRequest");
+
+    seed_peer
+        .on_message(
+            &seed_handle,
+            Message::HashRequest {
+                pieces_root: root,
+                base_layer: hash_req.2,
+                index: hash_req.0,
+                length: hash_req.1,
+                proof_layers: hash_req.3,
+            },
+        )
+        .unwrap();
+    let seed_msgs = drain(&mut seed_rx);
+    let hashes = seed_msgs
+        .into_iter()
+        .find_map(|m| match m {
+            Message::Hashes { hashes, .. } => Some(hashes),
+            _ => None,
+        })
+        .expect("seeder must reply Hashes");
+
+    leech_peer
+        .on_message(
+            &leech_handle,
+            Message::Hashes {
+                pieces_root: root,
+                base_layer: hash_req.2,
+                index: hash_req.0,
+                length: hash_req.1,
+                proof_layers: hash_req.3,
+                hashes,
+            },
+        )
+        .unwrap();
+    assert!(!leecher.missing.load(Ordering::Relaxed));
+    assert_eq!(*leecher.applied.lock(), layer);
+}
+
+#[test]
+fn corrupt_hashes_are_rejected() {
+    let root = [0x31u8; 32];
+    let layer = vec![[0x41u8; 32], [0x42u8; 32], [0x43u8; 32], [0x44u8; 32]];
+    let leecher = V2HashTorrent::new(root, layer.clone());
+    let (handle, _rx) = make_v2_handle("127.0.0.1:5102".parse().unwrap(), leecher.v2_short);
+    let mut peer = PeerConnHandler::new(leecher.clone(), &handle);
+    let mut bad = layer;
+    bad[0][0] ^= 0xff;
+    peer.on_message(
+        &handle,
+        Message::Hashes {
+            pieces_root: root,
+            base_layer: 4,
+            index: 0,
+            length: 4,
+            proof_layers: 0,
+            hashes: bad,
+        },
+    )
+    .unwrap();
+    assert!(leecher.missing.load(Ordering::Relaxed));
+    assert!(leecher.applied.lock().is_empty());
+}
+
+fn ltep_of(msgs: &[Message]) -> ExtendedHandshake {
+    msgs.iter()
+        .find_map(|m| match m {
+            Message::Extended { id: 0, payload } => Some(ExtendedHandshake::decode(payload).unwrap()),
+            _ => None,
+        })
+        .expect("LTEP handshake")
+}
+
+#[test]
+fn holepunch_advertised_only_when_enabled() {
+    let tor = FakeTorrent::new();
+    let (handle, mut rx) = make_handle("127.0.0.1:4100".parse().unwrap());
+    PeerConnHandler::new(tor.clone(), &handle).start(&handle);
+    assert!(!ltep_of(&drain(&mut rx)).m.contains_key(EXTENSION_NAME_HOLEPUNCH));
+
+    tor.holepunch.store(true, Ordering::Relaxed);
+    let (handle, mut rx) = make_handle("127.0.0.1:4101".parse().unwrap());
+    PeerConnHandler::new(tor.clone(), &handle).start(&handle);
+    let ext = ltep_of(&drain(&mut rx));
+    let id = *ext.m.get(EXTENSION_NAME_HOLEPUNCH).expect("ut_holepunch in m");
+    assert_ne!(id, 0);
+    let others: Vec<u8> = ext.m.iter().filter(|(k, _)| *k != EXTENSION_NAME_HOLEPUNCH).map(|(_, v)| *v).collect();
+    assert!(!others.contains(&id), "ut_holepunch id must be distinct: {ext:?}");
+}
+
+#[test]
+fn holepunch_peer_support_recorded_messages_routed_and_cleared_on_close() {
+    let tor = FakeTorrent::new();
+    tor.holepunch.store(true, Ordering::Relaxed);
+    let addr: SocketAddr = "127.0.0.1:4102".parse().unwrap();
+    let (handle, mut rx) = make_handle(addr);
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.start(&handle);
+    let our_id = *ltep_of(&drain(&mut rx)).m.get(EXTENSION_NAME_HOLEPUNCH).unwrap();
+
+    let mut hs = ExtendedHandshake::default();
+    hs.m.insert(EXTENSION_NAME_HOLEPUNCH.to_string(), 9);
+    peer.on_message(&handle, hs.to_message()).unwrap();
+    assert_eq!(*tor.hp_support.lock(), vec![(addr, Some(9))]);
+
+    // Messages on our id are decoded and handed to the torrent.
+    let v4 = HolepunchMsg::rendezvous("203.0.113.9:51413".parse().unwrap());
+    let v6 = HolepunchMsg::error("[2001:db8::1]:6881".parse().unwrap(), HolepunchError::NoSupport);
+    peer.on_message(&handle, v4.to_message(our_id)).unwrap();
+    peer.on_message(&handle, v6.to_message(our_id)).unwrap();
+    // Malformed: dropped, connection kept.
+    peer.on_message(&handle, Message::Extended { id: our_id, payload: Bytes::from_static(&[7, 0, 1]) })
+        .expect("malformed ut_holepunch must not kill the connection");
+    // The peer's own id routes nothing inbound.
+    peer.on_message(&handle, v4.to_message(9)).unwrap();
+    assert_eq!(*tor.hp_msgs.lock(), vec![(addr, v4), (addr, v6)]);
+
+    peer.on_closed(&handle, "test");
+    assert_eq!(tor.hp_support.lock().last(), Some(&(addr, None)));
+}
+
+#[test]
+fn holepunch_messages_ignored_when_disabled() {
+    let tor = FakeTorrent::new();
+    let addr: SocketAddr = "127.0.0.1:4103".parse().unwrap();
+    let (handle, _rx) = make_handle(addr);
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    peer.start(&handle);
+    let msg = HolepunchMsg::connect("203.0.113.9:51413".parse().unwrap());
+    peer.on_message(&handle, msg.to_message(3)).unwrap();
+    assert!(tor.hp_msgs.lock().is_empty());
+}
+
+fn make_handle_with(
+    addr: SocketAddr,
+    info_hash: [u8; 20],
+    v2_upgrade_bit: bool,
+) -> (ConnHandle, mpsc::UnboundedReceiver<Message>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut bits = default_peer_extension_bytes();
+    bits.set_bit(wt_wire::handshake::EXTENSION_BIT_V2_UPGRADE, v2_upgrade_bit);
+    let handle = ConnHandle::new(
+        addr,
+        true,
+        Transport::Tcp,
+        false,
+        InfoHash(info_hash),
+        Some([9u8; 20]),
+        PeerSource::Direct,
+        bits.0,
+        tx,
+        Arc::new(Notify::new()),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(wt_core::stats::AtomicConnStats::default()),
+    );
+    (handle, rx)
+}
+
+/// A peer setting the BEP 52 upgrade bit on a v1-only torrent is not in any
+/// v2 swarm: it must not be reported as BT2 (the Android swarm line counts
+/// `bittorrentVersion == "v2"`).
+#[test]
+fn v2_upgrade_bit_on_v1_only_torrent_is_not_reported_as_v2() {
+    let tor = FakeTorrent::new();
+    let (handle, _rx) = make_handle_with("127.0.0.1:5200".parse().unwrap(), [7u8; 20], true);
+    let peer = PeerConnHandler::new(tor.clone(), &handle);
+    assert!(!peer.peer_conn_info().v2);
+}
+
+/// On a v2 torrent: a v1-hash connection is v2 only when the peer offered the
+/// upgrade; only such connections are sent `HashRequest`s.
+#[test]
+fn hash_requests_go_only_to_v2_capable_peers() {
+    let root = [0x51u8; 32];
+    let layer = vec![[0x61u8; 32], [0x62u8; 32]];
+    let tor = V2HashTorrent::new(root, layer);
+    let v1_hash = [0x99u8; 20];
+
+    let cases = [
+        ("127.0.0.1:5201", v1_hash, false, false), // v1 swarm, plain peer
+        ("127.0.0.1:5202", v1_hash, true, true),   // v1 hash + upgrade bit
+        ("127.0.0.1:5203", tor.v2_short, false, true), // v2 swarm
+    ];
+    for (addr, ih, bit, want_v2) in cases {
+        let (handle, mut rx) = make_handle_with(addr.parse().unwrap(), ih, bit);
+        let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+        peer.on_message(&handle, Message::HaveAll).unwrap();
+        peer.update_requests(&handle);
+        let asked = drain(&mut rx).iter().any(|m| matches!(m, Message::HashRequest { .. }));
+        assert_eq!(peer.peer_conn_info().v2, want_v2, "{addr}: v2 flag");
+        assert_eq!(asked, want_v2, "{addr}: HashRequest sent");
+    }
+}
+
+/// Unsolicited `Hashes`/`HashReject` must not be recorded as our requests:
+/// that grew a never-pruned set per message and, past the outstanding cap,
+/// stopped us asking any peer-layer hashes of this peer.
+#[test]
+fn unsolicited_hash_messages_do_not_consume_hash_request_budget() {
+    let root = [0x71u8; 32];
+    let layer = vec![[0x81u8; 32], [0x82u8; 32]];
+    let tor = V2HashTorrent::new(root, layer.clone());
+    let (handle, mut rx) = make_v2_handle("127.0.0.1:5210".parse().unwrap(), tor.v2_short);
+    let mut peer = PeerConnHandler::new(tor.clone(), &handle);
+    for i in 0..200u32 {
+        peer.on_message(
+            &handle,
+            Message::Hashes {
+                pieces_root: [i as u8; 32],
+                base_layer: 4,
+                index: i * 2,
+                length: 2,
+                proof_layers: 0,
+                hashes: vec![[0u8; 32]; 2],
+            },
+        )
+        .unwrap();
+        peer.on_message(
+            &handle,
+            Message::HashReject { pieces_root: root, base_layer: 4, index: 1000 + i * 2, length: 2, proof_layers: 0 },
+        )
+        .unwrap();
+    }
+    // Unasked-for layer, even a correct one, is not applied.
+    peer.on_message(
+        &handle,
+        Message::Hashes { pieces_root: root, base_layer: 4, index: 0, length: 2, proof_layers: 0, hashes: layer },
+    )
+    .unwrap();
+    assert!(tor.applied.lock().is_empty());
+
+    peer.on_message(&handle, Message::HaveAll).unwrap();
+    peer.update_requests(&handle);
+    assert!(
+        drain(&mut rx).iter().any(|m| matches!(m, Message::HashRequest { pieces_root, .. } if *pieces_root == root)),
+        "our own HashRequest must still go out"
+    );
 }

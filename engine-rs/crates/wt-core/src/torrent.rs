@@ -76,7 +76,9 @@ impl PieceEntry {
 #[allow(clippy::type_complexity)]
 pub struct TorrentInner {
     pub info_hash: InfoHash,
-    pub info_hash_v2: Option<InfoHashV2>,
+    /// BEP 52 v2 infohash. Settable once: a btih magnet of a hybrid learns
+    /// it when the metadata arrives (see [`Self::set_info_hash_v2`]).
+    info_hash_v2: RwLock<Option<InfoHashV2>>,
     pub display_name: String,
     pub info: RwLock<Option<Arc<Info>>>,
     pub metainfo_raw: RwLock<Option<MetaInfo>>,
@@ -84,14 +86,36 @@ pub struct TorrentInner {
     pub default_storage: Arc<dyn ClientStorage>,
 
     pub pieces: RwLock<Vec<PieceEntry>>,
+    /// Block geometry of the current info (per-piece lengths for BEP 52).
+    pub geometry: RwLock<Arc<crate::picker::Geometry>>,
+    /// Per-piece v2 expected hash from metainfo `piece layers` (Phase 1 hybrid verify).
+    pub expected_v2: RwLock<Vec<Option<crate::hashing::ExpectedHash>>>,
+    /// In-flight BEP 52 hash-exchange buffers keyed by file pieces root (Go
+    /// `PeerConn.receivedHashPieces`, shared torrent-wide so peers can complete
+    /// each other's partial responses).
+    pub pending_piece_layers: RwLock<std::collections::HashMap<[u8; 32], Vec<[u8; 32]>>>,
     pub metadata: RwLock<crate::metadata::MetadataExchange>,
     pub pex: Mutex<crate::pex::PexState>,
     pub pex_last_recv: Mutex<HashMap<SocketAddr, Instant>>,
+    /// BEP 55 rendezvous bookkeeping and rate limits.
+    pub(crate) holepunch: Mutex<crate::holepunch::HolepunchState>,
+    /// Per-torrent BEP 55 counters (exposed on `/connections/{id}`).
+    pub(crate) holepunch_stats: Arc<crate::holepunch::HolepunchCounters>,
+    /// Live connections that advertised `ut_holepunch`, with their id.
+    pub(crate) holepunch_peers: RwLock<HashMap<SocketAddr, u8>>,
     pub peer_listen_ports: RwLock<HashMap<SocketAddr, u16>>,
     pub hasher: Mutex<Option<crate::hashing::PieceHasherPool>>,
     pub hash_seq: AtomicU64,
     pub dht_nodes: RwLock<Vec<SocketAddr>>,
     pub dirty_chunks: crate::piece_state::ChunkBits,
+    /// Blocks of incomplete pieces that matched their BEP 52 Merkle leaf.
+    /// Always a subset of `dirty_chunks`; readable before the piece is whole.
+    pub verified_chunks: crate::piece_state::ChunkBits,
+    /// Trusted leaf hashes of in-progress pieces (root checked against
+    /// `expected_v2`). Dropped when the piece completes.
+    pub leaf_layers: RwLock<HashMap<PieceIndex, Arc<Vec<[u8; 32]>>>>,
+    /// When each piece's leaf hashes were last asked of a peer.
+    pub leaf_requests: Mutex<HashMap<PieceIndex, Instant>>,
     /// Blocks on their way and being written.
     pub blocks: BlockTable,
     /// What refills read about every connected peer.
@@ -233,24 +257,39 @@ impl TorrentInner {
     ) -> Self {
         Self {
             info_hash,
-            info_hash_v2,
+            info_hash_v2: RwLock::new(info_hash_v2),
             display_name,
             info: RwLock::new(None),
             metainfo_raw: RwLock::new(None),
             storage: RwLock::new(None),
             default_storage,
             pieces: RwLock::new(Vec::new()),
-            metadata: RwLock::new(crate::metadata::MetadataExchange::new(
-                Some(info_hash),
-                info_hash_v2,
-            )),
+            geometry: RwLock::new(Arc::default()),
+            expected_v2: RwLock::new(Vec::new()),
+            pending_piece_layers: RwLock::new(std::collections::HashMap::new()),
+            // Pure v2 magnets store the truncated SHA-256 in `info_hash` as the
+            // swarm key. That is not a SHA-1 info-hash — do not expect ut_metadata
+            // to verify as v1, or metadata never completes and the file list stays empty.
+            metadata: RwLock::new({
+                let expected_v1 = match info_hash_v2 {
+                    Some(v2) if v2.to_short() == info_hash => None,
+                    _ => Some(info_hash),
+                };
+                crate::metadata::MetadataExchange::new(expected_v1, info_hash_v2)
+            }),
             pex: Mutex::new(crate::pex::PexState::new()),
             pex_last_recv: Mutex::new(HashMap::new()),
+            holepunch: Mutex::new(crate::holepunch::HolepunchState::new()),
+            holepunch_stats: Arc::default(),
+            holepunch_peers: RwLock::new(HashMap::new()),
             peer_listen_ports: RwLock::new(HashMap::new()),
             hasher: Mutex::new(None),
             hash_seq: AtomicU64::new(0),
             dht_nodes: RwLock::new(Vec::new()),
             dirty_chunks: Default::default(),
+            verified_chunks: Default::default(),
+            leaf_layers: Default::default(),
+            leaf_requests: Default::default(),
             blocks: BlockTable::default(),
             live_peers: RwLock::new(Vec::new()),
             peer_addrs: RwLock::new(HashMap::new()),
@@ -504,6 +543,34 @@ impl TorrentInner {
             .map(|c| c.config.torrent_peers_high_water)
             .unwrap_or(500)
             .max(1);
+        // A contact that keeps failing and is still cooling down stays out of
+        // the reserve: there it would be counted as a dialable peer (hiding
+        // that the pool is low, so trackers are not asked for more) and could
+        // push out a never-tried one at high water. Rediscovery after the
+        // cooldown lets it back in. Peers that can be hole punched are kept:
+        // their direct dials are expected to fail.
+        let peers = {
+            let now = Instant::now();
+            let cooling: HashSet<SocketAddr> = {
+                let backoff = self.dial_backoff.lock();
+                peers.iter().map(|p| p.addr)
+                    .filter(|addr| backoff.get(addr).is_some_and(|until| *until > now))
+                    .collect()
+            };
+            if cooling.is_empty() {
+                peers
+            } else {
+                let counts = self.dial_fail_counts.lock();
+                peers.into_iter()
+                    .filter(|p| {
+                        p.trusted
+                            || p.pex.supports_holepunch
+                            || !cooling.contains(&p.addr)
+                            || counts.get(&p.addr).copied().unwrap_or(0) < CHRONIC_DIAL_FAILS
+                    })
+                    .collect()
+            }
+        };
         let mut added = Vec::new();
         {
             let mut known = self.known_peers.write();
@@ -517,6 +584,10 @@ impl TorrentInner {
                     .cloned();
                 match prior {
                     Some(old) => {
+                        let mut peer = peer;
+                        // BEP 55: a later sighting without flags (tracker,
+                        // DHT) must not hide that PEX said it can be punched.
+                        peer.pex.supports_holepunch |= old.pex.supports_holepunch;
                         known.remove(&old);
                         known.insert(peer.clone());
                         if old != peer {
@@ -530,11 +601,21 @@ impl TorrentInner {
                     }
                 }
             }
-            // Go DeleteMin while over high water: drop untrusted first.
+            // Go DeleteMin while over high water: drop untrusted first, and
+            // among those the contacts that failed most before any untried one.
+            let fail_counts = if known.len() > high_water {
+                self.dial_fail_counts.lock().clone()
+            } else {
+                HashMap::new()
+            };
             while known.len() > high_water {
                 let victim = known
                     .iter()
-                    .min_by_key(|p| (p.trusted, self.peer_priority(p.addr)))
+                    .min_by_key(|p| (
+                        p.trusted,
+                        std::cmp::Reverse(fail_counts.get(&p.addr).copied().unwrap_or(0)),
+                        self.peer_priority(p.addr),
+                    ))
                     .cloned()
                     .or_else(|| known.iter().next().cloned());
                 match victim {
@@ -609,6 +690,7 @@ impl TorrentInner {
         }
         handles.insert(info.remote, handle.clone());
         drop(handles);
+        self.note_attached_punch(info.remote, info.source);
         self.peer_addrs.write().insert(crate::torrent_impls::peer_key_from_addr(info.remote), info.remote);
         self.start_hashing();
         let mut handler = crate::peer_conn::PeerConnHandler::new(Arc::clone(self), &handle);
@@ -656,6 +738,11 @@ impl TorrentInner {
             && !result.cancelled
             && result.error.is_none()
             && ps.mark_complete().is_ok();
+        // Leaf hashes only serve a piece in progress.
+        if valid {
+            self.leaf_layers.write().remove(&piece);
+            self.leaf_requests.lock().remove(&piece);
+        }
         if valid {
             self.failed_pieces.lock().remove(&piece);
         } else {
@@ -676,7 +763,10 @@ impl TorrentInner {
             }
         }
         if !valid {
-            let (begin, end) = piece_req_index_range(piece, info.piece_length, info.total_length());
+            let (begin, end) = piece_req_index_range(piece, info.piece_length, &self.geometry());
+            // Verified first: a reader must never see a verified bit whose
+            // block is no longer there.
+            self.verified_chunks.remove_range(begin, end);
             self.dirty_chunks.remove_range(begin, end);
         }
         if valid {
@@ -864,6 +954,7 @@ impl TorrentInner {
         });
 
         let total = cands.len();
+        let now = Instant::now();
         for (idx, c) in cands.iter().enumerate() {
             if c.bad_direction {
                 return Some(c.addr);
@@ -875,7 +966,7 @@ impl TorrentInner {
             // `wcs.Len() >= (max+1)/2` AFTER popping, i.e. remaining >= half.
             let remaining_after = total - 1 - idx;
             if remaining_after >= max.div_ceil(2)
-                && c.completed_handshake.elapsed() > Duration::from_secs(60)
+                && replaceable_for_age(c.useful, c.last_helpful, c.completed_handshake, now)
             {
                 return Some(c.addr);
             }
@@ -1070,22 +1161,63 @@ impl TorrentInner {
             // redialed ~9×/60s. Clear only via `clear_dial_penalty` once the
             // peer delivers useful data (Go: PopMax + no requeue avoids this).
         } else {
-            // Exponential backoff: 2s, 4s, 8s, … capped at 60s. Dialer re-queues
-            // so we retry without waiting solely on rediscovery.
+            // Backoff by consecutive failures: see `dial_backoff_after`.
             let n = {
                 let mut counts = self.dial_fail_counts.lock();
                 let e = counts.entry(addr).or_insert(0);
                 *e = e.saturating_add(1);
                 *e
             };
-            let shift = n.saturating_sub(1).min(5);
-            let secs = (2u64 << shift).min(60);
             self.dial_backoff
                 .lock()
-                .insert(addr, Instant::now() + Duration::from_secs(secs));
+                .insert(addr, Instant::now() + dial_backoff_after(n));
+            self.prune_dial_penalties();
         }
         // Only the dialer cares; waking every peer per failed dial is a herd.
         self.peer_notify.notify_one();
+    }
+
+    /// Settle a dial that did not end in plain success or failure.
+    pub(crate) fn dial_settled(&self, peer: &PeerInfo, verdict: DialVerdict) {
+        match verdict {
+            DialVerdict::Connected => return self.dial_finished(peer.addr, true),
+            DialVerdict::Unreachable => return self.dial_finished(peer.addr, false),
+            // Cool down first so the re-added peer is not redialed this tick.
+            DialVerdict::NoRoom => {
+                self.cool_down(peer.addr, NO_ROOM_REDIAL_AFTER);
+                self.add_peers(vec![peer.clone()]);
+            }
+            DialVerdict::Duplicate => self.cool_down(peer.addr, DUPLICATE_REDIAL_AFTER),
+            DialVerdict::Aborted => {
+                self.add_peers(vec![peer.clone()]);
+            }
+        }
+        self.dialing_peers.lock().remove(&peer.addr);
+        self.peer_notify.notify_one();
+    }
+
+    /// Hold off dialing `addr` for at least `wait`, without a fail count.
+    fn cool_down(&self, addr: SocketAddr, wait: Duration) {
+        let until = Instant::now() + wait;
+        let mut backoff = self.dial_backoff.lock();
+        let entry = backoff.entry(addr).or_insert(until);
+        *entry = (*entry).max(until);
+    }
+
+    /// Forget penalties long past their cooldown, so a long session's DHT
+    /// churn does not grow the two maps without bound and a contact that was
+    /// dead an hour ago starts even again.
+    fn prune_dial_penalties(&self) {
+        let now = Instant::now();
+        let kept: HashSet<SocketAddr> = {
+            let mut backoff = self.dial_backoff.lock();
+            if backoff.len() <= DIAL_PENALTY_SOFT_CAP {
+                return;
+            }
+            backoff.retain(|_, until| *until + DIAL_PENALTY_FORGET_AFTER > now);
+            backoff.keys().copied().collect()
+        };
+        self.dial_fail_counts.lock().retain(|addr, _| kept.contains(addr));
     }
 
     /// Wipe dial fail/backoff after the peer proves helpful (useful chunk).
@@ -1134,18 +1266,47 @@ impl TorrentInner {
     }
 
     pub fn set_info(&self, info: Arc<Info>) -> Result<()> {
+        self.set_info_with_layers(info, &[])
+    }
+
+    /// Accept info and optionally apply BEP 52 `piece layers` for v2 verify.
+    ///
+    /// When `info.meta_version == 2` and `piece_layers` is non-empty, layers are
+    /// validated first (Go `ValidatePieceLayers`). Missing layers after accept
+    /// soft-fail inside the index builder.
+    pub fn set_info_with_layers(
+        &self,
+        info: Arc<Info>,
+        piece_layers: &[([u8; 32], Vec<u8>)],
+    ) -> Result<()> {
+        if info.has_v2() && !piece_layers.is_empty() {
+            let mi = wt_types::MetaInfo {
+                piece_layers: piece_layers.to_vec(),
+                ..Default::default()
+            };
+            wt_meta::validate_metainfo_piece_layers(&mi, &info).map_err(|e| {
+                CoreError::Other(format!("invalid piece layers: {e}"))
+            })?;
+        }
+
         let num_pieces = info.num_pieces() as usize;
         let mut piece_entries = Vec::with_capacity(num_pieces);
         let piece_len = info.piece_length;
-        let total_len = info.total_length();
+        let geometry = Arc::new(crate::picker::Geometry::of(&info));
         for i in 0..num_pieces {
-            let mut entry = PieceEntry::new(i as PieceIndex, piece_len, total_len);
+            let data_len = geometry.piece_data_len(i as PieceIndex);
+            // PieceEntry::new derives chunk count from a synthetic total that
+            // makes this piece's span equal `data_len`.
+            let synthetic_total = i as i64 * piece_len + data_len;
+            let mut entry = PieceEntry::new(i as PieceIndex, piece_len, synthetic_total);
             if self.download_all_requested.load(Ordering::Relaxed) {
                 entry.priority = PiecePriority::Normal;
                 entry.base_priority = PiecePriority::Normal;
             }
             piece_entries.push(entry);
         }
+
+        let expected_v2 = crate::hashing::build_piece_layer_index(&info, piece_layers);
 
         // Open storage
         let storage = self.default_storage.open_torrent(&info, self.info_hash)?;
@@ -1158,9 +1319,15 @@ impl TorrentInner {
         }
         *self.storage.write() = Some(storage);
         *self.pieces_mut() = piece_entries;
+        *self.geometry.write() = geometry;
+        *self.expected_v2.write() = expected_v2;
+        self.pending_piece_layers.write().clear();
         let blocks = crate::picker::piece_req_index_range(0, piece_len, piece_len).1
             .saturating_mul(info.num_pieces());
         self.dirty_chunks.init(blocks);
+        self.verified_chunks.init(blocks);
+        self.leaf_layers.write().clear();
+        self.leaf_requests.lock().clear();
         self.blocks.init(blocks);
         crate::torrent_impls::init_availability(self, info.num_pieces());
         *self.info.write() = Some(info);
@@ -1168,10 +1335,55 @@ impl TorrentInner {
         Ok(())
     }
 
+    /// Apply / replace piece layers after info is already set (e.g. .torrent merge).
+    pub fn apply_piece_layers(&self, piece_layers: &[([u8; 32], Vec<u8>)]) -> Result<()> {
+        let Some(info) = self.info.read().clone() else {
+            return Ok(());
+        };
+        if info.has_v2() && !piece_layers.is_empty() {
+            let mi = wt_types::MetaInfo {
+                piece_layers: piece_layers.to_vec(),
+                ..Default::default()
+            };
+            wt_meta::validate_metainfo_piece_layers(&mi, &info).map_err(|e| {
+                CoreError::Other(format!("invalid piece layers: {e}"))
+            })?;
+        }
+        *self.expected_v2.write() =
+            crate::hashing::build_piece_layer_index(&info, piece_layers);
+        if let Some(raw) = self.metainfo_raw.write().as_mut() {
+            raw.piece_layers = piece_layers.to_vec();
+        }
+        Ok(())
+    }
+
+    pub fn info_hash_v2(&self) -> Option<InfoHashV2> {
+        *self.info_hash_v2.read()
+    }
+
+    /// Record the v2 infohash learned after creation. Only fills an empty
+    /// slot: `false` when a different one is already set. Prefer
+    /// `ClientInner::adopt_v2_key`, which also joins the v2 swarm.
+    pub fn set_info_hash_v2(&self, v2: InfoHashV2) -> bool {
+        let mut slot = self.info_hash_v2.write();
+        match *slot {
+            Some(have) => have == v2,
+            None => {
+                *slot = Some(v2);
+                true
+            }
+        }
+    }
+
+    /// Block geometry of the torrent (default, empty, before info).
+    pub fn geometry(&self) -> Arc<crate::picker::Geometry> {
+        Arc::clone(&self.geometry.read())
+    }
+
     pub fn piece_request_index_begin(&self, piece: PieceIndex) -> RequestIndex {
         let info_guard = self.info.read();
         if let Some(info) = &*info_guard {
-            let (begin, _) = piece_req_index_range(piece, info.piece_length, info.total_length());
+            let (begin, _) = piece_req_index_range(piece, info.piece_length, &self.geometry());
             begin
         } else {
             0
@@ -1186,13 +1398,14 @@ impl TorrentInner {
         let off = val - 1;
         let info = self.info.read();
         let info = info.as_ref()?;
-        if off < 0 || off >= info.total_length() {
+        let geometry = self.geometry();
+        if off < 0 || off >= geometry.end() {
             return None;
         }
         let piece = (off / info.piece_length) as PieceIndex;
         let in_piece_offset = (off % info.piece_length) as u32;
         let req_in_piece = in_piece_offset / BLOCK_SIZE;
-        let (start, _) = piece_req_index_range(piece, info.piece_length, info.total_length());
+        let (start, _) = piece_req_index_range(piece, info.piece_length, &geometry);
         Some(start + req_in_piece)
     }
 
@@ -1202,13 +1415,13 @@ impl TorrentInner {
         let Some(info) = &*info_guard else {
             return 0;
         };
-        let num_pieces = info.pieces.len() / 20;
+        // `num_pieces`, not the SHA-1 count: a pure v2 info has no v1 hashes.
+        let num_pieces = info.num_pieces();
         if num_pieces == 0 {
             return 0;
         }
-        let last_piece = (num_pieces - 1) as u32;
-        let (_, end_req) =
-            piece_req_index_range(last_piece, info.piece_length, info.total_length());
+        let last_piece = num_pieces - 1;
+        let (_, end_req) = piece_req_index_range(last_piece, info.piece_length, &self.geometry());
         end_req
     }
 
@@ -1240,6 +1453,101 @@ impl TorrentInner {
     /// Go `NudgeUrgentRequests` (Claude seek); see [`Self::nudge_urgent_requests`].
     pub fn nudge_urgent_peers(&self) {
         self.nudge_urgent_requests();
+    }
+}
+
+/// Consecutive failed dials after which a contact counts as chronic: its
+/// backoff jumps from seconds to minutes and rediscovery cannot put it back
+/// in the reserve while it cools down.
+pub(crate) const CHRONIC_DIAL_FAILS: u8 = 3;
+/// A connection that delivered useful data this recently is not replaced
+/// for its age alone.
+const RECENTLY_HELPFUL: Duration = Duration::from_secs(30);
+/// A reachable peer we had no room for is worth another try this soon.
+const NO_ROOM_REDIAL_AFTER: Duration = Duration::from_secs(30);
+/// An address of a peer we are already connected to another way.
+const DUPLICATE_REDIAL_AFTER: Duration = Duration::from_secs(120);
+/// Retried dials are never cut below this (or the configured minimum).
+const RETRY_DIAL_FLOOR: Duration = Duration::from_secs(2);
+const DIAL_PENALTY_SOFT_CAP: usize = 1024;
+const DIAL_PENALTY_FORGET_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// Go `worstBadConn` replaces any connection in the worse half once it is a
+/// minute old. Age alone must not cost us a peer that is delivering right
+/// now: its replacement is an unknown that may deliver nothing.
+fn replaceable_for_age(
+    useful: bool,
+    last_helpful: Option<Instant>,
+    completed_handshake: Instant,
+    now: Instant,
+) -> bool {
+    let delivering = useful
+        && last_helpful.is_some_and(|at| now.saturating_duration_since(at) < RECENTLY_HELPFUL);
+    now.saturating_duration_since(completed_handshake) > Duration::from_secs(60) && !delivering
+}
+
+/// Wait before redialing after `fails` consecutive failures: 2s and 4s for
+/// what may be a blip, then 30s, 1, 2 and 5 minutes for a chronic contact
+/// (was 8s, 16s, 32s, then 60s for ever).
+pub(crate) fn dial_backoff_after(fails: u8) -> Duration {
+    Duration::from_secs(match fails {
+        0 | 1 => 2,
+        2 => 4,
+        3 => 30,
+        4 => 60,
+        5 => 120,
+        _ => 300,
+    })
+}
+
+/// Dial timeout for a contact that already failed `fails` times in a row:
+/// halved per failure, to a quarter at most. An untried contact keeps the
+/// full `timeout`.
+pub(crate) fn retry_dial_timeout(timeout: Duration, min: Duration, fails: u8) -> Duration {
+    if fails == 0 {
+        return timeout;
+    }
+    let floor = min.max(RETRY_DIAL_FLOOR).min(timeout);
+    (timeout / (1 << fails.min(2))).max(floor)
+}
+
+/// How an outgoing dial ended, for the peer's standing in the dial pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DialVerdict {
+    Connected,
+    /// The peer did not answer or failed the handshake: fail count and backoff.
+    Unreachable,
+    /// The peer shook hands but every connection slot was taken. It is
+    /// reachable: back in the reserve after a short wait, no penalty.
+    NoRoom,
+    /// Already connected to this peer another way. No penalty, no redial soon.
+    Duplicate,
+    /// Never tried, for a reason of ours (no half-open slot, closing): back
+    /// in the reserve.
+    Aborted,
+}
+
+impl DialVerdict {
+    /// The peer answered and completed the handshake.
+    pub(crate) fn reached_peer(self) -> bool {
+        matches!(self, Self::Connected | Self::NoRoom | Self::Duplicate)
+    }
+}
+
+pub(crate) fn dial_verdict(result: &Result<()>) -> DialVerdict {
+    let err = match result {
+        Ok(()) => return DialVerdict::Connected,
+        Err(CoreError::Closed) => return DialVerdict::Aborted,
+        Err(err) => err.to_string(),
+    };
+    if err.contains("half-open limit exceeded") {
+        DialVerdict::Aborted
+    } else if err.contains("don't want conn") {
+        DialVerdict::NoRoom
+    } else if err.contains("duplicate peer") {
+        DialVerdict::Duplicate
+    } else {
+        DialVerdict::Unreachable
     }
 }
 
@@ -1730,5 +2038,197 @@ mod dial_parity_tests {
             PeerSource::Pex,
             "Go replaces same-(addr,trusted) so PEX wins over DHT for pex_dialed"
         );
+    }
+
+    fn dht_peer(n: u8) -> PeerInfo {
+        PeerInfo {
+            id: None,
+            addr: format!("203.0.113.{n}:6881").parse().unwrap(),
+            source: PeerSource::DhtGetPeers,
+            supports_encryption: false,
+            pex: Default::default(),
+            trusted: false,
+        }
+    }
+
+    #[test]
+    fn chronic_backoff_jumps_from_seconds_to_minutes() {
+        let secs: Vec<u64> = (1..=7).map(|n| dial_backoff_after(n).as_secs()).collect();
+        assert_eq!(secs, [2, 4, 30, 60, 120, 300, 300]);
+        assert_eq!(dial_backoff_after(u8::MAX).as_secs(), 300);
+        // A blip (one or two failures) waits no longer than before.
+        assert!(dial_backoff_after(CHRONIC_DIAL_FAILS - 1) <= Duration::from_secs(4));
+    }
+
+    #[test]
+    fn retry_dial_timeout_shrinks_with_failures_but_not_below_floor() {
+        let (nominal, min) = (Duration::from_secs(10), Duration::from_millis(500));
+        assert_eq!(retry_dial_timeout(nominal, min, 0), nominal, "untried: full timeout");
+        assert_eq!(retry_dial_timeout(nominal, min, 1), Duration::from_secs(5));
+        assert_eq!(retry_dial_timeout(nominal, min, 2), Duration::from_millis(2500));
+        assert_eq!(retry_dial_timeout(nominal, min, 200), Duration::from_millis(2500));
+        // Already reduced for a big pool: never below the 2s floor...
+        assert_eq!(retry_dial_timeout(Duration::from_secs(3), min, 2), Duration::from_secs(2));
+        // ...nor below a larger configured minimum, nor above the input.
+        assert_eq!(
+            retry_dial_timeout(Duration::from_secs(8), Duration::from_secs(3), 2),
+            Duration::from_secs(3)
+        );
+        assert_eq!(retry_dial_timeout(Duration::from_secs(1), min, 2), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn chronic_contact_cannot_be_rediscovered_into_the_reserve_while_cooling() {
+        let t = torrent();
+        let dead = dht_peer(1);
+        t.add_peers(vec![dead.clone()]);
+        for n in 1..=CHRONIC_DIAL_FAILS {
+            assert_eq!(t.take_dial_candidates(1).len(), 1, "dial {n}");
+            t.dial_finished(dead.addr, false);
+            let readded = t.add_peers(vec![dead.clone()]);
+            if n < CHRONIC_DIAL_FAILS {
+                assert_eq!(readded, 1, "fail {n}: a blip stays in the reserve");
+                t.dial_backoff.lock().remove(&dead.addr);
+            } else {
+                assert_eq!(readded, 0, "chronic: rediscovery must not re-add it");
+            }
+        }
+        assert!(t.known_peers.read().is_empty(), "dead contact must not pad the reserve");
+        // Once the cooldown is over, rediscovery lets it back in.
+        t.dial_backoff.lock().remove(&dead.addr);
+        assert_eq!(t.add_peers(vec![dead.clone()]), 1);
+        assert_eq!(t.take_dial_candidates(1).len(), 1);
+    }
+
+    #[test]
+    fn chronic_filter_spares_trusted_and_punchable_peers() {
+        let t = torrent();
+        let mut trusted = dht_peer(2);
+        trusted.trusted = true;
+        let mut punchable = dht_peer(3);
+        punchable.pex.supports_holepunch = true;
+        for p in [&trusted, &punchable] {
+            for _ in 0..CHRONIC_DIAL_FAILS {
+                t.dial_finished(p.addr, false);
+            }
+        }
+        // BEP 55: a NATed peer always fails direct dials; dropping it from the
+        // reserve would also drop the failed dial that triggers a rendezvous.
+        assert_eq!(t.add_peers(vec![trusted, punchable]), 2);
+    }
+
+    #[test]
+    fn high_water_evicts_most_failed_contact_before_untried_ones() {
+        let t = torrent();
+        // No client attached: high water defaults to 500.
+        let peers: Vec<PeerInfo> = (0..500u32)
+            .map(|n| PeerInfo {
+                id: None,
+                addr: format!("198.18.{}.{}:6881", n / 250, n % 250 + 1).parse().unwrap(),
+                source: PeerSource::DhtGetPeers,
+                supports_encryption: false,
+                pex: Default::default(),
+                trusted: false,
+            })
+            .collect();
+        let failed = peers[137].addr;
+        // Two failures, cooldown over: still in the reserve, but first to go.
+        t.dial_fail_counts.lock().insert(failed, 2);
+        assert_eq!(t.add_peers(peers), 500);
+        t.add_peers(vec![dht_peer(9)]);
+        let known = t.known_peers.read();
+        assert_eq!(known.len(), 500);
+        assert!(!known.iter().any(|p| p.addr == failed), "failed contact evicted first");
+        assert!(known.iter().any(|p| p.addr == dht_peer(9).addr), "untried newcomer kept");
+    }
+
+    #[test]
+    fn dial_verdict_separates_our_reasons_from_the_peers() {
+        let err = |m: &str| Err(CoreError::Other(m.into()));
+        assert_eq!(dial_verdict(&Ok(())), DialVerdict::Connected);
+        assert_eq!(dial_verdict(&Err(CoreError::Closed)), DialVerdict::Aborted);
+        assert_eq!(dial_verdict(&err("torrent half-open limit exceeded")), DialVerdict::Aborted);
+        assert_eq!(dial_verdict(&err("global half-open limit exceeded")), DialVerdict::Aborted);
+        assert_eq!(dial_verdict(&err("don't want conn")), DialVerdict::NoRoom);
+        assert_eq!(dial_verdict(&err("duplicate peer")), DialVerdict::Duplicate);
+        assert_eq!(dial_verdict(&err("TCP connect timeout")), DialVerdict::Unreachable);
+        assert_eq!(dial_verdict(&err("MSE handshake timeout")), DialVerdict::Unreachable);
+        assert!(DialVerdict::NoRoom.reached_peer() && DialVerdict::Duplicate.reached_peer());
+        assert!(!DialVerdict::Unreachable.reached_peer() && !DialVerdict::Aborted.reached_peer());
+    }
+
+    #[test]
+    fn reachable_peer_turned_away_for_room_keeps_its_standing() {
+        let t = torrent();
+        let peer = dht_peer(4);
+        t.add_peers(vec![peer.clone()]);
+        assert_eq!(t.take_dial_candidates(1).len(), 1);
+        t.dial_settled(&peer, DialVerdict::NoRoom);
+        assert!(t.dial_fail_counts.lock().get(&peer.addr).is_none(), "no fail count");
+        assert!(t.dialing_peers.lock().is_empty());
+        assert!(t.known_peers.read().iter().any(|p| p.addr == peer.addr), "back in the reserve");
+        assert_eq!(t.take_dial_candidates(1).len(), 0, "not re-handshaked in a tight loop");
+        t.dial_backoff.lock().remove(&peer.addr);
+        // Sorts with the untried peers, not behind them.
+        let fresh = dht_peer(5);
+        t.dial_fail_counts.lock().insert(fresh.addr, 1);
+        t.add_peers(vec![fresh]);
+        assert_eq!(t.take_dial_candidates(1)[0].addr, peer.addr);
+    }
+
+    #[test]
+    fn duplicate_and_aborted_dials_cost_no_fail_count() {
+        let t = torrent();
+        let (dup, aborted) = (dht_peer(6), dht_peer(7));
+        t.add_peers(vec![dup.clone(), aborted.clone()]);
+        assert_eq!(t.take_dial_candidates(2).len(), 2);
+        t.dial_settled(&dup, DialVerdict::Duplicate);
+        t.dial_settled(&aborted, DialVerdict::Aborted);
+        assert!(t.dial_fail_counts.lock().is_empty());
+        assert!(t.dialing_peers.lock().is_empty());
+        // The duplicate is connected another way: not re-added, and a
+        // rediscovery does not redial it at once.
+        t.add_peers(vec![dup.clone()]);
+        let next: Vec<_> = t.take_dial_candidates(2).iter().map(|p| p.addr).collect();
+        assert_eq!(next, [aborted.addr], "aborted dial is ready again; duplicate waits");
+    }
+
+    #[test]
+    fn cool_down_never_shortens_a_longer_backoff() {
+        let t = torrent();
+        let peer = dht_peer(8);
+        let long = Instant::now() + Duration::from_secs(300);
+        t.dial_backoff.lock().insert(peer.addr, long);
+        t.dial_settled(&peer, DialVerdict::NoRoom);
+        assert_eq!(t.dial_backoff.lock().get(&peer.addr).copied(), Some(long));
+    }
+
+    #[test]
+    fn stale_dial_penalties_are_pruned_past_the_soft_cap() {
+        let t = torrent();
+        let stale = Instant::now().checked_sub(DIAL_PENALTY_FORGET_AFTER + Duration::from_secs(1));
+        let Some(stale) = stale else { return }; // machine booted under 10 min ago
+        for n in 0..=DIAL_PENALTY_SOFT_CAP as u32 {
+            let addr: SocketAddr = format!("198.19.{}.{}:6881", n / 250, n % 250 + 1).parse().unwrap();
+            t.dial_backoff.lock().insert(addr, stale);
+            t.dial_fail_counts.lock().insert(addr, 6);
+        }
+        let live = dht_peer(10).addr;
+        t.dial_finished(live, false);
+        assert_eq!(t.dial_backoff.lock().len(), 1);
+        assert_eq!(t.dial_fail_counts.lock().keys().copied().collect::<Vec<_>>(), [live]);
+    }
+
+    #[test]
+    fn delivering_peer_is_not_replaced_for_age_alone() {
+        let handshake = Instant::now();
+        let now = handshake + Duration::from_secs(600);
+        let ago = |secs| Some(now - Duration::from_secs(secs));
+        assert!(!replaceable_for_age(true, ago(5), handshake, now), "delivered 5s ago: keep");
+        assert!(replaceable_for_age(true, ago(45), handshake, now), "gone quiet: replaceable");
+        assert!(replaceable_for_age(true, None, handshake, now), "never helped: replaceable");
+        assert!(replaceable_for_age(false, ago(5), handshake, now), "nothing left we want");
+        // Go's one-minute grace for a new connection is unchanged.
+        assert!(!replaceable_for_age(true, None, handshake, handshake + Duration::from_secs(30)));
     }
 }

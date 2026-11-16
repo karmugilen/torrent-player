@@ -9,7 +9,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Notify};
 use wt_types::{InfoHash, PeerId, PeerSource, Transport};
-use wt_wire::handshake::{default_peer_extension_bytes, handshake_incoming, PeerExtensionBits};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt as _;
+use wt_wire::handshake::{
+    default_peer_extension_bytes, HandshakeResult, PeerExtensionBits, EXTENSION_BIT_V2_UPGRADE,
+    HANDSHAKE_LEN, PROTOCOL_HEADER,
+    write_handshake,
+};
 use wt_wire::message::Message;
 use wt_wire::mse::{
     default_crypto_selector, handle_encryption, CryptoMethod, HeaderObfuscationPolicy,
@@ -35,6 +41,13 @@ pub struct AcceptedConn {
 /// Callback query to look up whether an InfoHash is actively managed.
 pub type InfoHashLookup = Arc<dyn Fn(&InfoHash) -> bool + Send + Sync>;
 
+/// Callback answering whether the torrent an inbound handshake matched has a
+/// v2 hash (hybrid or pure v2). Our reply then sets the BEP 52 v2-upgrade
+/// bit, so a hybrid peer that reached us by the v1 hash sees us as v2 capable.
+pub type V2Lookup = Arc<dyn Fn(&InfoHash) -> bool + Send + Sync>;
+
+type SharedV2Lookup = Arc<parking_lot::RwLock<Option<V2Lookup>>>;
+
 /// Callback providing candidate InfoHashes for inbound MSE decryption.
 pub type SkeyProvider = Arc<dyn Fn() -> Vec<[u8; 20]> + Send + Sync>;
 
@@ -45,6 +58,7 @@ pub struct PeerListener {
     listen_port: u16,
     closed: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
+    v2_lookup: SharedV2Lookup,
 }
 
 impl PeerListener {
@@ -97,6 +111,7 @@ impl PeerListener {
             listen_port: bound_port,
             closed,
             shutdown,
+            v2_lookup: Arc::default(),
         })
     }
 
@@ -116,6 +131,12 @@ impl PeerListener {
         self.shutdown.send_replace(true);
     }
 
+    /// Install the v2 lookup used by inbound handshake replies. It applies to
+    /// connections accepted from now on, whether or not the accept loop runs.
+    pub fn set_v2_lookup(&self, lookup: V2Lookup) {
+        *self.v2_lookup.write() = Some(lookup);
+    }
+
     /// Spawns the accept loop, sending accepted connections into `accepted_tx`.
     pub fn spawn_accept_loop(
         &self,
@@ -127,6 +148,7 @@ impl PeerListener {
         accepted_tx: mpsc::Sender<AcceptedConn>,
     ) {
         let closed = self.closed.clone();
+        let v2_lookup = self.v2_lookup.clone();
 
         // Spawn TCP accept loop
         for tcp in &self.tcp_listeners {
@@ -135,6 +157,7 @@ impl PeerListener {
             let c_tr = tracker.clone();
             let c_sk = skey_provider.clone();
             let c_lk = lookup.clone();
+            let c_v2 = v2_lookup.clone();
             let c_tx = accepted_tx.clone();
             let c_cl = closed.clone();
             let mut shutdown = self.shutdown.subscribe();
@@ -159,6 +182,7 @@ impl PeerListener {
                     let handshaker_tr = c_tr.clone();
                     let handshaker_sk = c_sk.clone();
                     let handshaker_lk = c_lk.clone();
+                    let handshaker_v2 = c_v2.clone();
                     let handshaker_tx = c_tx.clone();
 
                     tokio::spawn(async move {
@@ -172,6 +196,7 @@ impl PeerListener {
                             &handshaker_tr,
                             &handshaker_sk,
                             &handshaker_lk,
+                            &handshaker_v2,
                         )
                         .await
                         {
@@ -188,6 +213,7 @@ impl PeerListener {
             let u_tr = tracker;
             let u_sk = skey_provider;
             let u_lk = lookup;
+            let u_v2 = v2_lookup;
             let u_tx = accepted_tx;
             let u_cl = closed;
             let mut shutdown = self.shutdown.subscribe();
@@ -212,6 +238,7 @@ impl PeerListener {
                     let handshaker_tr = u_tr.clone();
                     let handshaker_sk = u_sk.clone();
                     let handshaker_lk = u_lk.clone();
+                    let handshaker_v2 = u_v2.clone();
                     let handshaker_tx = u_tx.clone();
 
                     tokio::spawn(async move {
@@ -225,6 +252,7 @@ impl PeerListener {
                             &handshaker_tr,
                             &handshaker_sk,
                             &handshaker_lk,
+                            &handshaker_v2,
                         )
                         .await
                         {
@@ -247,6 +275,7 @@ async fn handle_inbound_connection(
     tracker: &HalfOpenTracker,
     skey_provider: &SkeyProvider,
     lookup: &InfoHashLookup,
+    v2_lookup: &SharedV2Lookup,
 ) -> Result<AcceptedConn> {
     tokio::time::timeout(
         cfg.handshakes_timeout,
@@ -259,10 +288,59 @@ async fn handle_inbound_connection(
             tracker,
             skey_provider,
             lookup,
+            v2_lookup,
         ),
     )
     .await
     .map_err(|_| CoreError::Other("incoming handshake timeout".to_string()))?
+}
+
+/// Our reply bits for an inbound handshake on `info_hash`: the defaults, plus
+/// the BEP 52 v2-upgrade bit when the matched torrent has a v2 hash.
+fn inbound_reply_bits(info_hash: &InfoHash, v2_lookup: Option<&V2Lookup>) -> PeerExtensionBits {
+    let mut bits = default_peer_extension_bytes();
+    if v2_lookup.is_some_and(|has_v2| has_v2(info_hash)) {
+        bits.set_bit(EXTENSION_BIT_V2_UPGRADE, true);
+    }
+    bits
+}
+
+/// `wt_wire::handshake_incoming`, except our reserved bits are chosen after
+/// the info hash is known (the v2-upgrade bit depends on the torrent).
+async fn inbound_bt_handshake<S>(
+    stream: &mut S,
+    our_peer_id: &PeerId,
+    lookup: &InfoHashLookup,
+    v2_lookup: Option<&V2Lookup>,
+) -> std::io::Result<HandshakeResult>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use std::io::{Error, ErrorKind};
+    let mut buf = [0u8; HANDSHAKE_LEN];
+    stream.read_exact(&mut buf).await?;
+    if buf[..20] != PROTOCOL_HEADER[..] {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("unexpected protocol header: {:?}", &buf[..20]),
+        ));
+    }
+    let mut ext = [0u8; 8];
+    ext.copy_from_slice(&buf[20..28]);
+    let mut ih = [0u8; 20];
+    ih.copy_from_slice(&buf[28..48]);
+    let info_hash = InfoHash(ih);
+    if !lookup(&info_hash) {
+        let _ = stream.shutdown().await;
+        return Err(Error::new(ErrorKind::NotFound, format!("infohash not found: {info_hash}")));
+    }
+    let mut peer_id = [0u8; 20];
+    peer_id.copy_from_slice(&buf[48..68]);
+
+    let bits = inbound_reply_bits(&info_hash, v2_lookup);
+    write_handshake(stream, &info_hash, our_peer_id, &bits).await?;
+    stream.flush().await?;
+    Ok(HandshakeResult { extensions: PeerExtensionBits(ext), info_hash, peer_id })
 }
 
 /// Payload cipher for an inbound MSE handshake. Go `mse.DefaultCryptoSelector`:
@@ -289,6 +367,7 @@ async fn handle_inbound_inner(
     tracker: &HalfOpenTracker,
     skey_provider: &SkeyProvider,
     lookup: &InfoHashLookup,
+    v2_lookup: &SharedV2Lookup,
 ) -> Result<AcceptedConn> {
     // 1. MSE Handshake
     let skeys: Vec<Vec<u8>> = (skey_provider)().into_iter().map(|k| k.to_vec()).collect();
@@ -304,11 +383,8 @@ async fn handle_inbound_inner(
     let mut stream: Box<dyn PeerStream> = Box::new(encrypted_stream);
 
     // 2. Incoming BitTorrent Handshake
-    let reserved_bits = default_peer_extension_bytes();
-    let lk = lookup.clone();
-    let lookup_fn = move |ih: &InfoHash| -> bool { lk(ih) };
-
-    let peer_hs = handshake_incoming(&mut stream, &our_peer_id, &reserved_bits, lookup_fn)
+    let v2 = v2_lookup.read().clone();
+    let peer_hs = inbound_bt_handshake(&mut stream, &our_peer_id, lookup, v2.as_ref())
         .await
         .map_err(|e| CoreError::Other(format!("incoming BitTorrent handshake error: {e}")))?;
 

@@ -86,6 +86,28 @@ impl FileInfo {
     pub fn is_padding(&self) -> bool {
         self.attr.contains('p')
     }
+
+    /// First global piece index that overlaps this file (`torrent_offset / piece_length`).
+    pub fn begin_piece_index(&self, piece_length: i64) -> u32 {
+        if piece_length <= 0 {
+            return 0;
+        }
+        (self.torrent_offset / piece_length) as u32
+    }
+
+    /// Piece index after the last piece of this file.
+    pub fn end_piece_index(&self, piece_length: i64) -> u32 {
+        if piece_length <= 0 {
+            return 0;
+        }
+        ((self.torrent_offset + self.length + piece_length - 1) / piece_length) as u32
+    }
+
+    /// Number of pieces this file spans (Go `File.numPieces`).
+    pub fn num_pieces(&self, piece_length: i64) -> u32 {
+        self.end_piece_index(piece_length)
+            .saturating_sub(self.begin_piece_index(piece_length))
+    }
 }
 
 /// Decoded `info` dictionary (BEP 3 / 47 / 52). `wt-meta` produces it.
@@ -112,18 +134,102 @@ impl Info {
     pub fn total_length(&self) -> i64 {
         self.files.iter().map(|f| f.length).sum()
     }
+
+    /// End offset of the last file in the torrent payload (excludes trailing
+    /// implicit pad after the final file).
+    pub fn payload_end(&self) -> i64 {
+        self.files
+            .last()
+            .map(|f| f.torrent_offset + f.length)
+            .unwrap_or(0)
+    }
+
+    /// Piece count. For v2/hybrid this is the sum of per-file piece spans
+    /// (Go `Info.NumPieces`), which includes inter-file pad gaps.
     pub fn num_pieces(&self) -> u32 {
+        if self.piece_length <= 0 {
+            return 0;
+        }
+        if self.has_v2() {
+            return self
+                .files
+                .iter()
+                .filter(|f| !f.is_padding())
+                .map(|f| f.num_pieces(self.piece_length))
+                .sum();
+        }
         let total = self.total_length();
-        if self.piece_length <= 0 || total <= 0 {
+        if total <= 0 {
             return 0;
         }
         ((total + self.piece_length - 1) / self.piece_length) as u32
     }
+
+    /// File-data length of a piece (Go `metainfo.Piece.Length`).
+    ///
+    /// For v2/hybrid this excludes the zero pad to the next piece boundary.
+    pub fn piece_data_length(&self, index: PieceIndex) -> i64 {
+        let offset = index as i64 * self.piece_length;
+        if !self.has_v2() {
+            return (self.total_length() - offset).clamp(0, self.piece_length);
+        }
+        // Match Go `Piece.Length` for HasV2: walk piece-aligned file ends.
+        let mut cursor = 0i64;
+        let mut last_file_end = 0i64;
+        let piece_length = self.piece_length;
+        for fi in self.files.iter().filter(|f| !f.is_padding()) {
+            if cursor != fi.torrent_offset {
+                // Tolerant: trust torrent_offset from the file tree.
+                cursor = fi.torrent_offset;
+            }
+            let file_start_piece = if piece_length > 0 {
+                (cursor / piece_length) as i64
+            } else {
+                0
+            };
+            if file_start_piece > i64::from(index) {
+                break;
+            }
+            last_file_end = cursor + fi.length;
+            cursor = if piece_length > 0 {
+                (last_file_end + piece_length - 1) / piece_length * piece_length
+            } else {
+                last_file_end
+            };
+        }
+        let ret = (last_file_end - offset).min(piece_length);
+        ret.max(0)
+    }
+
+    /// V1 piece length including hybrid zero-pad (Go `Piece.V1Length`).
+    pub fn piece_v1_length(&self, index: PieceIndex) -> i64 {
+        let offset = index as i64 * self.piece_length;
+        let end = if self.has_v2() {
+            self.payload_end()
+        } else {
+            self.total_length()
+        };
+        (end - offset).clamp(0, self.piece_length)
+    }
+
+    /// Zero bytes appended to the v1 hasher for hybrid piece-aligned files.
+    pub fn v1_zero_pad(&self, index: PieceIndex) -> i64 {
+        if !self.has_v2() || !self.has_v1() {
+            return 0;
+        }
+        (self.piece_v1_length(index) - self.piece_data_length(index)).max(0)
+    }
+
     pub fn piece(&self, index: PieceIndex) -> Piece {
         let offset = index as i64 * self.piece_length;
-        let length = (self.total_length() - offset).clamp(0, self.piece_length);
-        Piece { index, offset, length }
+        let length = self.piece_data_length(index);
+        Piece {
+            index,
+            offset,
+            length,
+        }
     }
+
     /// v1 SHA-1 of a piece, if the info carries v1 hashes.
     pub fn piece_hash_v1(&self, index: PieceIndex) -> Option<[u8; 20]> {
         let start = index as usize * 20;

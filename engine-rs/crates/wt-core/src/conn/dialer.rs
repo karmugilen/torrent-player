@@ -73,6 +73,10 @@ pub struct DialOutcome {
 pub struct DialParams<'a> {
     pub remote_addr: SocketAddr,
     pub info_hash: InfoHash,
+    /// When dialing with the v1 hash on a hybrid torrent, set the v2-upgrade
+    /// reserved bit and accept a peer handshake that returns this truncated
+    /// SHA-256 (Go `ExtensionBitV2Upgrade` / `c.v2 = true`).
+    pub info_hash_v2_short: Option<InfoHash>,
     pub our_peer_id: PeerId,
     /// `None` = race every enabled transport (Go dialPool). `Some` = only that one.
     pub transport: Option<Transport>,
@@ -84,6 +88,8 @@ pub struct DialParams<'a> {
     pub tcp_conn_hook: Option<&'a TcpConnHook>,
     pub utp_socket: Option<&'a Arc<UtpSocket>>,
     pub require_plain: bool,
+    /// Resend the uTP SYN at this interval (BEP 55 hole punching).
+    pub utp_syn_resend: Option<Duration>,
 }
 
 /// Dials an outgoing peer, negotiates MSE (with plaintext/encrypted fallback), and
@@ -182,6 +188,7 @@ impl DialPool {
         let disable_utp = params.cfg.disable_utp;
         let hook = params.tcp_conn_hook.cloned();
         let utp = params.utp_socket.cloned();
+        let syn_resend = params.utp_syn_resend;
         self.dials.spawn(async move {
             let result = dial_raw_owned(
                 addr,
@@ -191,6 +198,7 @@ impl DialPool {
                 disable_utp,
                 hook.as_ref(),
                 utp.as_ref(),
+                syn_resend,
             )
             .await;
             (transport, result)
@@ -256,7 +264,14 @@ async fn complete_bt_handshake(
         (raw_stream, false)
     };
 
-    let reserved_bits = default_peer_extension_bytes();
+    let mut reserved_bits = default_peer_extension_bytes();
+    // Go: set v2-upgrade when sending the v1 hash and we know the v2 short hash.
+    let offer_v2_upgrade = params
+        .info_hash_v2_short
+        .is_some_and(|v2| v2 != params.info_hash);
+    if offer_v2_upgrade {
+        reserved_bits.set_bit(wt_wire::handshake::EXTENSION_BIT_V2_UPGRADE, true);
+    }
     let hs_fut = handshake(
         &mut stream,
         &params.info_hash,
@@ -268,9 +283,16 @@ async fn complete_bt_handshake(
         .map_err(|_| CoreError::Other("BitTorrent handshake timeout".to_string()))?
         .map_err(|e| CoreError::Other(format!("BitTorrent handshake failed: {e}")))?;
 
-    if peer_hs.info_hash != params.info_hash {
+    let negotiated_ih = if peer_hs.info_hash == params.info_hash {
+        params.info_hash
+    } else if params
+        .info_hash_v2_short
+        .is_some_and(|v2| peer_hs.info_hash == v2)
+    {
+        peer_hs.info_hash
+    } else {
         return Err(CoreError::Other("peer returned mismatched InfoHash".into()));
-    }
+    };
 
     let peer_ext_bits = peer_hs.extensions;
     let peer_id = peer_hs.peer_id;
@@ -285,7 +307,7 @@ async fn complete_bt_handshake(
         true,
         chosen_transport,
         is_encrypted,
-        params.info_hash,
+        negotiated_ih,
         Some(peer_id),
         params.source,
         peer_ext_bits.0,
@@ -307,6 +329,7 @@ async fn complete_bt_handshake(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dial_raw_owned(
     remote_addr: SocketAddr,
     chosen_transport: Transport,
@@ -315,6 +338,7 @@ async fn dial_raw_owned(
     disable_utp: bool,
     tcp_conn_hook: Option<&TcpConnHook>,
     utp_socket: Option<&Arc<UtpSocket>>,
+    syn_resend: Option<Duration>,
 ) -> Result<Box<dyn PeerStream>> {
     match chosen_transport {
         Transport::Tcp => {
@@ -354,10 +378,19 @@ async fn dial_raw_owned(
                     Arc::new(UtpSocket::bind(bind_addr.parse().unwrap()).await?)
                 }
             };
-            let utp = wt_wire::transport::dial_utp(&sock, remote_addr, dial_timeout)
-                .await
-                .map_err(CoreError::Io)?
-                .with_socket(sock);
+            let utp = tokio::time::timeout(
+                dial_timeout,
+                sock.connect_with_syn_resend(remote_addr, syn_resend),
+            )
+            .await
+            .map_err(|_| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("dial uTP {remote_addr} timed out"),
+                ))
+            })?
+            .map_err(CoreError::Io)?
+            .with_socket(sock);
             Ok(Box::new(utp))
         }
         other => Err(CoreError::Other(format!(

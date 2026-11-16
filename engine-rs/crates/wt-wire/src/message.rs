@@ -627,6 +627,42 @@ impl Message {
     }
 }
 
+/// Largest `length` accepted in a BEP 52 hash request. libtorrent and Go both
+/// reject more than 8192 (8192 leaf hashes cover 128 MiB).
+pub const HASH_REQUEST_MAX_LENGTH: u32 = 8192;
+/// Largest `length` a client should *send*; BEP 52 / libtorrent request
+/// piece layers in chunks of at most 512 hashes.
+pub const HASH_REQUEST_SEND_MAX_LENGTH: u32 = 512;
+/// A Merkle tree over 16 KiB leaves of an `i64`-sized file has < 64 layers.
+pub const HASH_REQUEST_MAX_LAYERS: u32 = 64;
+
+/// Structural BEP 52 checks for a `hash request` / `hashes` / `hash reject`
+/// header, independent of any torrent: `length` is a power of two in
+/// `2..=8192`, `index` is a multiple of `length`, and `base_layer` /
+/// `proof_layers` are within a 64-layer tree. A request failing this must be
+/// answered with `hash reject`, never served. Tree-specific bounds (index
+/// within the file's layer, proof depth) are the caller's to check.
+pub fn validate_hash_request(
+    base_layer: u32,
+    index: u32,
+    length: u32,
+    proof_layers: u32,
+) -> Result<(), &'static str> {
+    if !(2..=HASH_REQUEST_MAX_LENGTH).contains(&length) || !length.is_power_of_two() {
+        return Err("hash request length must be a power of two in 2..=8192");
+    }
+    if index % length != 0 {
+        return Err("hash request index must be a multiple of length");
+    }
+    if base_layer >= HASH_REQUEST_MAX_LAYERS
+        || proof_layers >= HASH_REQUEST_MAX_LAYERS
+        || base_layer + proof_layers >= HASH_REQUEST_MAX_LAYERS
+    {
+        return Err("hash request layers out of range");
+    }
+    Ok(())
+}
+
 pub fn marshal_bitfield(bf: &[bool]) -> Bytes {
     let mut b = vec![0u8; bf.len().div_ceil(8)];
     for (i, &have) in bf.iter().enumerate() {

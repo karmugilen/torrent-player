@@ -53,6 +53,10 @@ pub struct StatsResponse {
     pub path: String,
     pub payload_transfers_allowed: bool,
     pub listen_port: u16,
+    /// Sum of BEP 55 hole punching counters across live torrents.
+    /// Prefer [`ConnectionsResponse::holepunch`] for a single torrent.
+    #[serde(default)]
+    pub holepunch: wt_core::holepunch::HolepunchStats,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -431,6 +435,13 @@ pub struct PeerConnectionView {
     pub peer_max_requests: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_requests: Option<usize>,
+    /// How we found the peer, as a PeerSource code ("C" = BEP 55 hole punch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// `"v1"` or `"v2"`: which BitTorrent swarm this connection is on.
+    /// Hybrid torrents can have peers on either side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bittorrent_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -439,6 +450,9 @@ pub struct ConnectionsResponse {
     pub id: String,
     pub paused: bool,
     pub peers: Vec<PeerConnectionView>,
+    /// Per-torrent BEP 55 hole punching counters for this torrent id.
+    #[serde(default)]
+    pub holepunch: wt_core::holepunch::HolepunchStats,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<wt_core::stats::SwarmDiagnostics>,
 }

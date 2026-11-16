@@ -14,6 +14,7 @@ pub mod choking;
 pub mod client;
 pub mod conn;
 pub mod hashing;
+pub mod holepunch;
 pub mod metadata;
 pub mod peer_conn;
 pub mod pex;
@@ -49,6 +50,9 @@ pub struct ClientConfig {
     pub disable_tcp: bool,
     pub disable_webtorrent: bool,
     pub disable_pex: bool,
+    /// Turn off BEP 55 `ut_holepunch` (relaying and punching). It is also
+    /// off wherever PEX is (private torrents, `disable_pex`).
+    pub disable_holepunch: bool,
     pub seed: bool,
     pub dial_for_peer_conns: bool,
     pub accept_peer_connections: bool,
@@ -92,6 +96,7 @@ impl Default for ClientConfig {
             disable_tcp: false,
             disable_webtorrent: false,
             disable_pex: false,
+            disable_holepunch: false,
             seed: false,
             dial_for_peer_conns: true,
             accept_peer_connections: true,
@@ -249,6 +254,17 @@ impl Client {
         self.inner.local_port()
     }
 
+    /// Sum of BEP 55 hole punching counters across live torrents.
+    /// Prefer [`Torrent::holepunch_stats`] for per-torrent UI.
+    pub fn holepunch_stats(&self) -> holepunch::HolepunchStats {
+        self.inner
+            .torrents()
+            .iter()
+            .fold(holepunch::HolepunchStats::default(), |acc, t| {
+                acc + t.holepunch_stats.snapshot()
+            })
+    }
+
     pub fn listen_addrs(&self) -> Vec<SocketAddr> {
         self.inner.listen_addrs()
     }
@@ -332,7 +348,7 @@ impl Torrent {
     }
 
     pub fn info_hash_v2(&self) -> Option<InfoHashV2> {
-        self.inner.info_hash_v2
+        self.inner.info_hash_v2()
     }
 
     pub fn name(&self) -> String {
@@ -511,7 +527,7 @@ impl Torrent {
         let (begin, end) = crate::picker::piece_req_index_range(
             piece,
             info.piece_length,
-            info.total_length(),
+            &self.inner.geometry(),
         );
         // Bounded Direct Play RAM can drop a partial piece while dirty bits
         // still claim we have those blocks (Go errStreamEvicted: "must be
@@ -565,6 +581,7 @@ impl Torrent {
         // Completion and dirty/request bitmaps must agree after bounded storage
         // discards a piece, otherwise the scheduler never requests it again.
         if evicted {
+            self.inner.verified_chunks.remove_range(begin, end);
             self.inner.dirty_chunks.remove_range(begin, end);
         }
         true
@@ -777,6 +794,11 @@ impl Torrent {
         snap
     }
 
+    /// BEP 55 hole punching counters for this torrent only.
+    pub fn holepunch_stats(&self) -> holepunch::HolepunchStats {
+        self.inner.holepunch_stats.snapshot()
+    }
+
     pub fn peer_conns(&self) -> Vec<PeerConnInfo> {
         self.inner.peer_snapshots.read().values().cloned().collect()
     }
@@ -820,13 +842,13 @@ impl Torrent {
     }
 
     pub fn new_reader(&self) -> reader::Reader {
-        let total_length = self
-            .inner
-            .info
-            .read()
-            .as_ref()
-            .map(|i| i.total_length())
-            .unwrap_or(0);
+        // Torrent space: v2 files are piece aligned, so it ends at the last
+        // file's end, past the sum of file lengths.
+        let total_length = if self.inner.info.read().is_some() {
+            self.inner.geometry().end()
+        } else {
+            0
+        };
         reader::Reader::new(self.inner.clone(), 0, total_length)
     }
 
@@ -1074,12 +1096,13 @@ impl File {
         let start_piece = (file_start / piece_len) as usize;
         let end_piece = ((file_end + piece_len - 1) / piece_len) as usize;
 
+        let geometry = self.torrent.geometry();
         let pieces = self.torrent.pieces.read();
         let mut completed = 0;
         for i in start_piece..end_piece.min(pieces.len()) {
             if pieces[i].complete {
                 let p_start = i as i64 * piece_len;
-                let p_end = (p_start + piece_len).min(info.total_length());
+                let p_end = p_start + geometry.piece_data_len(i as PieceIndex);
                 let overlap_start = file_start.max(p_start);
                 let overlap_end = file_end.min(p_end);
                 completed += (overlap_end - overlap_start).max(0);

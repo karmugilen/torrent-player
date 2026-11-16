@@ -51,8 +51,9 @@
   - Native change notifications update the UI without repeated control HTTP requests. Transfer telemetry uses the engine's one-second sampling clock.
 - **Material You UI**: Wallpaper-based colours on Android 12+, light/dark appearance, and four themes (Aero, Antiquity, Retro, Wada). Settings are grouped into Downloads, Playback, Network, Seeding, Battery and memory, Appearance, Data, and About. One Clear action covers engine caches.
 - **Cached public trackers**: A small maintained tracker list refreshes daily in the background. The last good cache works offline, supplied trackers stay intact, and extra trackers are added only after public metadata is available. WebSocket signaling trackers remain enabled.
-- **Full swarm connectivity**: Finds peers via DHT, PEX, LSD, HTTP(S)/UDP trackers, and WebTorrent WebSocket trackers; moves data over TCP, native uTP, and WebRTC data channels (plus HTTP(S) web seeds when listed).
-- **Live connection maps**: Download details offers a world map of approximate peer countries and an expandable device/protocol/peer diagram. Country lookup uses a bundled offline DB-IP database; unknown and local addresses stay unlocated. Maps refresh once per second while details is open; pause clears peer connections.
+- **Full swarm connectivity**: Finds peers via DHT, PEX, LSD, HTTP(S)/UDP trackers, and WebTorrent WebSocket trackers; moves data over TCP, native uTP, and WebRTC data channels (plus HTTP(S) web seeds when listed). BEP 55 hole punching asks a connected peer to introduce two peers that cannot reach each other directly.
+  - Hole punching limits: uTP only, IPv4 only; symmetric NATs and CGNAT/5G usually still fail. Host e2e proves punched peers; real NAT / phone proof is still pending (Details → Connections counters).
+- **Live connection maps**: Download details offers a world map of approximate peer countries and an expandable device/protocol/peer diagram. Country lookup uses a bundled offline DB-IP database; unknown and local addresses stay unlocated. Maps refresh once per second while details is open; pause clears peer connections. The Connections view marks peers reached by hole punching and shows the engine's BEP 55 counters.
 
 ---
 
@@ -67,7 +68,7 @@ Notes:
 - **Transmission for Android** is on **IzzyOnDroid / GitHub** (not main f-droid.org; no longer on Google Play).
 - **Seek-first** means the swarm fetches the new playhead first and can move late blocks to faster peers — not the same as sequential streaming.
 - **Seeding limits**: Mine supports ratio, time, and speed. LibreTorrent/Transdroid here mean speed (and related) controls, not full ratio/time auto-stop like Mine.
-- **BitTorrent 2.0**: Mine can parse v2/hybrid metainfo; piece download/verify is still v1-only → **No**.
+- **BitTorrent 2.0**: Dual-stack Yes (hybrid + pure v2 magnets, piece-layer verify, `HashRequest`/`Hashes`, dual v1+v2-short discovery). On v2/hybrid torrents, **16 KiB leaf verify** can make seek/playhead bytes readable before the whole piece hashes; the seek scheduler itself is unchanged.
 
 ### Features
 
@@ -95,7 +96,7 @@ Notes:
 | Cast / DLNA / UPnP media server | No | No | Yes | No |
 | 35+ UI languages | No | Yes | No | No |
 | Remote-control PC/NAS client | No | No | No | Yes |
-| BitTorrent 2.0 | No | Yes | No | No |
+| BitTorrent 2.0 | Yes | Yes | No | No |
 | Native Rust engine | Yes | No | No | No |
 | F-Droid (f-droid.org) | Yes | Yes | No | Yes |
 | No ads | Yes | Yes | Yes | Yes |
@@ -121,15 +122,15 @@ Notes:
 | LTEP extension protocol | Yes | Yes | Yes | No |
 | Fast extension | Yes | Yes | Yes | No |
 | UPnP / NAT-PMP port mapping | Yes | Yes | Yes | No |
-| Hole punching (BEP 55) | No | Yes | No | No |
+| Hole punching (BEP 55) | Yes | Yes | No | No |
 
 ## Installation
 
 Install from [F-Droid](https://f-droid.org/packages/webtor.app/), or download the APK from [GitHub Releases](https://github.com/karmugilen/torrent-player/releases). Both are signed with the same key (`CN=Torrent Player`), so either one updates the other in place.
 
 ```bash
-# Replace with the asset name from the release, e.g. torrent-player-2.4.1.apk
-adb install -r torrent-player-2.4.1.apk
+# Replace with the asset name from the release, e.g. torrent-player-2.4.2.apk
+adb install -r torrent-player-2.4.2.apk
 ```
 
 Package id is `webtor.app` (arm64-v8a). Minimum Android 8.0 (API 26); current releases target Android 16 (API 36) with 16 KB page support.
@@ -190,7 +191,7 @@ Package id is `webtor.app` (arm64-v8a). Minimum Android 8.0 (API 26); current re
 
 - Pure Rust shared library (`libengine.so`); the only engine the app ships since 2.4.0.
 - Crate layout (dependency order): `wt-types` → `wt-meta` → `wt-wire` / `wt-discovery` → `wt-core` → `wt-engine`, with `wt-storage` / `wt-policy` on the types/meta side.
-- Protocols: TCP, native uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, HTTP and WebSocket trackers.
+- Protocols: TCP, native uTP, WebRTC/WebTorrent-compatible peers, DHT, PEX, BEP 55 hole punching (`ut_holepunch`, over uTP; off when PEX is off), HTTP and WebSocket trackers.
 - Playback scheduling prioritizes the playhead (about 2 MiB Now), then readahead (~24 MiB), lookbehind, and background rarest-first. Seeks cancel obsolete requests and move late playhead blocks to faster peers; MP4/MKV keyframe hints are fetched ahead when the container index is available.
 - Built-in playback aids (always on, not separate Settings toggles): hedged requests for stuck playhead blocks, slow-peer yield, dropping chokers, play-this-file-only while an external player is open, and play-next with start prefetch.
 - Playback method: **Stream** (default) gives the player a loopback HTTP media URL for incomplete video and Direct Play; **File proxy** uses a read-only content URI over a seekable descriptor on verified reads. Completed downloads open from the saved file either way.
@@ -244,6 +245,7 @@ cd android
 
 See [GitHub Releases](https://github.com/karmugilen/torrent-player/releases) for full notes. Recent highlights:
 
+- **2.4.2** — BitTorrent 2.0 dual-stack (hybrid + pure v2); BEP 55 hole punching (uTP/IPv4) with per-torrent Connections counters; thinner Kotlin↔Rust waist (raw `.torrent` add, magnet normalize, binary pieces snapshot).
 - **2.4.1** — `.torrent` files and download links; free space on the chosen volume (including SD cards); settings cleanup; seek A/B UI removed.
 - **2.4.0** — Rust engine replaces Go; faster seek scheduling; seeding defaults and store text updated for the Rust stack.
 

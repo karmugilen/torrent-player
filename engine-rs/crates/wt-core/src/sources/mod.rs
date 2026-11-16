@@ -729,6 +729,10 @@ impl Sources {
 }
 
 /// Returns false when every short-hash announce failed to start (Go backs off).
+///
+/// The v1 and v2-short lookups run at the same time: each can hold its
+/// stream open for the whole 15 minute timebox, so run in turn the v2 swarm
+/// of a hybrid torrent would wait behind the v1 one.
 async fn announce_to_dht(
     dht: &DhtNode,
     keys: &TorrentKeys,
@@ -736,59 +740,127 @@ async fn announce_to_dht(
     sink: &Arc<dyn PeerSink>,
     source: PeerSource,
 ) -> bool {
-    let mut any_ok = false;
-    let mut total_peers = 0usize;
-    for ih in keys.all_short() {
-        // Explicit port: the DHT socket's port is not the peer listen port.
-        let mut handle = match dht.announce(ih, port, false).await {
-            Ok(h) => {
-                any_ok = true;
-                h
-            }
-            Err(e) => {
-                tracing::debug!("dht announce start failed for {}: {e}", ih.to_hex());
-                continue;
-            }
-        };
-        // Go `timeboxedAnnounceToDht`: keep consuming PeersValues until the
-        // stream ends or 15m elapses. A short idle abort starved unique addrs
-        // mid-run once the first nearby DHT nodes had been queried.
-        let deadline = tokio::time::Instant::now() + DHT_ANNOUNCE_TIMEBOX;
-        while tokio::time::Instant::now() < deadline {
-            let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout(wait, handle.next()).await {
-                Ok(Some(vals)) => {
-                    let peers: Vec<PeerInfo> = vals
-                        .peers
-                        .into_iter()
-                        .filter(|a| a.port() != 0)
-                        .map(|addr| PeerInfo {
-                            id: None,
-                            addr,
-                            source,
-                            supports_encryption: false,
-                            pex: Default::default(),
-                            trusted: false,
-                        })
-                        .collect();
-                    if !peers.is_empty() {
-                        total_peers += peers.len();
-                        tracing::debug!(
-                            "dht get_peers +{} for {} (batch)",
-                            peers.len(),
-                            ih.to_hex()
-                        );
-                        sink.add_peers(ih, peers);
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => break, // timebox elapsed
-            }
-        }
-        handle.close();
-    }
+    let results = join_per_key(keys.all_short(), |ih| {
+        announce_one_to_dht(dht, ih, port, sink, source)
+    })
+    .await;
+    let any_ok = results.iter().any(|r| r.is_some());
+    let total_peers: usize = results.iter().flatten().sum();
     tracing::debug!("dht announce finished: any_ok={any_ok} peers={total_peers}");
     any_ok
+}
+
+/// Run `f` for every key concurrently on the current task; outputs in key order.
+async fn join_per_key<F, Fut>(keys: Vec<InfoHash>, f: F) -> Vec<Fut::Output>
+where
+    F: Fn(InfoHash) -> Fut,
+    Fut: std::future::Future,
+{
+    use std::task::Poll;
+    let mut futs: Vec<std::pin::Pin<Box<Fut>>> = keys.into_iter().map(|k| Box::pin(f(k))).collect();
+    let mut out: Vec<Option<Fut::Output>> = futs.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (fut, slot) in futs.iter_mut().zip(out.iter_mut()) {
+            if slot.is_none() {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(v) => *slot = Some(v),
+                    Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending { Poll::Pending } else { Poll::Ready(()) }
+    })
+    .await;
+    out.into_iter().map(|v| v.expect("every future completed")).collect()
+}
+
+/// One short-hash announce. `None` when it failed to start, else peers found.
+async fn announce_one_to_dht(
+    dht: &DhtNode,
+    ih: InfoHash,
+    port: u16,
+    sink: &Arc<dyn PeerSink>,
+    source: PeerSource,
+) -> Option<usize> {
+    let mut total_peers = 0usize;
+    // Explicit port: the DHT socket's port is not the peer listen port.
+    let mut handle = match dht.announce(ih, port, false).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::debug!("dht announce start failed for {}: {e}", ih.to_hex());
+            return None;
+        }
+    };
+    // Go `timeboxedAnnounceToDht`: keep consuming PeersValues until the
+    // stream ends or 15m elapses. A short idle abort starved unique addrs
+    // mid-run once the first nearby DHT nodes had been queried.
+    let deadline = tokio::time::Instant::now() + DHT_ANNOUNCE_TIMEBOX;
+    while tokio::time::Instant::now() < deadline {
+        let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(wait, handle.next()).await {
+            Ok(Some(vals)) => {
+                let peers: Vec<PeerInfo> = vals
+                    .peers
+                    .into_iter()
+                    .filter(|a| a.port() != 0)
+                    .map(|addr| PeerInfo {
+                        id: None,
+                        addr,
+                        source,
+                        supports_encryption: false,
+                        pex: Default::default(),
+                        trusted: false,
+                    })
+                    .collect();
+                if !peers.is_empty() {
+                    total_peers += peers.len();
+                    tracing::debug!("dht get_peers +{} for {} (batch)", peers.len(), ih.to_hex());
+                    sink.add_peers(ih, peers);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break, // timebox elapsed
+        }
+    }
+    handle.close();
+    Some(total_peers)
+}
+
+#[cfg(test)]
+mod dht_join_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// v2 discovery must not wait behind the v1 lookup's 15 minute timebox.
+    #[tokio::test(start_paused = true)]
+    async fn v1_and_v2_short_lookups_run_concurrently() {
+        let v1 = InfoHash([1; 20]);
+        let v2 = InfoHash([2; 20]);
+        let keys = TorrentKeys { v1: Some(v1), v2_short: Some(v2) };
+        let start = tokio::time::Instant::now();
+        let started = parking_lot::Mutex::new(Vec::new());
+        let out = join_per_key(keys.all_short(), |ih| {
+            let started = &started;
+            async move {
+                started.lock().push((ih, start.elapsed()));
+                tokio::time::sleep(DHT_ANNOUNCE_TIMEBOX).await;
+                ih
+            }
+        })
+        .await;
+        assert_eq!(out, vec![v1, v2], "outputs keep key order");
+        let started = started.into_inner();
+        assert_eq!(started.len(), 2);
+        assert!(started.iter().all(|(_, at)| *at == Duration::ZERO), "{started:?}");
+        assert_eq!(start.elapsed(), DHT_ANNOUNCE_TIMEBOX, "max of the two, not the sum");
+    }
+
+    #[tokio::test]
+    async fn join_per_key_handles_one_and_no_keys() {
+        assert_eq!(join_per_key(vec![InfoHash([7; 20])], |ih| async move { ih.0[0] }).await, vec![7]);
+        assert!(join_per_key(Vec::new(), |ih| async move { ih }).await.is_empty());
+    }
 }
 
 fn split_tracker_urls(tiers: &[Vec<String>]) -> (Vec<String>, Vec<String>) {

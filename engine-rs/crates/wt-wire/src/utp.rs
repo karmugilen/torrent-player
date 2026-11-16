@@ -534,11 +534,10 @@ impl AsyncWrite for UtpStream {
         let mut total_sent = 0;
         let mut packets_to_send = Vec::new();
 
-        let max_payload = if st.remote_addr.ip().is_loopback() {
-            8192
-        } else {
-            MAX_PAYLOAD_SIZE
-        };
+        // Every peer, loopback included, gets MTU-sized packets: the batched
+        // receive (udp_batch, 2 KiB slots) drops longer datagrams as
+        // truncated, so a larger loopback payload never arrived at all.
+        let max_payload = MAX_PAYLOAD_SIZE;
 
         while total_sent < buf.len() {
             let max_flight = std::cmp::min(st.cwnd, st.remote_wnd as usize);
@@ -818,6 +817,54 @@ impl UtpSocket {
                     let send_id = hdr.connection_id;
                     let recv_id = send_id.wrapping_add(1);
 
+                    let syn_ack = |ack_nr: u16| {
+                        let resp = PacketHeader {
+                            type_ver: (ST_STATE << 4) | UTP_VERSION,
+                            extension: EXT_NONE,
+                            connection_id: send_id,
+                            timestamp_micros: wall_micros(),
+                            timestamp_diff_micros: delay,
+                            wnd_size: DEFAULT_RECV_WND,
+                            seq_nr: 1,
+                            ack_nr,
+                        };
+                        let mut b = BytesMut::with_capacity(HEADER_SIZE);
+                        resp.encode(&mut b);
+                        b.freeze()
+                    };
+
+                    // A retransmitted SYN (its SYN-ACK was lost) must not
+                    // open a second stream over the first: answer it again.
+                    if streams_in.lock().contains_key(&(peer, recv_id)) {
+                        let _ = out_tx_in.send((syn_ack(hdr.seq_nr), peer));
+                        continue;
+                    }
+
+                    // Simultaneous open (BEP 55 hole punching: both ends dial
+                    // each other from their listen sockets). Both sides see
+                    // both SYN ids, so both keep the same connection: the
+                    // one whose SYN id is larger. On a tie both yield.
+                    {
+                        let mut pending = syn_senders_in.lock();
+                        let ours: Vec<u16> = pending
+                            .keys()
+                            .filter(|(addr, _)| *addr == peer)
+                            .map(|(_, cid)| *cid)
+                            .collect();
+                        if ours.iter().any(|&cid| cid > send_id) {
+                            // Our SYN wins; the peer yields when it sees it.
+                            continue;
+                        }
+                        for cid in ours {
+                            if let Some(sender) = pending.remove(&(peer, cid)) {
+                                let _ = sender.send(Err(Error::new(
+                                    ErrorKind::ConnectionAborted,
+                                    "uTP simultaneous open: yielded to peer's SYN",
+                                )));
+                            }
+                        }
+                    }
+
                     let mut st = StreamState::new(send_id, recv_id, peer, start_time);
                     st.ack_nr = hdr.seq_nr;
                     st.expected_seq_nr = hdr.seq_nr.wrapping_add(1);
@@ -831,19 +878,7 @@ impl UtpSocket {
                     streams_in.lock().insert((peer, recv_id), inner.clone());
 
                     // Send ST_STATE response
-                    let resp = PacketHeader {
-                        type_ver: (ST_STATE << 4) | UTP_VERSION,
-                        extension: EXT_NONE,
-                        connection_id: send_id,
-                        timestamp_micros: wall_micros(),
-                        timestamp_diff_micros: delay,
-                        wnd_size: DEFAULT_RECV_WND,
-                        seq_nr: 1,
-                        ack_nr: hdr.seq_nr,
-                    };
-                    let mut b = BytesMut::with_capacity(HEADER_SIZE);
-                    resp.encode(&mut b);
-                    let _ = out_tx_in.send((b.freeze(), peer));
+                    let _ = out_tx_in.send((syn_ack(hdr.seq_nr), peer));
 
                     let stream = UtpStream {
                         inner,
@@ -1141,6 +1176,22 @@ impl UtpSocket {
     }
 
     pub async fn connect(&self, remote: SocketAddr) -> io::Result<UtpStream> {
+        self.connect_with_syn_resend(remote, None).await
+    }
+
+    /// True while any stream to `remote` is registered (open or opening).
+    pub fn has_stream_to(&self, remote: SocketAddr) -> bool {
+        self.streams.lock().keys().any(|(addr, _)| *addr == remote)
+    }
+
+    /// [`Self::connect`], resending the SYN every `resend` until answered.
+    /// Hole punching needs this: the first SYN of each side usually dies at
+    /// the other side's NAT, and only a later one finds the mapping open.
+    pub async fn connect_with_syn_resend(
+        &self,
+        remote: SocketAddr,
+        resend: Option<Duration>,
+    ) -> io::Result<UtpStream> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::new(
                 ErrorKind::ConnectionAborted,
@@ -1170,13 +1221,33 @@ impl UtpSocket {
             ack_nr: 0,
         };
 
-        let mut b = BytesMut::with_capacity(HEADER_SIZE);
-        syn.encode(&mut b);
-        self.out_tx
-            .send((b.freeze(), remote))
-            .map_err(|_| Error::new(ErrorKind::BrokenPipe, "socket closed"))?;
+        let send_syn = |syn: &PacketHeader| {
+            let mut b = BytesMut::with_capacity(HEADER_SIZE);
+            syn.encode(&mut b);
+            self.out_tx
+                .send((b.freeze(), remote))
+                .map_err(|_| Error::new(ErrorKind::BrokenPipe, "socket closed"))
+        };
+        send_syn(&syn)?;
 
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut rx = rx;
+        let answer = loop {
+            let until = match resend {
+                Some(every) => (tokio::time::Instant::now() + every).min(deadline),
+                None => deadline,
+            };
+            match tokio::time::timeout_at(until, &mut rx).await {
+                Ok(answer) => break Ok(answer),
+                Err(_) if tokio::time::Instant::now() >= deadline => break Err(()),
+                Err(_) => {
+                    let mut again = syn.clone();
+                    again.timestamp_micros = wall_micros();
+                    send_syn(&again)?;
+                }
+            }
+        };
+        match answer {
             Ok(Ok(Ok(inner))) => {
                 pending.armed = false;
                 Ok(UtpStream {

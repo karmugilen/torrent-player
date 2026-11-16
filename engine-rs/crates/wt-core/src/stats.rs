@@ -103,6 +103,9 @@ pub struct PeerConnInfo {
     pub client_name: String,
     pub transport: Transport,
     pub source: PeerSource,
+    /// True when this connection negotiated on the truncated v2 infohash
+    /// (or upgraded via LTEP `v2`); false for classic v1 SHA-1 swarms.
+    pub v2: bool,
     pub encrypted: bool,
     pub outgoing: bool,
     pub peer_choking: bool,

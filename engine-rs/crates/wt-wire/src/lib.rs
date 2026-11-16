@@ -5,6 +5,7 @@ pub mod codec;
 pub mod ext;
 pub mod fast_core;
 pub mod handshake;
+pub mod holepunch;
 pub mod message;
 pub mod mse;
 pub mod transport;
@@ -20,12 +21,18 @@ pub use ext::{
     ExtendedHandshake, LocalLtepProtocolMap, MetadataMsg, MetadataMsgType, PexMsg,
     EXTENSION_NAME_METADATA, EXTENSION_NAME_PEX, METADATA_PIECE_SIZE,
 };
+pub use holepunch::{
+    HolepunchError, HolepunchMsg, HolepunchMsgType, EXTENSION_NAME_HOLEPUNCH,
+};
 pub use handshake::{
     default_peer_extension_bytes, handshake, handshake_incoming, read_handshake, write_handshake,
     HandshakeResult, PeerExtensionBits, EXTENSION_BIT_DHT, EXTENSION_BIT_FAST, EXTENSION_BIT_LTEP,
     EXTENSION_BIT_V2_UPGRADE, HANDSHAKE_LEN, PROTOCOL_HEADER, PROTOCOL_STR,
 };
-pub use message::{marshal_bitfield, unmarshal_bitfield, Message, MessageType};
+pub use message::{
+    marshal_bitfield, unmarshal_bitfield, validate_hash_request, Message, MessageType,
+    HASH_REQUEST_MAX_LENGTH, HASH_REQUEST_SEND_MAX_LENGTH,
+};
 pub use mse::{
     default_crypto_selector, handle_encryption, initiate_handshake, receive_handshake,
     CryptoMethod, HeaderObfuscationPolicy, MseStream, ReceiverResult,

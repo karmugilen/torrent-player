@@ -273,7 +273,7 @@ private fun SourceInput(
                 if (fullLinkWasPasted) pastedSourceToHide = value
             },
             enabled = !busy, modifier = Modifier.fillMaxWidth(),
-            label = { Text("Magnet link or torrent URL") }, placeholder = { Text("magnet:?xt=urn:btih:…") },
+            label = { Text("Magnet link or torrent URL") }, placeholder = { Text("magnet:?xt=urn:btih:… or btmh:…") },
             trailingIcon = {
                 if (magnet.isNotEmpty()) {
                     IconButton(onClick = { onMagnet("") }, enabled = !busy) {

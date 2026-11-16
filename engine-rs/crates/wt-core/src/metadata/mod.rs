@@ -253,7 +253,9 @@ impl MetadataExchange {
                 }
             }
             (Some(exp1), Some(exp2)) => {
-                if v1 != *exp1 {
+                let v1_ok = v1 == *exp1
+                    || (v2.to_short() == *exp1 && info_has_v2(&info));
+                if !v1_ok {
                     return Err(MetadataError::IncorrectV1);
                 }
                 if v2 != *exp2 {
@@ -484,5 +486,117 @@ mod tests {
             MetadataExchange::from_info_bytes(mi.info_bytes.clone(), Some(ih), None).unwrap();
         assert!(meta.has_info());
         assert!(matches!(meta.serve(0), Serve::Data(_)));
+    }
+
+    #[test]
+    fn pure_v2_magnet_metadata_verifies_with_short_alias() {
+        use wt_meta::info_hash_v2;
+        let raw = std::fs::read(testdata("bittorrent-v2-test.torrent")).unwrap();
+        let mi = parse_metainfo(&raw).unwrap();
+        let v2 = info_hash_v2(&mi.info_bytes);
+        let short = v2.to_short();
+        // How TorrentInner::new wires a pure-v2 magnet: no expected v1.
+        let mut meta = MetadataExchange::new(None, Some(v2));
+        meta.set_size(mi.info_bytes.len() as u32).unwrap();
+        let verified = meta.on_data(0, &mi.info_bytes).unwrap().expect("verified");
+        assert_eq!(verified.info_hash_v2, v2);
+        assert!(verified.info.has_v2());
+
+        // Also tolerate short hash parked in the v1 expected slot (legacy wiring).
+        let mut meta = MetadataExchange::new(Some(short), Some(v2));
+        meta.set_size(mi.info_bytes.len() as u32).unwrap();
+        let verified = meta.on_data(0, &mi.info_bytes).unwrap().expect("verified");
+        assert_eq!(verified.info_hash_v2, v2);
+    }
+
+    /// Feed `info_bytes` in ut_metadata-sized pieces; return the final result.
+    fn assemble(
+        meta: &mut MetadataExchange,
+        info_bytes: &[u8],
+    ) -> Result<Option<VerifiedMetadata>, MetadataError> {
+        meta.set_size(info_bytes.len() as u32).unwrap();
+        let n = info_bytes.len().div_ceil(METADATA_PIECE_SIZE);
+        let mut last = Ok(None);
+        for i in 0..n {
+            let start = i * METADATA_PIECE_SIZE;
+            let len = MetadataExchange::piece_size(info_bytes.len(), i as u32);
+            last = meta.on_data(i as u32, &info_bytes[start..start + len]);
+            if i + 1 < n {
+                assert!(matches!(last, Ok(None)), "piece {i}: {last:?}");
+            }
+        }
+        last
+    }
+
+    fn fixture_info(name: &str) -> Vec<u8> {
+        let raw = std::fs::read(testdata(name)).unwrap();
+        parse_metainfo(&raw).unwrap().info_bytes
+    }
+
+    /// BEP 52 hybrid magnet (`btih` + `btmh`): metadata must match BOTH. An
+    /// info dict matching only one of the two hashes is a spoof.
+    #[test]
+    fn bt20_hybrid_magnet_requires_both_hashes() {
+        use wt_meta::info_hash_v2;
+        let hybrid = fixture_info("bittorrent-v2-hybrid-test.torrent");
+        let other_v2 = fixture_info("bittorrent-v2-test.torrent");
+        let other_v1 = fixture_info("trackerless.torrent");
+        let (v1, v2) = (info_hash_v1(&hybrid), info_hash_v2(&hybrid));
+
+        // Genuine hybrid info (multi-piece ut_metadata) verifies and reports
+        // both hashes.
+        let mut m = MetadataExchange::new(Some(v1), Some(v2));
+        let ok = assemble(&mut m, &hybrid).unwrap().expect("verified");
+        assert_eq!((ok.info_hash_v1, ok.info_hash_v2), (v1, v2));
+        assert!(ok.info.has_v1() && ok.info.has_v2());
+
+        // Info whose SHA-1 matches the btih but whose SHA-256 is not the btmh.
+        let mut m = MetadataExchange::new(Some(v1), Some(info_hash_v2(&other_v2)));
+        assert_eq!(assemble(&mut m, &hybrid).unwrap_err(), MetadataError::IncorrectV2);
+        assert!(!m.has_info());
+
+        // Info whose SHA-256 matches the btmh but whose SHA-1 is not the btih.
+        let mut m = MetadataExchange::new(Some(info_hash_v1(&other_v1)), Some(v2));
+        assert_eq!(assemble(&mut m, &hybrid).unwrap_err(), MetadataError::IncorrectV1);
+        assert!(!m.has_info());
+
+        // A different torrent entirely, offered to a hybrid magnet.
+        let mut m = MetadataExchange::new(Some(v1), Some(v2));
+        assert!(assemble(&mut m, &other_v2).is_err());
+        assert!(!m.has_info());
+    }
+
+    /// Pure `btmh` magnet: the full SHA-256 is the only proof. Peers are found
+    /// by the truncated hash, which must never be accepted as a v1 SHA-1.
+    #[test]
+    fn bt20_pure_v2_magnet_rejects_wrong_v2_and_short_alias_needs_v2_info() {
+        use wt_meta::info_hash_v2;
+        let pure = fixture_info("bittorrent-v2-test.torrent");
+        let v2 = info_hash_v2(&pure);
+
+        let mut m = MetadataExchange::new(None, Some(v2));
+        let ok = assemble(&mut m, &pure).unwrap().expect("verified");
+        assert_eq!(ok.info_hash_v2, v2);
+        assert!(ok.info.has_v2() && !ok.info.has_v1());
+
+        let mut wrong = v2;
+        wrong.0[31] ^= 1;
+        let mut m = MetadataExchange::new(None, Some(wrong));
+        assert_eq!(assemble(&mut m, &pure).unwrap_err(), MetadataError::IncorrectV2);
+
+        // A truncated-SHA-256 match on the v1 slot alone (only the low 20
+        // bytes match) does not carry the full v2 proof when the magnet has
+        // the full v2 hash: the full hash still decides.
+        let mut m = MetadataExchange::new(Some(v2.to_short()), Some(wrong));
+        assert_eq!(assemble(&mut m, &pure).unwrap_err(), MetadataError::IncorrectV2);
+
+        // Short alias in the v1 slot with no btmh: accepted only for v2 infos,
+        // and the full v2 hash is learned from the verified bytes.
+        let mut m = MetadataExchange::new(Some(v2.to_short()), None);
+        let ok = assemble(&mut m, &pure).unwrap().expect("verified");
+        assert_eq!(ok.info_hash_v2, v2);
+        let v1_only = fixture_info("trackerless.torrent");
+        let mut m = MetadataExchange::new(Some(info_hash_v2(&v1_only).to_short()), None);
+        assert_eq!(assemble(&mut m, &v1_only).unwrap_err(), MetadataError::InvalidV2Info);
     }
 }

@@ -228,13 +228,28 @@ pub fn parse_info(info_bytes: &[u8]) -> Result<Info> {
     let files_val = dict.get(b"files".as_slice());
 
     if info.meta_version == 2 {
-        if let Some(raw) = &info.file_tree_raw {
-            let tree_val = bencode::decode(raw)?;
-            info.files = parse_file_tree(&tree_val, info.piece_length)?;
-            info.single_file = info.files.len() == 1 && info.files[0].path.is_empty();
-        }
+        validate_v2_piece_length(info.piece_length)?;
+        let Some(raw) = &info.file_tree_raw else {
+            return Err(Error::MetaInfo("meta version 2 without a file tree".into()));
+        };
+        let tree_val = bencode::decode(raw)?;
+        info.files = parse_file_tree(&tree_val, info.piece_length)?;
+        info.single_file = info.files.len() == 1 && info.files[0].path.is_empty();
         // Hybrid: also may have v1 files/pieces; prefer file tree for file list
-        // when meta version is 2 (matches Go UpvertedFiles).
+        // when meta version is 2 (matches Go UpvertedFiles). The v1 view must
+        // describe the same bytes, or v1 and v2 peers would be swarming on
+        // different data (libtorrent rejects these as inconsistent).
+        if info.has_v1() {
+            let v1_files = if let Some(files_v) = files_val {
+                parse_v1_files(files_v)?
+            } else {
+                vec![FileInfo {
+                    length: length.unwrap_or(0),
+                    ..FileInfo::default()
+                }]
+            };
+            check_hybrid_consistency(&info, &v1_files)?;
+        }
     } else if let Some(files_v) = files_val {
         info.single_file = false;
         info.files = parse_v1_files(files_v)?;
@@ -257,7 +272,87 @@ pub fn parse_info(info_bytes: &[u8]) -> Result<Info> {
     // If v1 multi-file was present alongside v2, Go's HasV1 checks Files/Length/Pieces.
     // Our Info already has files from the tree. Pieces may still be set for hybrid.
 
+    if info.files.iter().any(|f| f.length < 0) {
+        return Err(Error::MetaInfo("negative file length".into()));
+    }
+    check_payload_size(&info)?;
+
     Ok(info)
+}
+
+/// Largest payload whose 16 KiB blocks still fit a `u32` request index.
+pub const MAX_PAYLOAD_LENGTH: i64 = (u32::MAX as i64) * wt_types::BLOCK_SIZE as i64;
+
+/// Reject torrents whose piece or block indexes would not fit the `u32`
+/// `PieceIndex` / `RequestIndex` used across the engine (silent truncation
+/// otherwise maps distinct pieces onto the same index).
+fn check_payload_size(info: &Info) -> Result<()> {
+    let mut end: i64 = 0;
+    for f in &info.files {
+        let file_end = f
+            .torrent_offset
+            .checked_add(f.length)
+            .ok_or_else(|| Error::MetaInfo("file offset overflow".into()))?;
+        end = end.max(file_end);
+    }
+    if end > MAX_PAYLOAD_LENGTH {
+        return Err(Error::MetaInfo(format!("torrent payload too large ({end} bytes)")));
+    }
+    Ok(())
+}
+
+/// BEP 52: "piece length … must be a power of two and at least 16KiB".
+/// Merkle piece layers only line up with 16 KiB leaves when this holds.
+fn validate_v2_piece_length(piece_length: i64) -> Result<()> {
+    if piece_length < merkle::BLOCK_SIZE as i64 || !(piece_length as u64).is_power_of_two() {
+        return Err(Error::MetaInfo(format!(
+            "v2 piece length {piece_length} is not a power of two >= 16 KiB"
+        )));
+    }
+    Ok(())
+}
+
+/// BEP 52 upgrade path: a hybrid torrent's v1 `files` (with BEP 47 pad files)
+/// must lay out exactly the v2 file tree, each file starting on a piece
+/// boundary, and its v1 `pieces` must cover the same number of pieces.
+fn check_hybrid_consistency(info: &Info, v1_files: &[FileInfo]) -> Result<()> {
+    let inconsistent = |why: String| Err(Error::MetaInfo(format!("hybrid v1/v2 mismatch: {why}")));
+    let v1: Vec<&FileInfo> = v1_files.iter().filter(|f| !f.is_padding()).collect();
+    if v1.len() != info.files.len() {
+        return inconsistent(format!(
+            "{} v1 files vs {} v2 files",
+            v1.len(),
+            info.files.len()
+        ));
+    }
+    if v1_files.iter().any(|f| f.length < 0) {
+        return Err(Error::MetaInfo("negative file length".into()));
+    }
+    for (a, b) in v1.iter().zip(&info.files) {
+        // Single-file v1 (`length`) has an empty path; its v2 tree has the
+        // file as the one top-level entry.
+        let same_path = a.path == b.path || (a.path.is_empty() && v1.len() == 1 && b.path.len() == 1);
+        if !same_path || a.length != b.length {
+            return inconsistent(format!(
+                "v1 {:?} ({}) vs v2 {:?} ({})",
+                a.path, a.length, b.path, b.length
+            ));
+        }
+        // Empty files occupy no bytes, so creators may place them on either
+        // side of a pad file.
+        if a.length > 0 && a.torrent_offset != b.torrent_offset {
+            return inconsistent(format!(
+                "{:?} at v1 offset {} but v2 offset {} (missing pad file?)",
+                b.path, a.torrent_offset, b.torrent_offset
+            ));
+        }
+    }
+    let v1_pieces = info.pieces.len() / 20;
+    let v2_pieces = info.num_pieces() as usize;
+    if v1_pieces != v2_pieces {
+        return inconsistent(format!("{v1_pieces} v1 piece hashes vs {v2_pieces} v2 pieces"));
+    }
+    Ok(())
 }
 
 /// Encode an `Info` to bencode. For v2, `file_tree_raw` is preferred when set.
@@ -499,6 +594,9 @@ fn parse_v1_files(v: &Value) -> Result<Vec<FileInfo>> {
             .get(b"attr".as_slice())
             .and_then(value_to_string_lenient)
             .unwrap_or_default();
+        if length < 0 {
+            return Err(Error::MetaInfo("negative file length".into()));
+        }
         files.push(FileInfo {
             path,
             length,
@@ -506,7 +604,9 @@ fn parse_v1_files(v: &Value) -> Result<Vec<FileInfo>> {
             attr,
             pieces_root: None,
         });
-        offset += length;
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| Error::MetaInfo("file offsets overflow".into()))?;
     }
     Ok(files)
 }
@@ -532,11 +632,35 @@ fn list_of_strings(v: &Value) -> Option<Vec<String>> {
 
 /// Parse BEP 52 file tree into `FileInfo` list with piece-aligned offsets
 /// (padding semantics like Go).
+///
+/// Validation (all of it reachable from untrusted .torrent files and from
+/// ut_metadata, whose bytes are only as trustworthy as the infohash the user
+/// pasted): path components must be real names, every node must be a dict, a
+/// file needs a non-negative integer `length`, and a non-empty file needs a
+/// 32-byte `pieces root`. Nesting depth is bounded by the bencode decoder.
 fn parse_file_tree(tree: &Value, piece_length: i64) -> Result<Vec<FileInfo>> {
     let mut files = Vec::new();
     let mut offset: i64 = 0;
+    let root = tree
+        .as_dict()
+        .ok_or_else(|| Error::MetaInfo("file tree is not a dict".into()))?;
+    if root.is_empty() || root.contains_key(b"".as_slice()) {
+        // A bare file at the root has no name at all.
+        return Err(Error::MetaInfo("file tree has no named entries".into()));
+    }
     walk_file_tree(tree, &[], piece_length, &mut offset, &mut files)?;
     Ok(files)
+}
+
+fn validate_path_component(key: &[u8]) -> Result<String> {
+    let bad = key == b"." || key == b".." || key.contains(&b'/') || key.contains(&0);
+    if bad {
+        return Err(Error::MetaInfo(format!(
+            "invalid file tree path component {:?}",
+            String::from_utf8_lossy(key)
+        )));
+    }
+    Ok(String::from_utf8_lossy(key).into_owned())
 }
 
 fn walk_file_tree(
@@ -556,47 +680,69 @@ fn walk_file_tree(
 
     if dir_keys.is_empty() {
         // File leaf: properties under "".
-        let props = dict.get(b"".as_slice());
-        let (length, pieces_root) = match props {
-            Some(Value::Dict(pd)) => {
-                let length = pd
-                    .get(b"length".as_slice())
-                    .and_then(|x| x.as_int())
-                    .unwrap_or(0);
-                let pieces_root = pd
-                    .get(b"pieces root".as_slice())
-                    .and_then(|x| x.as_bytes())
-                    .and_then(|b| {
-                        if b.len() == 32 {
-                            let mut a = [0u8; 32];
-                            a.copy_from_slice(b);
-                            Some(a)
-                        } else {
-                            None
-                        }
-                    });
-                (length, pieces_root)
-            }
-            _ => (0, None),
+        let Some(Value::Dict(pd)) = dict.get(b"".as_slice()) else {
+            return Err(Error::MetaInfo(format!(
+                "file tree entry {path:?} has neither children nor file properties"
+            )));
         };
+        let length = match pd.get(b"length".as_slice()) {
+            Some(Value::Int(n)) if *n >= 0 => *n,
+            _ => {
+                return Err(Error::MetaInfo(format!(
+                    "file {path:?} has a missing or invalid length"
+                )))
+            }
+        };
+        let pieces_root = if length == 0 {
+            // BEP 52: empty files have no pieces root (and no pieces).
+            None
+        } else {
+            match pd.get(b"pieces root".as_slice()).and_then(|x| x.as_bytes()) {
+                Some(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(b);
+                    Some(a)
+                }
+                // Without it the file's data could never be verified.
+                _ => {
+                    return Err(Error::MetaInfo(format!(
+                        "file {path:?} lacks a 32-byte pieces root"
+                    )))
+                }
+            }
+        };
+        let attr = pd
+            .get(b"attr".as_slice())
+            .and_then(value_to_string_lenient)
+            .unwrap_or_default();
+        if attr.contains('p') {
+            // Pad files are a v1 artefact; in a v2 tree they would desync
+            // every offset computed from `files`.
+            return Err(Error::MetaInfo(format!("v2 file {path:?} marked as padding")));
+        }
         out.push(FileInfo {
             path: path.to_vec(),
             length,
             torrent_offset: *offset,
-            attr: String::new(),
+            attr,
             pieces_root,
         });
         // v2 files are piece-aligned.
-        if piece_length > 0 {
-            *offset += (length + piece_length - 1) / piece_length * piece_length;
+        let span = if piece_length > 0 {
+            length
+                .checked_add(piece_length - 1)
+                .map(|n| n / piece_length * piece_length)
         } else {
-            *offset += length;
-        }
+            Some(length)
+        };
+        *offset = span
+            .and_then(|n| offset.checked_add(n))
+            .ok_or_else(|| Error::MetaInfo("file tree offsets overflow".into()))?;
         return Ok(());
     }
 
     for key in dir_keys {
-        let name = String::from_utf8_lossy(key).into_owned();
+        let name = validate_path_component(key)?;
         let mut child_path = path.to_vec();
         child_path.push(name);
         let child = dict

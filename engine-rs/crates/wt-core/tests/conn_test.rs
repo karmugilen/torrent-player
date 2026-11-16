@@ -129,6 +129,7 @@ async fn test_tcp_dial_and_accept_roundtrip() {
     let dial_params = DialParams {
         remote_addr: dial_addr,
         info_hash: our_ih,
+        info_hash_v2_short: None,
         our_peer_id: client_peer_id,
         transport: Some(Transport::Tcp),
         source: PeerSource::Direct,
@@ -139,6 +140,7 @@ async fn test_tcp_dial_and_accept_roundtrip() {
         tcp_conn_hook: None,
         utp_socket: None,
         require_plain: false,
+        utp_syn_resend: None,
     };
 
     let client_outcome = dial_peer(dial_params).await.expect("dial_peer failed");
@@ -191,6 +193,7 @@ async fn test_tcp_dial_and_accept_roundtrip() {
         assert_eq!(id, 0);
         let ext = ExtendedHandshake::decode(&payload).expect("decode ext");
         assert_eq!(ext.v.as_deref(), Some("WebtorCoreTest/1.0"));
+        // Echoes what send_test_ltep wrote: the driver passes LTEP through.
         assert_eq!(ext.reqq, Some(1024));
     } else {
         panic!("expected ExtendedHandshake, got {s_ext:?}");
@@ -261,6 +264,7 @@ async fn test_tcp_dial_and_accept_plain_no_mse() {
     let dial_params = DialParams {
         remote_addr: dial_addr,
         info_hash: our_ih,
+        info_hash_v2_short: None,
         our_peer_id: client_peer_id,
         transport: Some(Transport::Tcp),
         source: PeerSource::Direct,
@@ -271,6 +275,7 @@ async fn test_tcp_dial_and_accept_plain_no_mse() {
         tcp_conn_hook: None,
         utp_socket: None,
         require_plain: true, // No MSE
+        utp_syn_resend: None,
     };
 
     let client_outcome = dial_peer(dial_params).await.expect("dial_peer failed");
@@ -322,6 +327,7 @@ async fn test_utp_dial_and_accept_roundtrip() {
     let dial_params = DialParams {
         remote_addr: dial_addr,
         info_hash: our_ih,
+        info_hash_v2_short: None,
         our_peer_id: client_peer_id,
         transport: Some(Transport::Utp),
         source: PeerSource::Direct,
@@ -332,6 +338,7 @@ async fn test_utp_dial_and_accept_roundtrip() {
         tcp_conn_hook: None,
         utp_socket: None,
         require_plain: false,
+        utp_syn_resend: None,
     };
 
     let client_outcome = dial_peer(dial_params).await.expect("dial uTP peer failed");
@@ -446,6 +453,7 @@ async fn test_utp_piece_multichunk_transfer() {
     let dial_params = DialParams {
         remote_addr: dial_addr,
         info_hash: our_ih,
+        info_hash_v2_short: None,
         our_peer_id: client_peer_id,
         transport: Some(Transport::Utp),
         source: PeerSource::Direct,
@@ -456,6 +464,7 @@ async fn test_utp_piece_multichunk_transfer() {
         tcp_conn_hook: None,
         utp_socket: None,
         require_plain: false,
+        utp_syn_resend: None,
     };
 
     let client_outcome = dial_peer(dial_params).await.expect("dial uTP peer failed");
@@ -572,6 +581,7 @@ async fn dial_race_first_wins_finishes_promptly() {
     let outcome = dial_peer(DialParams {
         remote_addr: dial_addr,
         info_hash: our_ih,
+        info_hash_v2_short: None,
         our_peer_id: client_peer_id,
         transport: None, // race TCP+uTP
         source: PeerSource::Direct,
@@ -582,6 +592,7 @@ async fn dial_race_first_wins_finishes_promptly() {
         tcp_conn_hook: None,
         utp_socket: utp.as_ref(),
         require_plain: true,
+        utp_syn_resend: None,
     })
     .await
     .expect("dial_peer");
@@ -635,6 +646,7 @@ async fn dial_race_handshakes_before_slow_loser_connects() {
         dial_peer(DialParams {
             remote_addr: addr,
             info_hash: ih,
+            info_hash_v2_short: None,
             our_peer_id: [0x32; 20],
             transport: None,
             source: PeerSource::Direct,
@@ -645,6 +657,7 @@ async fn dial_race_handshakes_before_slow_loser_connects() {
             tcp_conn_hook: None,
             utp_socket: None,
             require_plain: true,
+            utp_syn_resend: None,
         }),
     )
     .await;
@@ -701,6 +714,7 @@ async fn dial_race_bad_peer_gets_only_one_handshake_fallback() {
     let result = dial_peer(DialParams {
         remote_addr: addr,
         info_hash: InfoHash([0x45; 20]),
+        info_hash_v2_short: None,
         our_peer_id: [0x32; 20],
         transport: None,
         source: PeerSource::Direct,
@@ -711,6 +725,7 @@ async fn dial_race_bad_peer_gets_only_one_handshake_fallback() {
         tcp_conn_hook: None,
         utp_socket: None,
         require_plain: false,
+        utp_syn_resend: None,
     })
     .await;
     tcp_server.abort();
@@ -757,6 +772,7 @@ async fn dial_race_mse_and_bt_share_handshake_deadline() {
     let result = dial_peer(DialParams {
         remote_addr: addr,
         info_hash: ih,
+        info_hash_v2_short: None,
         our_peer_id: [0x32; 20],
         transport: Some(Transport::Tcp),
         source: PeerSource::Direct,
@@ -767,6 +783,7 @@ async fn dial_race_mse_and_bt_share_handshake_deadline() {
         tcp_conn_hook: None,
         utp_socket: None,
         require_plain: false,
+        utp_syn_resend: None,
     })
     .await;
     server.abort();
@@ -1188,6 +1205,7 @@ async fn test_utp_dial_reuses_listener_endpoint_and_transfers_data() {
             .parse()
             .unwrap(),
         info_hash: ih,
+        info_hash_v2_short: None,
         our_peer_id: [0x32; 20],
         transport: Some(Transport::Utp),
         source: PeerSource::Direct,
@@ -1198,6 +1216,7 @@ async fn test_utp_dial_reuses_listener_endpoint_and_transfers_data() {
         tcp_conn_hook: None,
         utp_socket: client.utp_socket(),
         require_plain: false,
+        utp_syn_resend: None,
     })
     .await
     .unwrap();
@@ -1222,4 +1241,62 @@ async fn test_utp_dial_reuses_listener_endpoint_and_transfers_data() {
     assert_eq!(received, payload);
     server.close();
     client.close();
+}
+
+/// BEP 52: a hybrid peer that reaches us by the v1 hash must see the
+/// v2-upgrade bit in our handshake reply when the torrent has a v2 hash, and
+/// must not see it for a v1-only torrent or before a v2 lookup is installed.
+#[tokio::test]
+async fn inbound_reply_sets_v2_upgrade_bit_only_for_v2_torrents() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use wt_wire::handshake::{PeerExtensionBits, EXTENSION_BIT_V2_UPGRADE, PROTOCOL_HEADER};
+
+    let mut cfg = test_config();
+    cfg.disable_utp = true;
+    let hybrid = InfoHash([0x61; 20]);
+    let v1_only = InfoHash([0x62; 20]);
+    let listener = PeerListener::bind(&cfg).await.unwrap();
+    let port = listener.listen_port();
+    let (accepted_tx, mut accepted_rx) = mpsc::channel(8);
+    let reply_bits = |ih: InfoHash| async move {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut hs = Vec::with_capacity(68);
+        hs.extend_from_slice(PROTOCOL_HEADER);
+        hs.extend_from_slice(&[0u8; 8]);
+        hs.extend_from_slice(&ih.0);
+        hs.extend_from_slice(&[0x77; 20]);
+        s.write_all(&hs).await.unwrap();
+        let mut reply = [0u8; 68];
+        tokio::time::timeout(Duration::from_secs(3), s.read_exact(&mut reply))
+            .await
+            .expect("handshake reply")
+            .unwrap();
+        assert_eq!(&reply[28..48], &ih.0, "reply echoes the peer's info hash");
+        let mut bits = [0u8; 8];
+        bits.copy_from_slice(&reply[20..28]);
+        PeerExtensionBits(bits)
+    };
+
+    listener.spawn_accept_loop(
+        cfg.clone(),
+        [0x31; 20],
+        HalfOpenTracker::new(),
+        Arc::new(move || vec![hybrid.0, v1_only.0]),
+        Arc::new(move |ih| *ih == hybrid || *ih == v1_only),
+        accepted_tx,
+    );
+    // No v2 lookup installed yet: plain v1 reply.
+    assert!(!reply_bits(hybrid).await.supports_v2_upgrade());
+
+    listener.set_v2_lookup(Arc::new(move |ih| *ih == hybrid));
+    let bits = reply_bits(hybrid).await;
+    assert!(bits.get_bit(EXTENSION_BIT_V2_UPGRADE), "hybrid torrent advertises v2");
+    assert!(bits.supports_extended() && bits.supports_fast(), "default bits kept");
+    assert!(!reply_bits(v1_only).await.supports_v2_upgrade(), "v1-only torrent does not");
+
+    for _ in 0..3 {
+        let acc = tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv()).await.unwrap().unwrap();
+        assert_eq!(acc.peer_id, [0x77; 20]);
+    }
+    listener.close();
 }

@@ -71,6 +71,16 @@ pub fn round_up_to_power_of_two(n: usize) -> usize {
     1usize << (usize::BITS - (n - 1).leading_zeros())
 }
 
+/// `ceil(log2(n))` for `n > 0` (Go `merkle.Log2RoundingUp`).
+///
+/// Used as BEP 52 `HashRequest.base_layer` for the piece-length leaf width.
+pub fn log2_rounding_up(n: usize) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    usize::BITS - (n - 1).leading_zeros()
+}
+
 /// Incremental v2 piece/file hasher (16 KiB leaf blocks).
 #[derive(Clone)]
 pub struct Hash {
@@ -148,10 +158,84 @@ impl Hash {
 }
 
 /// Padding hash for the hash layer corresponding to a piece (BEP 52).
+///
+/// This is the root of a subtree of `piece_length / 16 KiB` all-zero leaf
+/// hashes. Computed one layer at a time (`pad[k+1] = H(pad[k] || pad[k])`), so
+/// cost is O(log n) with no allocation. The previous version materialised
+/// every zero leaf: a hostile `piece length` of 2^40 asked for 2 GiB.
+///
+/// Matches Go `HashForPiecePad`: fewer than one block yields SHA-256 of the
+/// empty string, one block yields the zero hash. Non-power-of-two block counts
+/// (Go panics) return the zero hash; v2 parsing rejects such piece lengths.
 pub fn hash_for_piece_pad(piece_length: i64) -> [u8; 32] {
-    let blocks_per_piece = (piece_length / BLOCK_SIZE as i64).max(0) as usize;
-    let block_hashes = vec![[0u8; 32]; blocks_per_piece];
-    root(&block_hashes).unwrap_or([0u8; 32])
+    let blocks_per_piece = (piece_length / BLOCK_SIZE as i64).max(0) as u64;
+    if blocks_per_piece == 0 {
+        return Sha256::digest([]).into();
+    }
+    if !blocks_per_piece.is_power_of_two() {
+        return [0u8; 32];
+    }
+    pad_hash_at_height(blocks_per_piece.trailing_zeros())
+}
+
+/// Root of a perfect subtree of zero leaf hashes with `height` layers above
+/// the leaves (height 0 = the zero leaf hash itself).
+pub fn pad_hash_at_height(height: u32) -> [u8; 32] {
+    let mut h = [0u8; 32];
+    for _ in 0..height {
+        h = hash_pair(&h, &h);
+    }
+    h
+}
+
+fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(left);
+    buf[32..].copy_from_slice(right);
+    Sha256::digest(buf).into()
+}
+
+/// Verify a BEP 52 `hashes` message payload against a file's pieces root.
+///
+/// `base_hashes` are `length` consecutive hashes of one layer starting at
+/// `index` (a multiple of `length`, which is a power of two); `uncles` are the
+/// proof hashes, lowest layer first, each the sibling of the running subtree
+/// root. `layer_width` is the number of real (non-pad) nodes in the base layer;
+/// it determines how many uncles are needed to reach the root, since the layer
+/// is conceptually padded to the next power of two. Returns false on any
+/// shape error or mismatch; never panics on peer-controlled values.
+pub fn verify_hashes_with_proof(
+    pieces_root: &[u8; 32],
+    index: u32,
+    base_hashes: &[[u8; 32]],
+    uncles: &[[u8; 32]],
+    layer_width: u64,
+) -> bool {
+    let length = base_hashes.len() as u64;
+    if length == 0 || !length.is_power_of_two() || u64::from(index) % length != 0 {
+        return false;
+    }
+    let padded_width = layer_width.max(1).next_power_of_two();
+    if u64::from(index) + length > padded_width {
+        return false;
+    }
+    let levels_above = (padded_width / length).trailing_zeros() as usize;
+    if uncles.len() != levels_above {
+        return false;
+    }
+    let Ok(mut node) = root(base_hashes) else {
+        return false;
+    };
+    let mut pos = u64::from(index) / length;
+    for uncle in uncles {
+        node = if pos % 2 == 0 {
+            hash_pair(&node, uncle)
+        } else {
+            hash_pair(uncle, &node)
+        };
+        pos /= 2;
+    }
+    node == *pieces_root
 }
 
 
@@ -184,6 +268,22 @@ pub fn validate_piece_layers(
             }
             Some(compact) => {
                 let layer_hashes = compact_layer_to_slice_hashes(compact)?;
+                // BEP 52: one hash per piece of the file. Extra trailing pad
+                // hashes would still reduce to the right root, but they shift
+                // nothing and must not be trusted as real piece hashes.
+                let expected_pieces = if piece_length > 0 {
+                    fi.length.saturating_add(piece_length - 1) / piece_length
+                } else {
+                    0
+                };
+                if layer_hashes.len() as i64 != expected_pieces {
+                    return Err(Error::Merkle(format!(
+                        "file {:?}: piece layer has {} hashes, expected {}",
+                        fi.path,
+                        layer_hashes.len(),
+                        expected_pieces
+                    )));
+                }
                 let computed = root_with_pad_hash(&layer_hashes, hash_for_piece_pad(piece_length))?;
                 if computed != pieces_root {
                     return Err(Error::Merkle(format!(
@@ -220,6 +320,15 @@ mod tests {
         assert_eq!(round_up_to_power_of_two(2), 2);
         assert_eq!(round_up_to_power_of_two(3), 4);
         assert_eq!(round_up_to_power_of_two(5), 8);
+    }
+
+    #[test]
+    fn log2_rounding() {
+        assert_eq!(log2_rounding_up(0), 0);
+        assert_eq!(log2_rounding_up(1), 0);
+        assert_eq!(log2_rounding_up(2), 1);
+        assert_eq!(log2_rounding_up(3), 2);
+        assert_eq!(log2_rounding_up(16), 4);
     }
 
     #[test]

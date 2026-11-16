@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use wt_types::{InfoHash, PeerId, PeerInfo, PeerSource};
+use wt_types::{InfoHash, InfoHashV2, PeerId, PeerInfo, PeerSource};
 
 use crate::conn::{
     dial_peer as conn_dial_peer, AcceptedConn, DialParams, HalfOpenTracker, PeerListener,
@@ -116,7 +116,14 @@ impl TorrentAnnounceInfo for TorrentSourcesAdapter {
                 completed += info.piece(p.index).length;
             }
         }
-        (info.total_length() - completed).max(0)
+        // v2/hybrid pieces hold file data only: pad files are never
+        // downloaded, so they are not left either.
+        let wanted = if info.has_v2() {
+            info.files.iter().filter(|f| !f.is_padding()).map(|f| f.length).sum()
+        } else {
+            info.total_length()
+        };
+        (wanted - completed).max(0)
     }
 
     fn port(&self) -> u16 {
@@ -343,6 +350,13 @@ impl ClientInner {
                     .unwrap_or_default()
             });
 
+            // BEP 52: offer the v2 upgrade on inbound handshakes for torrents
+            // with a v2 hash, read live so one learned later counts.
+            let v2_client = Arc::downgrade(self);
+            listener.set_v2_lookup(Arc::new(move |ih: &InfoHash| {
+                v2_client.upgrade().is_some_and(|c| c.inbound_v2_upgrade(ih))
+            }));
+
             listener.spawn_accept_loop(
                 self.config.clone(),
                 self.peer_id,
@@ -429,7 +443,7 @@ impl ClientInner {
     pub(crate) fn torrent_keys_for(t: &TorrentInner) -> TorrentKeys {
         TorrentKeys {
             v1: Some(t.info_hash),
-            v2_short: t.info_hash_v2.map(|v| v.to_short()),
+            v2_short: t.info_hash_v2().map(|v| v.to_short()),
         }
     }
 
@@ -487,6 +501,16 @@ impl ClientInner {
         let mut info_obj: Option<wt_types::Info> = None;
         if let Some(ref ib) = spec.info_bytes {
             if let Ok(parsed) = wt_meta::parse_info(ib) {
+                // BEP 52: a v2 info dict's swarm key is its SHA-256. Without
+                // it a hybrid is only found on the v1 swarm, and a pure v2
+                // torrent (no v1 swarm at all) would be keyed by a SHA-1
+                // that no peer uses.
+                if parsed.has_v2() && spec.info_hash_v2.is_none() {
+                    spec.info_hash_v2 = Some(wt_meta::info_hash_v2(ib));
+                }
+                if spec.info_hash.is_none() && parsed.has_v2() && !parsed.has_v1() {
+                    spec.info_hash = spec.info_hash_v2.map(|v2| v2.to_short());
+                }
                 if spec.info_hash.is_none() {
                     use sha1::{Digest, Sha1};
                     let mut hasher = Sha1::new();
@@ -532,30 +556,21 @@ impl ClientInner {
                 drop(short_map);
                 drop(torrents_map);
                 self.merge_spec(&existing, &spec, info_obj)?;
-                let mut aliases = self.torrents_by_short.write();
                 if let Some(v1) = spec.info_hash {
-                    aliases.insert(v1, Arc::clone(&existing));
-                }
-                if let Some(v2) = spec.info_hash_v2 {
-                    aliases.insert(v2.to_short(), Arc::clone(&existing));
-                }
-                drop(aliases);
-                let mut new_keys = TorrentKeys {
-                    v1: None,
-                    v2_short: None,
-                };
-                if spec.info_hash.is_some_and(|v1| v1 != existing.info_hash) {
-                    new_keys.v1 = spec.info_hash;
-                }
-                if let Some(v2) = spec.info_hash_v2 {
-                    if existing.info_hash_v2.is_none() && v2.to_short() != existing.info_hash {
-                        new_keys.v2_short = Some(v2.to_short());
+                    self.torrents_by_short.write().insert(v1, Arc::clone(&existing));
+                    if v1 != existing.info_hash
+                        && existing.info_hash_v2().is_none_or(|v2| v2.to_short() != v1)
+                    {
+                        let trackers = existing.trackers.read().clone();
+                        let web_seeds = existing.web_seeds.read().clone();
+                        let keys = TorrentKeys { v1: Some(v1), v2_short: None };
+                        self.register_sources(&existing, keys, trackers, web_seeds);
                     }
                 }
-                if new_keys.v1.is_some() || new_keys.v2_short.is_some() {
-                    let trackers = existing.trackers.read().clone();
-                    let web_seeds = existing.web_seeds.read().clone();
-                    self.register_sources(&existing, new_keys, trackers, web_seeds);
+                // A v2 hash learned by merge (e.g. a .torrent or btmh added
+                // over a btih magnet) joins the v2 swarm.
+                if let Some(v2) = spec.info_hash_v2 {
+                    self.adopt_v2_key(&existing, v2);
                 }
                 return Ok((existing, false));
             }
@@ -576,11 +591,17 @@ impl ClientInner {
             .max_established_conns
             .store(self.config.established_conns_per_torrent, Ordering::Relaxed);
         if let Some(info) = info_obj {
-            torrent_inner.set_info(Arc::new(info))?;
+            torrent_inner.set_info_with_layers(Arc::new(info), &spec.piece_layers)?;
         }
         if let Some(info_bytes) = spec.info_bytes.clone() {
             *torrent_inner.metainfo_raw.write() = Some(wt_types::MetaInfo {
                 info_bytes,
+                piece_layers: spec.piece_layers.clone(),
+                ..Default::default()
+            });
+        } else if !spec.piece_layers.is_empty() {
+            *torrent_inner.metainfo_raw.write() = Some(wt_types::MetaInfo {
+                piece_layers: spec.piece_layers.clone(),
                 ..Default::default()
             });
         }
@@ -637,14 +658,28 @@ impl ClientInner {
         // display_name is not interior-mutable on TorrentInner; set only at create.
         if let Some(info) = info_obj {
             if torrent.info.read().is_none() {
-                torrent.set_info(Arc::new(info))?;
+                torrent.set_info_with_layers(Arc::new(info), &spec.piece_layers)?;
+            } else if !spec.piece_layers.is_empty() {
+                torrent.apply_piece_layers(&spec.piece_layers)?;
             }
+        } else if !spec.piece_layers.is_empty() {
+            torrent.apply_piece_layers(&spec.piece_layers)?;
         }
         if let Some(info_bytes) = &spec.info_bytes {
-            *torrent.metainfo_raw.write() = Some(wt_types::MetaInfo {
+            let mut mi = wt_types::MetaInfo {
                 info_bytes: info_bytes.clone(),
                 ..Default::default()
-            });
+            };
+            if !spec.piece_layers.is_empty() {
+                mi.piece_layers = spec.piece_layers.clone();
+            } else if let Some(prev) = torrent.metainfo_raw.read().as_ref() {
+                mi.piece_layers = prev.piece_layers.clone();
+            }
+            *torrent.metainfo_raw.write() = Some(mi);
+        } else if !spec.piece_layers.is_empty() {
+            if let Some(raw) = torrent.metainfo_raw.write().as_mut() {
+                raw.piece_layers = spec.piece_layers.clone();
+            }
         }
         if !spec.dht_nodes.is_empty() {
             self.add_dht_nodes(&spec.dht_nodes);
@@ -678,6 +713,43 @@ impl ClientInner {
 
         torrent.bump_change();
         Ok(())
+    }
+
+    /// BEP 52: give `torrent` its v2 infohash after creation and join the
+    /// v2 swarm (short-hash alias for inbound handshakes, trackers, DHT;
+    /// LSD and dials read it live). `false` when it already has another v2
+    /// hash or the short hash belongs to another torrent.
+    pub(crate) fn adopt_v2_key(&self, torrent: &Arc<TorrentInner>, v2: InfoHashV2) -> bool {
+        if torrent.info_hash_v2() == Some(v2) {
+            return true;
+        }
+        let short = v2.to_short();
+        {
+            let mut aliases = self.torrents_by_short.write();
+            if aliases.get(&short).is_some_and(|other| !Arc::ptr_eq(other, torrent)) {
+                return false;
+            }
+            if !torrent.set_info_hash_v2(v2) {
+                return false;
+            }
+            aliases.insert(short, Arc::clone(torrent));
+        }
+        if short != torrent.info_hash && !torrent.closed.load(Ordering::Relaxed) {
+            let trackers = torrent.trackers.read().clone();
+            let web_seeds = torrent.web_seeds.read().clone();
+            let keys = TorrentKeys { v1: None, v2_short: Some(short) };
+            self.register_sources(torrent, keys, trackers, web_seeds);
+        }
+        wt_types::events::record("v2_key_adopted", short.to_hex());
+        true
+    }
+
+    /// Whether an inbound handshake for `ih` should carry the BEP 52 v2
+    /// upgrade bit: the torrent it names has a v2 infohash.
+    pub(crate) fn inbound_v2_upgrade(&self, ih: &InfoHash) -> bool {
+        self.torrents_by_short.read().get(ih).is_some_and(|t| {
+            t.info_hash_v2().is_some() || t.info.read().as_ref().is_some_and(|i| i.has_v2())
+        })
     }
 
     pub fn torrent(&self, ih: InfoHash) -> Option<Arc<TorrentInner>> {
@@ -844,12 +916,15 @@ impl ClientInner {
     }
 
     /// Public torrents with metadata. BEP 27: private torrents use no LSD.
-    fn lsd_info_hashes(&self) -> Vec<String> {
+    /// A hybrid is announced under both swarm keys (v1 and truncated v2), as
+    /// for trackers and the DHT, so v2-only LAN peers find it too.
+    pub(crate) fn lsd_info_hashes(&self) -> Vec<String> {
         let torrents: Vec<_> = self.torrents.read().values().cloned().collect();
         torrents.iter()
             .filter(|t| !t.closed.load(Ordering::Relaxed)
                 && t.info.read().as_ref().is_some_and(|i| i.private != Some(true)))
-            .map(|t| hex::encode(t.info_hash.0))
+            .flat_map(|t| Self::torrent_keys_for(t).all_short())
+            .map(|ih| hex::encode(ih.0))
             .collect()
     }
 
@@ -965,15 +1040,24 @@ impl ClientInner {
                             }
                         };
                         let ok = result.is_ok();
+                        // Failures that say nothing bad about the peer (no
+                        // half-open slot, no room, already connected) must
+                        // not cost it a fail count: see `DialVerdict`.
+                        let verdict = crate::torrent::dial_verdict(&result);
+                        if !matches!(
+                            verdict,
+                            crate::torrent::DialVerdict::Connected | crate::torrent::DialVerdict::Unreachable
+                        ) {
+                            if verdict.reached_peer() {
+                                tor.note_dial_source(peer.source, true);
+                                wt_types::events::record("dial_skip", format!(
+                                    "src={:?} kind={verdict:?}", peer.source));
+                            }
+                            tor.dial_settled(&peer, verdict);
+                            return;
+                        }
                         if let Err(ref e) = result {
                             let msg = e.to_string();
-                            // PopMax already removed the candidate; half-open
-                            // races must not permanently discard reachable peers.
-                            if msg.contains("half-open limit exceeded") {
-                                tor.add_peers(vec![peer.clone()]);
-                                tor.dial_finished(peer.addr, true);
-                                return;
-                            }
                             *tor.swarm_diagnostics.lock().dial_failures
                                 .entry(crate::stats::failure_kind(&msg).into()).or_default() += 1;
                             // Dial-failure taxonomy for the desktop peers_compare
@@ -1021,6 +1105,9 @@ impl ClientInner {
                         }
                         if !ok {
                             tor.dial_finished(peer.addr, false);
+                            // BEP 55: a peer that can be punched may be behind
+                            // a NAT; ask a relay to introduce us.
+                            tor.maybe_rendezvous(&peer);
                         } else {
                             tor.swarm_diagnostics.lock().dial_ok += 1;
                             #[cfg(not(target_os = "android"))]
@@ -1062,20 +1149,30 @@ impl ClientInner {
             .get(&accepted.info_hash)
             .cloned()
             .ok_or_else(|| CoreError::Other("unknown infohash after accept".into()))?;
+        // BEP 55: the remote's simultaneous uTP dial can be the one that
+        // gets through, arriving here as an inbound connection.
+        let remote = accepted.handle.remote_addr();
+        let punched = accepted.handle.transport() == wt_types::Transport::Utp
+            && torrent.holepunch.lock().is_punched(remote, Instant::now());
+        let (source, handle) = if punched {
+            (PeerSource::UtHolepunch, accepted.handle.with_source(PeerSource::UtHolepunch))
+        } else {
+            (PeerSource::Incoming, accepted.handle)
+        };
         let info = AttachInfo {
-            remote: accepted.handle.remote_addr(),
+            remote,
             outgoing: false,
-            transport: accepted.handle.transport(),
-            encrypted: accepted.handle.is_encrypted(),
+            transport: handle.transport(),
+            encrypted: handle.is_encrypted(),
             peer_id: accepted.peer_id,
             reserved: accepted.peer_extension_bits.0,
-            source: PeerSource::Incoming,
+            source,
         };
         self.attach_driver(
             torrent,
             info,
             accepted.stream,
-            accepted.handle,
+            handle,
             accepted.write_rx,
             accepted.write_waker,
         )
@@ -1112,9 +1209,12 @@ impl ClientInner {
             PeerSource::Incoming
         };
         let mut stream: Box<dyn crate::PeerStream> = Box::new(peer.stream);
-        let reserved = default_peer_extension_bytes();
+        let mut reserved = default_peer_extension_bytes();
         let hs_timeout = self.config.handshakes_timeout.max(Duration::from_secs(5));
-
+        let v2_short = torrent.info_hash_v2().map(|v| v.to_short());
+        if v2_short.is_some_and(|s| s != torrent.info_hash) {
+            reserved.set_bit(wt_wire::handshake::EXTENSION_BIT_V2_UPGRADE, true);
+        }
         let peer_hs = if outgoing {
             let fut = handshake(
                 &mut stream,
@@ -1138,6 +1238,16 @@ impl ClientInner {
                 .map_err(|e| CoreError::Other(format!("webrtc incoming handshake: {e}")))?
         };
 
+        let negotiated_ih = if peer_hs.info_hash == torrent.info_hash {
+            torrent.info_hash
+        } else if v2_short.is_some_and(|s| peer_hs.info_hash == s) {
+            peer_hs.info_hash
+        } else if self.torrents_by_short.read().contains_key(&peer_hs.info_hash) {
+            peer_hs.info_hash
+        } else {
+            torrent.info_hash
+        };
+
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let write_waker = Arc::new(Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
@@ -1147,7 +1257,7 @@ impl ClientInner {
             outgoing,
             wt_types::Transport::WebRtc,
             false,
-            torrent.info_hash,
+            negotiated_ih,
             Some(peer_hs.peer_id),
             source,
             peer_hs.extensions.0,
@@ -1187,6 +1297,111 @@ impl ClientInner {
         transport: Option<wt_types::Transport>,
         require_plain: bool,
     ) -> Result<()> {
+        self.dial_peer_inner(torrent, addr, source, transport, require_plain, None)
+            .await
+    }
+
+    /// The uTP listen socket, through which every uTP dial leaves.
+    pub(crate) fn utp_socket(&self) -> Option<Arc<wt_wire::utp::UtpSocket>> {
+        self.listener
+            .read()
+            .as_ref()
+            .and_then(|l| l.utp_socket().cloned())
+    }
+
+    /// Whether a BEP 55 punch toward `endpoint` is possible at all: uTP is
+    /// on, we listen on it (punches must leave from the listen port), and
+    /// the listen socket's address family matches.
+    pub(crate) fn can_punch(&self, endpoint: SocketAddr) -> bool {
+        if self.closed.load(Ordering::Relaxed)
+            || self.config.disable_utp
+            || self.config.disable_holepunch
+            || !self.config.dial_for_peer_conns
+            || !crate::holepunch::usable_endpoint(endpoint)
+        {
+            return false;
+        }
+        let Some(sock) = self.utp_socket() else {
+            return false;
+        };
+        match sock.local_addr() {
+            Ok(local) => {
+                local.is_ipv4() == endpoint.is_ipv4()
+                    && !(endpoint.ip().is_loopback() && endpoint.port() == local.port())
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// BEP 55: dial `endpoint` over uTP from the listen socket, resending the
+    /// SYN so it survives the first packets dying at either NAT. Goes through
+    /// the normal dial path: half-open limits, dial rate limiter (Ghost
+    /// Mode), encryption policy and the connection limit all apply.
+    pub(crate) fn spawn_punch_dial(self: &Arc<Self>, torrent: Arc<TorrentInner>, endpoint: SocketAddr) {
+        if !self.can_punch(endpoint) || torrent.has_peer_at(endpoint) {
+            return;
+        }
+        let Some(utp) = self.utp_socket() else { return };
+        // The uTP socket is shared by all torrents: a stream to this endpoint
+        // that another torrent holds says nothing about this one's punch.
+        if utp.has_stream_to(endpoint) && !self.endpoint_held_by_other_torrent(&torrent, endpoint) {
+            // The remote's SYN already got through; that connection is it.
+            torrent.holepunch.lock().note_punch(endpoint, Instant::now());
+            return;
+        }
+        if !torrent.dialing_peers.lock().insert(endpoint) {
+            return;
+        }
+        torrent.holepunch.lock().note_punch(endpoint, Instant::now());
+        crate::holepunch::HolepunchCounters::bump(&torrent.holepunch_stats.punch_dials_attempted);
+        let cl = Arc::clone(self);
+        let task = self.tokio_handle.spawn(async move {
+            let result = cl
+                .dial_peer_inner(
+                    Arc::clone(&torrent),
+                    endpoint,
+                    PeerSource::UtHolepunch,
+                    Some(wt_types::Transport::Utp),
+                    false,
+                    Some(crate::holepunch::PUNCH_SYN_RESEND),
+                )
+                .await;
+            torrent.dialing_peers.lock().remove(&endpoint);
+            match &result {
+                Ok(()) => wt_types::events::record("holepunch_dial_ok", format!("addr={endpoint}")),
+                Err(e) => wt_types::events::record(
+                    "holepunch_dial_fail",
+                    format!("kind={}", crate::stats::failure_kind(&e.to_string())),
+                ),
+            }
+            // No dial penalty: a failed punch says nothing about the peer.
+            torrent.peers_changed().notify_one();
+        });
+        let mut tasks = self.tasks.lock();
+        tasks.retain(|t| !t.is_finished());
+        tasks.push(task);
+    }
+
+    /// Another torrent is connected or dialing to `endpoint`.
+    pub(crate) fn endpoint_held_by_other_torrent(
+        &self,
+        torrent: &Arc<TorrentInner>,
+        endpoint: SocketAddr,
+    ) -> bool {
+        self.torrents()
+            .iter()
+            .any(|t| !Arc::ptr_eq(t, torrent) && t.has_peer_at(endpoint))
+    }
+
+    async fn dial_peer_inner(
+        self: &Arc<Self>,
+        torrent: Arc<TorrentInner>,
+        addr: SocketAddr,
+        source: PeerSource,
+        transport: Option<wt_types::Transport>,
+        require_plain: bool,
+        utp_syn_resend: Option<Duration>,
+    ) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) || torrent.closed.load(Ordering::Relaxed) {
             return Err(CoreError::Closed);
         }
@@ -1219,14 +1434,22 @@ impl ClientInner {
             per_torrent,
             pending,
         );
-        let utp = self
-            .listener
-            .read()
-            .as_ref()
-            .and_then(|l| l.utp_socket().cloned());
+        // A contact that already failed gets a shorter dial: it holds a
+        // half-open slot for less time. Never a BEP 55 punch, whose target
+        // failed a direct dial by definition.
+        if utp_syn_resend.is_none() {
+            let fails = torrent.dial_fail_counts.lock().get(&addr).copied().unwrap_or(0);
+            cfg.nominal_dial_timeout = crate::torrent::retry_dial_timeout(
+                cfg.nominal_dial_timeout,
+                cfg.min_dial_timeout,
+                fails,
+            );
+        }
+        let utp = self.utp_socket();
         let outcome = conn_dial_peer(DialParams {
             remote_addr: addr,
             info_hash: torrent.info_hash,
+            info_hash_v2_short: torrent.info_hash_v2().map(|v| v.to_short()),
             our_peer_id: self.peer_id,
             transport,
             source,
@@ -1237,6 +1460,7 @@ impl ClientInner {
             tcp_conn_hook: hook.as_ref(),
             utp_socket: utp.as_ref(),
             require_plain,
+            utp_syn_resend,
         })
         .await?;
         let info = AttachInfo {
@@ -1299,5 +1523,90 @@ impl ClientInner {
         tasks.push(reader);
         tasks.push(writer);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bt20_tests {
+    use super::*;
+
+    const PURE_V2: &[u8] = include_bytes!("../../wt-meta/testdata/bittorrent-v2-test.torrent");
+    const HYBRID: &[u8] = include_bytes!("../../wt-meta/testdata/bittorrent-v2-hybrid-test.torrent");
+
+    fn client() -> crate::Client {
+        let cfg = ClientConfig {
+            no_dht: true,
+            local_service_discovery: false,
+            ..Default::default()
+        };
+        crate::Client::new(cfg).unwrap()
+    }
+
+    fn add_info_only(c: &crate::Client, file: &[u8]) -> Arc<TorrentInner> {
+        let mi = wt_meta::parse_metainfo(file).unwrap();
+        let spec = TorrentSpec {
+            info_bytes: Some(mi.info_bytes),
+            ..Default::default()
+        };
+        c.inner.add_torrent_spec(spec).unwrap().0
+    }
+
+    /// A pure v2 info dict added without hashes is keyed by its truncated
+    /// SHA-256 (the only swarm it has), not by a SHA-1 of the info bytes.
+    #[test]
+    fn pure_v2_info_bytes_key_the_torrent_by_truncated_sha256() {
+        let c = client();
+        let t = add_info_only(&c, PURE_V2);
+        let ib = wt_meta::parse_metainfo(PURE_V2).unwrap().info_bytes;
+        let v2 = wt_meta::info_hash_v2(&ib);
+        assert_eq!(t.info_hash_v2(), Some(v2));
+        assert_eq!(t.info_hash, v2.to_short());
+        assert_ne!(t.info_hash, wt_meta::info_hash_v1(&ib));
+        assert!(c.inner.torrents_by_short.read().contains_key(&v2.to_short()));
+        c.close();
+    }
+
+    /// A hybrid info dict joins both swarms, and LSD announces both keys.
+    #[test]
+    fn hybrid_info_bytes_register_both_swarms_and_lsd_announces_both() {
+        let c = client();
+        let t = add_info_only(&c, HYBRID);
+        let ib = wt_meta::parse_metainfo(HYBRID).unwrap().info_bytes;
+        let (v1, v2) = (wt_meta::info_hash_v1(&ib), wt_meta::info_hash_v2(&ib));
+        assert_eq!(t.info_hash, v1);
+        assert_eq!(t.info_hash_v2(), Some(v2));
+        let short = c.inner.torrents_by_short.read();
+        assert!(short.contains_key(&v1) && short.contains_key(&v2.to_short()));
+        drop(short);
+        let mut lsd = c.inner.lsd_info_hashes();
+        lsd.sort();
+        let mut want = vec![v1.to_hex(), v2.to_short().to_hex()];
+        want.sort();
+        assert_eq!(lsd, want);
+        c.close();
+    }
+
+    /// BEP 55: a uTP stream to an endpoint held by another torrent must not
+    /// pass for this torrent's punch having got through.
+    #[test]
+    fn endpoint_held_only_counts_other_torrents() {
+        let c = client();
+        let a = add_info_only(&c, PURE_V2);
+        let b = add_info_only(&c, HYBRID);
+        let ep: SocketAddr = "203.0.113.7:6881".parse().unwrap();
+        assert!(!c.inner.endpoint_held_by_other_torrent(&a, ep));
+        b.dialing_peers.lock().insert(ep);
+        assert!(c.inner.endpoint_held_by_other_torrent(&a, ep));
+        assert!(!c.inner.endpoint_held_by_other_torrent(&b, ep), "its own dial is not another's");
+        c.close();
+    }
+
+    /// Pure v2: one key, announced once.
+    #[test]
+    fn pure_v2_lsd_announces_one_key() {
+        let c = client();
+        let t = add_info_only(&c, PURE_V2);
+        assert_eq!(c.inner.lsd_info_hashes(), vec![t.info_hash.to_hex()]);
+        c.close();
     }
 }

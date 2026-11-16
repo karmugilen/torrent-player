@@ -18,9 +18,24 @@ fn types_match_go_json() {
         path: String::new(),
         payload_transfers_allowed: false,
         listen_port: 0,
+        holepunch: Default::default(),
     };
+    // `holepunch` (BEP 55 counters) is a Rust-engine extension the Go
+    // golden does not have; check it here and compare the rest to Go.
+    let mut stats = serde_json::to_value(stats).unwrap();
+    assert_eq!(
+        stats.as_object_mut().unwrap().remove("holepunch").unwrap(),
+        serde_json::json!({
+            "rendezvousSent": 0,
+            "connectReceived": 0,
+            "relayedForOthers": 0,
+            "errorsReceived": 0,
+            "punchDialsAttempted": 0,
+            "punchDialsSucceeded": 0,
+        })
+    );
     let values = [
-        (0, serde_json::to_value(stats).unwrap()),
+        (0, stats),
         (
             1,
             serde_json::to_value(AddRequest {
@@ -109,4 +124,66 @@ fn select_nil_slices_match_go_json() {
     let golden: serde_json::Value = serde_json::from_str(include_str!("go_json_golden.jsonl").lines().nth(5).unwrap()).unwrap();
     let request: SelectRequest = serde_json::from_value(golden.clone()).expect("Go nil selected must deserialize");
     assert_eq!(serde_json::to_value(request).unwrap(), golden);
+}
+
+/// Field names and values the Android app reads for the swarm line
+/// (`EngineClient.parseConnections`: `source`, `bittorrentVersion`;
+/// `PEER_SOURCE_HOLEPUNCH = "C"`; `isBt2` is `bittorrentVersion == "v2"`).
+#[test]
+fn peer_connection_view_bt2_and_holepunch_fields_match_android() {
+    let view = PeerConnectionView {
+        address: "203.0.113.1:6881".into(),
+        transport: "uTP".into(),
+        client: String::new(),
+        downloaded: 0,
+        uploaded: 0,
+        country: None,
+        peer_choking: None,
+        am_interested: None,
+        pending_requests: None,
+        peer_completion: None,
+        download_rate: None,
+        rtt_ms: None,
+        pipeline_limit: None,
+        nominal_max_requests: None,
+        peer_max_requests: None,
+        peak_requests: None,
+        source: Some(wt_core::PeerSource::UtHolepunch.code().into()),
+        bittorrent_version: Some("v2".into()),
+    };
+    let json = serde_json::to_value(&view).unwrap();
+    assert_eq!(json["source"], "C");
+    assert_eq!(json["bittorrentVersion"], "v2");
+}
+
+/// Per-torrent holepunch block on `/connections/{id}` (UI should prefer this
+/// over client-wide `/stats.holepunch`).
+#[test]
+fn connections_response_includes_per_torrent_holepunch() {
+    let resp = ConnectionsResponse {
+        id: "t1".into(),
+        paused: false,
+        peers: vec![],
+        holepunch: wt_core::holepunch::HolepunchStats {
+            rendezvous_sent: 13,
+            connect_received: 2,
+            relayed_for_others: 0,
+            errors_received: 11,
+            punch_dials_attempted: 2,
+            punch_dials_succeeded: 0,
+        },
+        diagnostics: None,
+    };
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(
+        json["holepunch"],
+        serde_json::json!({
+            "rendezvousSent": 13,
+            "connectReceived": 2,
+            "relayedForOthers": 0,
+            "errorsReceived": 11,
+            "punchDialsAttempted": 2,
+            "punchDialsSucceeded": 0,
+        })
+    );
 }

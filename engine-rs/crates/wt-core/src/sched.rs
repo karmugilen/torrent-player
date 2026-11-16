@@ -421,7 +421,9 @@ impl TorrentInner {
         let Some(info) = self.info.read().clone() else {
             return pick;
         };
-        let (plen, total) = (info.piece_length, info.total_length());
+        // Per-piece geometry: BEP 52 pieces end at file boundaries.
+        let geometry = self.geometry();
+        let (plen, total) = (info.piece_length, &*geometry);
         let wanted = self.wanted_pieces();
         let saving = self.saved_mode.load(Ordering::Relaxed)
             && wanted.candidates.first().is_none_or(|c| c.1 < PiecePriority::Readahead);
@@ -454,7 +456,7 @@ impl TorrentInner {
     /// run late get a second copy or move.
     #[allow(clippy::too_many_arguments)]
     fn pick_playhead(&self, peer: &PickPeer<'_>, want: usize, window: std::ops::Range<u32>,
-        wanted: &crate::torrent::WantedPieces, plen: i64, total: i64, pick: &mut Pick) {
+        wanted: &crate::torrent::WantedPieces, plen: i64, total: &crate::picker::Geometry, pick: &mut Pick) {
         let focus = window.start;
         let steal_after = self.client.read().upgrade()
             .map_or(Duration::ZERO, |c| *c.urgent_steal_after.read());
@@ -569,7 +571,7 @@ impl TorrentInner {
     /// The queue: best piece first, each block handed to one peer.
     #[allow(clippy::too_many_arguments)]
     fn pick_queue(&self, peer: &PickPeer<'_>, want: usize, window: Option<std::ops::Range<u32>>,
-        open_limit: usize, wanted: &crate::torrent::WantedPieces, plen: i64, total: i64,
+        open_limit: usize, wanted: &crate::torrent::WantedPieces, plen: i64, total: &crate::picker::Geometry,
         pick: &mut Pick) {
         let tuning = crate::tuning::current_seek_tuning();
         let slow = tuning.slow_peer_yield
@@ -647,7 +649,7 @@ impl TorrentInner {
 
     /// Whether faster peers can finish this piece before this slow peer's queue
     /// would get to it.
-    fn faster_peers_finish(&self, peer: &PickPeer<'_>, piece: PieceIndex, plen: i64, total: i64) -> bool {
+    fn faster_peers_finish(&self, peer: &PickPeer<'_>, piece: PieceIndex, plen: i64, total: &crate::picker::Geometry) -> bool {
         let (begin, end) = piece_req_index_range(piece, plen, total);
         let mut missing = (begin..end)
             .filter(|&r| !self.dirty_chunks.contains(r))
@@ -677,7 +679,7 @@ impl TorrentInner {
     /// The very end is small enough to read whole. Free blocks first; without
     /// any, second copies so one slow holder cannot hold up the end.
     fn pick_endgame(&self, peer: &PickPeer<'_>, want: usize, wanted: &crate::torrent::WantedPieces,
-        plen: i64, total: i64, pick: &mut Pick) {
+        plen: i64, total: &crate::picker::Geometry, pick: &mut Pick) {
         let mut copies = Vec::new();
         for &(index, ..) in &wanted.candidates {
             if !peer.has(index) {
@@ -715,7 +717,7 @@ impl TorrentInner {
 
     /// This peer has nothing to do while slower peers sit on blocks.
     fn pick_stalled(&self, peer: &PickPeer<'_>, want: usize, wanted: &crate::torrent::WantedPieces,
-        plen: i64, total: i64, pick: &mut Pick) {
+        plen: i64, total: &crate::picker::Geometry, pick: &mut Pick) {
         let now = Instant::now();
         let peers = self.live_peers.read();
         for &(index, ..) in wanted.candidates.iter().take(STALLED_SCAN_PIECES) {

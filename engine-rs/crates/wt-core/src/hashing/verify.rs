@@ -16,6 +16,59 @@ pub enum ExpectedHash {
     V2PieceLayer([u8; 32]),
     /// Whole-file pieces root when the file fits in one piece (no piece-length pad).
     V2FileRoot([u8; 32]),
+    /// Hybrid (BEP 52 + BEP 3) piece: the bytes must pass the v1 SHA-1 (over
+    /// the data plus `v1_zero_pad` zeros) **and** the v2 Merkle hash. `v2` is
+    /// [`ExpectedHash::V2PieceLayer`] or [`ExpectedHash::V2FileRoot`] semantics
+    /// depending on `v2_file_root`. Either failing fails the piece; a split
+    /// verdict means the torrent's v1 and v2 hashes disagree and is logged.
+    Hybrid {
+        v1: [u8; 20],
+        v2: [u8; 32],
+        v2_file_root: bool,
+    },
+}
+
+impl ExpectedHash {
+    /// Combine an indexed v2 expectation with the piece's v1 SHA-1, if any.
+    ///
+    /// Hybrid torrents must check both (libtorrent fails the torrent on a
+    /// v1/v2 disagreement). A v1 expectation, or `None`, is returned as is.
+    pub fn with_v1(self, v1: Option<[u8; 20]>) -> Self {
+        match (self, v1) {
+            (ExpectedHash::V2PieceLayer(v2), Some(v1)) => ExpectedHash::Hybrid {
+                v1,
+                v2,
+                v2_file_root: false,
+            },
+            (ExpectedHash::V2FileRoot(v2), Some(v1)) => ExpectedHash::Hybrid {
+                v1,
+                v2,
+                v2_file_root: true,
+            },
+            (other, _) => other,
+        }
+    }
+
+    /// True when the hash covers v1 SHA-1, so the caller must pass
+    /// `Info::v1_zero_pad` as `v1_zero_pad`.
+    pub fn uses_v1(&self) -> bool {
+        matches!(self, ExpectedHash::V1(_) | ExpectedHash::Hybrid { .. })
+    }
+
+    /// The v2 part, as a pure v2 expectation.
+    pub fn v2_part(&self) -> Option<ExpectedHash> {
+        match *self {
+            ExpectedHash::V1(_) => None,
+            ExpectedHash::V2PieceLayer(_) | ExpectedHash::V2FileRoot(_) => Some(*self),
+            ExpectedHash::Hybrid {
+                v2, v2_file_root, ..
+            } => Some(if v2_file_root {
+                ExpectedHash::V2FileRoot(v2)
+            } else {
+                ExpectedHash::V2PieceLayer(v2)
+            }),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,23 +130,39 @@ pub fn hash_piece_sync(
         }
     }
 
+    let v1_ok = |exp: &[u8; 20]| {
+        let pad = v1_zero_pad.max(0) as usize;
+        (hash_v1_default(data, pad) == *exp, (want + pad) as u64)
+    };
+    let v2_ok = |exp: &[u8; 32], file_root: bool| {
+        let mut h = wt_meta::merkle::Hash::new();
+        h.write(data);
+        let sum = if file_root {
+            h.sum()
+        } else {
+            h.sum_min_length(piece_length.max(0) as usize)
+        };
+        sum == *exp
+    };
     let (correct, bytes_hashed) = match expected {
-        ExpectedHash::V1(exp) => {
-            let pad = v1_zero_pad.max(0) as usize;
-            let sum = hash_v1_default(data, pad);
-            (sum == *exp, (want + pad) as u64)
-        }
-        ExpectedHash::V2PieceLayer(exp) => {
-            let mut h = wt_meta::merkle::Hash::new();
-            h.write(data);
-            let sum = h.sum_min_length(piece_length.max(0) as usize);
-            (sum == *exp, want as u64)
-        }
-        ExpectedHash::V2FileRoot(exp) => {
-            let mut h = wt_meta::merkle::Hash::new();
-            h.write(data);
-            let sum = h.sum();
-            (sum == *exp, want as u64)
+        ExpectedHash::V1(exp) => v1_ok(exp),
+        ExpectedHash::V2PieceLayer(exp) => (v2_ok(exp, false), want as u64),
+        ExpectedHash::V2FileRoot(exp) => (v2_ok(exp, true), want as u64),
+        ExpectedHash::Hybrid {
+            v1,
+            v2,
+            v2_file_root,
+        } => {
+            let ok2 = v2_ok(v2, *v2_file_root);
+            let (ok1, bytes) = v1_ok(v1);
+            if ok1 != ok2 {
+                tracing::warn!(
+                    v1_ok = ok1,
+                    v2_ok = ok2,
+                    "hybrid piece: v1 and v2 hashes disagree; failing the piece"
+                );
+            }
+            (ok1 && ok2, bytes + want as u64)
         }
     };
 

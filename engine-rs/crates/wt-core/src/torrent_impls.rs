@@ -100,6 +100,10 @@ impl PeerTorrent for TorrentInner {
             .unwrap_or(0)
     }
 
+    fn geometry(&self) -> Arc<crate::picker::Geometry> {
+        TorrentInner::geometry(self)
+    }
+
     fn chunk_size(&self) -> u32 {
         BLOCK_SIZE
     }
@@ -157,8 +161,7 @@ impl PeerTorrent for TorrentInner {
     fn mark_chunk_dirty(&self, req: RequestIndex) {
         self.dirty_chunks.insert(req);
         let piece = self.info.read().as_ref().map(|info| {
-            crate::picker::block_coord_from_req_index(req, info.piece_length, info.total_length())
-                .piece as usize
+            crate::picker::block_coord_from_req_index(req, info.piece_length, 0i64).piece as usize
         });
         // Only a piece's first block changes what refills see. `pieces_mut`
         // on every block threw away the scan all peers share.
@@ -175,8 +178,7 @@ impl PeerTorrent for TorrentInner {
 
     fn begin_chunk_write(&self, req: RequestIndex) -> bool {
         let piece = self.info.read().as_ref().map(|info| {
-            crate::picker::block_coord_from_req_index(req, info.piece_length, info.total_length())
-                .piece
+            crate::picker::block_coord_from_req_index(req, info.piece_length, 0i64).piece
         });
         if piece.is_some_and(|piece| {
             self.pieces
@@ -259,7 +261,7 @@ impl PeerTorrent for TorrentInner {
             return false;
         };
         let (begin, end) =
-            crate::picker::piece_req_index_range(piece, info.piece_length, info.total_length());
+            crate::picker::piece_req_index_range(piece, info.piece_length, &self.geometry());
         self.dirty_chunks.all_in_range(begin, end)
     }
 
@@ -339,6 +341,8 @@ impl PeerTorrent for TorrentInner {
     }
 
     fn peer_closed(&self, addr: SocketAddr) {
+        self.holepunch_peers.write().remove(&addr);
+        self.holepunch.lock().forget_conn(addr);
         let had_last_helpful = self
             .peer_snapshots
             .read()
@@ -464,8 +468,13 @@ impl PeerTorrent for TorrentInner {
         let Some(storage) = self.storage.read().clone() else {
             return;
         };
-        let Some(hash) = info.piece_hash_v1(piece) else {
-            return;
+        let expected_v2 = crate::hashing::expected_v2_for_piece(&self.expected_v2.read(), piece);
+        let v1 = info.piece_hash_v1(piece);
+        // Prefer indexed V2 expected hash; else v1; else nothing to verify yet.
+        let expected = match (expected_v2, v1) {
+            (Some(v2), _) => v2,
+            (None, Some(h)) => crate::hashing::ExpectedHash::V1(h),
+            (None, None) => return,
         };
         let priority = {
             let mut pieces = self.pieces_mut();
@@ -479,14 +488,19 @@ impl PeerTorrent for TorrentInner {
             p.priority
         };
         let piece_obj = info.piece(piece);
+        let v1_zero_pad = match expected {
+            crate::hashing::ExpectedHash::V1(_) => info.v1_zero_pad(piece),
+            _ => 0,
+        };
         let job = crate::hashing::HashJob {
             piece_index: piece,
             priority,
-            storage: storage.piece(piece_obj, Some(hash)),
-            expected: crate::hashing::ExpectedHash::V1(hash),
+            // Storage piece key stays v1 when present (API is `[u8; 20]`).
+            storage: storage.piece(piece_obj, v1),
+            expected,
             piece_length: info.piece_length,
             data_length: piece_obj.length,
-            v1_zero_pad: 0,
+            v1_zero_pad,
             smartban: None,
             seq: self.hash_seq.fetch_add(1, Ordering::Relaxed),
         };
@@ -607,11 +621,24 @@ impl PeerTorrent for TorrentInner {
                 .map_err(|e| CoreError::Other(e.to_string()))?
         };
         if let Some(verified) = verified {
-            self.set_info(Arc::new(verified.info))?;
+            let existing_layers = self
+                .metainfo_raw
+                .read()
+                .as_ref()
+                .map(|m| m.piece_layers.clone())
+                .unwrap_or_default();
+            let is_v2 = verified.info.has_v2();
+            self.set_info_with_layers(Arc::new(verified.info), &existing_layers)?;
             *self.metainfo_raw.write() = Some(wt_types::MetaInfo {
                 info_bytes: verified.info_bytes,
+                piece_layers: existing_layers,
                 ..Default::default()
             });
+            // BEP 52: a btih magnet that turns out to be a hybrid now knows
+            // its v2 hash: join the v2 swarm too.
+            if is_v2 && self.info_hash_v2().is_none() {
+                self.adopt_v2_key(verified.info_hash_v2);
+            }
             return Ok(true);
         }
         Ok(false)
@@ -685,6 +712,25 @@ impl PeerTorrent for TorrentInner {
                 .unwrap_or(false)
     }
 
+    fn holepunch_enabled(&self) -> bool {
+        self.holepunch_allowed()
+    }
+
+    fn note_holepunch_support(&self, addr: SocketAddr, ext_id: Option<u8>) {
+        match ext_id {
+            Some(id) => {
+                self.holepunch_peers.write().insert(addr, id);
+            }
+            None => {
+                self.holepunch_peers.write().remove(&addr);
+            }
+        }
+    }
+
+    fn on_holepunch(&self, from: SocketAddr, msg: wt_wire::holepunch::HolepunchMsg) {
+        self.handle_holepunch(from, msg);
+    }
+
     fn prefers_encryption(&self) -> bool {
         self.client
             .read()
@@ -723,6 +769,13 @@ impl PeerTorrent for TorrentInner {
         }
         drop(last);
         self.swarm_diagnostics.lock().pex_received += peers.len() as u64;
+        {
+            // BEP 55: the peer that reported a punchable peer is its likely relay.
+            let mut hp = self.holepunch.lock();
+            for p in peers.iter().filter(|p| p.pex.supports_holepunch) {
+                hp.note_pex_origin(p.addr, from);
+            }
+        }
         // Route through add_peers for high-water trim + dialer wake.
         let _ = self.add_peers(peers);
         Ok(())
@@ -733,7 +786,8 @@ impl PeerTorrent for TorrentInner {
             prefers_encryption: encrypted,
             seed_only: self.seeding.load(Ordering::Relaxed),
             supports_utp: utp,
-            supports_holepunch: false,
+            // BEP 55 0x08: the peer told us it speaks ut_holepunch.
+            supports_holepunch: self.holepunch_peers.read().contains_key(&addr),
             reachable: true,
         };
         self.pex.lock().add(addr, flags);
@@ -744,7 +798,7 @@ impl PeerTorrent for TorrentInner {
             prefers_encryption: encrypted,
             seed_only: false,
             supports_utp: utp,
-            supports_holepunch: false,
+            supports_holepunch: self.holepunch_peers.read().contains_key(&addr),
             reachable: false,
         };
         self.pex.lock().drop_listed(addr, flags);
@@ -797,6 +851,323 @@ impl PeerTorrent for TorrentInner {
         self.blocks.clear(req);
     }
 
+    fn has_v2(&self) -> bool {
+        self.info
+            .read()
+            .as_ref()
+            .is_some_and(|i| i.has_v2())
+            || self.info_hash_v2().is_some()
+    }
+
+    fn is_v2_handshake_hash(&self, ih: &[u8; 20]) -> bool {
+        self.info_hash_v2()
+            .map(|v2| v2.to_short().0 == *ih)
+            .unwrap_or(false)
+    }
+
+    fn missing_piece_layer_files(&self) -> Vec<crate::hashing::MissingLayerFile> {
+        let Some(info) = self.info.read().clone() else {
+            return Vec::new();
+        };
+        crate::hashing::missing_layer_files(&info, &self.expected_v2.read())
+    }
+
+    fn apply_peer_piece_hashes(
+        &self,
+        pieces_root: [u8; 32],
+        index: u32,
+        hashes: &[[u8; 32]],
+    ) -> Result<bool> {
+        let Some(info) = self.info.read().clone() else {
+            return Ok(false);
+        };
+        // Only roots of this torrent's multi-piece files get a buffer: a peer
+        // must not grow the map with `Hashes` for made-up roots.
+        let piece_length = info.piece_length;
+        if !crate::hashing::file_by_pieces_root(&info, &pieces_root)
+            .is_some_and(|f| f.num_pieces(piece_length) > 1)
+        {
+            return Err(CoreError::Other("Hashes for no multi-piece file of this torrent".into()));
+        }
+        let mut expected = self.expected_v2.write();
+        let mut pending_map = self.pending_piece_layers.write();
+        let pending = pending_map.entry(pieces_root).or_default();
+        let committed = crate::hashing::apply_inbound_hashes(
+            &info,
+            &mut expected,
+            pending,
+            pieces_root,
+            index,
+            hashes,
+        );
+        let committed = match committed {
+            Ok(c) => c,
+            Err(e) => {
+                if pending_map.get(&pieces_root).is_some_and(|p| p.is_empty()) {
+                    pending_map.remove(&pieces_root);
+                }
+                return Err(CoreError::Other(e));
+            }
+        };
+        if committed {
+            pending_map.remove(&pieces_root);
+            if let Some(compact) =
+                crate::hashing::compact_layer_from_expected(&info, &expected, pieces_root)
+            {
+                if let Some(raw) = self.metainfo_raw.write().as_mut() {
+                    if let Some(slot) = raw
+                        .piece_layers
+                        .iter_mut()
+                        .find(|(r, _)| *r == pieces_root)
+                    {
+                        slot.1 = compact;
+                    } else {
+                        raw.piece_layers.push((pieces_root, compact));
+                    }
+                }
+            }
+        }
+        Ok(committed)
+    }
+
+    fn serve_piece_hashes(
+        &self,
+        pieces_root: [u8; 32],
+        index: u32,
+        length: u32,
+        proof_layers: u32,
+    ) -> std::result::Result<Vec<[u8; 32]>, String> {
+        let Some(info) = self.info.read().clone() else {
+            return Err("no info".into());
+        };
+        if !info.has_v2() {
+            return Err("torrent has no v2 metadata".into());
+        }
+        crate::hashing::serve_hashes(
+            &info,
+            &self.expected_v2.read(),
+            pieces_root,
+            index,
+            length,
+            proof_layers,
+        )
+    }
+
+    fn leaf_hash_request(&self, piece: PieceIndex) -> Option<crate::hashing::HashRequestKey> {
+        let info = self.info.read().clone()?;
+        if !info.has_v2() {
+            return None;
+        }
+        // Only where a reader is waiting or about to: a background download
+        // gains nothing from reading a piece early.
+        if !self.pieces.read().get(piece as usize).is_some_and(|p| {
+            !p.complete && !p.checking && p.priority >= PiecePriority::Readahead
+        }) {
+            return None;
+        }
+        if self.leaf_layers.read().contains_key(&piece) {
+            return None;
+        }
+        let key = crate::hashing::leaf_request_for_piece(&info, &self.expected_v2.read(), piece)?;
+        let mut asked = self.leaf_requests.lock();
+        if asked.get(&piece).is_some_and(|at| at.elapsed() < LEAF_REQUEST_RETRY) {
+            return None;
+        }
+        asked.insert(piece, Instant::now());
+        Some(key)
+    }
+
+    fn apply_peer_leaf_hashes(
+        &self,
+        pieces_root: [u8; 32],
+        index: u32,
+        hashes: &[[u8; 32]],
+    ) -> Result<bool> {
+        let Some(info) = self.info.read().clone() else {
+            return Ok(false);
+        };
+        let (piece, expected) = {
+            let expected_v2 = self.expected_v2.read();
+            let piece = crate::hashing::piece_for_leaf_span(
+                &info,
+                &expected_v2,
+                pieces_root,
+                index,
+                hashes.len() as u32,
+            )
+            .ok_or_else(|| CoreError::Other("leaf hashes span no piece".into()))?;
+            let Some(expected) = crate::hashing::expected_v2_for_piece(&expected_v2, piece) else {
+                return Ok(false);
+            };
+            (piece, expected)
+        };
+        if !crate::hashing::leaf_layer_matches(&expected, hashes) {
+            // Let another peer be asked at once.
+            self.leaf_requests.lock().remove(&piece);
+            return Ok(false);
+        }
+        if self.pieces.read().get(piece as usize).is_none_or(|p| p.complete) {
+            return Ok(true);
+        }
+        let leaves = Arc::new(hashes.to_vec());
+        self.leaf_layers.write().insert(piece, Arc::clone(&leaves));
+        self.verify_dirty_leaves(&info, piece, &leaves);
+        Ok(true)
+    }
+
+    fn serve_leaf_hashes(
+        &self,
+        pieces_root: [u8; 32],
+        index: u32,
+        length: u32,
+        proof_layers: u32,
+    ) -> std::result::Result<Vec<[u8; 32]>, String> {
+        // BEP 52 shape first — reject before touching storage or building proofs.
+        wt_wire::validate_hash_request(0, index, length, proof_layers).map_err(str::to_string)?;
+        let info = self.info.read().clone().ok_or("no info")?;
+        if !info.has_v2() {
+            return Err("torrent has no v2 metadata".into());
+        }
+        let expected = self.expected_v2.read().clone();
+        // One piece per request bounds the hashing a peer can ask of us.
+        let piece = crate::hashing::piece_for_leaf_span(
+            &info,
+            &expected,
+            pieces_root,
+            index,
+            length,
+        )
+        .ok_or("leaf span is not one piece")?;
+        let leaves = if let Some(leaves) = self.leaf_layers.read().get(&piece) {
+            leaves.as_ref().clone()
+        } else {
+            if !self.pieces.read().get(piece as usize).is_some_and(|p| p.complete) {
+                return Err(format!("piece {piece} not complete"));
+            }
+            let storage = self.storage.read().clone().ok_or("no storage")?;
+            let piece_obj = info.piece(piece);
+            let ps = storage.piece(piece_obj, info.piece_hash_v1(piece));
+            let mut data = vec![0u8; piece_obj.length.max(0) as usize];
+            let mut read = 0;
+            while read < data.len() {
+                match ps.read_at(&mut data[read..], read as i64) {
+                    Ok(0) => return Err(format!("short read of piece {piece}")),
+                    Ok(n) => read += n,
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            crate::hashing::leaf_layer_of(&data, length as usize)
+        };
+        if leaves.len() != length as usize {
+            return Err("leaf count mismatch".into());
+        }
+        if proof_layers == 0 {
+            return Ok(leaves);
+        }
+
+        let Some(want_piece) = expected.get(piece as usize).copied().flatten() else {
+            return Err("missing expected hash for leaf piece".into());
+        };
+        if !crate::hashing::leaf_layer_matches(&want_piece, &leaves) {
+            return Err("leaf hashes do not match the piece hash".into());
+        }
+
+        // Layers covered by folding the leaf span itself.
+        let omitted = length.trailing_zeros().saturating_sub(1);
+        let above = proof_layers.saturating_sub(omitted);
+        if above == 0 {
+            return Ok(leaves);
+        }
+
+        // Uncles from the piece hash up to the pieces root use the piece-layer
+        // tree (same `proof_uncles` as a piece-layer HashRequest). A
+        // single-piece file's piece layer is one node, so `above > 0` rejects.
+        let file = crate::hashing::file_by_pieces_root(&info, &pieces_root)
+            .ok_or_else(|| format!("no file for pieces root {}", hex::encode(pieces_root)))?;
+        let piece_length = info.piece_length;
+        let begin = file.begin_piece_index(piece_length) as usize;
+        let end = file.end_piece_index(piece_length) as usize;
+        let file_span = end.saturating_sub(begin);
+        let rounded = wt_meta::merkle::round_up_to_power_of_two(file_span.max(1));
+        let pad = crate::hashing::piece_pad_hash(piece_length);
+        let mut piece_layer = Vec::with_capacity(rounded);
+        for i in 0..rounded {
+            let torrent_piece = begin + i;
+            if torrent_piece >= end {
+                piece_layer.push(pad);
+                continue;
+            }
+            match expected.get(torrent_piece).copied().flatten() {
+                Some(crate::hashing::ExpectedHash::V2PieceLayer(h)) => piece_layer.push(h),
+                Some(crate::hashing::ExpectedHash::V2FileRoot(h)) if file_span <= 1 => {
+                    piece_layer.push(h);
+                }
+                _ => {
+                    return Err(format!("missing piece layer hash for piece {torrent_piece}"));
+                }
+            }
+        }
+        let piece_in_file = (piece as usize).saturating_sub(begin) as u32;
+        let uncles = crate::hashing::proof_uncles(&piece_layer, piece_in_file, 1, above)?;
+        let mut out = leaves;
+        out.extend(uncles);
+        Ok(out)
+    }
+
+    fn check_leaf(&self, piece: PieceIndex, begin: u32, data: &[u8]) -> crate::hashing::LeafCheck {
+        let Some(leaves) = self.leaf_layers.read().get(&piece).cloned() else {
+            return crate::hashing::LeafCheck::Unknown;
+        };
+        // Only a whole block is a leaf; anything else waits for the piece hash.
+        let whole = self.info.read().as_ref().is_some_and(|info| {
+            i64::from(begin) + data.len() as i64 == info.piece(piece).length
+                || data.len() == BLOCK_SIZE as usize
+        });
+        if !whole {
+            return crate::hashing::LeafCheck::Unknown;
+        }
+        crate::hashing::check_block(&leaves, begin, data)
+    }
+
+    fn finish_verified_chunk_write(&self, req: RequestIndex) {
+        // Verified before dirty: the wake that follows the dirty bit must find
+        // the block already readable by strict readers.
+        self.verified_chunks.insert(req);
+        self.finish_chunk_write(req, true);
+    }
+
+    fn requeue_dirty_for_v2_hash(&self) {
+        let Some(info) = self.info.read().clone() else {
+            return;
+        };
+        let n = info.num_pieces();
+        let mut to_queue = Vec::new();
+        {
+            let expected = self.expected_v2.read();
+            let pieces = self.pieces.read();
+            for piece in 0..n {
+                if expected
+                    .get(piece as usize)
+                    .and_then(|e| e.as_ref())
+                    .is_none()
+                {
+                    continue;
+                }
+                let Some(p) = pieces.get(piece as usize) else {
+                    continue;
+                };
+                if p.checking || p.complete {
+                    continue;
+                }
+                if self.piece_all_dirty(piece) {
+                    to_queue.push(piece);
+                }
+            }
+        }
+        for piece in to_queue {
+            self.queue_piece_hash(piece);
+        }
+    }
 }
 
 /// Size the availability counters, counting bitfields that arrived before info.
@@ -849,6 +1220,72 @@ impl TorrentInner {
     }
 }
 
+impl TorrentInner {
+    /// Set the v2 infohash learned after creation, through the client when
+    /// attached (aliases + discovery), else on the torrent alone.
+    pub(crate) fn adopt_v2_key(&self, v2: wt_types::InfoHashV2) -> bool {
+        let client = self.client.read().upgrade();
+        let me = client.as_ref().and_then(|c| {
+            c.torrent(self.info_hash).filter(|t| std::ptr::eq(Arc::as_ptr(t), self))
+        });
+        match (client, me) {
+            (Some(client), Some(me)) => client.adopt_v2_key(&me, v2),
+            _ => self.set_info_hash_v2(v2),
+        }
+    }
+}
+
+/// How long one peer has to answer a piece's leaf-hash request before
+/// another may be asked.
+const LEAF_REQUEST_RETRY: Duration = Duration::from_secs(3);
+
+impl TorrentInner {
+    /// Leaf hashes for `piece` arrived after some of its blocks: check those
+    /// blocks now. A good one becomes readable; a bad one is dropped so it is
+    /// fetched again rather than failing the whole piece later.
+    fn verify_dirty_leaves(&self, info: &wt_types::Info, piece: PieceIndex, leaves: &[[u8; 32]]) {
+        let Some(storage) = self.storage.read().clone() else {
+            return;
+        };
+        let piece_obj = info.piece(piece);
+        let ps = storage.piece(piece_obj, info.piece_hash_v1(piece));
+        let (begin, end) =
+            crate::picker::piece_req_index_range(piece, info.piece_length, &self.geometry());
+        let mut buf = vec![0u8; BLOCK_SIZE as usize];
+        let mut changed = false;
+        for req in begin..end {
+            if !self.dirty_chunks.contains(req) || self.verified_chunks.contains(req) {
+                continue;
+            }
+            let offset = i64::from(req - begin) * i64::from(BLOCK_SIZE);
+            let len = (piece_obj.length - offset).clamp(0, i64::from(BLOCK_SIZE)) as usize;
+            if len == 0 || !matches!(ps.read_at(&mut buf[..len], offset), Ok(n) if n == len) {
+                continue;
+            }
+            // The piece hash, once queued, owns the verdict on these blocks.
+            if self.pieces.read().get(piece as usize).is_none_or(|p| p.checking || p.complete) {
+                break;
+            }
+            match crate::hashing::check_block(leaves, offset as u32, &buf[..len]) {
+                crate::hashing::LeafCheck::Verified => {
+                    self.verified_chunks.insert(req);
+                    changed = true;
+                }
+                crate::hashing::LeafCheck::Bad => {
+                    self.dirty_chunks.remove(req);
+                    wt_types::events::record("leaf_fail", format!("piece={piece} begin={offset} stored"));
+                    changed = true;
+                }
+                crate::hashing::LeafCheck::Unknown => {}
+            }
+        }
+        if changed {
+            // Readers may have new bytes; peers may have a block to refetch.
+            self.bump_change();
+        }
+    }
+}
+
 impl ReaderHost for TorrentInner {
     fn have(&self, offset: i64, len: i64, responsive: bool) -> i64 {
         let info_guard = self.info.read();
@@ -856,7 +1293,8 @@ impl ReaderHost for TorrentInner {
             return 0;
         };
         let piece_len = info.piece_length;
-        let total = info.total_length();
+        let geometry = self.geometry();
+        let total = geometry.end();
         let mut off = offset;
         let mut max = len;
         let mut ret = 0i64;
@@ -869,8 +1307,8 @@ impl ReaderHost for TorrentInner {
             let piece = (off / piece_len) as u32;
             let in_piece = off % piece_len;
             let chunk_start = (in_piece / BLOCK_SIZE as i64) * BLOCK_SIZE as i64;
-            let piece_end = ((piece as i64 + 1) * piece_len).min(total);
             let piece_base = piece as i64 * piece_len;
+            let piece_end = piece_base + geometry.piece_data_len(piece);
             let chunk_len = (piece_end - (piece_base + chunk_start)).min(BLOCK_SIZE as i64);
             if chunk_len <= 0 {
                 break;
@@ -879,12 +1317,13 @@ impl ReaderHost for TorrentInner {
                 .get(piece as usize)
                 .map(|p| p.complete)
                 .unwrap_or(false);
-            if !responsive && !complete {
-                break;
-            }
             if !complete {
                 let req = req_index_from_piece_and_offset(piece, chunk_start as u32, piece_len);
-                if !dirty.contains(req) {
+                // A block of an unfinished piece is readable once written, and
+                // either the reader accepts unverified data (responsive) or the
+                // block matched its BEP 52 Merkle leaf. On v1 no leaf is ever
+                // verified, so strict readers still wait for the piece hash.
+                if !dirty.contains(req) || !(responsive || self.verified_chunks.contains(req)) {
                     break;
                 }
             }
@@ -937,7 +1376,9 @@ impl ReaderHost for TorrentInner {
         let Some(storage) = &*storage_guard else {
             return Ok(0);
         };
-        if torrent_offset < 0 || torrent_offset >= info.total_length() || buf.is_empty() {
+        // v2: torrent space runs to the end of the last file, gaps included.
+        let end = self.geometry().end();
+        if torrent_offset < 0 || torrent_offset >= end || buf.is_empty() {
             return Ok(0);
         }
 
@@ -945,11 +1386,15 @@ impl ReaderHost for TorrentInner {
         let mut total_read = 0;
         let mut cur_offset = torrent_offset;
 
-        while total_read < buf.len() && cur_offset < info.total_length() {
+        while total_read < buf.len() && cur_offset < end {
             let piece_idx = (cur_offset / piece_len) as u32;
             let offset_in_piece = cur_offset % piece_len;
             let piece_obj = info.piece(piece_idx);
             let piece_storage = storage.piece(piece_obj, info.piece_hash_v1(piece_idx));
+            // In a v2 inter-file gap there is no data to read.
+            if offset_in_piece >= piece_obj.length {
+                break;
+            }
             let bytes_in_piece = (piece_obj.length - offset_in_piece) as usize;
             let want = (buf.len() - total_read).min(bytes_in_piece);
 
@@ -975,11 +1420,11 @@ impl ReaderHost for TorrentInner {
     }
 
     fn torrent_length(&self) -> i64 {
-        self.info
-            .read()
-            .as_ref()
-            .map(|i| i.total_length())
-            .unwrap_or(0)
+        // v1: total length. v2: end of the last (piece-aligned) file.
+        if self.info.read().is_none() {
+            return 0;
+        }
+        self.geometry().end()
     }
 
     fn num_pieces(&self) -> u32 {

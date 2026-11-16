@@ -82,6 +82,11 @@ fn test_connections_exclude_candidates_and_unknown_torrent() {
         "discovered candidates rendered as connected: {:?}",
         view.peers
     );
+    assert_eq!(
+        view.holepunch,
+        Default::default(),
+        "fresh torrent must expose zeroed per-torrent holepunch stats"
+    );
 
     let (code, _) = eng.dispatch("GET", "/connections/missing", "");
     assert_eq!(code, 404, "missing torrent status {code}");

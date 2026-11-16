@@ -46,6 +46,7 @@ impl TorrentRecord {
         self.downloaded = 0;
         self.verified_bytes = 0;
         let dirty = &self.torrent.inner.dirty_chunks;
+        let geometry = self.torrent.inner.geometry();
         for (view, file) in self.files.iter_mut().zip(files.iter()) {
             let start = file.offset();
             let end = start + file.length();
@@ -56,7 +57,8 @@ impl TorrentRecord {
             {
                 let Some(piece) = pieces.get(i) else { break };
                 let piece_start = i as i64 * piece_length;
-                let piece_end = (piece_start + piece_length).min(info.total_length());
+                // v2: pieces end at file boundaries (gaps after each file).
+                let piece_end = piece_start + geometry.piece_data_len(i as u32);
                 let overlap = (end.min(piece_end) - start.max(piece_start)).max(0);
                 if piece.complete {
                     received += overlap;

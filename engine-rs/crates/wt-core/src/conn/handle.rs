@@ -109,6 +109,26 @@ impl ConnHandle {
         }
     }
 
+    /// Same connection (writer, stats, close flag) under another peer source.
+    /// Only for a handle not yet attached: per-handle flags start fresh.
+    pub(crate) fn with_source(&self, source: PeerSource) -> Self {
+        let i = &self.inner;
+        Self::new(
+            i.remote_addr,
+            i.outgoing,
+            i.transport,
+            i.encrypted,
+            i.info_hash,
+            i.peer_id,
+            source,
+            i.peer_extension_bits,
+            i.write_tx.clone(),
+            Arc::clone(&i.write_waker),
+            Arc::clone(&i.closed),
+            Arc::clone(&i.stats),
+        )
+    }
+
     /// Queue a message to be written to the peer (non-blocking).
     /// Returns `true` if queued, `false` if the connection is closed.
     /// Unbounded so Piece replies are never try_send-dropped under a full pipeline.
@@ -307,6 +327,9 @@ impl ConnHandle {
             client_name: String::new(),
             transport: self.inner.transport,
             source: self.inner.source,
+            // Early snapshot before PeerConnHandler updates; authoritative
+            // v2 flag comes from peer_conn_info().
+            v2: false,
             encrypted: self.inner.encrypted,
             outgoing: self.inner.outgoing,
             peer_choking: true,

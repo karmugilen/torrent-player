@@ -20,6 +20,7 @@ use wt_wire::ext::{
     EXTENSION_NAME_PEX,
 };
 use wt_wire::handshake::PeerExtensionBits;
+use wt_wire::holepunch::{HolepunchMsg, EXTENSION_NAME_HOLEPUNCH};
 use wt_wire::message::{unmarshal_bitfield, Message};
 
 /// Go `PeerMaxRequests` default before the peer's LTEP `reqq` arrives.
@@ -41,7 +42,9 @@ use crate::stats::{AtomicConnStats, ExpectingRate, PeerConnInfo, RateEstimator};
 /// buffers, 5-byte interested and 17-byte request messages.
 pub(crate) const MAX_LOCAL_TO_REMOTE_REQUESTS: usize = ((1 << 20) - (1 << 19) - 5) / 17;
 use crate::sched::{peer_queue_limit, Pick, PeerLive, PickPeer, Take};
-use crate::wire::{DEFAULT_UT_METADATA_ID, DEFAULT_UT_PEX_ID, EXT_HANDSHAKE_ID};
+use crate::wire::{
+    DEFAULT_UT_HOLEPUNCH_ID, DEFAULT_UT_METADATA_ID, DEFAULT_UT_PEX_ID, EXT_HANDSHAKE_ID,
+};
 use crate::{CoreError, Result};
 
 // ---------------------------------------------------------------- PeerTorrent
@@ -57,6 +60,12 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn num_pieces(&self) -> u32;
     fn piece_length(&self) -> i64;
     fn total_length(&self) -> i64;
+    /// Block geometry (per-piece data lengths). The default is uniform v1
+    /// geometry from `piece_length` / `total_length`; BEP 52 torrents
+    /// override it, since their pieces end at file boundaries.
+    fn geometry(&self) -> Arc<crate::picker::Geometry> {
+        Arc::new(crate::picker::Geometry::v1(self.piece_length(), self.total_length()))
+    }
     fn chunk_size(&self) -> u32 {
         BLOCK_SIZE
     }
@@ -223,6 +232,16 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn pex_disabled(&self) -> bool {
         false
     }
+
+    /// BEP 55: offer `ut_holepunch` in the LTEP `m` dict and act on it.
+    fn holepunch_enabled(&self) -> bool {
+        false
+    }
+    /// The peer's `ut_holepunch` id from its extended handshake (`None`:
+    /// not supported, or the connection closed).
+    fn note_holepunch_support(&self, _addr: SocketAddr, _ext_id: Option<u8>) {}
+    /// A well-formed `ut_holepunch` message arrived from `from`.
+    fn on_holepunch(&self, _from: SocketAddr, _msg: HolepunchMsg) {}
     /// LTEP `reqq` we advertise (Go `localClientReqq` = 1024).
     fn local_reqq(&self) -> u32 {
         LOCAL_CLIENT_REQQ
@@ -234,6 +253,86 @@ pub trait PeerTorrent: Send + Sync + 'static {
     /// BEP 5 Port message value when both sides support DHT.
     fn dht_port(&self) -> Option<u16> {
         None
+    }
+
+    /// True when torrent info is BEP 52 v2/hybrid.
+    fn has_v2(&self) -> bool {
+        false
+    }
+
+    /// Handshake infohash is this torrent's truncated v2 hash (marks a v2 conn).
+    fn is_v2_handshake_hash(&self, _ih: &[u8; 20]) -> bool {
+        false
+    }
+
+    /// Multi-piece v2 files still missing piece-layer hashes.
+    fn missing_piece_layer_files(&self) -> Vec<crate::hashing::MissingLayerFile> {
+        Vec::new()
+    }
+
+    /// Apply inbound `Hashes` after Merkle proof against the file pieces root.
+    /// Returns `Ok(true)` when layers were committed and hashing may proceed.
+    fn apply_peer_piece_hashes(
+        &self,
+        _pieces_root: [u8; 32],
+        _index: u32,
+        _hashes: &[[u8; 32]],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Serve piece-layer hashes for an inbound `HashRequest`, or `Err` to reject.
+    fn serve_piece_hashes(
+        &self,
+        _pieces_root: [u8; 32],
+        _index: u32,
+        _length: u32,
+        _proof_layers: u32,
+    ) -> std::result::Result<Vec<[u8; 32]>, String> {
+        Err("no v2 piece layers".into())
+    }
+
+    /// Re-queue dirty pieces that can now verify after layers arrived.
+    fn requeue_dirty_for_v2_hash(&self) {}
+
+    /// The `HashRequest` for `piece`'s 16 KiB leaf hashes, when a reader
+    /// wants the piece, block-level verification applies to it, and no other
+    /// peer was just asked. Claims the ask.
+    fn leaf_hash_request(&self, _piece: PieceIndex) -> Option<crate::hashing::HashRequestKey> {
+        None
+    }
+
+    /// Apply an inbound `base_layer = 0` `Hashes` span. `Ok(true)` when the
+    /// leaves proved against the piece's trusted hash and are now in use.
+    fn apply_peer_leaf_hashes(
+        &self,
+        _pieces_root: [u8; 32],
+        _index: u32,
+        _hashes: &[[u8; 32]],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Serve the leaf hashes of one complete piece, or `Err` to reject.
+    fn serve_leaf_hashes(
+        &self,
+        _pieces_root: [u8; 32],
+        _index: u32,
+        _length: u32,
+        _proof_layers: u32,
+    ) -> std::result::Result<Vec<[u8; 32]>, String> {
+        Err("no leaf hashes".into())
+    }
+
+    /// Check a received block against its Merkle leaf, before it is written.
+    fn check_leaf(&self, _piece: PieceIndex, _begin: u32, _data: &[u8]) -> crate::hashing::LeafCheck {
+        crate::hashing::LeafCheck::Unknown
+    }
+
+    /// Like [`Self::finish_chunk_write`] for a written block that passed
+    /// [`Self::check_leaf`]: readers may be served it before its piece is whole.
+    fn finish_verified_chunk_write(&self, req: RequestIndex) {
+        self.finish_chunk_write(req, true);
     }
 }
 
@@ -341,6 +440,8 @@ pub struct PeerConnInner {
 
     pub peer_ext_ut_metadata: Option<u8>,
     pub peer_ext_ut_pex: Option<u8>,
+    /// Peer's BEP 55 `ut_holepunch` id.
+    pub peer_ext_ut_holepunch: Option<u8>,
     pub peer_metadata_size: Option<u32>,
 
     /// Requests we will accept as hedge answers.
@@ -379,6 +480,7 @@ pub struct PeerConnHandler<T: PeerTorrent> {
     closed: Arc<AtomicBool>,
     our_ext_metadata: u8,
     our_ext_pex: u8,
+    our_ext_holepunch: u8,
     peer_metadata: PeerMetadataState,
     pex_cursor: Option<PexCursor>,
     last_pex_sent: Option<Instant>,
@@ -395,6 +497,16 @@ pub struct PeerConnHandler<T: PeerTorrent> {
     /// Block asked of a new peer to measure it, and when.
     speed_probe: Option<(RequestIndex, Instant)>,
     speed_probed: bool,
+    /// Connection negotiated on the truncated v2 infohash (Go `PeerConn.v2`).
+    v2: bool,
+    /// Outbound HashRequest dedup + outstanding cap (Go `sentHashRequests`).
+    sent_hash_requests: HashSet<crate::hashing::HashRequestKey>,
+    /// Unanswered leaf-hash requests (`base_layer = 0`).
+    leaf_hash_requests: HashSet<crate::hashing::HashRequestKey>,
+    /// The peer rejected a leaf-hash request: it cannot serve them.
+    leaf_hashes_rejected: bool,
+    /// Piece of the last block request sent, to ask for leaves once per piece.
+    leaf_asked_piece: Option<PieceIndex>,
 }
 
 /// Run storage work that may wait on disk (evicting or saving a cache slot
@@ -409,6 +521,9 @@ fn blocking_io<R>(f: impl FnOnce() -> R) -> R {
         _ => f(),
     }
 }
+
+/// Cap on unanswered leaf-hash requests per peer.
+const MAX_OUTSTANDING_LEAF_REQUESTS: usize = 16;
 
 /// A peer with requests outstanding that delivered nothing for this long
 /// releases them (Go relies on balance stealing; this only catches dead peers).
@@ -440,6 +555,10 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     pub fn new(torrent: Arc<T>, handle: &ConnHandle) -> Self {
         let now = Instant::now();
         let torrent_key = torrent.peer_key(handle.remote_addr());
+        // v2 conn: negotiated on truncated SHA-256, or peer advertised v2-upgrade.
+        let peer_bits = PeerExtensionBits(handle.peer_extension_bits());
+        let v2 = torrent.is_v2_handshake_hash(&handle.info_hash().0)
+            || peer_bits.supports_v2_upgrade();
         Self {
             torrent,
             state: PeerConnInner {
@@ -475,6 +594,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 webtor_pipeline_limit: 0,
                 peer_ext_ut_metadata: None,
                 peer_ext_ut_pex: None,
+                peer_ext_ut_holepunch: None,
                 peer_metadata_size: None,
                 valid_receive_chunks: HashMap::new(),
                 is_snubbed: false,
@@ -483,6 +603,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             closed: Arc::new(AtomicBool::new(false)),
             our_ext_metadata: DEFAULT_UT_METADATA_ID,
             our_ext_pex: DEFAULT_UT_PEX_ID,
+            our_ext_holepunch: DEFAULT_UT_HOLEPUNCH_ID,
             peer_metadata: PeerMetadataState::new(),
             pex_cursor: None,
             last_pex_sent: None,
@@ -497,6 +618,108 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             last_warm: now,
             speed_probe: None,
             speed_probed: false,
+            v2,
+            sent_hash_requests: HashSet::new(),
+            leaf_hash_requests: HashSet::new(),
+            leaf_hashes_rejected: false,
+            leaf_asked_piece: None,
+        }
+    }
+
+    /// Mark this connection as BEP 52 v2 (handshake upgrade or inbound short hash).
+    pub fn set_v2(&mut self, v2: bool) {
+        self.v2 = v2;
+    }
+
+    /// BEP 52: this connection speaks v2. The peer's upgrade bit alone is
+    /// not enough: on a v1-only torrent there is no v2 swarm to be in, and
+    /// counting such peers as BT2 misreports the swarm.
+    fn speaks_v2(&self) -> bool {
+        self.v2 && self.torrent.has_v2()
+    }
+
+    fn should_request_hashes(&self) -> bool {
+        self.torrent.have_info() && self.speaks_v2()
+    }
+
+    /// Ask this peer for the leaf hashes of a piece it is about to send blocks
+    /// of, so each block can be verified, and read, as it arrives. Sent ahead
+    /// of the block request: the hashes come back first.
+    fn request_leaf_hashes(&mut self, handle: &ConnHandle, piece: PieceIndex) {
+        if self.leaf_asked_piece == Some(piece) {
+            return;
+        }
+        self.leaf_asked_piece = Some(piece);
+        if self.leaf_hashes_rejected
+            || self.leaf_hash_requests.len() >= MAX_OUTSTANDING_LEAF_REQUESTS
+            || !self.should_request_hashes()
+        {
+            return;
+        }
+        let Some(key) = self.torrent.leaf_hash_request(piece) else {
+            return;
+        };
+        if handle.send_message(Message::HashRequest {
+            pieces_root: key.pieces_root,
+            base_layer: key.base_layer,
+            index: key.index,
+            length: key.length,
+            proof_layers: key.proof_layers,
+        }) {
+            self.leaf_hash_requests.insert(key);
+        }
+    }
+
+    /// Go `requestMissingHashes`: ask a v2 peer for missing piece layers.
+    fn request_missing_hashes(&mut self, handle: &ConnHandle) {
+        if !self.should_request_hashes() || handle.is_closed() {
+            return;
+        }
+        let missing = self.torrent.missing_piece_layer_files();
+        if missing.is_empty() {
+            return;
+        }
+        let piece_length = self.torrent.piece_length();
+        let peer_have_all = self.state.peer_sent_have_all;
+        for file in missing {
+            // Peer must advertise every piece of the file (Go `continue file`).
+            if !peer_have_all {
+                let pieces = self.live.pieces.read();
+                let mut have_file = true;
+                for i in 0..file.num_pieces {
+                    if !pieces.contains(file.begin_piece + i) {
+                        have_file = false;
+                        break;
+                    }
+                }
+                drop(pieces);
+                if !have_file {
+                    continue;
+                }
+            }
+            for key in crate::hashing::hash_requests_for_file(
+                file.pieces_root,
+                file.num_pieces,
+                piece_length,
+            ) {
+                if self.sent_hash_requests.contains(&key) {
+                    continue;
+                }
+                if self.sent_hash_requests.len() >= crate::hashing::MAX_OUTSTANDING_HASH_REQUESTS {
+                    return;
+                }
+                self.send(
+                    handle,
+                    Message::HashRequest {
+                        pieces_root: key.pieces_root,
+                        base_layer: key.base_layer,
+                        index: key.index,
+                        length: key.length,
+                        proof_layers: key.proof_layers,
+                    },
+                );
+                self.sent_hash_requests.insert(key);
+            }
         }
     }
 
@@ -584,6 +807,10 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             if !self.torrent.pex_disabled() {
                 ext.m
                     .insert(EXTENSION_NAME_PEX.to_string(), self.our_ext_pex);
+            }
+            if self.torrent.holepunch_enabled() {
+                ext.m
+                    .insert(EXTENSION_NAME_HOLEPUNCH.to_string(), self.our_ext_holepunch);
             }
             ext.v = Some(self.torrent.extended_handshake_client_version());
             // Go `p` has omitempty — never advertise listen port 0.
@@ -702,6 +929,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             client_name: self.state.client_name.clone(),
             transport: self.state.transport,
             source: self.state.source,
+            v2: self.speaks_v2(),
             encrypted: self.state.encrypted,
             outgoing: self.state.outgoing,
             peer_choking: self.state.peer_choking,
@@ -743,7 +971,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     /// Cancel the local request without erasing an assignment stolen by another peer.
     fn cancel_outstanding(&mut self, handle: &ConnHandle, req: RequestIndex) {
         if !self.state.outstanding_requests.remove(&req) { return; }
-        let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
+        let coord = block_coord_from_req_index(req, self.torrent.piece_length(), &self.torrent.geometry());
         self.send(handle, Message::Cancel { index: coord.piece, begin: coord.offset, length: coord.length.max(1) });
         let bits = PeerExtensionBits(self.state.peer_extension_bits);
         let rejects_cancels = bits.supports_fast() && self.state.peer_id.is_none_or(|id|
@@ -823,13 +1051,16 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         {
             return;
         }
+        // Go `fillWriteBuffer` asks for missing piece layers before block requests.
+        self.request_missing_hashes(handle);
         self.state.need_request_update = false;
         // Peer handlers own their queues, so a block another peer took or
         // finished is cancelled here, on this peer's wake.
         let refocus = handle.take_refocus();
         let mut displaced = self.torrent.displaced_requests(&self.state.outstanding_requests, self.key());
         if refocus {
-            let (plen, total) = (self.torrent.piece_length(), self.torrent.total_length());
+            let geom = self.torrent.geometry();
+            let (plen, total) = (self.torrent.piece_length(), &geom);
             displaced.extend(self.state.outstanding_requests.iter().copied().filter(|&req| {
                 self.torrent.piece_priority(block_coord_from_req_index(req, plen, total).piece)
                     < PiecePriority::Now
@@ -945,7 +1176,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
 
     /// Send a request this peer has claimed, and expect its answer.
     fn send_request(&mut self, handle: &ConnHandle, req: RequestIndex) -> bool {
-        let coord = block_coord_from_req_index(req, self.torrent.piece_length(), self.torrent.total_length());
+        let coord = block_coord_from_req_index(req, self.torrent.piece_length(), &self.torrent.geometry());
+        self.request_leaf_hashes(handle, coord.piece);
         if !handle.send_message(Message::Request {
             index: coord.piece,
             begin: coord.offset,
@@ -981,7 +1213,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         if !interested && !self.torrent.data_download_disallowed() {
             // Stay interested while the playhead window needs what this peer has.
             if let Some(focus) = focus {
-                let (plen, total) = (self.torrent.piece_length(), self.torrent.total_length());
+                let geom = self.torrent.geometry();
+                let (plen, total) = (self.torrent.piece_length(), &geom);
                 let begin = block_coord_from_req_index(focus, plen, total).piece;
                 let end = begin.saturating_add(PLAYING_INTEREST_PIECES).min(self.torrent.num_pieces());
                 interested = (begin..end).any(|p| !self.torrent.piece_complete(p)
@@ -1023,7 +1256,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                     let piece = block_coord_from_req_index(
                         r,
                         self.torrent.piece_length(),
-                        self.torrent.total_length(),
+                        &self.torrent.geometry(),
                     )
                     .piece;
                     self.state.peer_allowed_fast.contains(&piece)
@@ -1052,7 +1285,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         {
             return;
         }
-        let (plen, total) = (self.torrent.piece_length(), self.torrent.total_length());
+        let geom = self.torrent.geometry();
+        let (plen, total) = (self.torrent.piece_length(), &geom);
         let focus_piece = self.torrent.request_focus_index()
             .map(|focus| block_coord_from_req_index(focus, plen, total).piece);
         let piece = if self.state.peer_sent_have_all {
@@ -1088,7 +1322,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return;
         }
         let Some(focus) = self.torrent.request_focus_index() else { return };
-        let coord = block_coord_from_req_index(focus, self.torrent.piece_length(), self.torrent.total_length());
+        let coord = block_coord_from_req_index(focus, self.torrent.piece_length(), &self.torrent.geometry());
         if coord.length == 0
             || !(self.state.peer_sent_have_all || self.live.pieces.read().contains(coord.piece))
             || !self.torrent.may_warm()
@@ -1146,7 +1380,8 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         self.state.webtor_choked_since = Some(Instant::now());
         // Cancel outstanding except allowed-fast
         let plen = self.torrent.piece_length();
-        let total = self.torrent.total_length();
+        let geom = self.torrent.geometry();
+        let total = &geom;
         let reqs: Vec<_> = self.state.outstanding_requests.iter().copied().collect();
         for r in reqs {
             let piece = block_coord_from_req_index(r, plen, total).piece;
@@ -1224,7 +1459,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                     &block_coord_from_req_index(
                         req,
                         self.torrent.piece_length(),
-                        self.torrent.total_length(),
+                        &self.torrent.geometry(),
                     )
                     .piece,
                 )
@@ -1304,6 +1539,24 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             return Ok(());
         }
 
+        // BEP 52: with the piece's leaf hashes in hand a block is judged on
+        // its own. A bad one is never written, so no reader sees it and the
+        // rest of the piece survives; the sender is provably at fault.
+        let leaf = self.torrent.check_leaf(index, begin, data);
+        if leaf == crate::hashing::LeafCheck::Bad {
+            self.torrent.finish_chunk_write(req, false);
+            self.state.stats.chunks_read_wasted.fetch_add(1, Ordering::Relaxed);
+            handle.stats().chunks_read_wasted.fetch_add(1, Ordering::Relaxed);
+            self.torrent.release_request(req, me);
+            self.torrent.release_hedge(req, me);
+            // The block is requestable again: any peer may fetch it.
+            self.torrent.bump_change();
+            wt_types::events::record("leaf_fail", format!("piece={index} begin={begin}"));
+            return Err(CoreError::Other(format!(
+                "peer sent block failing its merkle leaf: piece={index} begin={begin}"
+            )));
+        }
+
         // Almost every block lands in an existing RAM slot. Handing the
         // worker's core to another thread for that copy cost more than the
         // copy, on every 16 KiB block.
@@ -1312,7 +1565,11 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             None => blocking_io(|| self.torrent.write_chunk(index, begin, data)),
         };
         // Marks the block dirty (readable) only after a successful write.
-        self.torrent.finish_chunk_write(req, written.is_ok());
+        if written.is_ok() && leaf == crate::hashing::LeafCheck::Verified {
+            self.torrent.finish_verified_chunk_write(req);
+        } else {
+            self.torrent.finish_chunk_write(req, written.is_ok());
+        }
         if let Err(err) = written {
             // Go Peer.receiveChunk: log, pendRequest, onNeedUpdateRequests,
             // onWriteChunkErr; return nil — never kill the peer for a
@@ -1453,6 +1710,12 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             if let Some(&id) = ext.m.get(EXTENSION_NAME_PEX) {
                 self.state.peer_ext_ut_pex = (id != 0).then_some(id);
             }
+            if let Some(&id) = ext.m.get(EXTENSION_NAME_HOLEPUNCH) {
+                // BEP 10: id 0 in a later handshake disables the extension.
+                self.state.peer_ext_ut_holepunch = (id != 0).then_some(id);
+                self.torrent
+                    .note_holepunch_support(self.state.remote_addr, self.state.peer_ext_ut_holepunch);
+            }
             self.state.peer_metadata_size = ext.metadata_size;
             if let Some(name) = ext.v.clone() {
                 self.state.client_name = name;
@@ -1535,6 +1798,13 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 Err(_) => return Ok(()),
             };
             self.torrent.ingest_pex(self.state.remote_addr, &msg)?;
+            return Ok(());
+        }
+        if id == self.our_ext_holepunch && self.torrent.holepunch_enabled() {
+            // Malformed holepunch messages are dropped, never fatal.
+            if let Ok(msg) = HolepunchMsg::decode(&payload) {
+                self.torrent.on_holepunch(self.state.remote_addr, msg);
+            }
         }
         Ok(())
     }
@@ -1770,11 +2040,126 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             Message::Extended { id, payload } => {
                 self.handle_extended(handle, id, payload)?;
             }
-            Message::HashRequest { .. } => {
-                // BEP 52: reject by default until v2 piece layers are wired.
+            Message::HashRequest {
+                pieces_root,
+                base_layer,
+                index,
+                length,
+                proof_layers,
+            } => {
+                // Layer 0 is the 16 KiB leaves; hashing a stored piece to
+                // answer may wait on disk.
+                let served = if base_layer == 0 && self.torrent.piece_length() > i64::from(BLOCK_SIZE) {
+                    blocking_io(|| {
+                        self.torrent.serve_leaf_hashes(pieces_root, index, length, proof_layers)
+                    })
+                } else {
+                    self.torrent.serve_piece_hashes(pieces_root, index, length, proof_layers)
+                };
+                match served {
+                    Ok(hashes) => {
+                        self.send(
+                            handle,
+                            Message::Hashes {
+                                pieces_root,
+                                base_layer,
+                                index,
+                                length,
+                                proof_layers,
+                                hashes,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        tracing::debug!(error = %err, "HashRequest rejected");
+                        self.send(
+                            handle,
+                            Message::HashReject {
+                                pieces_root,
+                                base_layer,
+                                index,
+                                length,
+                                proof_layers,
+                            },
+                        );
+                    }
+                }
             }
-            Message::Hashes { .. } => {}
-            Message::HashReject { .. } => {}
+            Message::Hashes {
+                pieces_root,
+                base_layer,
+                index,
+                length,
+                proof_layers,
+                hashes,
+            } => {
+                let key = crate::hashing::HashRequestKey {
+                    pieces_root,
+                    base_layer,
+                    index,
+                    length,
+                    proof_layers,
+                };
+                if base_layer == 0 && self.torrent.piece_length() > i64::from(BLOCK_SIZE) {
+                    // Only spans we asked for: a peer cannot push leaf work.
+                    if self.leaf_hash_requests.remove(&key) {
+                        match blocking_io(|| {
+                            self.torrent.apply_peer_leaf_hashes(pieces_root, index, &hashes)
+                        }) {
+                            Ok(true) => {}
+                            Ok(false) => tracing::debug!("leaf Hashes did not prove against the piece hash"),
+                            Err(e) => tracing::debug!(error = %e, "ignoring bad leaf Hashes"),
+                        }
+                    }
+                    self.after_message(handle, is_block);
+                    return Ok(());
+                }
+                // Only spans we asked for (as for leaves). Recording the
+                // peer's key here grew a never-pruned set per unsolicited
+                // message and used up our outstanding-request cap.
+                if !self.sent_hash_requests.contains(&key) {
+                    self.after_message(handle, is_block);
+                    return Ok(());
+                }
+                match self
+                    .torrent
+                    .apply_peer_piece_hashes(pieces_root, index, &hashes)
+                {
+                    Ok(true) => {
+                        self.torrent.requeue_dirty_for_v2_hash();
+                        self.state.need_request_update = true;
+                    }
+                    Ok(false) => {
+                        tracing::debug!("Hashes did not validate against pieces root yet");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "ignoring bad Hashes");
+                    }
+                }
+            }
+            Message::HashReject {
+                pieces_root,
+                base_layer,
+                index,
+                length,
+                proof_layers,
+            } => {
+                // Keep the key in sent_hash_requests so we do not retry forever
+                // against a peer that cannot serve this range (Go keeps the map).
+                let key = crate::hashing::HashRequestKey {
+                    pieces_root,
+                    base_layer,
+                    index,
+                    length,
+                    proof_layers,
+                };
+                if self.leaf_hash_requests.remove(&key) {
+                    // Blocks from this peer fall back to whole-piece verify.
+                    self.leaf_hashes_rejected = true;
+                }
+                // A rejected piece-layer span stays in sent_hash_requests (it
+                // was put there when sent), so it is not asked again.
+            }
         }
         self.after_message(handle, is_block);
         Ok(())
@@ -1793,6 +2178,9 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             self.torrent
                 .pex_note_closed(self.state.remote_addr, self.state.encrypted, utp);
             self.pex_listed = false;
+        }
+        if self.state.peer_ext_ut_holepunch.take().is_some() {
+            self.torrent.note_holepunch_support(self.state.remote_addr, None);
         }
         // Drop availability
         if self.state.peer_sent_have_all {
