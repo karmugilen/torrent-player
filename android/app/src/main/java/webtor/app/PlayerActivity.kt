@@ -983,11 +983,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Composable
     private fun TrackSheet(type: String, onDismiss: () -> Unit) {
         var list by remember(type) { mutableStateOf(tracks(type)) }
-        // Side panel on the right, full height, so long lists scroll instead of being cut off.
+        // Floating box in the centre; long lists scroll inside it instead of being cut off.
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
-            .pointerInput(Unit) { detectTapGestures { onDismiss() } }, contentAlignment = Alignment.CenterEnd) {
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } }, contentAlignment = Alignment.Center) {
             androidx.compose.material3.Surface(
-                modifier = Modifier.fillMaxHeight().width(330.dp).padding(10.dp).pointerInput(Unit) { detectTapGestures { } },
+                modifier = Modifier.width(360.dp)
+                    .heightIn(max = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.85f).dp)
+                    .pointerInput(Unit) { detectTapGestures { } },
                 shape = RoundedCornerShape(24.dp),
                 tonalElevation = 6.dp,
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
