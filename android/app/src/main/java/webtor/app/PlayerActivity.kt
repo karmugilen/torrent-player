@@ -62,6 +62,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.ScreenLockRotation
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.FastForward
@@ -94,6 +97,23 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+
+/** Picture size in the built-in player, remembered between videos. */
+enum class PlayerAspect(val label: String) {
+    FIT("Fit"), CROP("Crop"), STRETCH("Stretch"), R16_9("16:9"), R4_3("4:3");
+
+    fun next(): PlayerAspect = entries[(ordinal + 1) % entries.size]
+
+    companion object {
+        private const val KEY = "playerAspect"
+        fun load(context: Context): PlayerAspect =
+            context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString(KEY, null)
+                ?.let { name -> entries.firstOrNull { it.name == name } } ?: FIT
+        fun save(context: Context, value: PlayerAspect) {
+            context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString(KEY, value.name).apply()
+        }
+    }
+}
 
 /** Settings flag for the built-in mpv player (experimental, on by default in this test build). */
 object BuiltInPlayer {
@@ -275,6 +295,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "screenshot-jpeg-quality" to "80",
         ).forEach { (k, v) -> MPVLib.setOptionString(k, v) }
         MPVLib.init()
+        applyAspect(aspect.value)
         MPVLib.addObserver(this)
         listOf(
             "time-pos" to MPVLib.MPV_FORMAT_DOUBLE,
@@ -624,6 +645,36 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun setSpeed(x: Double) = MPVLib.setPropertyDouble("speed", x)
 
+    private val aspect by lazy { mutableStateOf(PlayerAspect.load(this)) }
+    private val rotationLocked = mutableStateOf(false)
+
+    /** Fit keeps the whole picture, Crop fills the screen, Stretch ignores the video's shape. */
+    private fun applyAspect(mode: PlayerAspect) {
+        MPVLib.setPropertyString("keepaspect", if (mode == PlayerAspect.STRETCH) "no" else "yes")
+        MPVLib.setPropertyString("panscan", if (mode == PlayerAspect.CROP) "1.0" else "0.0")
+        MPVLib.setPropertyString("video-aspect-override", when (mode) {
+            PlayerAspect.R16_9 -> "16:9"
+            PlayerAspect.R4_3 -> "4:3"
+            else -> "-1"
+        })
+    }
+
+    private fun cycleAspect(): PlayerAspect {
+        val mode = aspect.value.next()
+        aspect.value = mode
+        PlayerAspect.save(this, mode)
+        applyAspect(mode)
+        return mode
+    }
+
+    /** Lock keeps the side the screen is on now; unlocked follows the sensor between both landscape sides. */
+    private fun toggleRotationLock(): Boolean {
+        val lock = !rotationLocked.value
+        rotationLocked.value = lock
+        requestedOrientation = if (lock) ActivityInfo.SCREEN_ORIENTATION_LOCKED else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        return lock
+    }
+
     private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, SPEED, IGNORE }
 
     @Composable
@@ -698,6 +749,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             } else prefetchFor(target, dur)
         }
         fun endScrub() { scrubOrigin = null; popup = null; popupSub = null }
+        val flashScope = androidx.compose.runtime.rememberCoroutineScope()
+        var flashJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+        fun flash(text: String) {
+            popup = text; popupSub = null; popupLevel = null
+            flashJob?.cancel()
+            flashJob = flashScope.launch { delay(1200); if (popup == text) popup = null }
+        }
 
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
@@ -871,6 +929,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         }
                         IconButton(onClick = { trackSheet = "sub"; controls = false }) {
                             Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White)
+                        }
+                        IconButton(onClick = { flash(cycleAspect().label); touchTick++ }) {
+                            Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}", tint = Color.White)
+                        }
+                        IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
+                            Icon(
+                                if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
+                                if (rotationLocked.value) "Unlock rotation" else "Lock rotation",
+                                tint = Color.White,
+                            )
                         }
                         if (items.size > 1 && playlistPos.intValue < items.size - 1) {
                             IconButton(onClick = { next(); touchTick++ }) {
