@@ -320,7 +320,16 @@ impl DocumentTorrentStorage {
         index: usize,
         off: i64,
     ) -> Option<usize> {
-        if inner.stream_lost.get(&index).copied().unwrap_or(false) {
+        // Like Go `readReceivedLocked`: the start and end of each video, where
+        // players read the index, are served verified only. A bad index can
+        // crash a player; a bad mid-file block is a brief glitch.
+        if inner.stream_lost.get(&index).copied().unwrap_or(false)
+            || inner.startup_pieces.get(&index).copied().unwrap_or(false)
+            || inner
+                .preload_pieces
+                .as_ref()
+                .is_some_and(|p| p.get(&index).copied().unwrap_or(false))
+        {
             return None;
         }
         let data = inner.cache.get(&index)?;

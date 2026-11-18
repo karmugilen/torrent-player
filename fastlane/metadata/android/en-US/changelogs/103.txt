@@ -1,0 +1,1 @@
+Direct Play now serves the start and end of each video only after they pass their hash check, so a corrupt block can no longer break the player while it opens a file.
