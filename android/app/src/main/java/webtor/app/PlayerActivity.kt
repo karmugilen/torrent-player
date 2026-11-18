@@ -1079,9 +1079,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     /**
      * Seek bar: dim track, light where the player has it buffered, white for
-     * what was played. Just past the buffer it shows what the torrent is fetching
-     * next: a faint stretch already downloaded, then a pulse where pieces are
-     * still arriving.
+     * what was played, and a short pulse just past the buffer while the torrent
+     * is still fetching.
      */
     @Composable
     private fun SeekBar(fraction: Float, cachedFraction: Float, downloaded: List<Span>, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
@@ -1110,25 +1109,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val y = size.height / 2 - h / 2
             val r = CornerRadius(h / 2)
             drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(0f, y), Size(size.width, h), r)
-            // Fetch ahead of the buffer: downloaded run, then the spot still arriving.
+            // Fetching: a short pulse just past the buffer while the file is not fully downloaded.
             val edge = maxOf(fraction, cachedFraction)
-            var readyEnd = edge
-            var fetching: Span? = null
-            for (s in downloaded) {
-                if (s.to <= readyEnd) continue
-                if (s.from > readyEnd + 0.001f) break
-                if (s.done >= 0.99f) readyEnd = s.to else { fetching = s; break }
-            }
-            if (readyEnd > edge) drawRect(Color.White.copy(alpha = 0.32f),
-                Offset(edge * size.width, y), Size((readyEnd - edge) * size.width, h))
-            if (downloaded.isNotEmpty() && readyEnd < 1f) {
-                val from = maxOf(readyEnd, fetching?.from ?: readyEnd)
-                val to = fetching?.to ?: minOf(1f, readyEnd + 0.01f)
-                drawRect(Color.White.copy(alpha = pulse),
-                    Offset(from * size.width, y), Size(((to - from) * size.width).coerceAtLeast(4.dp.toPx()), h))
-            }
-            if (cachedFraction > fraction) drawRect(Color.White.copy(alpha = 0.45f),
-                Offset(fraction * size.width, y), Size((cachedFraction - fraction) * size.width, h))
+            val complete = downloaded.isNotEmpty() && downloaded.all { it.done >= 0.99f }
+            if (downloaded.isNotEmpty() && !complete && edge < 1f) drawRect(Color.White.copy(alpha = pulse),
+                Offset(edge * size.width, y), Size(minOf(0.02f, 1f - edge) * size.width, h))
             drawRoundRect(Color.White, Offset(0f, y), Size(fraction * size.width, h), r)
             drawCircle(Color.White, radius = (if (active) 9.dp else 7.dp).toPx(), center = Offset(fraction * size.width, size.height / 2))
         }
