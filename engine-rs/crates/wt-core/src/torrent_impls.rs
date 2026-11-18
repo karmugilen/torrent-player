@@ -781,27 +781,28 @@ impl PeerTorrent for TorrentInner {
         Ok(())
     }
 
-    fn pex_note_connected(&self, addr: SocketAddr, encrypted: bool, utp: bool) {
+    fn pex_note_connected(&self, conn: SocketAddr, advertised: SocketAddr, l: crate::peer_conn::PexListing) {
         let flags = wt_types::PexFlags {
-            prefers_encryption: encrypted,
+            prefers_encryption: l.encrypted,
             seed_only: self.seeding.load(Ordering::Relaxed),
-            supports_utp: utp,
+            supports_utp: l.utp,
             // BEP 55 0x08: the peer told us it speaks ut_holepunch.
-            supports_holepunch: self.holepunch_peers.read().contains_key(&addr),
-            reachable: true,
+            supports_holepunch: self.holepunch_peers.read().contains_key(&conn),
+            // BEP 11 0x10 (Go PexOutgoingConn): only a peer we dialed is known reachable.
+            reachable: l.outgoing,
         };
-        self.pex.lock().add(addr, flags);
+        self.pex.lock().add(advertised, flags);
     }
 
-    fn pex_note_closed(&self, addr: SocketAddr, encrypted: bool, utp: bool) {
+    fn pex_note_closed(&self, conn: SocketAddr, advertised: SocketAddr, l: crate::peer_conn::PexListing) {
         let flags = wt_types::PexFlags {
-            prefers_encryption: encrypted,
+            prefers_encryption: l.encrypted,
             seed_only: false,
-            supports_utp: utp,
-            supports_holepunch: self.holepunch_peers.read().contains_key(&addr),
+            supports_utp: l.utp,
+            supports_holepunch: self.holepunch_peers.read().contains_key(&conn),
             reachable: false,
         };
-        self.pex.lock().drop_listed(addr, flags);
+        self.pex.lock().drop_listed(advertised, flags);
     }
 
     fn pex_genmsg(&self, cursor: &mut Option<crate::pex::PexCursor>) -> Option<PexMsg> {

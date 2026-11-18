@@ -54,7 +54,10 @@ pub type SkeyProvider = Arc<dyn Fn() -> Vec<[u8; 20]> + Send + Sync>;
 /// Inbound connection listener managing dual-stack TCP and uTP sockets.
 pub struct PeerListener {
     tcp_listeners: Vec<Arc<TcpListener>>,
+    /// IPv4 uTP socket: dials to IPv4 peers, DHT and UDP trackers share it.
     utp_socket: Option<Arc<UtpSocket>>,
+    /// IPv6 uTP socket on the same port, when the host has IPv6.
+    utp_socket_v6: Option<Arc<UtpSocket>>,
     listen_port: u16,
     closed: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
@@ -68,6 +71,7 @@ impl PeerListener {
         let (shutdown, _) = watch::channel(false);
         let mut tcp_listeners = Vec::new();
         let mut utp_socket = None;
+        let mut utp_socket_v6 = None;
         let mut bound_port = cfg.listen_port;
 
         // 1. TCP Listener
@@ -97,17 +101,23 @@ impl PeerListener {
                     vec![UtpSocket::bind(addr).await.map_err(CoreError::Io)?]
                 }
             };
-            if let Some(first) = utps.into_iter().next() {
+            for sock in utps {
+                let local = sock.local_addr().map_err(CoreError::Io)?;
                 if bound_port == 0 {
-                    bound_port = first.local_addr().map_err(CoreError::Io)?.port();
+                    bound_port = local.port();
                 }
-                utp_socket = Some(Arc::new(first));
+                if local.is_ipv4() {
+                    utp_socket.get_or_insert_with(|| Arc::new(sock));
+                } else {
+                    utp_socket_v6.get_or_insert_with(|| Arc::new(sock));
+                }
             }
         }
 
         Ok(Self {
             tcp_listeners,
             utp_socket,
+            utp_socket_v6,
             listen_port: bound_port,
             closed,
             shutdown,
@@ -123,6 +133,15 @@ impl PeerListener {
     /// Access the underlying uTP socket if enabled (e.g. for DHT/UDP tracker sharing).
     pub fn utp_socket(&self) -> Option<&Arc<UtpSocket>> {
         self.utp_socket.as_ref()
+    }
+
+    /// The uTP socket for dialing `addr`: IPv6 peers need the IPv6 socket.
+    pub fn utp_socket_for(&self, addr: SocketAddr) -> Option<&Arc<UtpSocket>> {
+        if addr.is_ipv6() {
+            self.utp_socket_v6.as_ref()
+        } else {
+            self.utp_socket.as_ref()
+        }
     }
 
     /// Close all listeners.
@@ -207,15 +226,15 @@ impl PeerListener {
             });
         }
 
-        // Spawn uTP accept loop
-        if let Some(utp) = self.utp_socket.clone() {
-            let u_cfg = cfg;
-            let u_tr = tracker;
-            let u_sk = skey_provider;
-            let u_lk = lookup;
-            let u_v2 = v2_lookup;
-            let u_tx = accepted_tx;
-            let u_cl = closed;
+        // Spawn uTP accept loops (IPv4 and IPv6)
+        for utp in self.utp_socket.iter().chain(self.utp_socket_v6.iter()).cloned() {
+            let u_cfg = cfg.clone();
+            let u_tr = tracker.clone();
+            let u_sk = skey_provider.clone();
+            let u_lk = lookup.clone();
+            let u_v2 = v2_lookup.clone();
+            let u_tx = accepted_tx.clone();
+            let u_cl = closed.clone();
             let mut shutdown = self.shutdown.subscribe();
             tokio::spawn(async move {
                 while !u_cl.load(Ordering::Relaxed) {

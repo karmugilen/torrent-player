@@ -330,6 +330,8 @@ impl ClientInner {
                 addrs.clear();
                 addrs.push(SocketAddr::from(([0, 0, 0, 0], port)));
                 addrs.push(SocketAddr::from(([127, 0, 0, 1], port)));
+                addrs.push(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)));
+                addrs.push(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)));
             }
             if let Some(utp) = listener.utp_socket() {
                 utp_for_sources = Some(Arc::clone(utp));
@@ -1301,12 +1303,12 @@ impl ClientInner {
             .await
     }
 
-    /// The uTP listen socket, through which every uTP dial leaves.
-    pub(crate) fn utp_socket(&self) -> Option<Arc<wt_wire::utp::UtpSocket>> {
+    /// The uTP listen socket a dial to `addr` leaves from (IPv4 or IPv6).
+    pub(crate) fn utp_socket_for(&self, addr: SocketAddr) -> Option<Arc<wt_wire::utp::UtpSocket>> {
         self.listener
             .read()
             .as_ref()
-            .and_then(|l| l.utp_socket().cloned())
+            .and_then(|l| l.utp_socket_for(addr).cloned())
     }
 
     /// Whether a BEP 55 punch toward `endpoint` is possible at all: uTP is
@@ -1321,7 +1323,7 @@ impl ClientInner {
         {
             return false;
         }
-        let Some(sock) = self.utp_socket() else {
+        let Some(sock) = self.utp_socket_for(endpoint) else {
             return false;
         };
         match sock.local_addr() {
@@ -1341,7 +1343,7 @@ impl ClientInner {
         if !self.can_punch(endpoint) || torrent.has_peer_at(endpoint) {
             return;
         }
-        let Some(utp) = self.utp_socket() else { return };
+        let Some(utp) = self.utp_socket_for(endpoint) else { return };
         // The uTP socket is shared by all torrents: a stream to this endpoint
         // that another torrent holds says nothing about this one's punch.
         if utp.has_stream_to(endpoint) && !self.endpoint_held_by_other_torrent(&torrent, endpoint) {
@@ -1445,7 +1447,7 @@ impl ClientInner {
                 fails,
             );
         }
-        let utp = self.utp_socket();
+        let utp = self.utp_socket_for(addr);
         let outcome = conn_dial_peer(DialParams {
             remote_addr: addr,
             info_hash: torrent.info_hash,

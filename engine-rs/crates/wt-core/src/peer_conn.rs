@@ -54,6 +54,15 @@ pub type PeerKey = u64;
 
 /// Torrent-wide surface the peer state machine needs. Implemented on
 /// `TorrentInner` (or a test double).
+/// Per-conn facts for an outbound PEX entry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PexListing {
+    pub encrypted: bool,
+    pub utp: bool,
+    /// We dialed this peer, so it is reachable (BEP 11 flag 0x10).
+    pub outgoing: bool,
+}
+
 pub trait PeerTorrent: Send + Sync + 'static {
     fn peer_key(&self, addr: SocketAddr) -> PeerKey;
     fn have_info(&self) -> bool;
@@ -197,10 +206,12 @@ pub trait PeerTorrent: Send + Sync + 'static {
         Vec::new()
     }
     fn ingest_pex(&self, from: SocketAddr, msg: &PexMsg) -> Result<()>;
-    /// Record a live conn for outbound PEX (Go `pex.Add`).
-    fn pex_note_connected(&self, _addr: SocketAddr, _encrypted: bool, _utp: bool) {}
+    /// Record a live conn for outbound PEX (Go `pex.Add`). `conn` is the
+    /// connection's remote address; `advertised` is the dialable address
+    /// shared with other peers (Go `dialAddr`).
+    fn pex_note_connected(&self, _conn: SocketAddr, _advertised: SocketAddr, _flags: PexListing) {}
     /// Record a disconnect for outbound PEX (Go `pex.Drop`).
-    fn pex_note_closed(&self, _addr: SocketAddr, _encrypted: bool, _utp: bool) {}
+    fn pex_note_closed(&self, _conn: SocketAddr, _advertised: SocketAddr, _flags: PexListing) {}
     /// Build next ut_pex payload; updates `cursor`.
     fn pex_genmsg(&self, cursor: &mut Option<crate::pex::PexCursor>) -> Option<PexMsg> {
         let _ = cursor;
@@ -484,7 +495,9 @@ pub struct PeerConnHandler<T: PeerTorrent> {
     peer_metadata: PeerMetadataState,
     pex_cursor: Option<PexCursor>,
     last_pex_sent: Option<Instant>,
-    pex_listed: bool,
+    /// Address this conn was listed under in outbound PEX, so the drop
+    /// names the same address as the add.
+    pex_listed: Option<SocketAddr>,
     cancelled_at: HashMap<RequestIndex, Instant>,
     live: Arc<PeerLive>,
     wanted_cache: std::cell::Cell<Option<(Instant, bool)>>,
@@ -607,7 +620,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             peer_metadata: PeerMetadataState::new(),
             pex_cursor: None,
             last_pex_sent: None,
-            pex_listed: false,
+            pex_listed: None,
             cancelled_at: HashMap::new(),
             live: Arc::new(PeerLive::new(torrent_key)),
             wanted_cache: std::cell::Cell::new(None),
@@ -915,6 +928,29 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             }
         }
         self.send(handle, Message::Bitfield(Bytes::from(bits)));
+    }
+
+    /// Go `dialAddr`: an inbound TCP conn arrives from an ephemeral port, so
+    /// share the listen port the peer announced instead. Outbound conns and
+    /// uTP (which dials from the listen socket) use the remote address.
+    fn pex_advertised_addr(&self) -> SocketAddr {
+        let addr = self.state.remote_addr;
+        if self.state.outgoing
+            || matches!(self.state.transport, Transport::Utp)
+            || self.state.peer_listen_port == 0
+        {
+            addr
+        } else {
+            SocketAddr::new(addr.ip(), self.state.peer_listen_port)
+        }
+    }
+
+    fn pex_listing(&self) -> PexListing {
+        PexListing {
+            encrypted: self.state.encrypted,
+            utp: matches!(self.state.transport, Transport::Utp),
+            outgoing: self.state.outgoing,
+        }
     }
 
     pub fn peer_conn_info(&self) -> PeerConnInfo {
@@ -1733,14 +1769,11 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                 }
             }
             // Go: t.pex.Add(c); c.pex.Init(c) once the extended handshake arrives.
-            if !self.torrent.pex_disabled() && !self.pex_listed {
-                let utp = matches!(self.state.transport, Transport::Utp);
-                self.torrent.pex_note_connected(
-                    self.state.remote_addr,
-                    self.state.encrypted,
-                    utp,
-                );
-                self.pex_listed = true;
+            if !self.torrent.pex_disabled() && self.pex_listed.is_none() {
+                let advertised = self.pex_advertised_addr();
+                self.torrent
+                    .pex_note_connected(self.state.remote_addr, advertised, self.pex_listing());
+                self.pex_listed = Some(advertised);
             }
             self.request_metadata_pieces(handle);
             self.state.need_request_update = true;
@@ -2173,11 +2206,9 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
 
     fn on_closed(&mut self, _handle: &ConnHandle, _reason: &str) {
         self.closed.store(true, Ordering::Relaxed);
-        if self.pex_listed {
-            let utp = matches!(self.state.transport, Transport::Utp);
+        if let Some(advertised) = self.pex_listed.take() {
             self.torrent
-                .pex_note_closed(self.state.remote_addr, self.state.encrypted, utp);
-            self.pex_listed = false;
+                .pex_note_closed(self.state.remote_addr, advertised, self.pex_listing());
         }
         if self.state.peer_ext_ut_holepunch.take().is_some() {
             self.torrent.note_holepunch_support(self.state.remote_addr, None);

@@ -260,8 +260,8 @@ impl PeerTorrent for FakeTorrent {
         self.pex_msgs.lock().push(msg.clone());
         Ok(())
     }
-    fn pex_note_connected(&self, addr: SocketAddr, _encrypted: bool, _utp: bool) {
-        self.pex_connected.lock().push(addr);
+    fn pex_note_connected(&self, conn: SocketAddr, _advertised: SocketAddr, _flags: wt_core::peer_conn::PexListing) {
+        self.pex_connected.lock().push(conn);
     }
     fn add_dht_node(&self, addr: SocketAddr) {
         self.dht_nodes.lock().push(addr);
