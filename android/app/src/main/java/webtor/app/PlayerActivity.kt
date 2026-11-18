@@ -992,7 +992,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         SeekBar(
                             fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
                             cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                            downloaded = if (directPlay.value) emptyList() else spans.value,
+                            downloaded = spans.value,
                             onDrag = { f ->
                                 sliderDragging = true; sliderValue = (f * dur).toFloat()
                                 seekPopup(sliderValue.toDouble()); touchTick++
