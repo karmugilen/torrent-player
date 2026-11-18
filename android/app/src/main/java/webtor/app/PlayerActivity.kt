@@ -61,8 +61,19 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.text.font.FontWeight
 import dev.jdtech.mpv.MPVLib
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /** Settings flag for the built-in mpv player (experimental, on by default in this test build). */
 object BuiltInPlayer {
@@ -290,50 +301,219 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         super.onDestroy()
     }
 
+    // ---- Torrent info for the playing file (http stream only) ----
+
+    /** One stretch of the file with the share of verified pieces in it, positions 0..1. */
+    data class Span(val from: Float, val to: Float, val done: Float)
+
+    private val spans = mutableStateOf<List<Span>>(emptyList())
+    private val swarm = mutableStateOf<String?>(null)
+
+    /** Engine id and file index from http://127.0.0.1:port/torrent/<id>/file/<n>. */
+    private fun torrentOf(uri: Uri): Pair<String, Int>? {
+        if (uri.scheme != "http") return null
+        val seg = uri.pathSegments
+        val t = seg.indexOf("torrent")
+        if (t < 0 || seg.size < t + 4 || seg[t + 2] != "file") return null
+        return seg[t + 1] to (seg[t + 3].toIntOrNull() ?: return null)
+    }
+
+    private fun refreshTorrentInfo() {
+        val item = items.getOrNull(playlistPos.intValue) ?: return
+        val (id, fileIndex) = torrentOf(item.uri) ?: run { spans.value = emptyList(); swarm.value = null; return }
+        val client = (application as WebtorApp).engineClient
+        val status = runCatching { client.torrent(id) }.getOrNull() ?: return
+        swarm.value = "${status.numPeers} peers · ${formatSpeed(status.downloadSpeed)}"
+        val files = status.files.sortedBy { it.index }
+        val file = files.find { it.index == fileIndex } ?: return
+        if (file.length <= 0) return
+        if (file.progress >= 1.0) { spans.value = listOf(Span(0f, 1f, 1f)); return }
+        val offset = files.takeWhile { it.index != fileIndex }.sumOf { it.length }
+        val pieces = runCatching { client.pieces(id, 4096) }.getOrNull() ?: return
+        val pl = pieces.pieceLength.takeIf { it > 0 } ?: return
+        val end = offset + file.length
+        spans.value = pieces.buckets.mapNotNull { b ->
+            val a = maxOf(b.start * pl, offset); val z = minOf((b.end + 1L) * pl, end)
+            if (z <= a || b.total <= 0) null
+            else Span(((a - offset).toDouble() / file.length).toFloat(), ((z - offset).toDouble() / file.length).toFloat(),
+                b.verified.toFloat() / b.total)
+        }
+    }
+
+    /** True when the spot at [fraction] of the file is already downloaded. */
+    private fun readyAt(fraction: Float): Boolean? {
+        val list = spans.value.takeIf { it.isNotEmpty() } ?: return null
+        return list.firstOrNull { fraction >= it.from && fraction <= it.to }?.let { it.done >= 0.99f }
+    }
+
+    // ---- Volume, brightness, speed ----
+
+    private val audio by lazy { getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager }
+
+    private fun currentBrightness(): Float {
+        val w = window.attributes.screenBrightness
+        if (w >= 0) return w
+        return runCatching {
+            android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255f
+        }.getOrDefault(0.5f)
+    }
+
+    private fun setBrightness(v: Float) {
+        window.attributes = window.attributes.apply { screenBrightness = v.coerceIn(0.01f, 1f) }
+    }
+
+    private fun volumeFraction(): Float {
+        val max = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        return audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() / max
+    }
+
+    private fun setVolume(v: Float) {
+        val max = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, (v.coerceIn(0f, 1f) * max).roundToInt(), 0)
+    }
+
+    private fun setSpeed(x: Double) = MPVLib.setPropertyDouble("speed", x)
+
+    private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK }
+
     @Composable
     private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit) {
         var controls by remember { mutableStateOf(true) }
         var touchTick by remember { mutableIntStateOf(0) }
-        var dragging by remember { mutableStateOf(false) }
-        var dragValue by remember { mutableFloatStateOf(0f) }
+        var sliderDragging by remember { mutableStateOf(false) }
+        var sliderValue by remember { mutableFloatStateOf(0f) }
+        var popup by remember { mutableStateOf<String?>(null) }
+        var popupSub by remember { mutableStateOf<String?>(null) }
+        var popupLevel by remember { mutableStateOf<Float?>(null) }
+        var fast by remember { mutableStateOf(false) }
         val pos by position
         val dur by duration
         val isPaused by paused
         val isBuffering by buffering
 
         BackHandler(onBack = onBack)
-        LaunchedEffect(controls, touchTick, isPaused, dragging) {
-            if (controls && !isPaused && !dragging) { delay(3500); controls = false }
+        LaunchedEffect(controls, touchTick, isPaused, sliderDragging) {
+            if (controls && !isPaused && !sliderDragging) { delay(3500); controls = false }
+        }
+        LaunchedEffect(Unit) {
+            while (true) {
+                withContext(Dispatchers.IO) { refreshTorrentInfo() }
+                delay(1000)
+            }
+        }
+
+        fun seekPopup(target: Double) {
+            val delta = target - pos
+            popup = (if (delta >= 0) "+" else "-") + clock(kotlin.math.abs(delta)) + "   " + clock(target)
+            popupSub = when (if (dur > 0) readyAt((target / dur).toFloat()) else null) {
+                true -> "Downloaded · plays instantly"
+                false -> "Not downloaded yet · will buffer"
+                null -> null
+            }
+            popupLevel = null
         }
 
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
+
+            // Gesture layer: tap, double tap, hold for 2x, swipes.
             Box(
-                Modifier.fillMaxSize().pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { controls = !controls; touchTick++ },
-                        onDoubleTap = { o ->
-                            when {
-                                o.x < size.width / 3f -> seekBy(-10)
-                                o.x > size.width * 2f / 3f -> seekBy(10)
-                                else -> togglePause()
+                Modifier.fillMaxSize()
+                    .pointerInput(Unit) {
+                        var held = false
+                        detectTapGestures(
+                            onPress = {
+                                held = false
+                                coroutineScope {
+                                    val hold = launch {
+                                        delay(450)
+                                        held = true; fast = true; setSpeed(2.0)
+                                        popup = "2× speed"; popupSub = "Release to go back"; popupLevel = null
+                                    }
+                                    tryAwaitRelease()
+                                    hold.cancel()
+                                    if (held) { setSpeed(1.0); fast = false; popup = null; popupSub = null }
+                                }
+                            },
+                            onTap = { if (!held) { controls = !controls; touchTick++ } },
+                            onDoubleTap = { o ->
+                                when {
+                                    o.x < size.width / 3f -> { seekBy(-10); popup = "-10 s"; popupSub = null; popupLevel = null }
+                                    o.x > size.width * 2f / 3f -> { seekBy(10); popup = "+10 s"; popupSub = null; popupLevel = null }
+                                    else -> togglePause()
+                                }
+                                touchTick++
+                            },
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        var mode = Drag.NONE
+                        var startX = 0f
+                        var level = 0f
+                        var target = 0.0
+                        var total = Offset.Zero
+                        detectDragGestures(
+                            onDragStart = { o -> mode = Drag.NONE; startX = o.x; total = Offset.Zero },
+                            onDragEnd = {
+                                if (mode == Drag.SEEK) seekTo(target)
+                                mode = Drag.NONE; popup = null; popupSub = null; popupLevel = null
+                            },
+                            onDragCancel = { mode = Drag.NONE; popup = null; popupSub = null; popupLevel = null },
+                        ) { change, d ->
+                            change.consume()
+                            total += d
+                            if (mode == Drag.NONE) {
+                                mode = when {
+                                    kotlin.math.abs(total.x) > kotlin.math.abs(total.y) -> Drag.SEEK
+                                    startX < size.width / 2f -> Drag.VOLUME
+                                    else -> Drag.BRIGHTNESS
+                                }
+                                level = when (mode) { Drag.VOLUME -> volumeFraction(); Drag.BRIGHTNESS -> currentBrightness(); else -> 0f }
+                                target = pos
                             }
-                            touchTick++
-                        },
-                    )
-                },
+                            when (mode) {
+                                Drag.VOLUME -> {
+                                    level = (level - d.y / (size.height * 0.8f)).coerceIn(0f, 1f)
+                                    setVolume(level)
+                                    popup = "Volume ${(level * 100).roundToInt()}%"; popupSub = null; popupLevel = level
+                                }
+                                Drag.BRIGHTNESS -> {
+                                    level = (level - d.y / (size.height * 0.8f)).coerceIn(0.01f, 1f)
+                                    setBrightness(level)
+                                    popup = "Brightness ${(level * 100).roundToInt()}%"; popupSub = null; popupLevel = level
+                                }
+                                Drag.SEEK -> {
+                                    // A full screen width is about 2 minutes.
+                                    target = (target + d.x / size.width * 120.0).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
+                                    seekPopup(target)
+                                }
+                                Drag.NONE -> {}
+                            }
+                        }
+                    },
             )
-            if (isBuffering) {
-                CircularProgressIndicator(Modifier.align(Alignment.Center).size(48.dp), color = Color.White)
+
+            if (isBuffering && !isPaused) {
+                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(Modifier.size(48.dp), color = Color.White)
+                    swarm.value?.let {
+                        Spacer(Modifier.height(10.dp))
+                        Text("Buffering · $it", color = Color.White, fontSize = 13.sp,
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.5f)).padding(horizontal = 10.dp, vertical = 4.dp))
+                    }
+                }
             }
+
             AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f))) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
                         }
-                        Text(title.value, color = Color.White, fontSize = 16.sp, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Column(Modifier.weight(1f)) {
+                            Text(title.value, color = Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            swarm.value?.let { Text(it, color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp) }
+                        }
                         PillButton("Audio") { cycle("aid"); touchTick++ }
                         PillButton("Subs") { cycle("sid"); touchTick++ }
                         if (items.size > 1 && playlistPos.intValue < items.size - 1) PillButton("Next") { next(); touchTick++ }
@@ -351,14 +531,21 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         RoundButton("+10") { seekBy(10); touchTick++ }
                     }
                     Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 32.dp, vertical = 16.dp)) {
-                        val shown = if (dragging) dragValue.toDouble() else pos
+                        val shown = if (sliderDragging) sliderValue.toDouble() else pos
                         Slider(
                             value = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                            onValueChange = { dragging = true; dragValue = (it * dur).toFloat() },
-                            onValueChangeFinished = { seekTo(dragValue.toDouble()); dragging = false; touchTick++ },
+                            onValueChange = {
+                                sliderDragging = true; sliderValue = (it * dur).toFloat()
+                                seekPopup(sliderValue.toDouble())
+                            },
+                            onValueChangeFinished = {
+                                seekTo(sliderValue.toDouble()); sliderDragging = false; popup = null; popupSub = null; touchTick++
+                            },
                             colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White,
-                                inactiveTrackColor = Color.White.copy(alpha = 0.3f)),
+                                inactiveTrackColor = Color.White.copy(alpha = 0.25f)),
                         )
+                        DownloadedBar(Modifier.fillMaxWidth().padding(horizontal = 10.dp).height(4.dp))
+                        Spacer(Modifier.height(6.dp))
                         Row(Modifier.fillMaxWidth()) {
                             Text(clock(shown), color = Color.White, fontSize = 13.sp)
                             Spacer(Modifier.weight(1f))
@@ -368,6 +555,48 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         }
                     }
                 }
+            }
+
+            // Center pop-up for gestures and seeking.
+            popup?.let { text ->
+                Column(
+                    Modifier.align(Alignment.TopCenter).padding(top = 56.dp)
+                        .clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.7f))
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    popupLevel?.let { lv ->
+                        Spacer(Modifier.height(8.dp))
+                        Box(Modifier.width(160.dp).height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.25f))) {
+                            Box(Modifier.fillMaxWidth(lv).height(4.dp).background(Color.White))
+                        }
+                    }
+                    popupSub?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, color = if (it.startsWith("Downloaded")) Color(0xFF7CE38B) else Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
+                    }
+                }
+            }
+            if (fast && popup == null) {
+                Text("2×", color = Color.White, fontSize = 16.sp, modifier = Modifier.align(Alignment.TopCenter).padding(top = 56.dp))
+            }
+        }
+    }
+
+    /** Which parts of this file are downloaded: green where verified, dim where missing. */
+    @Composable
+    private fun DownloadedBar(modifier: Modifier) {
+        val list = spans.value
+        if (list.isEmpty()) return
+        Canvas(modifier.clip(RoundedCornerShape(2.dp))) {
+            drawRect(Color.White.copy(alpha = 0.15f))
+            list.forEach { sp ->
+                if (sp.done > 0f) drawRect(
+                    Color(0xFF7CE38B).copy(alpha = 0.35f + 0.65f * sp.done),
+                    topLeft = Offset(sp.from * size.width, 0f),
+                    size = Size(((sp.to - sp.from) * size.width).coerceAtLeast(1f), size.height),
+                )
             }
         }
     }
@@ -389,7 +618,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Composable
     private fun PauseGlyph() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            repeat(2) { Box(Modifier.width(8.dp).size(8.dp, 28.dp).clip(RoundedCornerShape(2.dp)).background(Color.White)) }
+            repeat(2) { Box(Modifier.size(8.dp, 28.dp).clip(RoundedCornerShape(2.dp)).background(Color.White)) }
         }
     }
 }
