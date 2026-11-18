@@ -267,6 +267,21 @@ Full notes are on [GitHub Releases](https://github.com/karmugilen/torrent-player
 
 ---
 
+## Star history
+
+<p align="center">
+  <a href="https://star-history.com/#karmugilen/torrent-player&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=karmugilen/torrent-player&type=Date&theme=dark" />
+      <img src="https://api.star-history.com/svg?repos=karmugilen/torrent-player&type=Date" width="600" alt="Star history of Torrent Player" />
+    </picture>
+  </a>
+</p>
+
+If Torrent Player is useful to you, a ⭐ helps others find it.
+
+---
+
 ## Legal
 
 Use Torrent Player only with content you have the right to download or share. Screenshots and test fixtures use open Creative Commons films (*Big Buck Bunny* and *Sintel* &copy; Blender Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)).
