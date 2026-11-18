@@ -185,11 +185,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun startMpv() {
         MPVLib.create(applicationContext)
         listOf(
+            // Same base as mpvEx: fast profile, hardware decode with software fallback.
+            "profile" to "fast",
             "vo" to "gpu",
             "gpu-context" to "android",
             "opengl-es" to "yes",
-            "hwdec" to "mediacodec,mediacodec-copy",
-            "hwdec-codecs" to "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1",
+            "hwdec" to "mediacodec,mediacodec-copy,no",
+            "hwdec-codecs" to "all",
+            "vd-lavc-film-grain" to "cpu",
             "ao" to "audiotrack,opensles",
             "audio-set-media-role" to "yes",
             "tls-verify" to "no",
@@ -197,6 +200,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "demuxer-max-bytes" to "64MiB",
             "demuxer-max-back-bytes" to "64MiB",
             "hr-seek" to "no",
+            "hr-seek-framedrop" to "yes",
             "cache-pause-initial" to "no",
             "network-timeout" to "0",
             "keep-open" to "no",
@@ -223,8 +227,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         ).forEach { (k, f) -> MPVLib.observeProperty(k, f) }
 
         if (startSeconds > 1) MPVLib.setPropertyString("start", "%.3f".format(java.util.Locale.ROOT, startSeconds))
-        items.forEachIndexed { i, item ->
-            MPVLib.command(arrayOf("loadfile", mpvPath(item.uri), if (i == 0) "replace" else "append"))
+        // Open off the main thread, as mpvEx does, so a slow stream never freezes the UI.
+        val paths = items.map { it.uri }
+        lifecycleScope.launch(Dispatchers.Default) {
+            paths.forEachIndexed { i, uri ->
+                MPVLib.command(arrayOf("loadfile", mpvPath(uri), if (i == 0) "replace" else "append"))
+            }
         }
     }
 
