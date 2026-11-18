@@ -19,7 +19,7 @@
 
 <p><b>Privacy & Freedom:</b></p>
 <ul>
-  <li>100% Free and Open Source Software (MIT License; the engine is MPL-2.0; the bundled mpv and FFmpeg video libraries are GPL).</li>
+  <li>100% Free and Open Source Software (MIT License; the engine is MPL-2.0; the built-in player uses mpv and FFmpeg under the LGPL).</li>
   <li>No advertising trackers, analytics, or telemetry.</li>
   <li>Zero advertisements.</li>
   <li>Direct peer-to-peer swarm connectivity (DHT, UDP trackers, TCP, uTP, WebSockets, and WebRTC).</li>

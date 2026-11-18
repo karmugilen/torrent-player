@@ -7,43 +7,28 @@ and the peer map data in [peer-map-data.txt](android/app/src/main/assets/license
 
 ## Built-in video player
 
-Since 2.4.4 the APK includes the prebuilt Android package
-[`dev.jdtech.mpv:libmpv:0.4.1`](https://github.com/jarnedemeulemeester/libmpv-android) (wrapper code under the MIT
-License). It contains native libraries built from these projects:
+Since 2.4.4 the APK includes native libraries that [android/mpv/build.sh](android/mpv/build.sh) builds from
+source at the tags below. mpv is built with `-Dgpl=false` and FFmpeg without `--enable-gpl` or
+`--enable-version3`, so every library is under a license that allows linking from MIT code. Each is a separate
+shared library (`lib/arm64-v8a/*.so`) that can be replaced.
 
 | Project | Version | License | Source |
 | --- | --- | --- | --- |
-| mpv | 0.39.0, built with the `gpl` option | GPL-2.0-or-later | https://github.com/mpv-player/mpv |
-| FFmpeg (libavcodec, libavformat, libavutil, libavfilter, libavdevice, libswscale, libswresample, libpostproc) | 7.1 (n7.1) | GPL-3.0-or-later, as configured with `--enable-gpl --enable-version3` | https://ffmpeg.org/download.html |
-| libass | bundled | ISC | https://github.com/libass/libass |
-| FreeType | bundled | FreeType License (FTL) | https://freetype.org |
-| HarfBuzz | bundled | MIT ("Old MIT") | https://github.com/harfbuzz/harfbuzz |
-| FriBidi | bundled | LGPL-2.1-or-later | https://github.com/fribidi/fribidi |
-| libplacebo | bundled | LGPL-2.1-or-later | https://code.videolan.org/videolan/libplacebo |
-| dav1d | bundled | BSD-2-Clause | https://code.videolan.org/videolan/dav1d |
-| Mbed TLS | bundled | Apache-2.0 | https://github.com/Mbed-TLS/mbedtls |
-| Lua | bundled | MIT | https://www.lua.org |
-| LLVM libc++ (`libc++_shared.so`) | NDK | Apache-2.0 WITH LLVM-exception | https://github.com/llvm/llvm-project |
+| mpv (`libmpv.so`) | v0.39.0 | LGPL-2.1-or-later | https://github.com/mpv-player/mpv |
+| FFmpeg (`libavcodec`, `libavformat`, `libavutil`, `libavfilter`, `libavdevice`, `libswscale`, `libswresample`) | n7.1 | LGPL-2.1-or-later | https://github.com/FFmpeg/FFmpeg |
+| libplacebo (static, in `libmpv.so`) | v7.349.0 | LGPL-2.1-or-later | https://code.videolan.org/videolan/libplacebo |
+| FriBidi (static, in `libmpv.so`) | v1.0.16 | LGPL-2.1-or-later | https://github.com/fribidi/fribidi |
+| libass (static, in `libmpv.so`) | 0.17.3 | ISC | https://github.com/libass/libass |
+| FreeType (static, in `libmpv.so`) | 2.13.3 | FreeType License (FTL) | https://gitlab.freedesktop.org/freetype/freetype |
+| HarfBuzz (static, in `libmpv.so`) | 10.0.1 | MIT ("Old MIT") | https://github.com/harfbuzz/harfbuzz |
+| dav1d (static, in `libavcodec.so`) | 1.4.3 | BSD-2-Clause | https://code.videolan.org/videolan/dav1d |
+| JNI wrapper (`libplayer.so`, `dev.jdtech.mpv.MPVLib`) | libmpv-android 0.4.1 | MIT | https://github.com/jarnedemeulemeester/libmpv-android, license in [android/mpv/LICENSE.libmpv-android](android/mpv/LICENSE.libmpv-android) |
+| LLVM libc++ (`libc++_shared.so`) | Android NDK r26b | Apache-2.0 WITH LLVM-exception | https://github.com/llvm/llvm-project |
 
-Because mpv and FFmpeg are built as GPL, the APK as a whole is distributed under the terms of the
-GNU General Public License version 3. The app's own MIT and MPL-2.0 code stays under those licenses.
+The LGPL libraries are unmodified. To rebuild them, or to build the app with modified versions, run
+`android/mpv/build.sh` (it fetches the tags above into `android/mpv/deps/`, or uses what is already there) and
+then build the APK as described in the README.
 
-Corresponding source for the native libraries: the build scripts and pinned versions are in
-[libmpv-android at tag 0.4.1](https://github.com/jarnedemeulemeester/libmpv-android/tree/0.4.1/buildscripts).
-On request, the maintainer will provide the complete corresponding source for these libraries as shipped in
-any Torrent Player release, for at least three years after that release: open an issue at
-https://github.com/karmugilen/torrent-player/issues.
-
-FFmpeg configure line (arm64-v8a):
-
-```
---target-os=android --enable-cross-compile --arch=aarch64 --cpu=armv8-a --enable-jni --enable-mediacodec
---enable-mbedtls --enable-libdav1d --disable-vulkan --disable-static --enable-shared --enable-gpl
---enable-version3 --disable-stripping --disable-doc --disable-programs --disable-muxers --disable-encoders
---disable-devices --disable-filters --disable-v4l2-m2m
-```
-
-License texts: [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.txt),
-[GPL-2.0](https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt),
-[LGPL-2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt),
+License texts: [LGPL-2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt),
+[FreeType License](https://gitlab.freedesktop.org/freetype/freetype/-/blob/master/docs/FTL.TXT),
 [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0.txt).

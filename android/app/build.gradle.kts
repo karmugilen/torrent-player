@@ -34,6 +34,21 @@ val buildRustEngineEmulator by tasks.registering(Exec::class) {
     outputs.file(file("src/main/jniLibs/x86_64/libengine.so"))
 }
 
+// Built-in player: mpv, FFmpeg (LGPL build) and their libraries, built from
+// source by android/mpv/build.sh (skips itself when already up to date).
+val playerLibs = listOf(
+    "libavcodec.so", "libavdevice.so", "libavfilter.so", "libavformat.so", "libavutil.so",
+    "libswresample.so", "libswscale.so", "libmpv.so", "libplayer.so", "libc++_shared.so",
+)
+val buildPlayerLibs by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Build the built-in player's native libraries from source for arm64-v8a"
+    workingDir(repoRoot)
+    commandLine("bash", repoRoot.resolve("android/mpv/build.sh").absolutePath)
+    inputs.files(fileTree(repoRoot.resolve("android/mpv")) { include("build.sh", "wrapper/**") })
+    outputs.files(playerLibs.map { file("src/main/jniLibs/arm64-v8a/$it") })
+}
+
 // Everything in jniLibs is packaged, so a library left by an older multi-engine
 // build would ship in the APK.
 val cleanOtherEngineLibs by tasks.registering(Delete::class) {
@@ -47,7 +62,7 @@ val cleanOtherEngineLibs by tasks.registering(Delete::class) {
 }
 
 tasks.named("preBuild") {
-    dependsOn(buildRustEngine, cleanOtherEngineLibs)
+    dependsOn(buildRustEngine, buildPlayerLibs, cleanOtherEngineLibs)
     if (emulatorAbi) dependsOn(buildRustEngineEmulator)
 }
 
@@ -140,6 +155,10 @@ buildRustEngine.configure {
     environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
     environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
 }
+buildPlayerLibs.configure {
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+}
 buildRustEngineEmulator.configure {
     inputs.property("versionName", android.defaultConfig.versionName)
     environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
@@ -164,8 +183,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.activity:activity-compose:1.9.3")
-    // Built-in player: libmpv (FFmpeg + libass) for arm64.
-    implementation("dev.jdtech.mpv:libmpv:0.4.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

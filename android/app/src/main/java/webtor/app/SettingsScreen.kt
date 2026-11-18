@@ -463,7 +463,7 @@ fun SettingsScreen(
                     GroupDivider()
                     SettingRow(
                         title = "Open source licenses",
-                        supporting = "Video player libraries (mpv, FFmpeg) are GPL. Their sources and notices.",
+                        supporting = "Licenses of the libraries the app is built with.",
                         onClick = { runCatching { uri.openUri(NOTICES_URL) } },
                     )
                     GroupDivider()

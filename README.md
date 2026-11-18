@@ -244,6 +244,7 @@ More detail: [Direct Play](docs/DIRECT_PLAY.md) · [Signing](docs/SIGNING.md) ·
 - Rust **1.99.1** via rustup, with target `aarch64-linux-android` and `~/.cargo/bin` on `PATH`
 - Android SDK (platforms 34 and 36, build-tools 34+) and NDK **26.1.10909125**
 - Java 21
+- For the built-in player: meson, ninja, pkg-config, autoconf, automake and libtool
 
 **Debug build**
 
@@ -256,7 +257,7 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Gradle builds the Rust engine (`engine-rs/build-android.sh`) and packages `libengine.so` for you. No Go, Node.js or JavaScript toolchain is needed.
+Gradle builds the Rust engine (`engine-rs/build-android.sh`) and the player libraries (`android/mpv/build.sh`, about 3 minutes the first time; it clones mpv, FFmpeg and their dependencies at pinned tags) and packages them for you. No Go, Node.js or JavaScript toolchain is needed.
 
 **Tests**
 
@@ -358,4 +359,4 @@ Use Torrent Player only with content you have the right to download or share. Sc
 
 The app is released under the [MIT License](LICENSE). The torrent engine in `engine-rs/` is under the [Mozilla Public License 2.0](engine-rs/LICENSE), because it derives from [anacrolix/torrent](https://github.com/anacrolix/torrent); see [engine-rs/NOTICE.md](engine-rs/NOTICE.md).
 
-The built-in player bundles mpv and FFmpeg built as GPL, so the APK as a whole is distributed under GPL-3.0 terms. Versions, licenses and corresponding source are in [NOTICE.md](NOTICE.md).
+The built-in player uses mpv and FFmpeg, built from source as LGPL-2.1 shared libraries by [android/mpv/build.sh](android/mpv/build.sh). Versions and licenses are in [NOTICE.md](NOTICE.md).
