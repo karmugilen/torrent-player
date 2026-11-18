@@ -102,6 +102,11 @@ Builds:
       - cp -r $$libass$$ ../mpv/deps/libass
       - cp -r $$libplacebo$$ ../mpv/deps/libplacebo
       - cp -r $$mpv$$ ../mpv/deps/mpv
+    scandelete:
+      - android/mpv/deps/harfbuzz/src/wasm/
+      - android/mpv/deps/libplacebo/3rdparty/glad/example/
+      - android/mpv/deps/libplacebo/3rdparty/glad/glad/generator/rust/
+      - android/mpv/deps/libplacebo/3rdparty/jinja/tests/
     ndk: r26b
 
 AllowedAPKSigningKeys: b26e9a22c1a40c5f8bd2bb5ba9e8639f7835c1ca986e9607e240beeddbd9f71f
