@@ -97,6 +97,9 @@ object BuiltInPlayer {
     private const val KEY = "builtInPlayer"
     fun enabled(context: Context): Boolean =
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean(KEY, true)
+    /** False until the user picked built-in or external once (asked on first open). */
+    fun chosen(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).contains(KEY)
     fun setEnabled(context: Context, value: Boolean) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean(KEY, value).apply()
     }
@@ -212,6 +215,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "sub-scale-with-window" to "yes",
             "osd-level" to "1",
             "osd-font-size" to "32",
+            "screenshot-format" to "jpg",
+            "screenshot-jpeg-quality" to "80",
         ).forEach { (k, v) -> MPVLib.setOptionString(k, v) }
         MPVLib.init()
         MPVLib.addObserver(this)
@@ -256,6 +261,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun eventProperty(property: String) {}
     override fun eventProperty(property: String, value: Long) {
         if (property == "playlist-pos" && value >= 0) runOnUiThread {
+            if (value.toInt() != playlistPos.intValue) { runCatching { saveFrames() }; synchronized(frames) { frames.clear() } }
             playlistPos.intValue = value.toInt()
             items.getOrNull(value.toInt())?.let { title.value = it.name }
         }
@@ -330,6 +336,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun close() {
         if (finishing) return
+        runCatching { captureFrame(); saveFrames() }
         finishing = true
         val item = items.getOrNull(playlistPos.intValue) ?: items.firstOrNull()
         val result = Intent().apply {
@@ -397,6 +404,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     override fun finish() {
         if (!finishing) {
+            runCatching { saveFrames() }
             // System back or idle end: still report where playback stopped.
             finishing = true
             val item = items.getOrNull(playlistPos.intValue) ?: items.firstOrNull()
@@ -453,11 +461,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         return seg[t + 1] to (seg[t + 3].toIntOrNull() ?: return null)
     }
 
+    private val directPlay = mutableStateOf(false)
+
+    private fun libraryEntry(id: String): DownloadEntry? =
+        (application as WebtorApp).session.ui.value.library.find { it.engineId == id }
+
     private fun refreshTorrentInfo() {
         val item = items.getOrNull(playlistPos.intValue) ?: return
         val (id, fileIndex) = torrentOf(item.uri) ?: run { spans.value = emptyList(); swarm.value = null; fileDone.value = null; return }
         val client = (application as WebtorApp).engineClient
         val status = runCatching { client.torrent(id) }.getOrNull() ?: return
+        directPlay.value = libraryEntry(id)?.directPlay == true
         swarm.value = "${status.numPeers} peers · ${formatSpeed(status.downloadSpeed)}"
         val files = status.files.sortedBy { it.index }
         val file = files.find { it.index == fileIndex } ?: return
@@ -481,6 +495,35 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun readyAt(fraction: Float): Boolean? {
         val list = spans.value.takeIf { it.isNotEmpty() } ?: return null
         return list.firstOrNull { fraction >= it.from && fraction <= it.to }?.let { it.done >= 0.99f }
+    }
+
+    // ---- Library previews from the player ----
+
+    private val frames = ArrayList<android.graphics.Bitmap>()
+
+    /** Grab the current picture through mpv, scaled down for the library card. */
+    private fun captureFrame() {
+        if (duration.doubleValue <= 0 || position.doubleValue < 3) return
+        val file = java.io.File(cacheDir, "player-frame.jpg")
+        file.delete()
+        MPVLib.command(arrayOf("screenshot-to-file", file.path, "video"))
+        if (!file.exists() || file.length() == 0L) return
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.path, bounds)
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= 480) sample *= 2
+        val bmp = android.graphics.BitmapFactory.decodeFile(file.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+        file.delete()
+        if (bmp != null) synchronized(frames) { frames += bmp; while (frames.size > 3) frames.removeAt(0) }
+    }
+
+    private fun saveFrames() {
+        val item = items.getOrNull(playlistPos.intValue) ?: return
+        val (id, index) = torrentOf(item.uri) ?: return
+        val entry = libraryEntry(id) ?: return
+        val video = entry.files.find { it.index == index } ?: return
+        val list = synchronized(frames) { frames.toList() }
+        (application as WebtorApp).thumbnails.putPlayerFrames(entry, video, list)
     }
 
     // ---- Volume, brightness, speed ----
@@ -511,7 +554,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun setSpeed(x: Double) = MPVLib.setPropertyDouble("speed", x)
 
-    private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK }
+    private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, IGNORE }
 
     @Composable
     private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit) {
@@ -547,6 +590,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         LaunchedEffect(skipTick) {
             if (skipSide != 0) { delay(800); skipSide = 0; skipTotal = 0 }
+        }
+        LaunchedEffect(Unit) {
+            delay(8000)
+            while (true) {
+                if (!paused.value && !buffering.value) withContext(Dispatchers.IO) { runCatching { captureFrame() } }
+                delay(90_000)
+            }
         }
         LaunchedEffect(Unit) {
             while (true) {
@@ -631,7 +681,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             total += d
                             if (mode == Drag.NONE) {
                                 mode = when {
-                                    kotlin.math.abs(total.x) > kotlin.math.abs(total.y) -> Drag.SEEK
+                                    // Sideways swipes do nothing; seek with double tap or the bar.
+                                    kotlin.math.abs(total.x) > kotlin.math.abs(total.y) -> Drag.IGNORE
                                     startX < size.width / 2f -> Drag.BRIGHTNESS
                                     else -> Drag.VOLUME
                                 }
@@ -655,7 +706,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                     seekPopup(target)
                                     pendingSeek = target // bar follows the finger
                                 }
-                                Drag.NONE -> {}
+                                Drag.NONE, Drag.IGNORE -> {}
                             }
                         }
                     },
@@ -689,7 +740,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         Column(Modifier.weight(1f).padding(start = 4.dp)) {
                             Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            val info = listOfNotNull(fileDone.value?.let { "$it% downloaded" }, swarm.value).joinToString("  ·  ")
+                            // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
+                            val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
+                            val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
                             if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
                         }
                         IconButton(onClick = { trackSheet = "audio"; touchTick++ }) {

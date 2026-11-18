@@ -104,10 +104,34 @@ class ThumbnailRepository(
         previewsOnIo(entry, fileIndex)
     }
 
+    /**
+     * Frames captured by the built-in player while it played this file. They win
+     * over extraction, so the library never downloads video just for a preview.
+     */
+    fun putPlayerFrames(entry: DownloadEntry, video: SavedFile, frames: List<Bitmap>) {
+        if (frames.isEmpty()) return
+        val key = cacheKey(entry, video)
+        synchronized(publicationLock) {
+            if (persistFramesAtomically(key, frames.takeLast(3), complete = false)) {
+                runCatching { File(cache, "$key.player").writeText("1") }
+            }
+            putMemory(key, CachedPreview(frames.takeLast(3), true, COMPLETE_BUCKET))
+        }
+    }
+
+    private fun playerFrames(key: String): List<Bitmap>? {
+        if (!File(cache, "$key.player").exists()) return null
+        synchronized(memory) { memory[key]?.frames?.takeIf { it.isNotEmpty() }?.let { return it } }
+        return loadFramesFromDisk(key).takeIf { it.isNotEmpty() }?.also {
+            putMemory(key, CachedPreview(it, true, COMPLETE_BUCKET))
+        }
+    }
+
     private suspend fun previewsOnIo(entry: DownloadEntry, fileIndex: Int?): List<Bitmap> {
         val capturedGlobal = globalEpoch.get()
         val capturedEntry = getEntryEpoch(entry.key)
         val video = previewVideo(entry, fileIndex) ?: return emptyList()
+        playerFrames(cacheKey(entry, video))?.let { return it }
         val complete = !entry.directPlay && (entry.complete || video.isVerifiedComplete)
         val key = cacheKey(entry, video)
         val previewClient = engineHost?.let { webtor.core.EngineClient(it) }
@@ -397,6 +421,7 @@ class ThumbnailRepository(
 
     private fun deleteDiskFrames(key: String) {
         (0..2).forEach { File(cache, "$key-$it.jpg").delete() }
+        File(cache, "$key.player").delete()
         File(cache, "$key.done").delete()
         File(cache, "$key.live").delete()
         File(cache, "$key.facts").delete()

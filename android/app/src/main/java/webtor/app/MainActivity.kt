@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.AlertDialog
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
@@ -245,6 +247,19 @@ class MainActivity : ComponentActivity() {
                         ClearAllDialog(
                             onConfirm = session::confirmClearAll,
                             onDismiss = session::dismissClearAll,
+                        )
+                    }
+                    // First open: ask which player to use. Settings > Playback can change it later.
+                    var askPlayer by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(!BuiltInPlayer.chosen(this@MainActivity)) }
+                    if (askPlayer) {
+                        fun pick(builtIn: Boolean) { BuiltInPlayer.setEnabled(this@MainActivity, builtIn); askPlayer = false }
+                        AlertDialog(
+                            onDismissRequest = {},
+                            icon = { androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.PlayArrow, null) },
+                            title = { androidx.compose.material3.Text("Choose a video player") },
+                            text = { androidx.compose.material3.Text("Built-in player: plays inside the app with mpv, shows download progress and fetches the spot you seek to first.\n\nExternal player: opens VLC, MX Player or another app you have installed.\n\nYou can change this any time in Settings > Playback.") },
+                            confirmButton = { androidx.compose.material3.Button(onClick = { pick(true) }) { androidx.compose.material3.Text("Built-in") } },
+                            dismissButton = { androidx.compose.material3.OutlinedButton(onClick = { pick(false) }) { androidx.compose.material3.Text("External app") } },
                         )
                     }
                     state.diagnosticsPreview?.let { report ->

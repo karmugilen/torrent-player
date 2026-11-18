@@ -212,11 +212,13 @@ fun SettingsScreen(
                     GroupDivider()
                     val ctx = LocalContext.current
                     var builtIn by remember { mutableStateOf(BuiltInPlayer.enabled(ctx)) }
-                    SwitchSetting(
-                        title = "Built-in player (mpv)",
-                        supporting = "Play videos inside the app with mpv. Turn off to choose VLC, MX or another player.",
-                        checked = builtIn,
-                        onCheckedChange = { builtIn = it; BuiltInPlayer.setEnabled(ctx, it) },
+                    ChoiceSetting(
+                        title = "Video player",
+                        supporting = if (builtIn) "Built-in: plays inside the app with mpv and fetches the spot you seek to first."
+                            else "External: opens VLC, MX Player or another installed app.",
+                        options = listOf(true to "Built-in", false to "External app"),
+                        selected = builtIn,
+                        onSelect = { builtIn = it; BuiltInPlayer.setEnabled(ctx, it) },
                     )
                 }
             }
