@@ -529,6 +529,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         var skipTotal by remember { mutableIntStateOf(0) }
         var skipTick by remember { mutableIntStateOf(0) }
         var scrubOrigin by remember { mutableStateOf<Double?>(null) }
+        // After release, hold the bar at the target until mpv gets there (no jump back).
+        var pendingSeek by remember { mutableStateOf<Double?>(null) }
         var lastScrubAt by remember { mutableStateOf(0L) }
         val pos by position
         val dur by duration
@@ -538,6 +540,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         BackHandler(onBack = onBack)
         LaunchedEffect(controls, touchTick, isPaused, sliderDragging, trackSheet) {
             if (controls && !isPaused && !sliderDragging && trackSheet == null) { delay(3500); controls = false }
+        }
+        LaunchedEffect(pendingSeek) { if (pendingSeek != null) { delay(4000); pendingSeek = null } }
+        LaunchedEffect(pos, isBuffering) {
+            pendingSeek?.let { t -> if (kotlin.math.abs(pos - t) < 3 && !seekWait) pendingSeek = null }
         }
         LaunchedEffect(skipTick) {
             if (skipSide != 0) { delay(800); skipSide = 0; skipTotal = 0 }
@@ -564,7 +570,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             popupLevel = null
             if (ready == true || inBuffer) {
                 val now = System.currentTimeMillis()
-                if (now - lastScrubAt > 180) { lastScrubAt = now; seekTo(target) }
+                if (now - lastScrubAt > 250 && !seekWait) { lastScrubAt = now; seekTo(target) }
             } else prefetchFor(target, dur)
         }
         fun endScrub() { scrubOrigin = null; popup = null; popupSub = null }
@@ -616,7 +622,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         detectDragGestures(
                             onDragStart = { o -> mode = Drag.NONE; startX = o.x; total = Offset.Zero },
                             onDragEnd = {
-                                if (mode == Drag.SEEK) seekTo(target)
+                                if (mode == Drag.SEEK) { pendingSeek = target; seekTo(target) }
                                 mode = Drag.NONE; endScrub(); popupLevel = null
                             },
                             onDragCancel = { mode = Drag.NONE; endScrub(); popupLevel = null },
@@ -647,6 +653,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                     // A full screen width is 90 seconds, like common players.
                                     target = (target + d.x / size.width * 90.0).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
                                     seekPopup(target)
+                                    pendingSeek = target // bar follows the finger
                                 }
                                 Drag.NONE -> {}
                             }
@@ -679,8 +686,28 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
                         }
-                        Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 4.dp))
+                        Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                            Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val info = listOfNotNull(fileDone.value?.let { "$it% downloaded" }, swarm.value).joinToString("  ·  ")
+                            if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                        }
+                        IconButton(onClick = { trackSheet = "audio"; touchTick++ }) {
+                            Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White)
+                        }
+                        IconButton(onClick = { trackSheet = "sub"; touchTick++ }) {
+                            Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White)
+                        }
+                        if (Build.VERSION.SDK_INT >= 26) {
+                            IconButton(onClick = { controls = false; enterPip() }) {
+                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White)
+                            }
+                        }
+                        if (items.size > 1 && playlistPos.intValue < items.size - 1) {
+                            IconButton(onClick = { next(); touchTick++ }) {
+                                Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White)
+                            }
+                        }
                     }
 
                     // Center: rewind, play/pause, forward.
@@ -706,11 +733,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
 
                     // Bottom: time, seek bar, then actions.
-                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp)) {
-                        val shown = if (sliderDragging) sliderValue.toDouble() else pos
+                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 28.dp, vertical = 14.dp)) {
+                        val shown = when {
+                            sliderDragging -> sliderValue.toDouble()
+                            else -> pendingSeek ?: pos
+                        }
                         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
                             Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
                             Spacer(Modifier.weight(1f))
+                            val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
+                            if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f),
+                                style = MaterialTheme.typography.labelLarge)
                             Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
                         }
                         SeekBar(
@@ -721,31 +754,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 seekPopup(sliderValue.toDouble()); touchTick++
                             },
                             onDragEnd = {
+                                pendingSeek = sliderValue.toDouble()
                                 seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
                             },
                         )
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { trackSheet = "audio"; touchTick++ }) {
-                                Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White)
-                            }
-                            IconButton(onClick = { trackSheet = "sub"; touchTick++ }) {
-                                Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White)
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            val info = listOfNotNull(fileDone.value?.let { "$it% downloaded" }, swarm.value).joinToString("  ·  ")
-                            Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                            if (items.size > 1 && playlistPos.intValue < items.size - 1) {
-                                IconButton(onClick = { next(); touchTick++ }) {
-                                    Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White)
-                                }
-                            }
-                            if (Build.VERSION.SDK_INT >= 26) {
-                                IconButton(onClick = { controls = false; enterPip() }) {
-                                    Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White)
-                                }
-                            }
-                        }
                     }
                 }
             }
