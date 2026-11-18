@@ -396,6 +396,9 @@ class MainActivity : ComponentActivity() {
             putExtra("subs.name", event.subtitles.map { it.name }.toTypedArray())
             putExtra("subs.enable", event.subtitles.take(1).map { Uri.parse(it.uri) }.toTypedArray())
             event.subtitles.firstOrNull()?.let { putExtra("subtitles_location", it.uri) }
+            if (event.mime.startsWith("video/") && BuiltInPlayer.enabled(this@MainActivity)) {
+                setClass(this@MainActivity, PlayerActivity::class.java)
+            }
         }
         launchedPlaybackUri = event.uri
         launchedPlaybackItems = event.playlist.map { it.uri }.toSet()

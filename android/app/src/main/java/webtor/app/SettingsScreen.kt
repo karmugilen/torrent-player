@@ -45,6 +45,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlin.math.roundToInt
@@ -207,6 +208,15 @@ fun SettingsScreen(
                         options = listOf(PlaybackMethod.HTTP to "Stream", PlaybackMethod.CONTENT_URI to "File proxy"),
                         selected = state.playbackMethod,
                         onSelect = onPlaybackMethod,
+                    )
+                    GroupDivider()
+                    val ctx = LocalContext.current
+                    var builtIn by remember { mutableStateOf(BuiltInPlayer.enabled(ctx)) }
+                    SwitchSetting(
+                        title = "Built-in player (mpv)",
+                        supporting = "Play videos inside the app with mpv. Turn off to choose VLC, MX or another player.",
+                        checked = builtIn,
+                        onCheckedChange = { builtIn = it; BuiltInPlayer.setEnabled(ctx, it) },
                     )
                 }
             }
