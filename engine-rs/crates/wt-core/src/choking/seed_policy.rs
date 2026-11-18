@@ -79,9 +79,9 @@ mod tests {
     #[test]
     fn tit_for_tat_headroom() {
         let cfg = ChokeConfig::default();
-        // Go: up >= down + 100KiB → disallow. Equality counts as disallow.
-        assert!(!upload_allowed(&peer(100 << 10, 0), &cfg, true));
-        assert!(upload_allowed(&peer((100 << 10) - 1, 0), &cfg, true));
+        // up >= down + headroom → disallow. Equality counts as disallow.
+        assert!(!upload_allowed(&peer(TIT_FOR_TAT_HEADROOM, 0), &cfg, true));
+        assert!(upload_allowed(&peer(TIT_FOR_TAT_HEADROOM - 1, 0), &cfg, true));
         assert!(!upload_allowed(&peer(0, 0), &cfg, false)); // no wanted pieces
     }
 }

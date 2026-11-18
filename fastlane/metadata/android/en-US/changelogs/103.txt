@@ -1,1 +1,1 @@
-Faster downloads: hole punching starts right away for peers behind routers, and Direct Play gives back to the swarm while you watch. IPv6 for uTP and hole punching. Direct Play only serves verified video headers.
+Faster downloads: hole punching starts right away for peers behind routers, and Direct Play gives back to the swarm while you watch. IPv6 for uTP and hole punching. Direct Play only serves verified video headers. Quieter Direct Play notification. Notification permission is asked when the app opens, not while adding a link.
