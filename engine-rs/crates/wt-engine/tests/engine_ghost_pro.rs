@@ -64,7 +64,9 @@ fn test_ghost_pro_playback_startup_seek_and_scaled_windows() {
         assert_eq!(window.readahead, PieceSpan::new(piece(urgent), piece(forward)), "{name}: forward");
         assert_eq!(window.lookahead, PieceSpan::new(piece(forward), piece(forward + lookahead)), "{name}: lookahead");
         let torrent = eng.server.records.read()[&id].read().torrent.clone();
-        let now_end = window.urgent.end.min(window.urgent.begin + (((2 << 20) + piece_length - 1) / piece_length) as u32 + wt_policy::constants::URGENT_NOW_EXTRA_PIECES.load(std::sync::atomic::Ordering::Relaxed) as u32);
+        // Past the open phase the Now tip is min(urgent window, 4 MiB) (a1b418b).
+        let tip: i64 = urgent.min(4 << 20);
+        let now_end = window.urgent.end.min(window.urgent.begin + ((tip + piece_length - 1) / piece_length) as u32 + wt_policy::constants::URGENT_NOW_EXTRA_PIECES.load(std::sync::atomic::Ordering::Relaxed) as u32);
         for (span, priority) in [
             (PieceSpan::new(32, now_end), wt_core::PiecePriority::Now),
             (PieceSpan::new(now_end, window.urgent.end), wt_core::PiecePriority::Next),

@@ -170,9 +170,11 @@ fn wanting(num_pieces: u32, priority: PiecePriority) -> Arc<TorrentInner> {
 
 #[test]
 fn refills_share_one_queue_without_overlap() {
-    let t = wanting(64, PiecePriority::Normal);
+    // Above ENDGAME_BYTES (16 MiB): smaller selections take the endgame path,
+    // which reads free blocks without the shared cursor by design.
+    let t = wanting(512, PiecePriority::Normal);
     let mut all = Bitset::new();
-    all.insert_range(0, 64);
+    all.insert_range(0, 512);
     let none = HashSet::new();
     let first = t.pick_blocks(&pick_peer(1, &all, &none, false), 8);
     let second = t.pick_blocks(&pick_peer(2, &all, &none, false), 8);
