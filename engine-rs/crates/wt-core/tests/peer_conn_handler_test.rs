@@ -784,29 +784,48 @@ fn peak_capacity_starts_at_zero_and_recovers_after_choke_without_a_floor() {
 }
 
 #[test]
-fn normal_download_refills_after_draining_the_queue() {
+fn normal_download_refills_at_half_pipeline_not_after_every_block() {
+    // Since the one-table scheduler (cbec960) every download refills when at
+    // most half its nominal pipeline is outstanding; the old "only when
+    // empty" rule for saved downloads is gone. A peer reqq of 4 holds the
+    // pipeline at 4 so the busy (above-half) state is reachable here.
     let tor = FakeTorrent::new();
     tor.focused.store(false, Ordering::Relaxed);
     let (handle, mut rx) = make_handle("127.0.0.1:4996".parse().unwrap());
     let mut peer = PeerConnHandler::new(tor, &handle);
+    let ext = ExtendedHandshake { reqq: Some(4), ..Default::default() };
+    peer.on_message(&handle, Message::Extended { id: 0, payload: ext.encode() }).unwrap();
     peer.on_message(&handle, Message::HaveAll).unwrap();
     peer.on_message(&handle, Message::Unchoke).unwrap();
-    let first = drain(&mut rx).into_iter().find_map(|m| match m {
-        Message::Request { index, begin, length } => Some((index, begin, length)), _ => None,
-    }).unwrap();
-    peer.on_message(&handle, Message::Piece {
-        index: first.0, begin: first.1, piece: Bytes::from(vec![0; first.2 as usize]),
-    }).unwrap();
-    let wave: Vec<_> = drain(&mut rx).into_iter().filter_map(|m| match m {
-        Message::Request { index, begin, length } => Some((index, begin, length)), _ => None,
-    }).collect();
-    assert!(wave.len() >= 2, "the queue should grow from Go's initial one request");
-    peer.on_message(&handle, Message::Piece {
-        index: wave[0].0, begin: wave[0].1, piece: Bytes::from(vec![0; wave[0].2 as usize]),
-    }).unwrap();
+    let mut queue: Vec<(u32, u32, u32)> = Vec::new();
+    let take = |rx: &mut _, queue: &mut Vec<_>| {
+        let sent: Vec<_> = drain(rx).into_iter().filter_map(|m| match m {
+            Message::Request { index, begin, length } => Some((index, begin, length)), _ => None,
+        }).collect();
+        queue.extend(sent.iter().copied());
+        sent.len()
+    };
+    take(&mut rx, &mut queue);
+    for _ in 0..4 {
+        peer.on_wake(&handle);
+        take(&mut rx, &mut queue);
+    }
+    assert_eq!(peer.peer_conn_info().nominal_max_requests, 4);
+    assert_eq!(peer.peer_conn_info().pending_requests, 4, "slow start fills the reqq-capped pipeline");
+
+    // 3 of 4 outstanding is above half: a block arriving must not top up.
+    let (i, b, l) = queue.remove(0);
+    peer.on_message(&handle, Message::Piece { index: i, begin: b, piece: Bytes::from(vec![0; l as usize]) }).unwrap();
     peer.on_wake(&handle);
-    assert!(!drain(&mut rx).iter().any(|m| matches!(m, Message::Request { .. })),
-        "normal downloads must not rebuild and top up a busy queue after every block");
+    assert_eq!(take(&mut rx, &mut queue), 0,
+        "a busy queue (above half the pipeline) must not rebuild after every block");
+
+    // 2 of 4 is at half: the next wake refills back to the pipeline.
+    let (i, b, l) = queue.remove(0);
+    peer.on_message(&handle, Message::Piece { index: i, begin: b, piece: Bytes::from(vec![0; l as usize]) }).unwrap();
+    peer.on_wake(&handle);
+    assert!(take(&mut rx, &mut queue) > 0, "a queue at half the pipeline must refill");
+    assert!(peer.peer_conn_info().pending_requests <= 4);
 }
 
 #[test]
@@ -853,11 +872,13 @@ fn refocus_reaches_the_live_handler_and_cancels_old_nonurgent_requests() {
 }
 
 #[test]
-fn playback_focus_does_not_top_up_busy_queue_every_wake() {
+fn playback_focus_wakes_never_grow_queue_past_the_pipeline() {
     // Regression: on_wake used to call update_requests whenever
     // request_focus_index().is_some(), so under PeakWholeQueue a 100ms wake
     // doubled outstanding until peerMax (~2000). Bunny peerfix showed
     // pendingRequests 293–514 with pipelineLimit 0/11; Go stayed ~20.
+    // Slow start may double the queue per wake (half-pipeline refill), but it
+    // must stay within the nominal pipeline and the peer's reqq.
     let tor = FakeTorrent::new();
     assert!(
         tor.request_focus_index().is_some(),
@@ -865,6 +886,8 @@ fn playback_focus_does_not_top_up_busy_queue_every_wake() {
     );
     let (handle, mut rx) = make_handle("127.0.0.1:4992".parse().unwrap());
     let mut peer = PeerConnHandler::new(tor, &handle);
+    let ext = ExtendedHandshake { reqq: Some(4), ..Default::default() };
+    peer.on_message(&handle, Message::Extended { id: 0, payload: ext.encode() }).unwrap();
     peer.on_message(&handle, Message::HaveAll).unwrap();
     peer.on_message(&handle, Message::Unchoke).unwrap();
     let _ = drain(&mut rx);
@@ -873,19 +896,20 @@ fn playback_focus_does_not_top_up_busy_queue_every_wake() {
         (1..=8).contains(&after_first),
         "slow-start should open a small queue, got {after_first}"
     );
-    for _ in 0..20 {
+    let mut prev = after_first;
+    for wake in 0..20 {
         peer.on_wake(&handle);
         let _ = drain(&mut rx);
+        let info = peer.peer_conn_info();
+        assert!(
+            info.pending_requests <= info.nominal_max_requests && info.pending_requests <= 4,
+            "wake {wake}: pending {} exceeds pipeline {} / reqq 4",
+            info.pending_requests, info.nominal_max_requests
+        );
+        assert!(info.pending_requests <= prev.max(1) * 2, "wake {wake}: grew faster than slow start");
+        prev = info.pending_requests;
     }
-    let after_wakes = peer.peer_conn_info().pending_requests;
-    assert_eq!(
-        after_wakes, after_first,
-        "Go isLowOnRequests: a non-empty queue must not refill on every wake just because focus is set (was {after_first}, now {after_wakes})"
-    );
-    assert!(
-        after_wakes < 64,
-        "must not approach the historical 300+ flood, got {after_wakes}"
-    );
+    assert_eq!(prev, 4, "focused wakes settle at the reqq-capped pipeline");
 }
 
 #[test]
@@ -1576,3 +1600,4 @@ fn unsolicited_hash_messages_do_not_consume_hash_request_budget() {
         "our own HashRequest must still go out"
     );
 }
+
