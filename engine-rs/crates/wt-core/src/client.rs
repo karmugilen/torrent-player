@@ -1025,6 +1025,25 @@ impl ClientInner {
                     }
                 }
                 for peer in torrent.take_dial_candidates(count) {
+                    // Punch first: PEX says this peer speaks ut_holepunch but
+                    // never took an outgoing connection (no 0x10), so it is
+                    // almost surely behind NAT and a direct dial would only
+                    // burn the dial timeout. Ask a relay now; the direct dial
+                    // waits until the punch has had its chance.
+                    if crate::holepunch::punch_first_candidate(&peer)
+                        && torrent.dial_fail_counts.lock().get(&peer.addr).is_none()
+                    {
+                        torrent.dialing_peers.lock().remove(&peer.addr);
+                        if torrent.maybe_rendezvous(&peer) {
+                            torrent.dial_backoff.lock().insert(
+                                peer.addr,
+                                Instant::now() + crate::holepunch::PUNCH_FIRST_WAIT,
+                            );
+                            torrent.add_peers(vec![peer.clone()]);
+                            continue;
+                        }
+                        torrent.dialing_peers.lock().insert(peer.addr);
+                    }
                     if peer.source == PeerSource::Pex {
                         torrent.swarm_diagnostics.lock().pex_dialed += 1;
                     }

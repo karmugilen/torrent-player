@@ -35,8 +35,20 @@ pub const ATTEMPT_MEMORY: Duration = Duration::from_secs(10 * 60);
 pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Rendezvous we send through one relay per window.
 pub const RENDEZVOUS_PER_RELAY: usize = 4;
-/// Rendezvous one torrent sends per window.
-pub const RENDEZVOUS_PER_TORRENT: usize = 16;
+/// Rendezvous one torrent sends per window (punch-first sends more of them).
+pub const RENDEZVOUS_PER_TORRENT: usize = 32;
+/// After a punch-first rendezvous, the direct dial waits this long so the
+/// punch can land first; if it does not, the peer is dialed normally.
+pub const PUNCH_FIRST_WAIT: Duration = Duration::from_secs(8);
+
+/// Punch first instead of dialing: PEX says the peer speaks ut_holepunch and
+/// nobody reported an outgoing connection to it (BEP 11 flag 0x10).
+pub fn punch_first_candidate(peer: &wt_types::PeerInfo) -> bool {
+    peer.source == wt_types::PeerSource::Pex
+        && peer.pex.supports_holepunch
+        && !peer.pex.reachable
+        && usable_endpoint(peer.addr)
+}
 /// Rendezvous we relay for one sender per window.
 pub const RELAY_PER_SENDER: usize = 8;
 /// Rendezvous one torrent relays per window.
