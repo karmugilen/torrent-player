@@ -60,6 +60,18 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.rememberScrollState
@@ -135,10 +147,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
 
         setContent {
-            PlayerScreen(
+            androidx.compose.material3.MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme(
+                primary = Color.White, onPrimary = Color.Black,
+            )) { PlayerScreen(
                 surface = { SurfaceView(it).apply { holder.addCallback(surfaceCallback) } },
                 onBack = ::close,
-            )
+            ) }
         }
         updatePip() // so leaving the app goes straight to picture in picture
     }
@@ -273,7 +287,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
     }
 
-    data class Track(val id: String, val label: String, val selected: Boolean)
+    data class Track(val id: String, val name: String, val detail: String, val selected: Boolean)
 
     /** Audio or subtitle tracks from mpv's track-list; subtitles get an "Off" row. */
     fun tracks(type: String): List<Track> {
@@ -292,10 +306,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 title?.takeIf { it.isNotBlank() && it != lang },
             ).joinToString(" · ").ifBlank { "Track $id" }
             val detail = listOfNotNull(codec?.uppercase(), channels, if (external) "file" else null).joinToString(" · ")
-            Track(id.toString(), if (detail.isBlank()) name else "$name  ($detail)",
-                MPVLib.getPropertyBoolean("track-list/$i/selected") == true)
+            Track(id.toString(), name, detail, MPVLib.getPropertyBoolean("track-list/$i/selected") == true)
         }
-        return if (type == "sub") listOf(Track("no", "Off", list.none { it.selected })) + list else list
+        return if (type == "sub") listOf(Track("no", "Off", "", list.none { it.selected })) + list else list
     }
 
     fun selectTrack(type: String, id: String) =
@@ -421,6 +434,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
     }
     private val swarm = mutableStateOf<String?>(null)
+    private val fileDone = mutableStateOf<Int?>(null)
 
     /** Engine id and file index from http://127.0.0.1:port/torrent/<id>/file/<n>. */
     private fun torrentOf(uri: Uri): Pair<String, Int>? {
@@ -433,13 +447,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun refreshTorrentInfo() {
         val item = items.getOrNull(playlistPos.intValue) ?: return
-        val (id, fileIndex) = torrentOf(item.uri) ?: run { spans.value = emptyList(); swarm.value = null; return }
+        val (id, fileIndex) = torrentOf(item.uri) ?: run { spans.value = emptyList(); swarm.value = null; fileDone.value = null; return }
         val client = (application as WebtorApp).engineClient
         val status = runCatching { client.torrent(id) }.getOrNull() ?: return
         swarm.value = "${status.numPeers} peers · ${formatSpeed(status.downloadSpeed)}"
         val files = status.files.sortedBy { it.index }
         val file = files.find { it.index == fileIndex } ?: return
         if (file.length <= 0) return
+        fileDone.value = (file.progress * 100).toInt().coerceIn(0, 100)
         if (file.progress >= 1.0) { spans.value = listOf(Span(0f, 1f, 1f)); return }
         currentFile = Triple(id, fileIndex, file.length)
         val offset = files.takeWhile { it.index != fileIndex }.sumOf { it.length }
@@ -501,6 +516,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         var popupLevel by remember { mutableStateOf<Float?>(null) }
         var fast by remember { mutableStateOf(false) }
         var trackSheet by remember { mutableStateOf<String?>(null) }
+        // Double-tap skip streak, like MX Player: side (-1 / +1) and seconds so far.
+        var skipSide by remember { mutableIntStateOf(0) }
+        var skipTotal by remember { mutableIntStateOf(0) }
+        var skipTick by remember { mutableIntStateOf(0) }
+        var scrubOrigin by remember { mutableStateOf<Double?>(null) }
+        var lastScrubAt by remember { mutableStateOf(0L) }
         val pos by position
         val dur by duration
         val isPaused by paused
@@ -510,6 +531,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         LaunchedEffect(controls, touchTick, isPaused, sliderDragging, trackSheet) {
             if (controls && !isPaused && !sliderDragging && trackSheet == null) { delay(3500); controls = false }
         }
+        LaunchedEffect(skipTick) {
+            if (skipSide != 0) { delay(800); skipSide = 0; skipTotal = 0 }
+        }
         LaunchedEffect(Unit) {
             while (true) {
                 withContext(Dispatchers.IO) { refreshTorrentInfo() }
@@ -517,17 +541,25 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             }
         }
 
+        /**
+         * While dragging: show where it lands and move the picture like a normal
+         * player when that spot is already downloaded or buffered. Spots not yet
+         * downloaded are only prefetched, then seeked once on release.
+         */
         fun seekPopup(target: Double) {
-            prefetchFor(target, dur)
-            val delta = target - pos
-            popup = (if (delta >= 0) "+" else "-") + clock(kotlin.math.abs(delta)) + "   " + clock(target)
-            popupSub = when (if (dur > 0) readyAt((target / dur).toFloat()) else null) {
-                true -> "Downloaded · plays instantly"
-                false -> "Not downloaded yet · will buffer"
-                null -> null
-            }
+            val origin = scrubOrigin ?: pos.also { scrubOrigin = it }
+            val delta = target - origin
+            popup = clock(target) + "  [" + (if (delta >= 0) "+" else "-") + clock(kotlin.math.abs(delta)) + "]"
+            val ready = if (dur > 0) readyAt((target / dur).toFloat()) else null
+            val inBuffer = target >= pos - 5 && target <= cached.doubleValue
+            popupSub = if (ready == false && !inBuffer) "will buffer" else null
             popupLevel = null
+            if (ready == true || inBuffer) {
+                val now = System.currentTimeMillis()
+                if (now - lastScrubAt > 180) { lastScrubAt = now; seekTo(target) }
+            } else prefetchFor(target, dur)
         }
+        fun endScrub() { scrubOrigin = null; popup = null; popupSub = null }
 
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
@@ -538,28 +570,32 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 Modifier.fillMaxSize()
                     .pointerInput(Unit) {
                         var held = false
+                        var streakPress = false
+                        fun sideOf(x: Float) = when { x < size.width / 3f -> -1; x > size.width * 2f / 3f -> 1; else -> 0 }
                         detectTapGestures(
-                            onPress = {
+                            onPress = { o ->
                                 held = false
+                                // During a skip streak every tap on the same side adds 10 s at once.
+                                val side = sideOf(o.x)
+                                streakPress = side != 0 && side == skipSide
+                                if (streakPress) { seekBy(10 * side); skipTotal += 10; skipTick++ }
                                 coroutineScope {
                                     val hold = launch {
                                         delay(450)
                                         held = true; fast = true; setSpeed(2.0)
-                                        popup = "2× speed"; popupSub = "Release to go back"; popupLevel = null
                                     }
                                     tryAwaitRelease()
                                     hold.cancel()
-                                    if (held) { setSpeed(1.0); fast = false; popup = null; popupSub = null }
+                                    if (held) { setSpeed(1.0); fast = false }
                                 }
                             },
-                            onTap = { if (!held) { controls = !controls; touchTick++ } },
+                            onTap = { if (!held && !streakPress) { controls = !controls; touchTick++ } },
                             onDoubleTap = { o ->
-                                when {
-                                    o.x < size.width / 3f -> { seekBy(-10); popup = "-10 s"; popupSub = null; popupLevel = null }
-                                    o.x > size.width * 2f / 3f -> { seekBy(10); popup = "+10 s"; popupSub = null; popupLevel = null }
-                                    else -> togglePause()
+                                if (!streakPress) {
+                                    val side = sideOf(o.x)
+                                    if (side == 0) togglePause()
+                                    else { seekBy(10 * side); skipSide = side; skipTotal = 10; skipTick++ }
                                 }
-                                touchTick++
                             },
                         )
                     }
@@ -573,9 +609,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             onDragStart = { o -> mode = Drag.NONE; startX = o.x; total = Offset.Zero },
                             onDragEnd = {
                                 if (mode == Drag.SEEK) seekTo(target)
-                                mode = Drag.NONE; popup = null; popupSub = null; popupLevel = null
+                                mode = Drag.NONE; endScrub(); popupLevel = null
                             },
-                            onDragCancel = { mode = Drag.NONE; popup = null; popupSub = null; popupLevel = null },
+                            onDragCancel = { mode = Drag.NONE; endScrub(); popupLevel = null },
                         ) { change, d ->
                             change.consume()
                             total += d
@@ -600,8 +636,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                     popup = "Brightness ${(level * 100).roundToInt()}%"; popupSub = null; popupLevel = level
                                 }
                                 Drag.SEEK -> {
-                                    // A full screen width is about 2 minutes.
-                                    target = (target + d.x / size.width * 120.0).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
+                                    // A full screen width is 90 seconds, like common players.
+                                    target = (target + d.x / size.width * 90.0).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
                                     seekPopup(target)
                                 }
                                 Drag.NONE -> {}
@@ -625,45 +661,49 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxSize()) {
                     // Shade only top and bottom so the picture stays clear.
-                    Box(Modifier.fillMaxWidth().height(120.dp).align(Alignment.TopCenter)
+                    Box(Modifier.fillMaxWidth().height(110.dp).align(Alignment.TopCenter)
                         .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))))
-                    Box(Modifier.fillMaxWidth().height(150.dp).align(Alignment.BottomCenter)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f)))))
+                    Box(Modifier.fillMaxWidth().height(170.dp).align(Alignment.BottomCenter)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))))
 
+                    // Top: back and title only.
                     Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
                         }
-                        Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                            Text(title.value, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            swarm.value?.let { Text(it, color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp) }
-                        }
-                        PillButton("Audio") { trackSheet = "audio"; touchTick++ }
-                        PillButton("Subtitles") { trackSheet = "sub"; touchTick++ }
-                        if (Build.VERSION.SDK_INT >= 26) PillButton("PiP") { controls = false; enterPip() }
-                        if (items.size > 1 && playlistPos.intValue < items.size - 1) PillButton("Next") { next(); touchTick++ }
+                        Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 4.dp))
                     }
 
-                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(48.dp), verticalAlignment = Alignment.CenterVertically) {
-                        RoundButton("-10") { seekBy(-10); touchTick++ }
-                        Box(
-                            Modifier.size(68.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
-                                .pointerInput(Unit) { detectTapGestures { togglePause(); touchTick++ } },
-                            contentAlignment = Alignment.Center,
+                    // Center: rewind, play/pause, forward.
+                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(56.dp)) {
+                            Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(36.dp))
+                        }
+                        androidx.compose.material3.FilledTonalIconButton(
+                            onClick = { togglePause(); touchTick++ },
+                            modifier = Modifier.size(72.dp),
+                            colors = androidx.compose.material3.IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = Color.Black.copy(alpha = 0.4f), contentColor = Color.White),
                         ) {
-                            if (isBuffering && !isPaused) CircularProgressIndicator(Modifier.size(40.dp), color = Color.White, strokeWidth = 3.dp)
-                            else if (isPaused) Icon(Icons.Filled.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(42.dp))
-                            else PauseGlyph()
+                            when {
+                                isBuffering && !isPaused -> CircularProgressIndicator(Modifier.size(40.dp), color = Color.White, strokeWidth = 3.dp)
+                                isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(44.dp))
+                                else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(44.dp))
+                            }
                         }
-                        RoundButton("+10") { seekBy(10); touchTick++ }
+                        IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(56.dp)) {
+                            Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(36.dp))
+                        }
                     }
 
-                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 28.dp, vertical = 14.dp)) {
+                    // Bottom: time, seek bar, then actions.
+                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp)) {
                         val shown = if (sliderDragging) sliderValue.toDouble() else pos
                         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-                            Text(clock(shown), color = Color.White, fontSize = 13.sp)
+                            Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
                             Spacer(Modifier.weight(1f))
-                            Text(clock(dur), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                            Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
                         }
                         SeekBar(
                             fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
@@ -673,9 +713,31 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 seekPopup(sliderValue.toDouble()); touchTick++
                             },
                             onDragEnd = {
-                                seekTo(sliderValue.toDouble()); sliderDragging = false; popup = null; popupSub = null; touchTick++
+                                seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
                             },
                         )
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { trackSheet = "audio"; touchTick++ }) {
+                                Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White)
+                            }
+                            IconButton(onClick = { trackSheet = "sub"; touchTick++ }) {
+                                Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            val info = listOfNotNull(fileDone.value?.let { "$it% downloaded" }, swarm.value).joinToString("  ·  ")
+                            Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            if (items.size > 1 && playlistPos.intValue < items.size - 1) {
+                                IconButton(onClick = { next(); touchTick++ }) {
+                                    Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White)
+                                }
+                            }
+                            if (Build.VERSION.SDK_INT >= 26) {
+                                IconButton(onClick = { controls = false; enterPip() }) {
+                                    Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -684,40 +746,67 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 TrackSheet(type, onDismiss = { trackSheet = null })
             }
 
-            // Center pop-up for gestures and seeking.
-            popup?.let { text ->
-                Column(
-                    Modifier.align(Alignment.TopCenter).padding(top = 84.dp)
-                        .clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.7f))
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+            // Double-tap skip: a soft arc on that side with the running total, like MX Player.
+            if (skipSide != 0) {
+                val left = skipSide < 0
+                Box(
+                    Modifier.align(if (left) Alignment.CenterStart else Alignment.CenterEnd)
+                        .fillMaxHeight().fillMaxWidth(0.36f)
+                        .clip(if (left) RoundedCornerShape(topEndPercent = 50, bottomEndPercent = 50)
+                              else RoundedCornerShape(topStartPercent = 50, bottomStartPercent = 50))
+                        .background(Color.White.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Text(text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                    popupLevel?.let { lv ->
-                        Spacer(Modifier.height(8.dp))
-                        Box(Modifier.width(160.dp).height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.25f))) {
-                            Box(Modifier.fillMaxWidth(lv).height(4.dp).background(Color.White))
-                        }
-                    }
-                    popupSub?.let {
-                        Spacer(Modifier.height(4.dp))
-                        Text(it, color = if (it.startsWith("Downloaded")) Color(0xFF7CE38B) else Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(if (left) Icons.Filled.FastRewind else Icons.Filled.FastForward, null,
+                            tint = Color.White, modifier = Modifier.size(32.dp))
+                        Text("$skipTotal seconds", color = Color.White, style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }
-            if (fast && popup == null) {
-                Text("2×", color = Color.White, fontSize = 16.sp, modifier = Modifier.align(Alignment.TopCenter).padding(top = 56.dp))
+
+            // Small pop-up for swipes and seeking.
+            popup?.let { text ->
+                Column(
+                    Modifier.align(Alignment.TopCenter).padding(top = 72.dp)
+                        .clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(text, color = Color.White, style = MaterialTheme.typography.titleSmall)
+                    popupLevel?.let { lv ->
+                        Spacer(Modifier.height(6.dp))
+                        Box(Modifier.width(110.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.25f))) {
+                            Box(Modifier.fillMaxWidth(lv).height(3.dp).background(Color.White))
+                        }
+                    }
+                    popupSub?.let {
+                        Text(it, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+
+            // Hold for 2x: a small chip at the top.
+            if (fast) {
+                Row(
+                    Modifier.align(Alignment.TopCenter).padding(top = 24.dp)
+                        .clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.55f))
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("2×", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                    Icon(Icons.Filled.FastForward, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                }
             }
         }
     }
 
     /**
-     * Seek bar with the torrent drawn in: dim track, green where the file is
-     * downloaded, light where mpv has it buffered, white for what was played.
+     * Seek bar: dim track, light where the player has it buffered, white for
+     * what was played. Download progress is shown as a number below it.
      */
     @Composable
     private fun SeekBar(fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
-        val list = spans.value
         var active by remember { mutableStateOf(false) }
         Canvas(
             Modifier.fillMaxWidth().height(32.dp)
@@ -738,12 +827,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val y = size.height / 2 - h / 2
             val r = CornerRadius(h / 2)
             drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(0f, y), Size(size.width, h), r)
-            list.forEach { sp ->
-                if (sp.done > 0.02f) drawRect(
-                    Color(0xFF7CE38B).copy(alpha = 0.25f + 0.5f * sp.done),
-                    Offset(sp.from * size.width, y), Size(((sp.to - sp.from) * size.width).coerceAtLeast(1.5f), h),
-                )
-            }
             if (cachedFraction > fraction) drawRect(Color.White.copy(alpha = 0.45f),
                 Offset(fraction * size.width, y), Size((cachedFraction - fraction) * size.width, h))
             drawRoundRect(Color.White, Offset(0f, y), Size(fraction * size.width, h), r)
@@ -751,61 +834,47 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
     }
 
-    /** Side panel to pick an audio or subtitle track. */
+    /** Material panel to pick an audio or subtitle track. */
     @Composable
     private fun TrackSheet(type: String, onDismiss: () -> Unit) {
         var list by remember(type) { mutableStateOf(tracks(type)) }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
-            .pointerInput(Unit) { detectTapGestures { onDismiss() } }) {
-            Column(
-                Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(340.dp)
-                    .background(Color(0xF0181818)).pointerInput(Unit) { detectTapGestures { } }
-                    .padding(vertical = 16.dp),
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f))
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } }, contentAlignment = Alignment.Center) {
+            androidx.compose.material3.Surface(
+                modifier = Modifier.width(420.dp).heightIn(max = 320.dp).pointerInput(Unit) { detectTapGestures { } },
+                shape = RoundedCornerShape(28.dp),
+                tonalElevation = 6.dp,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
             ) {
-                Text(if (type == "audio") "Audio" else "Subtitles", color = Color.White, fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-                if (list.isEmpty() || (type == "sub" && list.size == 1)) {
-                    Text(if (type == "audio") "No audio tracks" else "No subtitles in this video", color = Color.White.copy(alpha = 0.6f),
-                        fontSize = 14.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-                }
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    list.forEach { t ->
-                        Row(
-                            Modifier.fillMaxWidth()
-                                .pointerInput(t.id) { detectTapGestures { selectTrack(type, t.id); list = tracks(type); onDismiss() } }
-                                .background(if (t.selected) Color.White.copy(alpha = 0.1f) else Color.Transparent)
-                                .padding(horizontal = 20.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(Modifier.size(18.dp).clip(CircleShape)
-                                .background(if (t.selected) Color(0xFF7CE38B) else Color.White.copy(alpha = 0.2f)))
-                            Spacer(Modifier.width(14.dp))
-                            Text(t.label, color = Color.White, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Column(Modifier.padding(vertical = 20.dp)) {
+                    Row(Modifier.padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (type == "audio") Icons.Filled.Audiotrack else Icons.Filled.Subtitles, null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(12.dp))
+                        Text(if (type == "audio") "Audio" else "Subtitles", style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.onSurface)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    if (list.isEmpty() || (type == "sub" && list.size == 1)) {
+                        Text(if (type == "audio") "No audio tracks" else "No subtitles in this video",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
+                    }
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        list.forEach { t ->
+                            val pick = { selectTrack(type, t.id); list = tracks(type); onDismiss() }
+                            androidx.compose.material3.ListItem(
+                                headlineContent = { Text(t.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                supportingContent = t.detail.takeIf { it.isNotBlank() }?.let { d -> { Text(d) } },
+                                leadingContent = { androidx.compose.material3.RadioButton(selected = t.selected, onClick = pick) },
+                                colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+                                modifier = Modifier.padding(horizontal = 8.dp).clip(RoundedCornerShape(16.dp))
+                                    .clickable(onClick = pick),
+                            )
                         }
                     }
                 }
             }
-        }
-    }
-
-    @Composable
-    private fun PillButton(label: String, onClick: () -> Unit) {
-        TextButton(onClick = onClick) { Text(label, color = Color.White) }
-    }
-
-    @Composable
-    private fun RoundButton(label: String, onClick: () -> Unit) {
-        Box(
-            Modifier.size(56.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.15f))
-                .pointerInput(Unit) { detectTapGestures { onClick() } },
-            contentAlignment = Alignment.Center,
-        ) { Text(label, color = Color.White, fontSize = 15.sp) }
-    }
-
-    @Composable
-    private fun PauseGlyph() {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            repeat(2) { Box(Modifier.size(8.dp, 28.dp).clip(RoundedCornerShape(2.dp)).background(Color.White)) }
         }
     }
 }
