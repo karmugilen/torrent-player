@@ -64,7 +64,13 @@
 - Adding a torrent that is already in your library opens that entry instead of creating a duplicate.
 
 ### Playing
-- **Built-in player** (new in 2.4.4): the seek bar shows which parts are downloaded, and dragging it fetches the new spot first. Swipe left for brightness and right for volume, double tap to skip, swipe sideways to seek, hold for 2x and slide to pick 0.25x–4x. Audio and subtitle tracks, picture-in-picture, and library previews from frames you watched.
+- **Built-in video player** (since 2.4.4), included in the app:
+  - **Seek bar** shows what is buffered; dragging fetches the new spot from the torrent first, and the pop-up says if it still has to buffer.
+  - **Gestures:** swipe left for brightness and right for volume, swipe sideways to seek, double tap to skip, hold for 2x and slide to pick 0.25x–4x.
+  - **Top bar:** audio and subtitle tracks, aspect ratio (Fit, Crop, Stretch, 16:9, 4:3), rotation lock, next episode, and downloaded % · peers · speed under the title.
+  - **Picture-in-picture**, and library previews from frames you watched.
+  - A new video waits until its length is known before it starts, so the end time always shows.
+  - Built from source on mpv and FFmpeg as LGPL libraries; versions and licenses in [NOTICE.md](NOTICE.md).
 - **Or your own player:** choose on the first play, change any time in Settings → Playback → *Video player*.
 - **Stream while downloading** to any Android video player, or play finished files at any time.
 - **Continue watching:** every episode keeps its position.
