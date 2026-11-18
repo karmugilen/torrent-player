@@ -214,7 +214,7 @@ fun SettingsScreen(
                     var builtIn by remember { mutableStateOf(BuiltInPlayer.enabled(ctx)) }
                     ChoiceSetting(
                         title = "Video player",
-                        supporting = if (builtIn) "Built-in: plays inside the app with mpv and fetches the spot you seek to first."
+                        supporting = if (builtIn) "Built-in: plays inside this app and fetches the spot you seek to first."
                             else "External: opens VLC, MX Player or another installed app.",
                         options = listOf(true to "Built-in", false to "External app"),
                         selected = builtIn,

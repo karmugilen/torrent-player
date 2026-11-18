@@ -79,6 +79,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -216,7 +218,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         listOf(
             // Same base as mpvEx: fast profile, hardware decode with software fallback.
             "profile" to "fast",
-            "vo" to "gpu",
+            // No picture output until the surface is attached; opening a file with no
+            // surface aborts the whole app (vo_android_init asserts a window id).
+            "vo" to "null",
             "gpu-context" to "android",
             "opengl-es" to "yes",
             "hwdec" to "mediacodec,mediacodec-copy,no",
@@ -258,7 +262,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         ).forEach { (k, f) -> MPVLib.observeProperty(k, f) }
 
         if (startSeconds > 1) MPVLib.setPropertyString("start", "%.3f".format(java.util.Locale.ROOT, startSeconds))
-        // Open off the main thread, as mpvEx does, so a slow stream never freezes the UI.
+    }
+
+    private var filesLoaded = false
+
+    /** Open the files once a surface is attached. Off the main thread, as mpvEx does, so a slow stream never freezes the UI. */
+    private fun loadFilesOnce() {
+        if (filesLoaded) return
+        filesLoaded = true
         val paths = items.map { it.uri }
         lifecycleScope.launch(Dispatchers.Default) {
             paths.forEachIndexed { i, uri ->
@@ -274,6 +285,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             MPVLib.attachSurface(holder.surface)
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", "gpu")
+            loadFilesOnce()
         }
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             if (!alive) return
@@ -696,49 +708,77 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         )
                     }
                     .pointerInput(Unit) {
-                        var mode = Drag.NONE
-                        var startX = 0f
-                        var level = 0f
-                        var target = 0.0
-                        var total = Offset.Zero
-                        detectDragGestures(
-                            onDragStart = { o -> mode = Drag.NONE; startX = o.x; total = Offset.Zero },
-                            onDragEnd = {
-                                if (mode == Drag.SEEK) { pendingSeek = target; seekTo(target) }
-                                mode = Drag.NONE; endScrub(); popupLevel = null
-                            },
-                            onDragCancel = { mode = Drag.NONE; endScrub(); popupLevel = null },
-                        ) { change, d ->
-                            change.consume()
-                            total += d
-                            if (mode == Drag.NONE) {
-                                mode = when {
-                                    // Sideways swipes do nothing; seek with double tap or the bar.
-                                    kotlin.math.abs(total.x) > kotlin.math.abs(total.y) -> Drag.IGNORE
-                                    startX < size.width / 2f -> Drag.BRIGHTNESS
-                                    else -> Drag.VOLUME
+                        // Swipes as in mpvEx: measured from where the finger went down.
+                        // Clearly sideways (over 30 px and twice the vertical move) seeks
+                        // 0.05 s per pixel with the video paused, and resumes on release.
+                        // Up/down: left half brightness, right half volume.
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val start = down.position
+                            val startAt = System.currentTimeMillis()
+                            var mode = Drag.NONE
+                            var level = 0f
+                            var origin = 0.0
+                            var target = 0.0
+                            var wasPaused = false
+                            fun finish(apply: Boolean) {
+                                if (mode == Drag.SEEK) {
+                                    if (apply) { pendingSeek = target; seekTo(target) }
+                                    if (!wasPaused) MPVLib.setPropertyBoolean("pause", false)
                                 }
-                                level = when (mode) { Drag.VOLUME -> volumeFraction(); Drag.BRIGHTNESS -> currentBrightness(); else -> 0f }
-                                target = pos
+                                if (mode != Drag.NONE) { endScrub(); popupLevel = null }
                             }
-                            when (mode) {
-                                Drag.VOLUME -> {
-                                    level = (level - d.y / (size.height * 0.8f)).coerceIn(0f, 1f)
-                                    setVolume(level)
-                                    popup = "Volume ${(level * 100).roundToInt()}%"; popupSub = null; popupLevel = level
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.count { it.pressed } > 1) { finish(false); break }
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) { finish(true); break }
+                                val dx = change.position.x - start.x
+                                val dy = change.position.y - start.y
+                                val ax = kotlin.math.abs(dx); val ay = kotlin.math.abs(dy)
+                                if (mode == Drag.NONE) {
+                                    mode = when {
+                                        fast || trackSheet != null -> if (ax > 30f || ay > 30f) Drag.IGNORE else Drag.NONE
+                                        ax > 30f && ax > ay * 2f && System.currentTimeMillis() - startAt > 100 -> Drag.SEEK
+                                        ay > 30f && ay > ax -> if (start.x < size.width / 2f) Drag.BRIGHTNESS else Drag.VOLUME
+                                        else -> Drag.NONE
+                                    }
+                                    when (mode) {
+                                        Drag.VOLUME -> level = volumeFraction()
+                                        Drag.BRIGHTNESS -> level = currentBrightness()
+                                        Drag.SEEK -> {
+                                            origin = pos; target = pos
+                                            wasPaused = paused.value
+                                            if (!wasPaused) MPVLib.setPropertyBoolean("pause", true)
+                                            controls = true; touchTick++ // show the bar while swiping
+                                        }
+                                        else -> {}
+                                    }
                                 }
-                                Drag.BRIGHTNESS -> {
-                                    level = (level - d.y / (size.height * 0.8f)).coerceIn(0.01f, 1f)
-                                    setBrightness(level)
-                                    popup = "Brightness ${(level * 100).roundToInt()}%"; popupSub = null; popupLevel = level
+                                when (mode) {
+                                    Drag.VOLUME -> {
+                                        val v = (level - dy / (size.height * 0.8f)).coerceIn(0f, 1f)
+                                        setVolume(v)
+                                        popup = "Volume ${(v * 100).roundToInt()}%"; popupSub = null; popupLevel = v
+                                    }
+                                    Drag.BRIGHTNESS -> {
+                                        val v = (level - dy / (size.height * 0.8f)).coerceIn(0.01f, 1f)
+                                        setBrightness(v)
+                                        popup = "Brightness ${(v * 100).roundToInt()}%"; popupSub = null; popupLevel = v
+                                    }
+                                    Drag.SEEK -> {
+                                        val next = (origin + dx * 0.05).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
+                                        if (next.toInt() != target.toInt()) {
+                                            target = next
+                                            seekPopup(target)
+                                            pendingSeek = target // bar follows the finger
+                                        }
+                                        touchTick++
+                                    }
+                                    Drag.NONE, Drag.IGNORE -> {}
                                 }
-                                Drag.SEEK -> {
-                                    // A full screen width is 90 seconds, like common players.
-                                    target = (target + d.x / size.width * 90.0).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
-                                    seekPopup(target)
-                                    pendingSeek = target // bar follows the finger
-                                }
-                                Drag.NONE, Drag.IGNORE -> {}
+                                // Once a swipe is decided, taps, double taps and hold-for-2x stand down.
+                                if (mode != Drag.NONE) change.consume()
                             }
                         }
                     },
@@ -777,16 +817,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
                             if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
                         }
-                        IconButton(onClick = { trackSheet = "audio"; touchTick++ }) {
+                        IconButton(onClick = { trackSheet = "audio"; controls = false }) {
                             Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White)
                         }
-                        IconButton(onClick = { trackSheet = "sub"; touchTick++ }) {
+                        IconButton(onClick = { trackSheet = "sub"; controls = false }) {
                             Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White)
-                        }
-                        if (Build.VERSION.SDK_INT >= 26) {
-                            IconButton(onClick = { controls = false; enterPip() }) {
-                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White)
-                            }
                         }
                         if (items.size > 1 && playlistPos.intValue < items.size - 1) {
                             IconButton(onClick = { next(); touchTick++ }) {
@@ -822,6 +857,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         val shown = when {
                             sliderDragging -> sliderValue.toDouble()
                             else -> pendingSeek ?: pos
+                        }
+                        if (Build.VERSION.SDK_INT >= 26) {
+                            IconButton(onClick = { controls = false; enterPip() }, modifier = Modifier.align(Alignment.End)) {
+                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White)
+                            }
                         }
                         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
                             Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
@@ -943,39 +983,49 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Composable
     private fun TrackSheet(type: String, onDismiss: () -> Unit) {
         var list by remember(type) { mutableStateOf(tracks(type)) }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f))
-            .pointerInput(Unit) { detectTapGestures { onDismiss() } }, contentAlignment = Alignment.Center) {
+        // Side panel on the right, full height, so long lists scroll instead of being cut off.
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } }, contentAlignment = Alignment.CenterEnd) {
             androidx.compose.material3.Surface(
-                modifier = Modifier.width(420.dp).heightIn(max = 320.dp).pointerInput(Unit) { detectTapGestures { } },
-                shape = RoundedCornerShape(28.dp),
+                modifier = Modifier.fillMaxHeight().width(330.dp).padding(10.dp).pointerInput(Unit) { detectTapGestures { } },
+                shape = RoundedCornerShape(24.dp),
                 tonalElevation = 6.dp,
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
             ) {
-                Column(Modifier.padding(vertical = 20.dp)) {
-                    Row(Modifier.padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.padding(vertical = 14.dp)) {
+                    Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(if (type == "audio") Icons.Filled.Audiotrack else Icons.Filled.Subtitles, null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.width(12.dp))
-                        Text(if (type == "audio") "Audio" else "Subtitles", style = MaterialTheme.typography.headlineSmall,
-                            color = MaterialTheme.colorScheme.onSurface)
+                        Text(if (type == "audio") "Audio" else "Subtitles", style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                        val count = if (type == "sub") list.size - 1 else list.size
+                        if (count > 0) Text("$count", style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
                     if (list.isEmpty() || (type == "sub" && list.size == 1)) {
                         Text(if (type == "audio") "No audio tracks" else "No subtitles in this video",
                             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
                     }
-                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
                         list.forEach { t ->
                             val pick = { selectTrack(type, t.id); list = tracks(type); onDismiss() }
-                            androidx.compose.material3.ListItem(
-                                headlineContent = { Text(t.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                supportingContent = t.detail.takeIf { it.isNotBlank() }?.let { d -> { Text(d) } },
-                                leadingContent = { androidx.compose.material3.RadioButton(selected = t.selected, onClick = pick) },
-                                colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
-                                modifier = Modifier.padding(horizontal = 8.dp).clip(RoundedCornerShape(16.dp))
-                                    .clickable(onClick = pick),
-                            )
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                                    .background(if (t.selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                                    .clickable(onClick = pick).padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                androidx.compose.material3.RadioButton(selected = t.selected, onClick = pick, modifier = Modifier.size(36.dp))
+                                Column(Modifier.padding(start = 4.dp)) {
+                                    Text(t.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                                    if (t.detail.isNotBlank()) Text(t.detail, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
                     }
                 }
