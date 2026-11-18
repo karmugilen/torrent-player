@@ -558,9 +558,6 @@ const STARVING_REQUESTS: usize = 16;
 /// Reuse of [`PeerConnHandler::peer_has_wanted_pieces`]; below the 50 ms
 /// choke-reconcile wake interval.
 const WANTED_PIECES_CACHE: Duration = Duration::from_millis(25);
-/// Tit-for-tat headroom for a peer holding a piece the player needs now: we
-/// upload this far ahead of what it gave us so it unchokes us sooner.
-const URGENT_TIT_FOR_TAT_HEADROOM: i64 = 8 << 20;
 /// A refill rescans every piece; one that found nothing retries at this pace.
 const IDLE_REFILL_EVERY: Duration = Duration::from_millis(250);
 /// A peer publishes its listing at this pace; each publish takes a torrent-wide
@@ -928,11 +925,11 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
     }
 
     /// Choke config for this peer: a peer holding what the player needs now
-    /// gets a larger tit-for-tat headroom, so we earn its unchoke sooner.
+    /// gets uploads with no tit-for-tat cap, so we earn its unchoke sooner.
     fn choke_config_for_peer(&self) -> crate::choking::ChokeConfig {
         let mut cfg = self.torrent.choke_config();
         if !cfg.seeding && !cfg.give_back && self.peer_has_urgent_pieces() {
-            cfg.tit_for_tat_headroom = cfg.tit_for_tat_headroom.max(URGENT_TIT_FOR_TAT_HEADROOM);
+            cfg.give_back = true;
         }
         cfg
     }
