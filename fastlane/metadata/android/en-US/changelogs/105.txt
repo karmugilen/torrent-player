@@ -1,0 +1,1 @@
+Player: aspect ratio button (Fit, Crop, Stretch, 16:9, 4:3, remembered) and rotation lock in the top bar. A new video now waits until its length is known before it starts, so the end time always shows.

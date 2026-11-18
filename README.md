@@ -112,7 +112,7 @@
 Both are signed with the same key (`CN=Torrent Player`), so either one updates the other in place.
 
 ```bash
-adb install -r torrent-player-2.4.4.apk
+adb install -r torrent-player-2.4.5.apk
 ```
 
 - Package: `webtor.app` (arm64-v8a)
@@ -328,6 +328,7 @@ BitTorrent is a legal technology used to share Linux distributions, open films, 
 
 Full notes are on [GitHub Releases](https://github.com/karmugilen/torrent-player/releases).
 
+- **2.4.5**: Player aspect ratio button (Fit, Crop, Stretch, 16:9, 4:3) and rotation lock; video waits until its length is known before playing.
 - **2.4.4**: Built-in video player with a seek bar that shows downloaded parts, seek prefetch, gestures, hold-and-slide speed, audio and subtitle tracks, and picture-in-picture. Pick it or your own player on first play.
 - **2.4.3**: Hole punching starts right away for peers behind routers and now works over IPv6. Direct Play gives back to the swarm while you watch and serves only verified video headers. Quieter Direct Play notification, and notification permission is asked when the app opens.
 - **2.4.2**: BitTorrent 2.0 (hybrid and pure v2), BEP 55 hole punching, BT1/BT2 and hole-punch counts in Connections, and a lighter app ↔ engine link.
