@@ -1023,7 +1023,6 @@ class LibrarySession(
                         screen = Screen.Library,
                     )
                 }
-                _events.trySend(UiEvent.RequestNotifications)
                 try {
                     val needed = torrent.files.filter { it.index in draft.selected }.sumOf { it.length }
                     val free = withContext(io) { storage.freeBytes }
@@ -2492,9 +2491,6 @@ class LibrarySession(
                 if (latest.isDeleting || latest.generation != expectedGen) return
                 failRestore(current.key, expectedGen, "Transfers were stopped. Try Resume again.")
                 return
-            }
-            if (!current.directPlay && !hasAnyUri) {
-                _events.trySend(UiEvent.RequestNotifications)
             }
             val status = runCatching { withContext(io) { client.torrent(added.id) } }.getOrNull()
             patch(current.key) {

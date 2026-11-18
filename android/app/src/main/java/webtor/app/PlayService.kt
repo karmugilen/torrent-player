@@ -163,7 +163,9 @@ class PlayService : Service() {
         val stop = serviceAction(ACTION_STOP, REQUEST_STOP, flags)
         val stopLabel = if (isMultiple) "Stop all" else "Stop"
 
-        return NotificationCompat.Builder(this, CHANNEL)
+        val minimal = playbackOnly || streaming
+        return NotificationCompat.Builder(this, if (minimal) PLAYBACK_CHANNEL else CHANNEL)
+            .setPriority(if (minimal) NotificationCompat.PRIORITY_MIN else NotificationCompat.PRIORITY_LOW)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(if (playbackOnly || streaming) android.R.drawable.ic_media_play else android.R.drawable.stat_sys_download)
@@ -177,7 +179,7 @@ class PlayService : Service() {
             .setShowWhen(false)
             .setProgress(if (playbackOnly || streaming) 0 else 100, if (playbackOnly || streaming) 0 else progress, false)
             .apply {
-                if (stats.isNotEmpty()) setStyle(NotificationCompat.BigTextStyle().bigText("$text\n$stats"))
+                if (!minimal && stats.isNotEmpty()) setStyle(NotificationCompat.BigTextStyle().bigText("$text\n$stats"))
             }
             .apply {
                 if (!commandInProgress && !playbackOnly) {
@@ -206,6 +208,15 @@ class PlayService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Downloads", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Torrent download progress and controls"
+                setShowBadge(false)
+            },
+        )
+        // Direct Play: minimum importance, so it sits collapsed in the silent
+        // section with no status bar icon. A new id because importance is fixed
+        // once a channel exists.
+        manager.createNotificationChannel(
+            NotificationChannel(PLAYBACK_CHANNEL, "Direct Play", NotificationManager.IMPORTANCE_MIN).apply {
+                description = "Shown quietly while a video streams"
                 setShowBadge(false)
             },
         )
@@ -244,6 +255,7 @@ class PlayService : Service() {
         private const val EXTRA_HOLD_LOCKS = "holdLocks"
         private const val EXTRA_STATS = "stats"
         private const val CHANNEL = "webtor-downloads"
+        private const val PLAYBACK_CHANNEL = "webtor-playback"
         private const val NOTIF_ID = 42
         private const val NOTIF_TIMEOUT_ID = 43
         private const val REQUEST_OPEN = 0

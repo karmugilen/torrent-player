@@ -108,7 +108,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        if (savedInstanceState == null) handleIncoming(intent)
+        if (savedInstanceState == null) {
+            // Ask once when the app opens, not in the middle of adding a magnet link.
+            requestNotifications()
+            handleIncoming(intent)
+        }
         setContent {
             val state by session.ui.collectAsState()
             val screenStates = rememberSaveableStateHolder()
@@ -307,7 +311,6 @@ class MainActivity : ComponentActivity() {
                 pendingRepairTarget = Pair(event.entryKey, event.fileIndex)
                 fileRepairPicker.launch(arrayOf("*/*"))
             }
-            UiEvent.RequestNotifications -> requestNotifications()
             is UiEvent.OpenContent -> openContent(event)
             is UiEvent.ShareText -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, event.text) }, "Share diagnostics"))
             UiEvent.ExitApp -> finish()

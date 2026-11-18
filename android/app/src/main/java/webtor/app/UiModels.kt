@@ -116,7 +116,6 @@ sealed class UiEvent {
     data object PickTorrent : UiEvent()
     data object PickFolder : UiEvent()
     data class PickFileForRepair(val entryKey: String, val fileIndex: Int) : UiEvent()
-    data object RequestNotifications : UiEvent()
     data class OpenContent(val uri: String, val mime: String, val name: String,
         val playlist: List<PlaybackItem> = emptyList(), val subtitles: List<PlaybackItem> = emptyList(),
         val positionMs: Long = 0L,
