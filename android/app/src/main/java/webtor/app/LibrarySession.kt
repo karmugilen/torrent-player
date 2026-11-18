@@ -2856,7 +2856,7 @@ class LibrarySession(
         val holdLocks = now - lastTrafficAt < TRANSFER_LOCK_GRACE_MS
         val sent = listOf<Any>(
             notification.title, notification.progress, notification.text, notification.multiple,
-            notification.playbackOnly, playbackStatsLine(_ui.value), holdLocks,
+            notification.playbackOnly, notification.streaming, playbackStatsLine(_ui.value), holdLocks,
         )
         // An unchanged notification is not redrawn every second, which costs the
         // system more than the app. The slow refresh restores one lost to a restart.
@@ -2870,6 +2870,7 @@ class LibrarySession(
                 text = notification.text,
                 multiple = notification.multiple,
                 playbackOnly = notification.playbackOnly,
+                streaming = notification.streaming,
                 stats = playbackStatsLine(_ui.value),
                 holdLocks = holdLocks,
             )

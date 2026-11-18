@@ -40,7 +40,15 @@ fun entryTelemetry(entry: DownloadEntry): String = buildString {
     else transferTelemetry(entry)?.let { append(" · $it") }
 }
 
-data class DownloadNotification(val title: String, val text: String, val progress: Int, val multiple: Boolean, val playbackOnly: Boolean = false)
+data class DownloadNotification(
+    val title: String,
+    val text: String,
+    val progress: Int,
+    val multiple: Boolean,
+    val playbackOnly: Boolean = false,
+    /** Only Direct Play is active: shown as playback (play icon, no progress bar), Stop kept. */
+    val streaming: Boolean = false,
+)
 
 fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String> = emptySet()): DownloadNotification? {
     val active = entries.filter { it.hasActiveTransfer() }
@@ -63,7 +71,7 @@ fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String>
     val progress = if (total <= 0) 0 else (100.0 * got / total).toInt().coerceIn(0, 100)
     val text = when {
         streaming.isNotEmpty() && downloading.isEmpty() -> buildString {
-            append("Direct Play · ↓ " + formatSpeed(streaming.sumOf { it.liveDownloadSpeed() ?: 0L }))
+            append("Direct Play · streaming")
             val statuses = streaming.mapNotNull { it.liveStatus() }
             if (statuses.size == streaming.size) append(" · ${formatPeers(statuses.sumOf { it.numPeers.coerceAtLeast(0) })}")
         }
@@ -84,11 +92,17 @@ fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String>
         }
         else -> "Waiting for peers"
     }
+    val streamingOnly = streaming.isNotEmpty() && downloading.isEmpty() && checking.isEmpty() && waiting == 0
     return DownloadNotification(
-        title = if (active.size == 1) active.first().title else "${active.size} downloads",
+        title = when {
+            active.size == 1 -> active.first().title
+            streamingOnly -> "${active.size} videos"
+            else -> "${active.size} downloads"
+        },
         text = text,
         progress = progress,
         multiple = active.size > 1,
+        streaming = streamingOnly,
     )
 }
 

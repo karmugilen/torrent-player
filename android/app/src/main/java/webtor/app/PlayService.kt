@@ -27,6 +27,7 @@ class PlayService : Service() {
     private var paused: Boolean = false
     private var isMultiple: Boolean = false
     private var playbackOnly: Boolean = false
+    private var streaming: Boolean = false
     // Live playback stats (seek time), shown expanded.
     private var stats: String = ""
     // Off once nothing has moved for a while, so a stalled download sleeps.
@@ -130,6 +131,7 @@ class PlayService : Service() {
         if (intent?.hasExtra(EXTRA_HOLD_LOCKS) == true) holdLocks = intent.getBooleanExtra(EXTRA_HOLD_LOCKS, true)
         if (intent?.hasExtra(EXTRA_STATS) == true) stats = intent.getStringExtra(EXTRA_STATS).orEmpty()
         if (intent?.hasExtra(EXTRA_PLAYBACK_ONLY) == true) playbackOnly = intent.getBooleanExtra(EXTRA_PLAYBACK_ONLY, false)
+        if (intent?.hasExtra(EXTRA_STREAMING) == true) streaming = intent.getBooleanExtra(EXTRA_STREAMING, false)
         if (intent?.hasExtra(EXTRA_MULTIPLE) == true) {
             isMultiple = intent.getBooleanExtra(EXTRA_MULTIPLE, false)
         }
@@ -164,7 +166,7 @@ class PlayService : Service() {
         return NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(if (playbackOnly) android.R.drawable.ic_media_play else android.R.drawable.stat_sys_download)
+            .setSmallIcon(if (playbackOnly || streaming) android.R.drawable.ic_media_play else android.R.drawable.stat_sys_download)
             .setContentIntent(open)
             .setDeleteIntent(serviceAction(ACTION_REFRESH, REQUEST_REFRESH, flags))
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -173,7 +175,7 @@ class PlayService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setShowWhen(false)
-            .setProgress(if (playbackOnly) 0 else 100, if (playbackOnly) 0 else progress, false)
+            .setProgress(if (playbackOnly || streaming) 0 else 100, if (playbackOnly || streaming) 0 else progress, false)
             .apply {
                 if (stats.isNotEmpty()) setStyle(NotificationCompat.BigTextStyle().bigText("$text\n$stats"))
             }
@@ -193,6 +195,7 @@ class PlayService : Service() {
             .putExtra(EXTRA_PROGRESS, progress)
             .putExtra(EXTRA_PAUSED, paused)
             .putExtra(EXTRA_MULTIPLE, isMultiple)
+            .putExtra(EXTRA_STREAMING, streaming)
             .putExtra(EXTRA_STATS, stats)
         return PendingIntent.getForegroundService(this, requestCode, intent, flags)
     }
@@ -237,6 +240,7 @@ class PlayService : Service() {
         const val EXTRA_PAUSED = "paused"
         const val EXTRA_MULTIPLE = "multiple"
         private const val EXTRA_PLAYBACK_ONLY = "playbackOnly"
+        private const val EXTRA_STREAMING = "streaming"
         private const val EXTRA_HOLD_LOCKS = "holdLocks"
         private const val EXTRA_STATS = "stats"
         private const val CHANNEL = "webtor-downloads"
@@ -254,6 +258,7 @@ class PlayService : Service() {
             text: String = "Downloading",
             multiple: Boolean = false,
             playbackOnly: Boolean = false,
+            streaming: Boolean = false,
             stats: String = "",
             holdLocks: Boolean = true,
         ) {
@@ -265,6 +270,7 @@ class PlayService : Service() {
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_MULTIPLE, multiple)
                 .putExtra(EXTRA_PLAYBACK_ONLY, playbackOnly)
+                .putExtra(EXTRA_STREAMING, streaming)
                 .putExtra(EXTRA_STATS, stats)
             runCatching { ContextCompat.startForegroundService(ctx, intent) }
         }
