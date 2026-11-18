@@ -41,6 +41,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -704,11 +705,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val dur by duration
         val isPaused by paused
         val isBuffering by buffering
-        // Opened at a saved spot: say so for a few seconds, with a way back to the start.
-        var resumeChip by remember { mutableStateOf(startSeconds > 5) }
 
         BackHandler(onBack = onBack)
-        LaunchedEffect(Unit) { if (resumeChip) { delay(10_000); resumeChip = false } }
         LaunchedEffect(controls, touchTick, isPaused, sliderDragging, trackSheet) {
             if (controls && !isPaused && !sliderDragging && trackSheet == null) { delay(3500); controls = false }
         }
@@ -1031,22 +1029,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
 
-            // Resumed from the saved spot, with Start over.
-            if (resumeChip) {
-                Row(
-                    Modifier.align(Alignment.BottomStart).padding(start = 28.dp, bottom = 132.dp)
-                        .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.6f))
-                        .padding(start = 14.dp, end = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Resumed at ${clock(startSeconds)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
-                    TextButton(onClick = {
-                        if (firstFileLoaded) seekTo(0.0) else MPVLib.setPropertyString("start", "0")
-                        resumeChip = false; touchTick++
-                    }) { Text("Start over", color = Color.White) }
-                }
-            }
-
             // Small pop-up for swipes and seeking.
             popup?.let { text ->
                 Column(
@@ -1096,13 +1078,19 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     /**
-     * Seek bar: dim track, green where the torrent has the file downloaded
-     * (fainter green where it is still downloading), light where the player has
-     * it buffered, white for what was played.
+     * Seek bar: dim track, light where the player has it buffered, white for
+     * what was played. Just past the buffer it shows what the torrent is fetching
+     * next: a faint stretch already downloaded, then a pulse where pieces are
+     * still arriving.
      */
     @Composable
     private fun SeekBar(fraction: Float, cachedFraction: Float, downloaded: List<Span>, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
         var active by remember { mutableStateOf(false) }
+        val pulse by androidx.compose.animation.core.rememberInfiniteTransition(label = "fetch").animateFloat(
+            initialValue = 0.18f, targetValue = 0.6f, label = "fetch",
+            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                androidx.compose.animation.core.tween(700), androidx.compose.animation.core.RepeatMode.Reverse),
+        )
         Canvas(
             Modifier.fillMaxWidth().height(32.dp)
                 .pointerInput(Unit) {
@@ -1122,11 +1110,22 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val y = size.height / 2 - h / 2
             val r = CornerRadius(h / 2)
             drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(0f, y), Size(size.width, h), r)
-            downloaded.forEach { s ->
-                if (s.done <= 0f) return@forEach
-                val green = Color(0xFF4CAF50).copy(alpha = if (s.done >= 0.99f) 0.85f else 0.25f + 0.45f * s.done)
-                val x = s.from * size.width
-                drawRect(green, Offset(x, y), Size(((s.to - s.from) * size.width).coerceAtLeast(1f), h))
+            // Fetch ahead of the buffer: downloaded run, then the spot still arriving.
+            val edge = maxOf(fraction, cachedFraction)
+            var readyEnd = edge
+            var fetching: Span? = null
+            for (s in downloaded) {
+                if (s.to <= readyEnd) continue
+                if (s.from > readyEnd + 0.001f) break
+                if (s.done >= 0.99f) readyEnd = s.to else { fetching = s; break }
+            }
+            if (readyEnd > edge) drawRect(Color.White.copy(alpha = 0.32f),
+                Offset(edge * size.width, y), Size((readyEnd - edge) * size.width, h))
+            if (downloaded.isNotEmpty() && readyEnd < 1f) {
+                val from = maxOf(readyEnd, fetching?.from ?: readyEnd)
+                val to = fetching?.to ?: minOf(1f, readyEnd + 0.01f)
+                drawRect(Color.White.copy(alpha = pulse),
+                    Offset(from * size.width, y), Size(((to - from) * size.width).coerceAtLeast(4.dp.toPx()), h))
             }
             if (cachedFraction > fraction) drawRect(Color.White.copy(alpha = 0.45f),
                 Offset(fraction * size.width, y), Size((cachedFraction - fraction) * size.width, h))
