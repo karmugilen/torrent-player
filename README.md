@@ -19,9 +19,9 @@
 </p>
 
 <p align="center">
-  <a href="https://f-droid.org/packages/webtor.app/"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" height="70" alt="Get it on F-Droid"></a>
-  <a href="https://github.com/karmugilen/torrent-player/releases/latest"><img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" height="70" alt="Get it on GitHub"></a>
-  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/karmugilen/torrent-player"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" height="46" alt="Get it on Obtainium"></a>
+  <a href="https://f-droid.org/packages/webtor.app/"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" height="64" alt="Get it on F-Droid"></a>
+  <a href="https://github.com/karmugilen/torrent-player/releases/latest"><img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" height="64" alt="Get it on GitHub"></a>
+  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/karmugilen/torrent-player"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" height="64" alt="Get it on Obtainium"></a>
 </p>
 
 <p align="center">
@@ -137,32 +137,32 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 
 | Feature | Torrent Player | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| Runs the swarm on the phone | ✅ | ✅ | ✅ | ❌ |
-| Magnets and `.torrent` files | ✅ | ✅ | ✅ | ✅ |
-| Selective file download | ✅ | ✅ | ✅ | ✅ |
-| Stream to a player while downloading | ✅ | ✅ | ✅ | ❌ |
-| Seek-first for external players | ✅ | ❌ | ❌ | ❌ |
-| Direct Play (RAM + small disk cache) | ✅ | ❌ | ❌ | ❌ |
-| Continue watching | ✅ | ❌ | ❌ | ❌ |
-| Play next with prefetch | ✅ | ❌ | ❌ | ❌ |
-| Episode playlist + subtitles | ✅ | ❌ | ❌ | ❌ |
-| Offline peer world map | ✅ | ❌ | ❌ | ❌ |
-| Piece heat / swarm details | ✅ | ❌ | ❌ | ❌ |
-| Seeding limits (ratio / time / speed) | ✅ | ✅ | ✅ | ✅ |
-| BitTorrent 2.0 | ✅ | ✅ | ❌ | ❌ |
-| Native Rust engine | ✅ | ❌ | ❌ | ❌ |
-| Create torrents | ❌ | ✅ | ❌ | ❌ |
-| RSS / auto-download | ❌ | ✅ | ❌ | ✅ |
-| Download scheduling | ❌ | ✅ | ❌ | ❌ |
-| IP filtering | ❌ | ✅ | ❌ | ❌ |
-| Tracker / peer proxy | ❌ | ✅ | ✅ | ❌ |
-| Android TV | ❌ | ✅ | ✅ | ✅ |
-| Cast / DLNA / UPnP media server | ❌ | ❌ | ✅ | ❌ |
-| 35+ UI languages | ❌ | ✅ | ❌ | ❌ |
-| Remote control of a PC/NAS client | ❌ | ❌ | ❌ | ✅ |
-| On f-droid.org | ✅ | ✅ | ❌ | ✅ |
-| No ads, no telemetry | ✅ | ✅ | ✅ | ✅ |
-| GitHub and F-Droid share a signing key | ✅ | ❌ | ❌ | ❌ |
+| Runs the swarm on the phone | Yes | Yes | Yes | No |
+| Magnets and `.torrent` files | Yes | Yes | Yes | Yes |
+| Selective file download | Yes | Yes | Yes | Yes |
+| Stream to a player while downloading | Yes | Yes | Yes | No |
+| Seek-first for external players | Yes | No | No | No |
+| Direct Play (RAM + small disk cache) | Yes | No | No | No |
+| Continue watching | Yes | No | No | No |
+| Play next with prefetch | Yes | No | No | No |
+| Episode playlist + subtitles | Yes | No | No | No |
+| Offline peer world map | Yes | No | No | No |
+| Piece heat / swarm details | Yes | No | No | No |
+| Seeding limits (ratio / time / speed) | Yes | Yes | Yes | Yes |
+| BitTorrent 2.0 | Yes | Yes | No | No |
+| Native Rust engine | Yes | No | No | No |
+| Create torrents | No | Yes | No | No |
+| RSS / auto-download | No | Yes | No | Yes |
+| Download scheduling | No | Yes | No | No |
+| IP filtering | No | Yes | No | No |
+| Tracker / peer proxy | No | Yes | Yes | No |
+| Android TV | No | Yes | Yes | Yes |
+| Cast / DLNA / UPnP media server | No | No | Yes | No |
+| 35+ UI languages | No | Yes | No | No |
+| Remote control of a PC/NAS client | No | No | No | Yes |
+| On f-droid.org | Yes | Yes | No | Yes |
+| No ads, no telemetry | Yes | Yes | Yes | Yes |
+| GitHub and F-Droid share a signing key | Yes | No | No | No |
 
 </details>
 
@@ -171,24 +171,24 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 
 | Protocol | Torrent Player | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| HTTP(S) and UDP trackers | ✅ | ✅ | ✅ | ❌ |
-| WebSocket trackers (WebTorrent) | ✅ | ✅ | ❌ | ❌ |
-| DHT | ✅ | ✅ | ✅ | ❌ |
-| PEX (peer exchange) | ✅ | ✅ | ✅ | ❌ |
-| LSD (same Wi-Fi) | ✅ | ✅ | ✅ | ❌ |
-| Cached public tracker list | ✅ | ❌ | ❌ | ❌ |
-| TCP and uTP | ✅ | ✅ | ✅ | ❌ |
-| WebRTC | ✅ | ✅ | ❌ | ❌ |
-| Web seeds (`url-list`) | ✅ | ✅ | ✅ | ❌ |
-| Encryption (MSE/PE) | ✅ | ✅ | ✅ | ❌ |
-| Extension protocol and Fast extension | ✅ | ✅ | ✅ | ❌ |
-| UPnP / NAT-PMP port mapping | ✅ | ✅ | ✅ | ❌ |
-| Hole punching (BEP 55) | ✅ | ✅ | ❌ | ❌ |
+| HTTP(S) and UDP trackers | Yes | Yes | Yes | No |
+| WebSocket trackers (WebTorrent) | Yes | Yes | No | No |
+| DHT | Yes | Yes | Yes | No |
+| PEX (peer exchange) | Yes | Yes | Yes | No |
+| LSD (same Wi-Fi) | Yes | Yes | Yes | No |
+| Cached public tracker list | Yes | No | No | No |
+| TCP and uTP | Yes | Yes | Yes | No |
+| WebRTC | Yes | Yes | No | No |
+| Web seeds (`url-list`) | Yes | Yes | Yes | No |
+| Encryption (MSE/PE) | Yes | Yes | Yes | No |
+| Extension protocol and Fast extension | Yes | Yes | Yes | No |
+| UPnP / NAT-PMP port mapping | Yes | Yes | Yes | No |
+| Hole punching (BEP 55) | Yes | Yes | No | No |
 
 </details>
 
 **Notes**
-- Transdroid is a remote control for a client on a PC or NAS and has no torrent engine of its own, so every protocol row is ❌.
+- Transdroid is a remote control for a client on a PC or NAS and has no torrent engine of its own, so it has no protocol support of its own.
 - Transmission for Android is distributed through IzzyOnDroid and GitHub, not f-droid.org or Google Play.
 - *Seek-first* means the swarm fetches the new playhead before anything else and moves late blocks to faster peers. Plain sequential download is not the same.
 - *Seeding limits*: Torrent Player stops seeding by ratio, time or speed. For LibreTorrent and Transdroid the row means speed and related controls.
@@ -312,9 +312,9 @@ BitTorrent is a legal technology used to share Linux distributions, open films, 
 
 ## Contributing and support
 
-- 🐛 **Found a bug or want a feature?** [Open an issue](https://github.com/karmugilen/torrent-player/issues/new). Include your Android version, phone model and, if possible, the magnet of a legal test torrent.
-- 🔧 **Pull requests are welcome.** Run the tests in [Building from source](#building-from-source) first.
-- ⭐ **Like the app?** Star the repo and tell a friend. It helps more people find a private, open source way to stream torrents.
+- **Found a bug or want a feature?** [Open an issue](https://github.com/karmugilen/torrent-player/issues/new). Include your Android version, phone model and, if possible, the magnet of a legal test torrent.
+- **Pull requests are welcome.** Run the tests in [Building from source](#building-from-source) first.
+- **Like the app?** Star the repo and tell a friend. It helps more people find a private, open source way to stream torrents.
 
 ---
 
@@ -340,7 +340,7 @@ Full notes are on [GitHub Releases](https://github.com/karmugilen/torrent-player
   </a>
 </p>
 
-If Torrent Player is useful to you, a ⭐ helps others find it.
+If Torrent Player is useful to you, a star helps others find it.
 
 ---
 
