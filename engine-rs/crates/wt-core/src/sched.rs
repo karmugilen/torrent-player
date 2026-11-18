@@ -19,20 +19,8 @@ use crate::piece_state::{Bitset, ChunkBits};
 use crate::picker::{block_coord_from_req_index, piece_req_index_range};
 use crate::torrent::TorrentInner;
 
-/// Blocks ahead of the playhead the playhead pass looks after (2 MiB), at least.
+/// Blocks ahead of the playhead the playhead pass looks after (2 MiB).
 pub const PLAYHEAD_WINDOW_BLOCKS: u32 = 128;
-/// Upper bound of the playhead window (8 MiB).
-const PLAYHEAD_WINDOW_MAX_BLOCKS: u32 = 512;
-/// The playhead window covers this many seconds of the swarm's rate, so a fast
-/// swarm keeps every peer on blocks the player needs soon instead of running
-/// past a 2 MiB window into queue order.
-const PLAYHEAD_WINDOW_SECONDS: f64 = 2.0;
-
-/// Playhead window in blocks for a swarm delivering `rate` bytes a second.
-pub fn playhead_window_blocks(rate: f64) -> u32 {
-    let blocks = (rate.max(0.0) * PLAYHEAD_WINDOW_SECONDS / f64::from(BLOCK_SIZE)) as u32;
-    blocks.clamp(PLAYHEAD_WINDOW_BLOCKS, PLAYHEAD_WINDOW_MAX_BLOCKS)
-}
 /// Blocks at the playhead that go to the quickest peer, not the first to ask.
 const FOCUS_BLOCKS: u32 = 8;
 /// A peer leaves a focus block to one this many times quicker.
@@ -441,11 +429,7 @@ impl TorrentInner {
             && wanted.candidates.first().is_none_or(|c| c.1 < PiecePriority::Readahead);
         let focus = if saving { None } else { self.request_focus_index() };
         let window = focus.map(|f| {
-            let rate: f64 = self.live_peers.read().iter()
-                .filter(|p| !p.choking.load(Ordering::Relaxed))
-                .map(|p| p.rate().max(0.0))
-                .sum();
-            f..f.saturating_add(playhead_window_blocks(rate)).min(self.max_end_request())
+            f..f.saturating_add(PLAYHEAD_WINDOW_BLOCKS).min(self.max_end_request())
         });
         if let Some(window) = &window {
             self.pick_playhead(peer, want, window.clone(), &wanted, plen, total, &mut pick);
@@ -825,14 +809,6 @@ mod tests {
         assert!(t.is_writing(3));
         t.end_write(3);
         assert!(t.begin_write(3));
-    }
-
-    #[test]
-    fn playhead_window_follows_swarm_rate() {
-        assert_eq!(playhead_window_blocks(0.0), PLAYHEAD_WINDOW_BLOCKS);
-        assert_eq!(playhead_window_blocks(1_000_000.0), PLAYHEAD_WINDOW_BLOCKS);
-        assert_eq!(playhead_window_blocks(2_097_152.0), 256);
-        assert_eq!(playhead_window_blocks(1e9), PLAYHEAD_WINDOW_MAX_BLOCKS);
     }
 
     #[test]
