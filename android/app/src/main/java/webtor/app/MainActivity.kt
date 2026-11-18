@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.AlertDialog
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
@@ -247,6 +249,23 @@ class MainActivity : ComponentActivity() {
                             onDismiss = session::dismissClearAll,
                         )
                     }
+                    // First open: ask which player to use. Settings > Playback can change it later.
+                    var askPlayer by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(!BuiltInPlayer.chosen(this@MainActivity)) }
+                    if (askPlayer) {
+                        fun pick(builtIn: Boolean) {
+                            BuiltInPlayer.setEnabled(this@MainActivity, builtIn); askPlayer = false
+                            android.widget.Toast.makeText(this@MainActivity,
+                                "You can change the video player later in Settings > Playback", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                        AlertDialog(
+                            onDismissRequest = {},
+                            icon = { androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.PlayArrow, null) },
+                            title = { androidx.compose.material3.Text("Choose a video player") },
+                            text = { androidx.compose.material3.Text("Built-in player: plays inside this app, shows download progress and fetches the spot you seek to first.\n\nExternal player: opens VLC, MX Player or another app you have installed.\n\nYou can change this any time in Settings > Playback.") },
+                            confirmButton = { androidx.compose.material3.Button(onClick = { pick(true) }) { androidx.compose.material3.Text("Built-in") } },
+                            dismissButton = { androidx.compose.material3.OutlinedButton(onClick = { pick(false) }) { androidx.compose.material3.Text("External app") } },
+                        )
+                    }
                     state.diagnosticsPreview?.let { report ->
                         AlertDialog(onDismissRequest = session::closeDiagnostics, title = { androidx.compose.material3.Text("Diagnostics preview") }, text = { androidx.compose.material3.Text(report) }, confirmButton = { androidx.compose.material3.TextButton(onClick = session::shareDiagnostics) { androidx.compose.material3.Text("Share") } }, dismissButton = { androidx.compose.material3.TextButton(onClick = session::closeDiagnostics) { androidx.compose.material3.Text("Close") } })
                     }
@@ -396,6 +415,9 @@ class MainActivity : ComponentActivity() {
             putExtra("subs.name", event.subtitles.map { it.name }.toTypedArray())
             putExtra("subs.enable", event.subtitles.take(1).map { Uri.parse(it.uri) }.toTypedArray())
             event.subtitles.firstOrNull()?.let { putExtra("subtitles_location", it.uri) }
+            if (event.mime.startsWith("video/") && BuiltInPlayer.enabled(this@MainActivity)) {
+                setClass(this@MainActivity, PlayerActivity::class.java)
+            }
         }
         launchedPlaybackUri = event.uri
         launchedPlaybackItems = event.playlist.map { it.uri }.toSet()
@@ -412,7 +434,7 @@ class MainActivity : ComponentActivity() {
 
     private fun launchViewer(intent: Intent): Boolean {
         val isMedia = intent.type?.let { it.startsWith("video/") || it.startsWith("audio/") } == true
-        val missing = if (isMedia) "Install VLC, mpv, or another media player."
+        val missing = if (isMedia) "Install VLC or another media player."
             else "No installed app can open this file type. The file is saved in Downloads/Webtor."
         try {
             if (intent.resolveActivity(packageManager) == null) {

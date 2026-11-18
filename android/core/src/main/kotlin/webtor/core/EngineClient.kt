@@ -353,6 +353,12 @@ class EngineClient(
         })
     }
 
+    /** Built-in player: fetch bytes around a seek target before the player asks for them. */
+    fun prefetch(id: String, fileIndex: Int, offset: Long, length: Long) {
+        post("/prefetch", JSONObject().put("id", id).put("fileIndex", fileIndex)
+            .put("offset", offset.coerceAtLeast(0L)).put("length", length))
+    }
+
     fun pause(id: String) { post("/pause", JSONObject().put("id", id)) }
     fun resume(id: String) { post("/resume", JSONObject().put("id", id)) }
     fun networkChanged(generation: Long, connected: Boolean) {

@@ -58,6 +58,16 @@
         </activity>
 
         <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode"
+            android:screenOrientation="sensorLandscape"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Webtor" />
+
+        <activity
             android:name=".IncomingActivity"
             android:exported="true"
             android:excludeFromRecents="true"

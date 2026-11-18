@@ -45,6 +45,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlin.math.roundToInt
@@ -122,6 +123,21 @@ fun SettingsScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
+            // First in Settings so the player choice is easy to find and change.
+            item(key = "player") {
+                SettingsGroup("Video player") {
+                    val ctx = LocalContext.current
+                    var builtIn by remember { mutableStateOf(BuiltInPlayer.enabled(ctx)) }
+                    ChoiceSetting(
+                        title = "Video player",
+                        supporting = if (builtIn) "Built-in: plays inside this app and fetches the spot you seek to first."
+                            else "External: opens VLC, MX Player or another installed app.",
+                        options = listOf(true to "Built-in", false to "External app"),
+                        selected = builtIn,
+                        onSelect = { builtIn = it; BuiltInPlayer.setEnabled(ctx, it) },
+                    )
+                }
+            }
             item(key = "downloads") {
                 SettingsGroup("Downloads") {
                     val storageKnown = state.freeBytes >= 0L

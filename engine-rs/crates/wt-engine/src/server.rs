@@ -839,6 +839,7 @@ impl EngineServer {
             ("POST", ["play"]) => self.handle_play(body_str),
             ("POST", ["file-only"]) => self.handle_file_only(body_str),
             ("POST", ["focus"]) => self.handle_focus(body_str),
+            ("POST", ["prefetch"]) => self.handle_prefetch(body_str),
             ("POST", ["configure"]) => self.handle_configure(body_str),
             ("POST", ["select"]) => self.handle_select(body_str),
             ("POST", ["pause"]) => self.handle_pause_resume(body_str, true),
@@ -1466,6 +1467,57 @@ impl EngineServer {
                 serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap(),
             )
         }
+    }
+
+    /// Built-in player seek preview: while the user drags to a new spot, fetch the
+    /// bytes around it at High so the seek lands on data that is already arriving.
+    /// Uses the resume-demand slot; it expires after 20 s or with the next prefetch.
+    fn handle_prefetch(&self, body: &str) -> (u16, Vec<u8>) {
+        let bad = || (400, serde_json::to_vec(&json!({"error": "invalid json"})).unwrap());
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return bad() };
+        let (Some(id), Some(file_index), Some(offset)) = (
+            v.get("id").and_then(|x| x.as_str()),
+            v.get("fileIndex").and_then(|x| x.as_u64()),
+            v.get("offset").and_then(|x| x.as_i64()),
+        ) else { return bad() };
+        let length = v.get("length").and_then(|x| x.as_i64()).unwrap_or(4 << 20).clamp(256 << 10, 32 << 20);
+        let Some(record) = self.record_by_id(id) else {
+            return (404, serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap());
+        };
+        let rec = record.read();
+        if rec.paused || !self.payload_transfers_allowed.load(Ordering::SeqCst) {
+            return (200, serde_json::to_vec(&json!({"ok": false})).unwrap());
+        }
+        let files = rec.torrent.files();
+        let Some(file) = files.get(file_index as usize) else {
+            return (400, serde_json::to_vec(&json!({"error": "no such file"})).unwrap());
+        };
+        let (file_offset, file_length) = (file.offset(), file.length());
+        let piece_length = rec.piece_length;
+        if piece_length <= 0 || file_length <= 0 {
+            return (200, serde_json::to_vec(&json!({"ok": false})).unwrap());
+        }
+        let start = offset.clamp(0, file_length - 1);
+        let stop = (start + length).min(file_length);
+        let begin = (file_offset + start) / piece_length;
+        let end = (file_offset + stop + piece_length - 1) / piece_length;
+        drop(files);
+        let coordinator = rec.playback_coordinator.clone();
+        let rec_id = rec.id.clone();
+        drop(rec);
+        let generation = coordinator.hold_resume(
+            (begin..end).map(|piece| (piece as u32, wt_types::PiecePriority::High)).collect(),
+        );
+        crate::playback::PlaybackHost::publish_demand(self, &rec_id, &coordinator.effective());
+        let weak = self.self_ref.get().cloned().unwrap_or_default();
+        let expire_id = rec_id.clone();
+        self.client.inner.tokio_handle.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            if let (Some(server), Some(demand)) = (weak.upgrade(), coordinator.expire_resume(generation)) {
+                crate::playback::PlaybackHost::publish_demand(&*server, &expire_id, &demand);
+            }
+        });
+        (200, serde_json::to_vec(&json!({"ok": true, "pieces": end - begin})).unwrap())
     }
 
     fn handle_focus(&self, body: &str) -> (u16, Vec<u8>) {
