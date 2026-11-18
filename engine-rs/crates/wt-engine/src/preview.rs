@@ -383,8 +383,12 @@ pub fn open_preview(
     let file_offset = file.offset();
     let backend_read = backend.clone();
 
-    let cached_only = rec.direct_play && server.playback_readers.lock().values()
-        .any(|reader| reader.id == id && !reader.is_closed());
+    // Direct Play thumbnails use only what is already in RAM or the startup
+    // cache. Fetching frames from peers while nothing plays filled the RAM
+    // cache, the pieces were evicted when the preview closed, and the next
+    // thumbnail refresh fetched them again: "cached" rose and fell, wasting
+    // data. Playing or not, a preview never downloads Direct Play video.
+    let cached_only = rec.direct_play;
     let read_fn: PreviewReadFn = Box::new(move |buf, offset| {
         let abs = file_offset + offset;
         let want = buf.len();
