@@ -54,6 +54,9 @@ pub struct ChokeConfig {
     pub data_upload_disallowed: bool,
     pub seeding: bool,
     pub tit_for_tat_headroom: i64,
+    /// Direct Play "give back": upload to every interested peer with no
+    /// tit-for-tat cap while we stream.
+    pub give_back: bool,
 }
 
 impl Default for ChokeConfig {
@@ -67,6 +70,7 @@ impl Default for ChokeConfig {
             data_upload_disallowed: false,
             seeding: false,
             tit_for_tat_headroom: TIT_FOR_TAT_HEADROOM,
+            give_back: false,
         }
     }
 }

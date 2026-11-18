@@ -145,6 +145,8 @@ pub struct TorrentInner {
     pub(crate) saved_queue: Mutex<SharedQueue>,
     /// Saved to the user's files, not Direct Play.
     pub saved_mode: std::sync::atomic::AtomicBool,
+    /// Direct Play upload without the tit-for-tat cap; see `ChokeConfig::give_back`.
+    pub(crate) give_back: std::sync::atomic::AtomicBool,
     pub(crate) last_refocus: Mutex<Option<Instant>>,
     pub(crate) refocus_seq: AtomicU64,
     pub(crate) last_read_nudge: Mutex<Option<Instant>>,
@@ -306,6 +308,7 @@ impl TorrentInner {
             wanted_pieces: Mutex::new(None),
             saved_queue: Mutex::new(SharedQueue::default()),
             saved_mode: std::sync::atomic::AtomicBool::new(false),
+            give_back: std::sync::atomic::AtomicBool::new(false),
             last_refocus: Mutex::new(None),
             refocus_seq: AtomicU64::new(0),
             last_read_nudge: Mutex::new(None),

@@ -635,6 +635,9 @@ impl EngineServer {
                 rec.torrent.allow_data_upload();
             }
         }
+        // Direct Play gives back: upload to every interested peer, not only
+        // to peers that are sending us pieces, and without the 100 KiB cap.
+        rec.torrent.set_give_back(active && rec.direct_play);
         self.apply_seed_policy(rec);
     }
 

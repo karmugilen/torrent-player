@@ -827,6 +827,7 @@ impl PeerTorrent for TorrentInner {
         ChokeConfig {
             data_upload_disallowed: self.data_upload_disallowed.load(Ordering::Relaxed),
             seeding: self.is_seeding(),
+            give_back: self.give_back.load(Ordering::Relaxed),
             ..ChokeConfig::default()
         }
     }

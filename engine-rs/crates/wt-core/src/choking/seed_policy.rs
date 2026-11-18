@@ -22,7 +22,8 @@ pub fn upload_allowed(
     if config.no_upload || config.data_upload_disallowed {
         return false;
     }
-    if config.seeding {
+    // Seeding, or Direct Play giving back what it streams: no tit-for-tat.
+    if config.seeding || config.give_back {
         return true;
     }
     if !peer_has_wanted_pieces {

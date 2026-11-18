@@ -714,6 +714,15 @@ impl Torrent {
         self.inner.wake_all_connections();
     }
 
+    /// Upload to every interested peer with no tit-for-tat cap (Direct Play
+    /// gives back while it streams). Data upload must still be allowed.
+    pub fn set_give_back(&self, on: bool) {
+        if self.inner.give_back.swap(on, Ordering::Relaxed) != on {
+            self.inner.bump_change();
+            self.inner.wake_all_connections();
+        }
+    }
+
     pub fn bump_change(&self) {
         self.inner.bump_change();
     }

@@ -1697,8 +1697,16 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         // In RAM it is a copy. On disk it must not hold up this task, which also
         // receives this peer's blocks, nor a runtime worker. Peers may be served
         // out of order, so the block is sent when the read finishes.
+        // A block we can no longer read (Direct Play evicted it from RAM, or
+        // the disk read failed) is rejected; the peer may still be feeding
+        // us, so the connection stays.
         let data = match self.torrent.read_chunk_in_memory(index, begin, length) {
-            Some(data) => data.inspect_err(|_| handle.release_upload())?,
+            Some(Ok(data)) => data,
+            Some(Err(_)) => {
+                handle.release_upload();
+                self.send(handle, Message::Reject { index, begin, length });
+                return Ok(());
+            }
             None => match tokio::runtime::Handle::try_current() {
                 Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                     let torrent = Arc::clone(&self.torrent);
@@ -1709,17 +1717,23 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
                                 handle.release_upload();
                             }
                         }
-                        Err(err) => {
+                        Err(_) => {
                             handle.release_upload();
-                            handle.close(format!("handler error: {err}"));
+                            let _ = handle.send_message(Message::Reject { index, begin, length });
                         }
                     });
                     self.state.upload_rate.add_bytes(length as usize);
                     self.state.stats.add_bytes_written(i64::from(length));
                     return Ok(());
                 }
-                _ => self.torrent.read_chunk(index, begin, length)
-                    .inspect_err(|_| handle.release_upload())?,
+                _ => match self.torrent.read_chunk(index, begin, length) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        handle.release_upload();
+                        self.send(handle, Message::Reject { index, begin, length });
+                        return Ok(());
+                    }
+                },
             },
         };
         let len = data.len();
