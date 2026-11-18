@@ -55,6 +55,13 @@ runs F-Droid's own `verify_apks` check before it reports success.
 
 ## History
 
+- 2.4.4 (104): built-in video player. Build steps changed: Debian `meson`,
+  `ninja-build`, `pkg-config` and autotools, srclibs dav1d, FFmpeg, freetype,
+  fribidi, harfbuzz, libass, libplacebo and mpv copied into `android/mpv/deps`,
+  `scandelete` for upstream wasm/glad-example/jinja-test files, then Gradle runs
+  `android/mpv/build.sh` (LGPL builds of FFmpeg and mpv). Needs an fdroiddata
+  merge request with the 104 block; checkupdates alone would copy the 103 block
+  and fail.
 - 2.4.1 (101): .torrent files and links, free-space fix for chosen folders,
   settings cleanup, seek A/B UI removed. Same Rust build steps as 2.4.0;
   F-Droid checkupdates picks up the `v2.4.1` tag.
