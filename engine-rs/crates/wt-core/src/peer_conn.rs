@@ -161,6 +161,15 @@ pub trait PeerTorrent: Send + Sync + 'static {
     fn any_wanted_among(&self, pieces: &Bitset) -> bool {
         pieces.iter().any(|piece| self.piece_priority(piece) > PiecePriority::None && !self.piece_complete(piece))
     }
+    /// Whether `pieces` holds a piece the player needs now (priority Now or
+    /// higher) that we do not have yet.
+    fn any_urgent_among(&self, pieces: &Bitset) -> bool {
+        pieces.iter().any(|piece| self.piece_priority(piece) >= PiecePriority::Now && !self.piece_complete(piece))
+    }
+    /// Any piece the player needs now that we do not have yet.
+    fn any_urgent_incomplete(&self) -> bool {
+        (0..self.num_pieces()).any(|p| self.piece_priority(p) >= PiecePriority::Now && !self.piece_complete(p))
+    }
     /// Go `Torrent.onWriteChunkErr` — storage/cache write failures while receiving.
     fn report_write_chunk_error(&self, _err: &CoreError) {}
     fn read_chunk(&self, piece: PieceIndex, begin: u32, length: u32) -> Result<Bytes>;
@@ -501,6 +510,8 @@ pub struct PeerConnHandler<T: PeerTorrent> {
     cancelled_at: HashMap<RequestIndex, Instant>,
     live: Arc<PeerLive>,
     wanted_cache: std::cell::Cell<Option<(Instant, bool)>>,
+    /// Like `wanted_cache`, for pieces the player needs now.
+    urgent_cache: std::cell::Cell<Option<(Instant, bool)>>,
     /// When a refill last found nothing to request.
     idle_refill_at: Option<Instant>,
     last_snapshot: Instant,
@@ -547,6 +558,9 @@ const STARVING_REQUESTS: usize = 16;
 /// Reuse of [`PeerConnHandler::peer_has_wanted_pieces`]; below the 50 ms
 /// choke-reconcile wake interval.
 const WANTED_PIECES_CACHE: Duration = Duration::from_millis(25);
+/// Tit-for-tat headroom for a peer holding a piece the player needs now: we
+/// upload this far ahead of what it gave us so it unchokes us sooner.
+const URGENT_TIT_FOR_TAT_HEADROOM: i64 = 8 << 20;
 /// A refill rescans every piece; one that found nothing retries at this pace.
 const IDLE_REFILL_EVERY: Duration = Duration::from_millis(250);
 /// A peer publishes its listing at this pace; each publish takes a torrent-wide
@@ -624,6 +638,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             cancelled_at: HashMap::new(),
             live: Arc::new(PeerLive::new(torrent_key)),
             wanted_cache: std::cell::Cell::new(None),
+            urgent_cache: std::cell::Cell::new(None),
             idle_refill_at: None,
             last_snapshot: Instant::now(),
             // The first message publishes, so a new peer is listed at once.
@@ -892,9 +907,39 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
         wanted
     }
 
+    /// Whether the peer has a piece the player needs now.
+    fn peer_has_urgent_pieces(&self) -> bool {
+        if !self.torrent.have_info() {
+            return false;
+        }
+        let now = Instant::now();
+        if let Some((at, urgent)) = self.urgent_cache.get() {
+            if now.saturating_duration_since(at) < WANTED_PIECES_CACHE {
+                return urgent;
+            }
+        }
+        let urgent = if self.state.peer_sent_have_all {
+            self.torrent.any_urgent_incomplete()
+        } else {
+            self.torrent.any_urgent_among(&self.live.pieces.read())
+        };
+        self.urgent_cache.set(Some((now, urgent)));
+        urgent
+    }
+
+    /// Choke config for this peer: a peer holding what the player needs now
+    /// gets a larger tit-for-tat headroom, so we earn its unchoke sooner.
+    fn choke_config_for_peer(&self) -> crate::choking::ChokeConfig {
+        let mut cfg = self.torrent.choke_config();
+        if !cfg.seeding && !cfg.give_back && self.peer_has_urgent_pieces() {
+            cfg.tit_for_tat_headroom = cfg.tit_for_tat_headroom.max(URGENT_TIT_FOR_TAT_HEADROOM);
+        }
+        cfg
+    }
+
     /// Go `upload` choke/unchoke reconciliation via `uploadAllowed`.
     fn reconcile_choke(&mut self, handle: &ConnHandle) {
-        let cfg = self.torrent.choke_config();
+        let cfg = self.choke_config_for_peer();
         let input = PeerChokeInput {
             id: self.key(),
             interested: self.state.peer_interested,
@@ -1665,7 +1710,7 @@ impl<T: PeerTorrent> PeerConnHandler<T> {
             );
             return Ok(());
         }
-        let cfg = self.torrent.choke_config();
+        let cfg = self.choke_config_for_peer();
         let input = PeerChokeInput {
             id: self.key(),
             interested: self.state.peer_interested,
@@ -1918,7 +1963,7 @@ impl<T: PeerTorrent + 'static> ConnHandler for PeerConnHandler<T> {
             return Some(Duration::from_secs(1));
         }
         // Reconcile choke when seed policy or tit-for-tat gate may have flipped.
-        let cfg = self.torrent.choke_config();
+        let cfg = self.choke_config_for_peer();
         let input = PeerChokeInput {
             id: self.key(),
             interested: self.state.peer_interested,

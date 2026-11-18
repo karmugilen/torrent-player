@@ -221,6 +221,19 @@ impl PeerTorrent for TorrentInner {
         })
     }
 
+    fn any_urgent_among(&self, wanted: &crate::piece_state::Bitset) -> bool {
+        let pieces = self.pieces.read();
+        wanted.iter().any(|i| {
+            pieces
+                .get(i as usize)
+                .is_some_and(|p| p.priority >= PiecePriority::Now && !p.complete)
+        })
+    }
+
+    fn any_urgent_incomplete(&self) -> bool {
+        self.pieces.read().iter().any(|p| p.priority >= PiecePriority::Now && !p.complete)
+    }
+
     fn background_only(&self) -> bool {
         // By what is wanted, not whether a playhead is set: any brief read, such
         // as a thumbnail, sets one, and it stays while the download runs.
