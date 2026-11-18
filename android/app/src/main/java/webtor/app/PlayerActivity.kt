@@ -171,7 +171,24 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Volatile private var loading = true
     @Volatile private var cacheWait = false
     @Volatile private var seekWait = false
-    private fun updateBuffering() { buffering.value = loading || cacheWait || seekWait }
+    /** Held paused until the total length is known, so playback never starts with no end time. */
+    private val lengthWait = mutableStateOf(false)
+    private var lengthWaitJob: kotlinx.coroutines.Job? = null
+    private fun updateBuffering() { buffering.value = loading || cacheWait || seekWait || lengthWait.value }
+
+    /** Start of each file: pause until mpv reports the duration, or 15 s at most. */
+    private fun holdForLength() {
+        lengthWait.value = true; updateBuffering()
+        if (alive) MPVLib.setPropertyBoolean("pause", true)
+        lengthWaitJob?.cancel()
+        lengthWaitJob = lifecycleScope.launch { delay(15_000); releaseLength(play = true) }
+    }
+    private fun releaseLength(play: Boolean) {
+        if (!lengthWait.value) return
+        lengthWait.value = false; updateBuffering()
+        lengthWaitJob?.cancel(); lengthWaitJob = null
+        if (play && alive) MPVLib.setPropertyBoolean("pause", false)
+    }
     private val playlistPos = mutableIntStateOf(0)
 
     /** True while a touch that began on a system gesture edge (home pill, status bar) is in progress. */
@@ -294,6 +311,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "screenshot-format" to "jpg",
             "screenshot-jpeg-quality" to "80",
         ).forEach { (k, v) -> MPVLib.setOptionString(k, v) }
+        MPVLib.setOptionString("pause", "yes") // until the length is known
+        lengthWait.value = true
         MPVLib.init()
         applyAspect(aspect.value)
         MPVLib.addObserver(this)
@@ -358,7 +377,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun eventProperty(property: String, value: Double) {
         when (property) {
             "time-pos" -> position.doubleValue = value
-            "duration" -> duration.doubleValue = value
+            "duration" -> {
+                duration.doubleValue = value
+                if (value > 0) runOnUiThread { releaseLength(play = true) }
+            }
             "demuxer-cache-time" -> cached.doubleValue = value
         }
     }
@@ -384,7 +406,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
                 loading = false; updateBuffering()
             }
-            MPVLib.MPV_EVENT_START_FILE -> { loading = true; updateBuffering() }
+            MPVLib.MPV_EVENT_START_FILE -> {
+                loading = true; updateBuffering()
+                runOnUiThread { duration.doubleValue = 0.0; holdForLength() }
+            }
             MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; updateBuffering() }
             MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip() }
         }
@@ -418,7 +443,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     fun selectTrack(type: String, id: String) =
         MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id)
 
-    fun togglePause() { if (alive) MPVLib.command(arrayOf("cycle", "pause")) }
+    fun togglePause() {
+        if (lengthWait.value) { releaseLength(play = true); return }
+        if (alive) MPVLib.command(arrayOf("cycle", "pause"))
+    }
     fun seekBy(seconds: Int) = MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes"))
     fun seekTo(seconds: Double) = MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes"))
     fun cycle(what: String) = MPVLib.command(arrayOf("osd-msg", "cycle", what))
@@ -489,6 +517,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     override fun onStop() {
         super.onStop()
+        releaseLength(play = false)
         if (!isFinishing && alive) MPVLib.setPropertyBoolean("pause", true)
     }
 
@@ -892,7 +921,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             )
 
             // Spinner only when controls are hidden; with controls, the play button shows it.
-            if (isBuffering && !isPaused && !controls) {
+            if (isBuffering && (!isPaused || lengthWait.value) && !controls) {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(Modifier.size(44.dp), color = Color.White, strokeWidth = 3.dp)
                     swarm.value?.let {
@@ -959,7 +988,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 containerColor = Color.Black.copy(alpha = 0.4f), contentColor = Color.White),
                         ) {
                             when {
-                                isBuffering && !isPaused -> CircularProgressIndicator(Modifier.size(40.dp), color = Color.White, strokeWidth = 3.dp)
+                                isBuffering && (!isPaused || lengthWait.value) -> CircularProgressIndicator(Modifier.size(40.dp), color = Color.White, strokeWidth = 3.dp)
                                 isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(44.dp))
                                 else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(44.dp))
                             }
