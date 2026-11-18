@@ -1,1 +1,1 @@
-Direct Play now serves the start and end of each video only after they pass their hash check, so a corrupt block can no longer break the player while it opens a file.
+Direct Play serves the start and end of each video only after they pass their hash check. uTP and hole punching now work with IPv6 peers. Peer exchange shares the right ports and reachability, so other clients can reach your peers.
