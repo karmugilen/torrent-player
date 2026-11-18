@@ -11,16 +11,23 @@
 <p align="center">
   <a href="https://f-droid.org/packages/webtor.app/"><img src="https://img.shields.io/f-droid/v/webtor.app?style=flat-square&logo=f-droid" alt="F-Droid"></a>
   <a href="https://github.com/karmugilen/torrent-player/releases"><img src="https://img.shields.io/github/v/release/karmugilen/torrent-player?style=flat-square&color=orange" alt="Latest release"></a>
+  <a href="https://github.com/karmugilen/torrent-player/releases"><img src="https://img.shields.io/github/downloads/karmugilen/torrent-player/total?style=flat-square&color=success" alt="Downloads"></a>
+  <a href="https://github.com/karmugilen/torrent-player/stargazers"><img src="https://img.shields.io/github/stars/karmugilen/torrent-player?style=flat-square&color=yellow" alt="GitHub stars"></a>
   <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 8.0+"></a>
   <a href="engine-rs"><img src="https://img.shields.io/badge/Engine-Rust-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust engine"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2B%20MPL--2.0-blue.svg?style=flat-square" alt="License: MIT, engine MPL-2.0"></a>
 </p>
 
 <p align="center">
-  <a href="https://f-droid.org/packages/webtor.app/">F-Droid</a> ·
-  <a href="https://github.com/karmugilen/torrent-player/releases/latest">Download APK</a> ·
+  <a href="https://f-droid.org/packages/webtor.app/"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" height="70" alt="Get it on F-Droid"></a>
+  <a href="https://github.com/karmugilen/torrent-player/releases/latest"><img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" height="70" alt="Get it on GitHub"></a>
+  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/karmugilen/torrent-player"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" height="46" alt="Get it on Obtainium"></a>
+</p>
+
+<p align="center">
   <a href="#features">Features</a> ·
   <a href="#how-it-compares">How it compares</a> ·
+  <a href="#faq">FAQ</a> ·
   <a href="#building-from-source">Build</a>
 </p>
 
@@ -98,6 +105,7 @@
 | --- | --- |
 | F-Droid | [f-droid.org/packages/webtor.app](https://f-droid.org/packages/webtor.app/) |
 | GitHub | [Latest release APK](https://github.com/karmugilen/torrent-player/releases/latest) |
+| Obtainium | [Add to Obtainium](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/karmugilen/torrent-player) for automatic updates from GitHub |
 
 Both are signed with the same key (`CN=Torrent Player`), so either one updates the other in place.
 
@@ -253,6 +261,60 @@ cd engine-rs && cargo test --workspace
 ```
 
 **Release builds:** a local `assembleRelease` is fine for testing on your own phone. Published GitHub and F-Droid builds must come from `scripts/fdroid-release.sh` so they match F-Droid’s rebuild.
+
+---
+
+## FAQ
+
+<details>
+<summary><strong>Which video players work?</strong></summary>
+
+Any player that opens Android video links. VLC, mpv, Just Player and Nova Player all work, and players that accept playlists, subtitles and resume positions get those too. If a player cannot open the stream, switch Settings → Playback → *How players get the video* to **File proxy**.
+</details>
+
+<details>
+<summary><strong>Does it use mobile data?</strong></summary>
+
+Downloads run on any network by default; you can limit them to Wi-Fi or unmetered networks in Settings → Network. Seeding finished downloads is Wi-Fi only by default.
+</details>
+
+<details>
+<summary><strong>Will Direct Play fill up my storage?</strong></summary>
+
+No. Direct Play keeps video in a bounded RAM cache and saves only a small verified startup cache on disk, so you can watch large files on a nearly full phone.
+</details>
+
+<details>
+<summary><strong>Why do transfers stop in the background after a while?</strong></summary>
+
+Recent Android versions allow apps about 6 hours a day of background data transfer. Torrent Player shows a notification when that happens; opening the app continues the transfers.
+</details>
+
+<details>
+<summary><strong>Does it collect any data?</strong></summary>
+
+No. There are no ads, accounts, analytics or crash reporters. Peer country lookup uses an offline database inside the app. See the [privacy policy](PRIVACY.md).
+</details>
+
+<details>
+<summary><strong>Which devices are supported?</strong></summary>
+
+Phones and tablets on Android 8.0 or newer with a 64-bit ARM processor (arm64-v8a), which covers almost every phone sold since 2017. No root needed.
+</details>
+
+<details>
+<summary><strong>Is it legal?</strong></summary>
+
+BitTorrent is a legal technology used to share Linux distributions, open films, games and datasets. What you download is your responsibility; use Torrent Player only with content you have the right to share.
+</details>
+
+---
+
+## Contributing and support
+
+- 🐛 **Found a bug or want a feature?** [Open an issue](https://github.com/karmugilen/torrent-player/issues/new). Include your Android version, phone model and, if possible, the magnet of a legal test torrent.
+- 🔧 **Pull requests are welcome.** Run the tests in [Building from source](#building-from-source) first.
+- ⭐ **Like the app?** Star the repo and tell a friend. It helps more people find a private, open source way to stream torrents.
 
 ---
 
