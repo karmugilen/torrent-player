@@ -135,36 +135,36 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 <details open>
 <summary><strong>Features</strong></summary>
 
-✓ supported &nbsp;·&nbsp; ✗ not supported
+✅ supported &nbsp;·&nbsp; ❌ not supported
 
 | Feature | Torrent Player | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| Runs the swarm on the phone | ✓ | ✓ | ✓ | ✗ |
-| Magnets and `.torrent` files | ✓ | ✓ | ✓ | ✓ |
-| Selective file download | ✓ | ✓ | ✓ | ✓ |
-| Stream to a player while downloading | ✓ | ✓ | ✓ | ✗ |
-| Seek-first for external players | ✓ | ✗ | ✗ | ✗ |
-| Direct Play (RAM + small disk cache) | ✓ | ✗ | ✗ | ✗ |
-| Continue watching | ✓ | ✗ | ✗ | ✗ |
-| Play next with prefetch | ✓ | ✗ | ✗ | ✗ |
-| Episode playlist + subtitles | ✓ | ✗ | ✗ | ✗ |
-| Offline peer world map | ✓ | ✗ | ✗ | ✗ |
-| Piece heat / swarm details | ✓ | ✗ | ✗ | ✗ |
-| Seeding limits (ratio / time / speed) | ✓ | ✓ | ✓ | ✓ |
-| BitTorrent 2.0 | ✓ | ✓ | ✗ | ✗ |
-| Native Rust engine | ✓ | ✗ | ✗ | ✗ |
-| Create torrents | ✗ | ✓ | ✗ | ✗ |
-| RSS / auto-download | ✗ | ✓ | ✗ | ✓ |
-| Download scheduling | ✗ | ✓ | ✗ | ✗ |
-| IP filtering | ✗ | ✓ | ✗ | ✗ |
-| Tracker / peer proxy | ✗ | ✓ | ✓ | ✗ |
-| Android TV | ✗ | ✓ | ✓ | ✓ |
-| Cast / DLNA / UPnP media server | ✗ | ✗ | ✓ | ✗ |
-| 35+ UI languages | ✗ | ✓ | ✗ | ✗ |
-| Remote control of a PC/NAS client | ✗ | ✗ | ✗ | ✓ |
-| On f-droid.org | ✓ | ✓ | ✗ | ✓ |
-| No ads, no telemetry | ✓ | ✓ | ✓ | ✓ |
-| GitHub and F-Droid share a signing key | ✓ | ✗ | ✗ | ✗ |
+| Runs the swarm on the phone | ✅ | ✅ | ✅ | ❌ |
+| Magnets and `.torrent` files | ✅ | ✅ | ✅ | ✅ |
+| Selective file download | ✅ | ✅ | ✅ | ✅ |
+| Stream to a player while downloading | ✅ | ✅ | ✅ | ❌ |
+| Seek-first for external players | ✅ | ❌ | ❌ | ❌ |
+| Direct Play (RAM + small disk cache) | ✅ | ❌ | ❌ | ❌ |
+| Continue watching | ✅ | ❌ | ❌ | ❌ |
+| Play next with prefetch | ✅ | ❌ | ❌ | ❌ |
+| Episode playlist + subtitles | ✅ | ❌ | ❌ | ❌ |
+| Offline peer world map | ✅ | ❌ | ❌ | ❌ |
+| Piece heat / swarm details | ✅ | ❌ | ❌ | ❌ |
+| Seeding limits (ratio / time / speed) | ✅ | ✅ | ✅ | ✅ |
+| BitTorrent 2.0 | ✅ | ✅ | ❌ | ❌ |
+| Native Rust engine | ✅ | ❌ | ❌ | ❌ |
+| Create torrents | ❌ | ✅ | ❌ | ❌ |
+| RSS / auto-download | ❌ | ✅ | ❌ | ✅ |
+| Download scheduling | ❌ | ✅ | ❌ | ❌ |
+| IP filtering | ❌ | ✅ | ❌ | ❌ |
+| Tracker / peer proxy | ❌ | ✅ | ✅ | ❌ |
+| Android TV | ❌ | ✅ | ✅ | ✅ |
+| Cast / DLNA / UPnP media server | ❌ | ❌ | ✅ | ❌ |
+| 35+ UI languages | ❌ | ✅ | ❌ | ❌ |
+| Remote control of a PC/NAS client | ❌ | ❌ | ❌ | ✅ |
+| On f-droid.org | ✅ | ✅ | ❌ | ✅ |
+| No ads, no telemetry | ✅ | ✅ | ✅ | ✅ |
+| GitHub and F-Droid share a signing key | ✅ | ❌ | ❌ | ❌ |
 
 </details>
 
@@ -173,19 +173,19 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 
 | Protocol | Torrent Player | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| HTTP(S) and UDP trackers | ✓ | ✓ | ✓ | ✗ |
-| WebSocket trackers (WebTorrent) | ✓ | ✓ | ✗ | ✗ |
-| DHT | ✓ | ✓ | ✓ | ✗ |
-| PEX (peer exchange) | ✓ | ✓ | ✓ | ✗ |
-| LSD (same Wi-Fi) | ✓ | ✓ | ✓ | ✗ |
-| Cached public tracker list | ✓ | ✗ | ✗ | ✗ |
-| TCP and uTP | ✓ | ✓ | ✓ | ✗ |
-| WebRTC | ✓ | ✓ | ✗ | ✗ |
-| Web seeds (`url-list`) | ✓ | ✓ | ✓ | ✗ |
-| Encryption (MSE/PE) | ✓ | ✓ | ✓ | ✗ |
-| Extension protocol and Fast extension | ✓ | ✓ | ✓ | ✗ |
-| UPnP / NAT-PMP port mapping | ✓ | ✓ | ✓ | ✗ |
-| Hole punching (BEP 55) | ✓ | ✓ | ✗ | ✗ |
+| HTTP(S) and UDP trackers | ✅ | ✅ | ✅ | ❌ |
+| WebSocket trackers (WebTorrent) | ✅ | ✅ | ❌ | ❌ |
+| DHT | ✅ | ✅ | ✅ | ❌ |
+| PEX (peer exchange) | ✅ | ✅ | ✅ | ❌ |
+| LSD (same Wi-Fi) | ✅ | ✅ | ✅ | ❌ |
+| Cached public tracker list | ✅ | ❌ | ❌ | ❌ |
+| TCP and uTP | ✅ | ✅ | ✅ | ❌ |
+| WebRTC | ✅ | ✅ | ❌ | ❌ |
+| Web seeds (`url-list`) | ✅ | ✅ | ✅ | ❌ |
+| Encryption (MSE/PE) | ✅ | ✅ | ✅ | ❌ |
+| Extension protocol and Fast extension | ✅ | ✅ | ✅ | ❌ |
+| UPnP / NAT-PMP port mapping | ✅ | ✅ | ✅ | ❌ |
+| Hole punching (BEP 55) | ✅ | ✅ | ❌ | ❌ |
 
 </details>
 
