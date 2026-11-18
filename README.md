@@ -135,34 +135,36 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 <details open>
 <summary><strong>Features</strong></summary>
 
+✓ supported &nbsp;·&nbsp; ✗ not supported
+
 | Feature | Torrent Player | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| Runs the swarm on the phone | Yes | Yes | Yes | No |
-| Magnets and `.torrent` files | Yes | Yes | Yes | Yes |
-| Selective file download | Yes | Yes | Yes | Yes |
-| Stream to a player while downloading | Yes | Yes | Yes | No |
-| Seek-first for external players | Yes | No | No | No |
-| Direct Play (RAM + small disk cache) | Yes | No | No | No |
-| Continue watching | Yes | No | No | No |
-| Play next with prefetch | Yes | No | No | No |
-| Episode playlist + subtitles | Yes | No | No | No |
-| Offline peer world map | Yes | No | No | No |
-| Piece heat / swarm details | Yes | No | No | No |
-| Seeding limits (ratio / time / speed) | Yes | Yes | Yes | Yes |
-| BitTorrent 2.0 | Yes | Yes | No | No |
-| Native Rust engine | Yes | No | No | No |
-| Create torrents | No | Yes | No | No |
-| RSS / auto-download | No | Yes | No | Yes |
-| Download scheduling | No | Yes | No | No |
-| IP filtering | No | Yes | No | No |
-| Tracker / peer proxy | No | Yes | Yes | No |
-| Android TV | No | Yes | Yes | Yes |
-| Cast / DLNA / UPnP media server | No | No | Yes | No |
-| 35+ UI languages | No | Yes | No | No |
-| Remote control of a PC/NAS client | No | No | No | Yes |
-| On f-droid.org | Yes | Yes | No | Yes |
-| No ads, no telemetry | Yes | Yes | Yes | Yes |
-| GitHub and F-Droid share a signing key | Yes | No | No | No |
+| Runs the swarm on the phone | ✓ | ✓ | ✓ | ✗ |
+| Magnets and `.torrent` files | ✓ | ✓ | ✓ | ✓ |
+| Selective file download | ✓ | ✓ | ✓ | ✓ |
+| Stream to a player while downloading | ✓ | ✓ | ✓ | ✗ |
+| Seek-first for external players | ✓ | ✗ | ✗ | ✗ |
+| Direct Play (RAM + small disk cache) | ✓ | ✗ | ✗ | ✗ |
+| Continue watching | ✓ | ✗ | ✗ | ✗ |
+| Play next with prefetch | ✓ | ✗ | ✗ | ✗ |
+| Episode playlist + subtitles | ✓ | ✗ | ✗ | ✗ |
+| Offline peer world map | ✓ | ✗ | ✗ | ✗ |
+| Piece heat / swarm details | ✓ | ✗ | ✗ | ✗ |
+| Seeding limits (ratio / time / speed) | ✓ | ✓ | ✓ | ✓ |
+| BitTorrent 2.0 | ✓ | ✓ | ✗ | ✗ |
+| Native Rust engine | ✓ | ✗ | ✗ | ✗ |
+| Create torrents | ✗ | ✓ | ✗ | ✗ |
+| RSS / auto-download | ✗ | ✓ | ✗ | ✓ |
+| Download scheduling | ✗ | ✓ | ✗ | ✗ |
+| IP filtering | ✗ | ✓ | ✗ | ✗ |
+| Tracker / peer proxy | ✗ | ✓ | ✓ | ✗ |
+| Android TV | ✗ | ✓ | ✓ | ✓ |
+| Cast / DLNA / UPnP media server | ✗ | ✗ | ✓ | ✗ |
+| 35+ UI languages | ✗ | ✓ | ✗ | ✗ |
+| Remote control of a PC/NAS client | ✗ | ✗ | ✗ | ✓ |
+| On f-droid.org | ✓ | ✓ | ✗ | ✓ |
+| No ads, no telemetry | ✓ | ✓ | ✓ | ✓ |
+| GitHub and F-Droid share a signing key | ✓ | ✗ | ✗ | ✗ |
 
 </details>
 
@@ -171,19 +173,19 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 
 | Protocol | Torrent Player | LibreTorrent | Transmission | Transdroid |
 | --- | :---: | :---: | :---: | :---: |
-| HTTP(S) and UDP trackers | Yes | Yes | Yes | No |
-| WebSocket trackers (WebTorrent) | Yes | Yes | No | No |
-| DHT | Yes | Yes | Yes | No |
-| PEX (peer exchange) | Yes | Yes | Yes | No |
-| LSD (same Wi-Fi) | Yes | Yes | Yes | No |
-| Cached public tracker list | Yes | No | No | No |
-| TCP and uTP | Yes | Yes | Yes | No |
-| WebRTC | Yes | Yes | No | No |
-| Web seeds (`url-list`) | Yes | Yes | Yes | No |
-| Encryption (MSE/PE) | Yes | Yes | Yes | No |
-| Extension protocol and Fast extension | Yes | Yes | Yes | No |
-| UPnP / NAT-PMP port mapping | Yes | Yes | Yes | No |
-| Hole punching (BEP 55) | Yes | Yes | No | No |
+| HTTP(S) and UDP trackers | ✓ | ✓ | ✓ | ✗ |
+| WebSocket trackers (WebTorrent) | ✓ | ✓ | ✗ | ✗ |
+| DHT | ✓ | ✓ | ✓ | ✗ |
+| PEX (peer exchange) | ✓ | ✓ | ✓ | ✗ |
+| LSD (same Wi-Fi) | ✓ | ✓ | ✓ | ✗ |
+| Cached public tracker list | ✓ | ✗ | ✗ | ✗ |
+| TCP and uTP | ✓ | ✓ | ✓ | ✗ |
+| WebRTC | ✓ | ✓ | ✗ | ✗ |
+| Web seeds (`url-list`) | ✓ | ✓ | ✓ | ✗ |
+| Encryption (MSE/PE) | ✓ | ✓ | ✓ | ✗ |
+| Extension protocol and Fast extension | ✓ | ✓ | ✓ | ✗ |
+| UPnP / NAT-PMP port mapping | ✓ | ✓ | ✓ | ✗ |
+| Hole punching (BEP 55) | ✓ | ✓ | ✗ | ✗ |
 
 </details>
 
