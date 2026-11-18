@@ -461,6 +461,12 @@ fun SettingsScreen(
                         onClick = { runCatching { uri.openUri(SOURCE_CODE_URL) } },
                     )
                     GroupDivider()
+                    SettingRow(
+                        title = "Open source licenses",
+                        supporting = "Video player libraries (mpv, FFmpeg) are GPL. Their sources and notices.",
+                        onClick = { runCatching { uri.openUri(NOTICES_URL) } },
+                    )
+                    GroupDivider()
                     SettingRow(title = "Version", supporting = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                 }
             }
@@ -597,3 +603,4 @@ private fun ValueBadge(text: String) {
 
 private const val PRIVACY_POLICY_URL = "https://github.com/karmugilen/torrent-player/blob/v2.4.0/PRIVACY.md"
 private const val SOURCE_CODE_URL = "https://github.com/karmugilen/torrent-player"
+private const val NOTICES_URL = "https://github.com/karmugilen/torrent-player/blob/v2.4.4/NOTICE.md"

@@ -1,0 +1,1 @@
+Built-in video player. Choose it or your own player the first time you play; change it in Settings, Playback. The seek bar shows which parts are downloaded, and seeking fetches the new spot first. Swipe for brightness and volume, double tap to skip, hold for 2x and slide to change speed. Audio and subtitle tracks, picture-in-picture, and library previews from frames you watched.

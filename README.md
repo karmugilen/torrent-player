@@ -47,7 +47,7 @@
 
 ## Why Torrent Player
 
-- **Watch right away.** Open a magnet and start playing in VLC, mpv, Just Player or any other video player while the torrent is still downloading.
+- **Watch right away.** Open a magnet and start playing in the built-in player, or in VLC, mpv, Just Player or any other video player, while the torrent is still downloading.
 - **Seeking that keeps up.** Jump anywhere in a video and Torrent Player fetches that spot first, sends late blocks to faster peers and pulls MP4/MKV keyframes ahead.
 - **Direct Play.** Stream from a bounded RAM cache without filling your storage. Only a small verified startup cache is kept on disk.
 - **Modern swarm.** BitTorrent 2.0, BEP 55 hole punching over IPv4 and IPv6, WebTorrent peers, DHT, PEX and LSD, all in one native Rust engine.
@@ -64,6 +64,8 @@
 - Adding a torrent that is already in your library opens that entry instead of creating a duplicate.
 
 ### Playing
+- **Built-in player** (new in 2.4.4): the seek bar shows which parts are downloaded, and dragging it fetches the new spot first. Swipe left for brightness and right for volume, double tap to skip, swipe sideways to seek, hold for 2x and slide to pick 0.25x–4x. Audio and subtitle tracks, picture-in-picture, and library previews from frames you watched.
+- **Or your own player:** choose on the first play, change any time in Settings → Playback → *Video player*.
 - **Stream while downloading** to any Android video player, or play finished files at any time.
 - **Continue watching:** every episode keeps its position.
 - **Play next:** when one video ends the next selected one starts, and its opening is fetched in advance.
@@ -110,7 +112,7 @@
 Both are signed with the same key (`CN=Torrent Player`), so either one updates the other in place.
 
 ```bash
-adb install -r torrent-player-2.4.3.apk
+adb install -r torrent-player-2.4.4.apk
 ```
 
 - Package: `webtor.app` (arm64-v8a)
@@ -123,7 +125,7 @@ adb install -r torrent-player-2.4.3.apk
 1. **Add a torrent.** Paste a magnet or link, tap **Open file**, or share a `.torrent` into the app.
 2. **Pick files.** Torrent Player loads the file list; tick the files you want. Magnets can be saved before the list arrives.
 3. **Choose how to get it.** **Download** saves the files; **Direct Play** streams from RAM.
-4. **Press Play.** Android asks which video player to use. Selected subtitle files go along with the video.
+4. **Press Play.** The first time, pick the built-in player or your own app. Selected subtitle files go along with the video.
 5. **Manage it later.** Downloads stay in the library across restarts. **Pause** keeps the files and drops connections; **Delete** asks whether to remove the files too.
 
 ---
@@ -143,6 +145,7 @@ Torrent Player next to [LibreTorrent](https://github.com/proninyaroslav/libretor
 | Magnets and `.torrent` files | ✅ | ✅ | ✅ | ✅ |
 | Selective file download | ✅ | ✅ | ✅ | ✅ |
 | Stream to a player while downloading | ✅ | ✅ | ✅ | ❌ |
+| Built-in player with downloaded-parts seek bar | ✅ | ❌ | ❌ | ❌ |
 | Seek-first for external players | ✅ | ❌ | ❌ | ❌ |
 | Direct Play (RAM + small disk cache) | ✅ | ❌ | ❌ | ❌ |
 | Continue watching | ✅ | ❌ | ❌ | ❌ |
@@ -271,7 +274,7 @@ cd engine-rs && cargo test --workspace
 <details>
 <summary><strong>Which video players work?</strong></summary>
 
-Any player that opens Android video links. VLC, mpv, Just Player and Nova Player all work, and players that accept playlists, subtitles and resume positions get those too. If a player cannot open the stream, switch Settings → Playback → *How players get the video* to **File proxy**.
+The built-in player works out of the box. Any player that opens Android video links works too: VLC, mpv, Just Player and Nova Player all do, and players that accept playlists, subtitles and resume positions get those too. If a player cannot open the stream, switch Settings → Playback → *How players get the video* to **File proxy**.
 </details>
 
 <details>
@@ -324,6 +327,7 @@ BitTorrent is a legal technology used to share Linux distributions, open films, 
 
 Full notes are on [GitHub Releases](https://github.com/karmugilen/torrent-player/releases).
 
+- **2.4.4**: Built-in video player with a seek bar that shows downloaded parts, seek prefetch, gestures, hold-and-slide speed, audio and subtitle tracks, and picture-in-picture. Pick it or your own player on first play.
 - **2.4.3**: Hole punching starts right away for peers behind routers and now works over IPv6. Direct Play gives back to the swarm while you watch and serves only verified video headers. Quieter Direct Play notification, and notification permission is asked when the app opens.
 - **2.4.2**: BitTorrent 2.0 (hybrid and pure v2), BEP 55 hole punching, BT1/BT2 and hole-punch counts in Connections, and a lighter app ↔ engine link.
 - **2.4.1**: `.torrent` files and download links, free space shown per volume (including SD cards), tidier settings.
@@ -353,3 +357,5 @@ Use Torrent Player only with content you have the right to download or share. Sc
 ## License
 
 The app is released under the [MIT License](LICENSE). The torrent engine in `engine-rs/` is under the [Mozilla Public License 2.0](engine-rs/LICENSE), because it derives from [anacrolix/torrent](https://github.com/anacrolix/torrent); see [engine-rs/NOTICE.md](engine-rs/NOTICE.md).
+
+The built-in player bundles mpv and FFmpeg built as GPL, so the APK as a whole is distributed under GPL-3.0 terms. Versions, licenses and corresponding source are in [NOTICE.md](NOTICE.md).

@@ -5,6 +5,7 @@
 <p><b>Core Features:</b></p>
 <ul>
   <li><b>Direct Local Storage:</b> Single-contract download directly to local public storage (<code>Downloads/Webtor</code>) for straightforward file management.</li>
+  <li><b>Built-in Video Player:</b> Seek bar that shows downloaded parts, seek prefetch, brightness and volume swipes, hold-and-slide playback speed, audio and subtitle tracks, and picture-in-picture.</li>
   <li><b>In-Progress Video Streaming:</b> Stream growing video files directly to external players such as VLC, Nova Video Player, MPV, or Just Player without waiting for downloads to finish.</li>
   <li><b>Selective File Downloading:</b> Choose specific files to prioritize or download in multi-file swarms.</li>
   <li><b>Bitfield Piece Visualizer:</b> Interactive real-time visualizer showing piece distribution and swarm availability.</li>
@@ -18,7 +19,7 @@
 
 <p><b>Privacy & Freedom:</b></p>
 <ul>
-  <li>100% Free and Open Source Software (MIT License; the engine is MPL-2.0).</li>
+  <li>100% Free and Open Source Software (MIT License; the engine is MPL-2.0; the bundled mpv and FFmpeg video libraries are GPL).</li>
   <li>No advertising trackers, analytics, or telemetry.</li>
   <li>Zero advertisements.</li>
   <li>Direct peer-to-peer swarm connectivity (DHT, UDP trackers, TCP, uTP, WebSockets, and WebRTC).</li>
