@@ -65,6 +65,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
@@ -623,7 +624,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun setSpeed(x: Double) = MPVLib.setPropertyDouble("speed", x)
 
-    private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, IGNORE }
+    private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, SPEED, IGNORE }
 
     @Composable
     private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit) {
@@ -635,6 +636,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         var popupSub by remember { mutableStateOf<String?>(null) }
         var popupLevel by remember { mutableStateOf<Float?>(null) }
         var fast by remember { mutableStateOf(false) }
+        // Hold speed as in mpvEx: starts at 2x, slide to change, swipe up while holding to keep it.
+        var holdSpeed by remember { mutableStateOf(2.0) }
+        var speedLocked by remember { mutableStateOf(false) }
+        val view = androidx.compose.ui.platform.LocalView.current
         var trackSheet by remember { mutableStateOf<String?>(null) }
         // Double-tap skip streak, like MX Player: side (-1 / +1) and seconds so far.
         var skipSide by remember { mutableIntStateOf(0) }
@@ -715,11 +720,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 coroutineScope {
                                     val hold = launch {
                                         delay(450)
-                                        held = true; fast = true; setSpeed(2.0)
+                                        held = true; speedLocked = false; holdSpeed = 2.0; fast = true; setSpeed(2.0)
                                     }
                                     tryAwaitRelease()
                                     hold.cancel()
-                                    if (held) { setSpeed(1.0); fast = false }
+                                    if (held) { if (!speedLocked) setSpeed(1.0); fast = false }
                                 }
                             },
                             onTap = { if (!held && !streakPress) { controls = !controls; touchTick++ } },
@@ -742,6 +747,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             val start = down.position
                             val startAt = System.currentTimeMillis()
                             var mode = Drag.NONE
+                            var speedX = 0f
+                            var speedY = 0f
                             var level = 0f
                             var origin = 0.0
                             var target = 0.0
@@ -763,11 +770,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 val ax = kotlin.math.abs(dx); val ay = kotlin.math.abs(dy)
                                 if (mode == Drag.NONE) {
                                     mode = when {
-                                        fast || trackSheet != null -> if (ax > 30f || ay > 30f) Drag.IGNORE else Drag.NONE
+                                        fast -> Drag.SPEED
+                                        trackSheet != null -> if (ax > 30f || ay > 30f) Drag.IGNORE else Drag.NONE
                                         ax > 30f && ax > ay * 2f && System.currentTimeMillis() - startAt > 100 -> Drag.SEEK
                                         ay > 30f && ay > ax -> if (start.x < size.width / 2f) Drag.BRIGHTNESS else Drag.VOLUME
                                         else -> Drag.NONE
                                     }
+                                    if (mode == Drag.SPEED) { speedX = change.position.x; speedY = change.position.y }
                                     when (mode) {
                                         Drag.VOLUME -> level = volumeFraction()
                                         Drag.BRIGHTNESS -> level = currentBrightness()
@@ -800,10 +809,25 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                         }
                                         touchTick++
                                     }
+                                    Drag.SPEED -> if (fast) {
+                                        // Right is faster, left is slower: about a third of the screen spans all steps.
+                                        val step = ((change.position.x - speedX) / size.width * (speeds.size - 1) * 3.5f).toInt()
+                                        val next = speeds[(speeds.indexOf(2.0) + step).coerceIn(0, speeds.size - 1)]
+                                        if (next != holdSpeed) {
+                                            holdSpeed = next; setSpeed(next)
+                                            view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                        }
+                                        // Swipe up while holding keeps this speed after letting go.
+                                        if (!speedLocked && speedY - change.position.y > 60.dp.toPx()) {
+                                            speedLocked = true
+                                            view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                                        }
+                                    }
                                     Drag.NONE, Drag.IGNORE -> {}
                                 }
                                 // Once a swipe is decided, taps, double taps and hold-for-2x stand down.
-                                if (mode != Drag.NONE) change.consume()
+                                // Speed sliding leaves the touch to the hold, which resets on release.
+                                if (mode != Drag.NONE && mode != Drag.SPEED) change.consume()
                             }
                         }
                     },
@@ -956,16 +980,28 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
 
-            // Hold for 2x: a small chip at the top.
-            if (fast) {
-                Row(
+            // Hold speed: chip at the top with the current speed. Locked speed stays; tap the chip for normal speed.
+            if (fast || speedLocked) {
+                Column(
                     Modifier.align(Alignment.TopCenter).padding(top = 24.dp)
-                        .clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.55f))
+                        .then(if (speedLocked && !fast) Modifier.clickable { speedLocked = false; holdSpeed = 2.0; setSpeed(1.0) } else Modifier)
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("2×", color = Color.White, style = MaterialTheme.typography.labelLarge)
-                    Icon(Icons.Filled.FastForward, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(speedLabel(holdSpeed), color = Color.White, style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.width(4.dp))
+                        Icon(if (speedLocked) Icons.Filled.Lock else Icons.Filled.FastForward, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    }
+                    Text(
+                        when {
+                            fast && !speedLocked -> "slide ← → to change · swipe up to keep"
+                            fast -> "speed kept"
+                            else -> "tap for normal speed"
+                        },
+                        color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall,
+                    )
                 }
             }
         }
@@ -1060,6 +1096,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
     }
 }
+
+private val speeds = listOf(0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+
+private fun speedLabel(x: Double) = (if (x % 1.0 == 0.0) x.toInt().toString() else x.toString()) + "×"
 
 private fun clock(seconds: Double): String {
     val s = seconds.toLong().coerceAtLeast(0)
