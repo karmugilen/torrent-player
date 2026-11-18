@@ -41,7 +41,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -992,7 +991,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         SeekBar(
                             fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
                             cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                            downloaded = spans.value,
                             onDrag = { f ->
                                 sliderDragging = true; sliderValue = (f * dur).toFloat()
                                 seekPopup(sliderValue.toDouble()); touchTick++
@@ -1079,17 +1077,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     /**
      * Seek bar: dim track, light where the player has it buffered, white for
-     * what was played, and a short pulse just past the buffer while the torrent
-     * is still fetching.
+     * what was played. Download progress is shown as a number below it.
      */
     @Composable
-    private fun SeekBar(fraction: Float, cachedFraction: Float, downloaded: List<Span>, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
+    private fun SeekBar(fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
         var active by remember { mutableStateOf(false) }
-        val pulse by androidx.compose.animation.core.rememberInfiniteTransition(label = "fetch").animateFloat(
-            initialValue = 0.18f, targetValue = 0.6f, label = "fetch",
-            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-                androidx.compose.animation.core.tween(700), androidx.compose.animation.core.RepeatMode.Reverse),
-        )
         Canvas(
             Modifier.fillMaxWidth().height(32.dp)
                 .pointerInput(Unit) {
@@ -1109,11 +1101,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val y = size.height / 2 - h / 2
             val r = CornerRadius(h / 2)
             drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(0f, y), Size(size.width, h), r)
-            // Fetching: a short pulse just past the buffer while the file is not fully downloaded.
-            val edge = maxOf(fraction, cachedFraction)
-            val complete = downloaded.isNotEmpty() && downloaded.all { it.done >= 0.99f }
-            if (downloaded.isNotEmpty() && !complete && edge < 1f) drawRect(Color.White.copy(alpha = pulse),
-                Offset(edge * size.width, y), Size(minOf(0.02f, 1f - edge) * size.width, h))
+            if (cachedFraction > fraction) drawRect(Color.White.copy(alpha = 0.45f),
+                Offset(fraction * size.width, y), Size((cachedFraction - fraction) * size.width, h))
             drawRoundRect(Color.White, Offset(0f, y), Size(fraction * size.width, h), r)
             drawCircle(Color.White, radius = (if (active) 9.dp else 7.dp).toPx(), center = Offset(fraction * size.width, size.height / 2))
         }
