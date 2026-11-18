@@ -153,6 +153,31 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun updateBuffering() { buffering.value = loading || cacheWait || seekWait }
     private val playlistPos = mutableIntStateOf(0)
 
+    /** True while a touch that began on a system gesture edge (home pill, status bar) is in progress. */
+    private var edgeTouch = false
+
+    /**
+     * Swiping up from the home pill or down from the top belongs to the system.
+     * Those touches never reach the player, so they cannot seek, change volume
+     * or pop up the time overlay.
+     */
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        if (ev.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+            val h = window.decorView.height.toFloat()
+            val minEdge = 40 * resources.displayMetrics.density
+            val g = androidx.core.view.ViewCompat.getRootWindowInsets(window.decorView)
+                ?.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemGestures())
+            val bottom = maxOf(minEdge, (g?.bottom ?: 0).toFloat())
+            val top = maxOf(minEdge * 0.6f, (g?.top ?: 0).toFloat())
+            edgeTouch = h > 0 && (ev.y >= h - bottom || ev.y <= top)
+        }
+        if (edgeTouch) {
+            if (ev.actionMasked == android.view.MotionEvent.ACTION_UP || ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL) edgeTouch = false
+            return true
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -853,7 +878,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
 
                     // Bottom: time, seek bar, then actions.
-                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 28.dp, vertical = 14.dp)) {
+                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 28.dp, end = 28.dp, top = 14.dp, bottom = 40.dp)) {
                         val shown = when {
                             sliderDragging -> sliderValue.toDouble()
                             else -> pendingSeek ?: pos
