@@ -821,6 +821,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPip.value = isInPictureInPictureMode
         pipBuffer(isInPictureInPictureMode)
+        // The page went into the small window with its video: the app behind it goes back to
+        // the library, not to a second copy of the same page. Tapping the card brings it back.
+        if (isInPictureInPictureMode && pageMode) {
+            val session = (application as WebtorApp).session
+            if (session.ui.value.openTorrentKey == detailKey) session.closeFiles()
+        }
         // Closed from the small window: stop and report the position.
         if (!isInPictureInPictureMode && lifecycle.currentState == androidx.lifecycle.Lifecycle.State.CREATED) close()
     }
