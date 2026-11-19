@@ -173,20 +173,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Volatile private var seekWait = false
     /** Held paused until the total length is known, so playback never starts with no end time. */
     private val lengthWait = mutableStateOf(false)
-    private var lengthWaitJob: kotlinx.coroutines.Job? = null
     private fun updateBuffering() { buffering.value = loading || cacheWait || seekWait || lengthWait.value }
 
-    /** Start of each file: pause until mpv reports the duration, or 15 s at most. */
+    /**
+     * Start of each file: pause until mpv reports the duration. No time limit: a torrent
+     * may need a while to fetch the header or the index at the end of the file, and
+     * starting before that leaves the player with no end time. Tapping play skips the wait.
+     * Runs on the UI thread, like every duration update, so a late reset can never wipe
+     * a length that already arrived.
+     */
     private fun holdForLength() {
+        duration.doubleValue = 0.0
         lengthWait.value = true; updateBuffering()
         if (alive) MPVLib.setPropertyBoolean("pause", true)
-        lengthWaitJob?.cancel()
-        lengthWaitJob = lifecycleScope.launch { delay(15_000); releaseLength(play = true) }
     }
     private fun releaseLength(play: Boolean) {
         if (!lengthWait.value) return
         lengthWait.value = false; updateBuffering()
-        lengthWaitJob?.cancel(); lengthWaitJob = null
         if (play && alive) MPVLib.setPropertyBoolean("pause", false)
     }
     private val playlistPos = mutableIntStateOf(0)
@@ -366,7 +369,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     // mpv calls these on its own thread.
-    override fun eventProperty(property: String) {}
+    override fun eventProperty(property: String) {
+        // Property became unavailable (between files): forget the old length.
+        if (property == "duration") runOnUiThread { duration.doubleValue = 0.0 }
+    }
     override fun eventProperty(property: String, value: Long) {
         if (property == "playlist-pos" && value >= 0) runOnUiThread {
             if (value.toInt() != playlistPos.intValue) { runCatching { saveFrames() }; synchronized(frames) { frames.clear() } }
@@ -377,9 +383,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun eventProperty(property: String, value: Double) {
         when (property) {
             "time-pos" -> position.doubleValue = value
-            "duration" -> {
+            "duration" -> runOnUiThread {
                 duration.doubleValue = value
-                if (value > 0) runOnUiThread { releaseLength(play = true) }
+                if (value > 0) releaseLength(play = true)
             }
             "demuxer-cache-time" -> cached.doubleValue = value
         }
@@ -408,7 +414,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             }
             MPVLib.MPV_EVENT_START_FILE -> {
                 loading = true; updateBuffering()
-                runOnUiThread { duration.doubleValue = 0.0; holdForLength() }
+                runOnUiThread { holdForLength() }
             }
             MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; updateBuffering() }
             MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip() }
