@@ -1139,7 +1139,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             },
                         )
                     }
-                    .pointerInput(Unit) {
+                    .pointerInput(compact) {
+                        // Small player on the page: swipe up goes full screen (as on YouTube);
+                        // no brightness, volume or drag-seek there, the page scrolls instead.
                         // Swipes as in mpvEx: measured from where the finger went down.
                         // Clearly sideways (over 30 px and twice the vertical move) seeks
                         // 0.05 s per pixel with the video paused, and resumes on release.
@@ -1175,6 +1177,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                     mode = when {
                                         fast -> Drag.SPEED
                                         trackSheet != null -> if (ax > 30f || ay > 30f) Drag.IGNORE else Drag.NONE
+                                        compact -> if (ax > 30f || ay > 30f) {
+                                            if (dy < -30f && ay > ax) setFullscreen(true)
+                                            Drag.IGNORE
+                                        } else Drag.NONE
                                         ax > 30f && ax > ay * 2f && System.currentTimeMillis() - startAt > 100 -> Drag.SEEK
                                         ay > 30f && ay > ax -> if (start.x < size.width / 2f) Drag.BRIGHTNESS else Drag.VOLUME
                                         else -> Drag.NONE
