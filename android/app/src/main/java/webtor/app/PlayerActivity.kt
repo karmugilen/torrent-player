@@ -81,6 +81,10 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.runtime.collectAsState
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.layout
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -347,13 +351,46 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
             GaleTheme(dark = ui.darkTheme, theme = ui.appTheme, reducedEffects = ui.reducedEffects, dynamicColors = ui.dynamicColors) {
-                Column(
+                // How far the page has pushed the video up: 0 (all shown) down to minus its height.
+                // The video scrolls away with the page and comes back when the list is at its top.
+                val shift = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+                LaunchedEffect(full) { shift.floatValue = 0f }
+                androidx.compose.foundation.layout.BoxWithConstraints(
                     Modifier.fillMaxSize()
                         .background(if (full) Color.Black else MaterialTheme.colorScheme.background)
-                        .then(if (full) Modifier else Modifier.background(Color.Black).statusBarsPadding()),
+                        .then(if (full) Modifier else Modifier.background(Color.Black).statusBarsPadding())
+                        .clipToBounds(),
                 ) {
+                    val playerH = constraints.maxWidth * 9f / 16f
+                    val scroll = remember(playerH) {
+                        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+                            override fun onPreScroll(available: androidx.compose.ui.geometry.Offset,
+                                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
+                                if (available.y >= 0) return androidx.compose.ui.geometry.Offset.Zero
+                                val next = (shift.floatValue + available.y).coerceAtLeast(-playerH)
+                                val used = next - shift.floatValue; shift.floatValue = next
+                                return androidx.compose.ui.geometry.Offset(0f, used)
+                            }
+                            override fun onPostScroll(consumed: androidx.compose.ui.geometry.Offset, available: androidx.compose.ui.geometry.Offset,
+                                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
+                                if (available.y <= 0) return androidx.compose.ui.geometry.Offset.Zero
+                                val next = (shift.floatValue + available.y).coerceAtMost(0f)
+                                val used = next - shift.floatValue; shift.floatValue = next
+                                return androidx.compose.ui.geometry.Offset(0f, used)
+                            }
+                        }
+                    }
+                    Column(Modifier.fillMaxSize().then(if (full) Modifier else Modifier.nestedScroll(scroll))) {
                     // Same node in both layouts, so the video surface is kept, never rebuilt.
-                    Box(if (full) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                    // On the page its slot shrinks as the page scrolls and the video slides up out of it.
+                    Box(if (full) Modifier.fillMaxSize() else Modifier.fillMaxWidth()
+                        .layout { m, c ->
+                            val h = playerH.toInt()
+                            val p = m.measure(c.copy(minHeight = h, maxHeight = h))
+                            val shown = (playerH + shift.floatValue).toInt().coerceIn(0, h)
+                            layout(p.width, shown) { p.place(0, shown - h) }
+                        }
+                        .clipToBounds()) {
                         androidx.compose.material3.MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme(
                             primary = Color.White, onPrimary = Color.Black,
                         )) { PlayerScreen(
@@ -385,6 +422,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 embedded = true,
                             )
                         }
+                    }
                     }
                 }
             }
@@ -1234,6 +1272,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
                             if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (compact && Build.VERSION.SDK_INT >= 26) IconButton(onClick = { controls = false; enterPip() }) {
+                            Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
                         IconButton(onClick = { trackSheet = "audio"; controls = false }) {
                             Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White, modifier = Modifier.size(iconSize))
