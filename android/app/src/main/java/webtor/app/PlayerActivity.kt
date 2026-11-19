@@ -306,6 +306,29 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     /** mpv opens http directly; content URIs go through a descriptor mpv closes itself. */
+    /**
+     * External subtitles, fetched to a local file first, each given to mpv once whole.
+     * mpv loads a subtitle in one go and does nothing else meanwhile: a torrent .srt not
+     * downloaded yet held the first frame, play and seek for 40 s.
+     */
+    private fun addSubtitles(subs: List<Uri>) {
+        if (subs.isEmpty()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val dir = java.io.File(cacheDir, "player-subs").apply { deleteRecursively(); mkdirs() }
+            subs.forEachIndexed { i, uri ->
+                val name = (uri.lastPathSegment ?: "sub$i").substringAfterLast('/').ifBlank { "sub$i" }
+                val file = java.io.File(dir, "$i-" + name.replace(Regex("[^A-Za-z0-9._-]"), "_"))
+                val ok = runCatching {
+                    val stream = if (uri.scheme == "http" || uri.scheme == "https") java.net.URL(uri.toString()).openStream()
+                        else contentResolver.openInputStream(uri)
+                    stream?.use { input -> file.outputStream().use { input.copyTo(it) } } != null
+                }.getOrDefault(false)
+                if (!ok || !alive) return@forEachIndexed
+                mpvSend { MPVLib.command(arrayOf("sub-add", file.path, if (i == 0) "select" else "auto")) }
+            }
+        }
+    }
+
     private fun mpvPath(uri: Uri): String = when (uri.scheme) {
         "content" -> try {
             contentResolver.openFileDescriptor(uri, "r")?.let { "fdclose://${it.detachFd()}" } ?: uri.toString()
@@ -477,13 +500,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 if (!firstFileLoaded) {
                     firstFileLoaded = true
                     val subs = subtitles.toList()
-                    mpvSend {
-                        // Later episodes start from the beginning.
-                        MPVLib.setPropertyString("start", "none")
-                        subs.forEachIndexed { i, s ->
-                            MPVLib.command(arrayOf("sub-add", mpvPath(s), if (i == 0) "select" else "auto"))
-                        }
-                    }
+                    // Later episodes start from the beginning.
+                    mpvSend { MPVLib.setPropertyString("start", "none") }
+                    addSubtitles(subs)
                 }
             }
             MPVLib.MPV_EVENT_START_FILE -> {
