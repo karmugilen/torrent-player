@@ -28,9 +28,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -191,6 +188,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Volatile private var seekWait = false
     /** Held paused until the total length is known, so playback never starts with no end time. */
     private val lengthWait = mutableStateOf(false)
+    /** A seek the app asked for and mpv has not finished yet; shows the spinner even while paused. */
+    private val seekPending = mutableStateOf(false)
+    private fun markSeek() { seekPending.value = true }
     private fun updateBuffering() { buffering.value = loading || cacheWait || seekWait || lengthWait.value }
 
     /**
@@ -460,10 +460,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
             MPVLib.MPV_EVENT_START_FILE -> {
-                loading = true; updateBuffering()
+                loading = true; seekPending.value = false; updateBuffering()
                 runOnUiThread { holdForLength() }
             }
-            MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; updateBuffering() }
+            MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; seekPending.value = false; updateBuffering() }
             MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip() }
         }
     }
@@ -502,8 +502,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (lengthWait.value) { releaseLength(play = true); return }
         mpvSend { MPVLib.command(arrayOf("cycle", "pause")) }
     }
-    fun seekBy(seconds: Int) { mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
-    fun seekTo(seconds: Double) { mpvSend { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
+    fun seekBy(seconds: Int) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
+    fun seekTo(seconds: Double) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
     fun cycle(what: String) { mpvSend { MPVLib.command(arrayOf("osd-msg", "cycle", what)) } }
     fun next() { mpvSend { MPVLib.command(arrayOf("playlist-next")) } }
 
@@ -811,6 +811,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val dur by duration
         val isPaused by paused
         val isBuffering by buffering
+        val seekingNow by seekPending
+        // Never spin forever if mpv drops a seek.
+        LaunchedEffect(seekingNow) { if (seekingNow) { delay(20_000); seekPending.value = false } }
 
         BackHandler(onBack = onBack)
         LaunchedEffect(controls, touchTick, isPaused, sliderDragging, trackSheet) {
@@ -864,6 +867,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             flashJob = flashScope.launch { delay(1200); if (popup == text) popup = null }
         }
 
+        // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
+        val spinning = (isBuffering && (!isPaused || lengthWait.value)) || (seekingNow && scrubOrigin == null && !sliderDragging)
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
 
@@ -1003,7 +1008,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             )
 
             // Spinner only when controls are hidden; with controls, the play button shows it.
-            if (isBuffering && (!isPaused || lengthWait.value) && !controls) {
+            if (spinning && !controls) {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(Modifier.size(44.dp), color = Color.White, strokeWidth = 3.dp)
                     swarm.value?.let {
@@ -1015,116 +1020,103 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             }
 
             AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
-                androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
-                    // Sizes follow the screen: a phone in landscape is about 360 dp tall, tablets get up to 1.5x.
-                    val k = (minOf(maxWidth, maxHeight) / 360.dp).coerceIn(1f, 1.5f)
-                    // Narrow windows (split screen, small phones) move the actions under the seek bar.
-                    val compact = maxWidth < 620.dp
-                    val tap = 52.dp * k
-                    val glyph = 28.dp * k
-
+                Box(Modifier.fillMaxSize()) {
+                    val iconSize = 27.dp
                     // Shade only top and bottom so the picture stays clear.
-                    Box(Modifier.fillMaxWidth().height(120.dp * k).align(Alignment.TopCenter)
+                    Box(Modifier.fillMaxWidth().height(110.dp).align(Alignment.TopCenter)
                         .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))))
-                    Box(Modifier.fillMaxWidth().height(if (compact) 230.dp * k else 190.dp * k).align(Alignment.BottomCenter)
+                    Box(Modifier.fillMaxWidth().height(170.dp).align(Alignment.BottomCenter)
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))))
 
-                    @Composable
-                    fun Action(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
-                        IconButton(onClick = onClick, modifier = Modifier.size(tap)) {
-                            Icon(icon, label, tint = Color.White, modifier = Modifier.size(glyph))
+                    // Top: back and title only.
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(iconSize))
+                        }
+                        Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                            Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
+                            val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
+                            val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
+                            if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                        }
+                        IconButton(onClick = { trackSheet = "audio"; controls = false }) {
+                            Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White, modifier = Modifier.size(iconSize))
+                        }
+                        IconButton(onClick = { trackSheet = "sub"; controls = false }) {
+                            Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White, modifier = Modifier.size(iconSize))
+                        }
+                        IconButton(onClick = { flash(cycleAspect().label); touchTick++ }) {
+                            Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}", tint = Color.White, modifier = Modifier.size(iconSize))
+                        }
+                        IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
+                            Icon(
+                                if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
+                                if (rotationLocked.value) "Unlock rotation" else "Lock rotation",
+                                tint = Color.White, modifier = Modifier.size(iconSize),
+                            )
+                        }
+                        if (items.size > 1 && playlistPos.intValue < items.size - 1) {
+                            IconButton(onClick = { next(); touchTick++ }) {
+                                Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White, modifier = Modifier.size(iconSize))
+                            }
                         }
                     }
-                    @Composable
-                    fun Actions() {
-                        Action(Icons.Filled.Audiotrack, "Audio") { trackSheet = "audio"; controls = false }
-                        Action(Icons.Filled.Subtitles, "Subtitles") { trackSheet = "sub"; controls = false }
-                        Action(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}") { flash(cycleAspect().label); touchTick++ }
-                        Action(
-                            if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
-                            if (rotationLocked.value) "Unlock rotation" else "Lock rotation",
-                        ) { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }
-                        if (items.size > 1 && playlistPos.intValue < items.size - 1) {
-                            Action(Icons.Filled.SkipNext, "Next episode") { next(); touchTick++ }
+
+                    // Center: rewind, play/pause, forward.
+                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(64.dp)) {
+                            Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(40.dp))
+                        }
+                        androidx.compose.material3.FilledTonalIconButton(
+                            onClick = { togglePause(); touchTick++ },
+                            modifier = Modifier.size(80.dp),
+                            colors = androidx.compose.material3.IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = Color.Black.copy(alpha = 0.4f), contentColor = Color.White),
+                        ) {
+                            when {
+                                spinning -> CircularProgressIndicator(Modifier.size(44.dp), color = Color.White, strokeWidth = 3.dp)
+                                isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(50.dp))
+                                else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(50.dp))
+                            }
+                        }
+                        IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(64.dp)) {
+                            Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(40.dp))
+                        }
+                    }
+
+                    // Bottom: time, seek bar, then actions.
+                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 28.dp, end = 28.dp, top = 14.dp, bottom = 40.dp)) {
+                        val shown = when {
+                            sliderDragging -> sliderValue.toDouble()
+                            else -> pendingSeek ?: pos
                         }
                         if (Build.VERSION.SDK_INT >= 26) {
-                            Action(Icons.Filled.PictureInPictureAlt, "Picture in picture") { controls = false; enterPip() }
-                        }
-                    }
-
-                    // Keep clear of the camera cutout.
-                    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)) {
-                        // Top: back, title, and the actions when there is room.
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Action(Icons.AutoMirrored.Filled.ArrowBack, "Back", onBack)
-                            Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                                Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
-                                    fontSize = MaterialTheme.typography.titleMedium.fontSize * k,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
-                                val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
-                                val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
-                                if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            if (!compact) Actions()
-                        }
-
-                        // Center: rewind, play/pause, forward.
-                        Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (compact) 32.dp * k else 64.dp * k),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(72.dp * k)) {
-                                Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(46.dp * k))
-                            }
-                            androidx.compose.material3.FilledTonalIconButton(
-                                onClick = { togglePause(); touchTick++ },
-                                modifier = Modifier.size(92.dp * k),
-                                colors = androidx.compose.material3.IconButtonDefaults.filledTonalIconButtonColors(
-                                    containerColor = Color.Black.copy(alpha = 0.45f), contentColor = Color.White),
-                            ) {
-                                when {
-                                    isBuffering && (!isPaused || lengthWait.value) -> CircularProgressIndicator(Modifier.size(50.dp * k), color = Color.White, strokeWidth = 3.dp)
-                                    isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(58.dp * k))
-                                    else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(58.dp * k))
-                                }
-                            }
-                            IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(72.dp * k)) {
-                                Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(46.dp * k))
+                            IconButton(onClick = { controls = false; enterPip() }, modifier = Modifier.align(Alignment.End)) {
+                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
                             }
                         }
-
-                        // Bottom: time, seek bar, and the actions on narrow screens.
-                        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                            .padding(start = 24.dp, end = 24.dp, top = 14.dp, bottom = if (compact) 12.dp else 28.dp)) {
-                            val shown = when {
-                                sliderDragging -> sliderValue.toDouble()
-                                else -> pendingSeek ?: pos
-                            }
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-                                val timeStyle = MaterialTheme.typography.labelLarge.copy(fontSize = MaterialTheme.typography.labelLarge.fontSize * k)
-                                Text(clock(shown), color = Color.White, style = timeStyle)
-                                Spacer(Modifier.weight(1f))
-                                val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
-                                if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f), style = timeStyle)
-                                Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = timeStyle)
-                            }
-                            SeekBar(
-                                fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                                cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                                onDrag = { f ->
-                                    sliderDragging = true; sliderValue = (f * dur).toFloat()
-                                    seekPopup(sliderValue.toDouble()); touchTick++
-                                },
-                                onDragEnd = {
-                                    pendingSeek = sliderValue.toDouble()
-                                    seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
-                                },
-                            )
-                            if (compact) {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly,
-                                    verticalAlignment = Alignment.CenterVertically) { Actions() }
-                            }
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+                            Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
+                            Spacer(Modifier.weight(1f))
+                            val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
+                            if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f),
+                                style = MaterialTheme.typography.labelLarge)
+                            Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
                         }
+                        SeekBar(
+                            fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
+                            cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
+                            onDrag = { f ->
+                                sliderDragging = true; sliderValue = (f * dur).toFloat()
+                                seekPopup(sliderValue.toDouble()); touchTick++
+                            },
+                            onDragEnd = {
+                                pendingSeek = sliderValue.toDouble()
+                                seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
+                            },
+                        )
                     }
                 }
             }
@@ -1208,7 +1200,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun SeekBar(fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
         var active by remember { mutableStateOf(false) }
         Canvas(
-            Modifier.fillMaxWidth().height(44.dp)
+            Modifier.fillMaxWidth().height(40.dp)
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onPress = { o -> active = true; onDrag((o.x / size.width).coerceIn(0f, 1f)); val tap = tryAwaitRelease(); if (tap) { active = false; onDragEnd() } },
@@ -1222,14 +1214,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     ) { change, _ -> change.consume(); onDrag((change.position.x / size.width).coerceIn(0f, 1f)) }
                 },
         ) {
-            val h = (if (active) 8.dp else 5.dp).toPx()
+            val h = (if (active) 6.dp else 4.5.dp).toPx()
             val y = size.height / 2 - h / 2
             val r = CornerRadius(h / 2)
             drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(0f, y), Size(size.width, h), r)
             if (cachedFraction > fraction) drawRect(Color.White.copy(alpha = 0.45f),
                 Offset(fraction * size.width, y), Size((cachedFraction - fraction) * size.width, h))
             drawRoundRect(Color.White, Offset(0f, y), Size(fraction * size.width, h), r)
-            drawCircle(Color.White, radius = (if (active) 12.dp else 9.dp).toPx(), center = Offset(fraction * size.width, size.height / 2))
+            drawCircle(Color.White, radius = (if (active) 10.dp else 8.dp).toPx(), center = Offset(fraction * size.width, size.height / 2))
         }
     }
 
