@@ -69,7 +69,7 @@ tasks.named("preBuild") {
 android {
     namespace = "webtor.app"
     compileSdk = 36
-    ndkVersion = "26.1.10909125"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         // F-Droid and GitHub ship webtor.app; the Google Play listing is

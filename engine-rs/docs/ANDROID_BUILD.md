@@ -7,7 +7,7 @@ produce that library. Select with a Gradle property.
 ## Requirements
 
 - JDK 17 or 21 (`JAVA_HOME=/usr/lib/jvm/java-21-openjdk` on this machine)
-- Android SDK + NDK **26.1.10909125** (`ANDROID_HOME`, `ANDROID_NDK_HOME`)
+- Android SDK + NDK **28.2.13676358** (`ANDROID_HOME`, `ANDROID_NDK_HOME`)
 - For Rust: Rust toolchain with `aarch64-linux-android` (and `x86_64-linux-android` for the emulator)
 - Disk: keep ≥25 GB free; Rust Android builds write under `/home/kar/.cache/wt-targets/android-<abi>` (never `/tmp`)
 
@@ -16,7 +16,7 @@ produce that library. Select with a Gradle property.
 ```sh
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 export ANDROID_HOME=/home/kar/Android/Sdk
-export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
 
 ./android/gradlew -p android :app:assembleDebug --no-daemon \
   -Dorg.gradle.jvmargs=-Xmx2g
@@ -36,7 +36,7 @@ This runs `engine-go/build.sh` and writes `android/app/src/main/jniLibs/arm64-v8
 ```sh
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 export ANDROID_HOME=/home/kar/Android/Sdk
-export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
 
 ./android/gradlew -p android :app:assembleDebug -Pwebtor.engine=rust --no-daemon \
   -Dorg.gradle.jvmargs=-Xmx2g

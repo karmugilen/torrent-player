@@ -8,7 +8,7 @@
 # tags below; the F-Droid recipe fills deps/ from srclibs first, so its build
 # fetches nothing. Results are copied to android/app/src/main/jniLibs/arm64-v8a.
 #
-# Needs ANDROID_NDK_HOME (NDK 26.1.10909125), meson, ninja, pkg-config, make,
+# Needs ANDROID_NDK_HOME (NDK 28.2.13676358), meson, ninja, pkg-config, make,
 # autoconf/automake/libtool (libass) and python3.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ DEPS="$HERE/deps"
 WORK="$HERE/build/arm64-v8a"
 PREFIX="$WORK/prefix"
 OUT="$HERE/../app/src/main/jniLibs/arm64-v8a"
-NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_HOME:-}/ndk/26.1.10909125}}"
+NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_HOME:-}/ndk/28.2.13676358}}"
 [ -d "$NDK" ] || { echo "Android NDK not found; set ANDROID_NDK_HOME" >&2; exit 1; }
 
 # Pinned versions (tag names). Keep in step with webtor.app.yml srclibs and NOTICE.md.

@@ -7,7 +7,7 @@ MODE="${1:-debug}"
 SERIAL="${ADB_SERIAL:-00121649A004784}"
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
-export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/26.1.10909125}"
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/28.2.13676358}"
 export PATH="$HOME/.cargo/bin:$PATH"
 
 case "$MODE" in

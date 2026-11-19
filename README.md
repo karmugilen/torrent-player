@@ -248,7 +248,7 @@ More detail: [Direct Play](docs/DIRECT_PLAY.md) · [Signing](docs/SIGNING.md) ·
 **You need**
 - Linux and Git
 - Rust **1.99.1** via rustup, with target `aarch64-linux-android` and `~/.cargo/bin` on `PATH`
-- Android SDK (platforms 34 and 36, build-tools 34+) and NDK **26.1.10909125**
+- Android SDK (platforms 34 and 36, build-tools 34+) and NDK **28.2.13676358**
 - Java 21
 - For the built-in player: meson, ninja, pkg-config, autoconf, automake and libtool
 
@@ -258,7 +258,7 @@ More detail: [Direct Play](docs/DIRECT_PLAY.md) · [Signing](docs/SIGNING.md) ·
 cd android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
   ANDROID_HOME=$HOME/Android/Sdk \
-  ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/26.1.10909125 \
+  ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/28.2.13676358 \
   ./gradlew :app:assembleDebug --no-daemon
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```

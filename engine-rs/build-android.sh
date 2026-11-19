@@ -4,9 +4,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENGINE_RS="$(cd "$(dirname "$0")" && pwd)"
-NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_HOME:-}/ndk/26.1.10909125}}"
+NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_HOME:-}/ndk/28.2.13676358}}"
 if [ ! -d "$NDK" ]; then
-    echo "Android NDK 26.1.10909125 not found; set ANDROID_NDK_HOME" >&2
+    echo "Android NDK 28.2.13676358 not found; set ANDROID_NDK_HOME" >&2
     exit 1
 fi
 
