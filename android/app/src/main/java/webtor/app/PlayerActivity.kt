@@ -99,8 +99,10 @@ import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /** Picture size in the built-in player, remembered between videos. */
-enum class PlayerAspect(val label: String) {
-    FIT("Fit"), CROP("Crop"), STRETCH("Stretch"), R16_9("16:9"), R4_3("4:3");
+enum class PlayerAspect(val label: String, val detail: String) {
+    FIT("Fit", "Whole picture, bars if needed"), CROP("Crop", "Fill the screen, edges cut"),
+    STRETCH("Stretch", "Fill the screen, shape ignored"), R16_9("16:9", "Show as widescreen"),
+    R4_3("4:3", "Show as classic TV");
 
     fun next(): PlayerAspect = entries[(ordinal + 1) % entries.size]
 
@@ -464,7 +466,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 runOnUiThread { holdForLength() }
             }
             MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; seekPending.value = false; updateBuffering() }
-            MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip() }
+            MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip(); if (inPip.value) pipBuffer(true) }
         }
     }
 
@@ -565,8 +567,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         )
         return android.app.PictureInPictureParams.Builder().setAspectRatio(ratio).setActions(listOf(action)).apply {
             videoRect(ratio.toDouble())?.let { setSourceRectHint(it) }
-            // Video: no cross-fade while the window resizes (Android's advice for players).
-            if (Build.VERSION.SDK_INT >= 31) setAutoEnterEnabled(!finishing).setSeamlessResizeEnabled(false)
+            // Seamless resize on (Android's advice for video): off made the system lay a
+            // still overlay on the window for ~0.6 s after every PiP resize.
+            if (Build.VERSION.SDK_INT >= 31) setAutoEnterEnabled(!finishing).setSeamlessResizeEnabled(true)
         }.build()
     }
 
@@ -574,6 +577,25 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (Build.VERSION.SDK_INT < 26) return
         if (!packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
         pipParams()?.let { runCatching { enterPictureInPictureMode(it) } }
+    }
+
+    /**
+     * In PiP the video buffer keeps one size, the video's own in the window's
+     * shape, and the system scales it with the window. Resizing PiP then never
+     * makes mpv reallocate and redraw mid-animation, which flashed a wrong frame.
+     * Full screen goes back to the view's size (aspect modes need it).
+     */
+    private fun pipBuffer(on: Boolean) {
+        val holder = videoView?.holder ?: return
+        if (!on) { holder.setSizeFromLayout(); return }
+        val ratio = (mpv { MPVLib.getPropertyDouble("video-params/aspect") }?.takeIf { it > 0 } ?: (16.0 / 9))
+            .coerceIn(1 / 2.39, 2.39) // as the PiP window's ratio
+        val dw = mpv { MPVLib.getPropertyInt("video-params/dw") }?.takeIf { it > 0 } ?: 1280
+        val dh = mpv { MPVLib.getPropertyInt("video-params/dh") }?.takeIf { it > 0 } ?: 720
+        // Long side at the video's own resolution, at most 1920 (PiP is small).
+        val long = maxOf(dw, dh).coerceIn(640, 1920)
+        val (w, h) = if (ratio >= 1) long to (long / ratio).toInt() else (long * ratio).toInt() to long
+        holder.setFixedSize(w and 1.inv(), h and 1.inv())
     }
 
     private fun updatePip() {
@@ -589,6 +611,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPip.value = isInPictureInPictureMode
+        pipBuffer(isInPictureInPictureMode)
         // Closed from the small window: stop and report the position.
         if (!isInPictureInPictureMode && lifecycle.currentState == androidx.lifecycle.Lifecycle.State.CREATED) close()
     }
@@ -766,8 +789,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         })
     }
 
-    private fun cycleAspect(): PlayerAspect {
-        val mode = aspect.value.next()
+    private fun cycleAspect(): PlayerAspect = setAspect(aspect.value.next())
+
+    private fun setAspect(mode: PlayerAspect): PlayerAspect {
         aspect.value = mode
         PlayerAspect.save(this, mode)
         applyAspect(mode)
@@ -1047,8 +1071,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         IconButton(onClick = { trackSheet = "sub"; controls = false }) {
                             Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
-                        IconButton(onClick = { flash(cycleAspect().label); touchTick++ }) {
-                            Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}", tint = Color.White, modifier = Modifier.size(iconSize))
+                        // Tap: next aspect. Hold: pick from a list, like audio and subtitles.
+                        val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+                        Box(
+                            Modifier.size(48.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onTap = { flash(cycleAspect().label); touchTick++ },
+                                        onLongPress = {
+                                            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                            trackSheet = "aspect"; controls = false
+                                        },
+                                    )
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}. Hold for the list.",
+                                tint = Color.White, modifier = Modifier.size(iconSize))
                         }
                         IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
                             Icon(
@@ -1228,7 +1267,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     /** Material panel to pick an audio or subtitle track. */
     @Composable
     private fun TrackSheet(type: String, onDismiss: () -> Unit) {
-        var list by remember(type) { mutableStateOf(tracks(type)) }
+        var list by remember(type) {
+            mutableStateOf(if (type == "aspect") PlayerAspect.entries.map { Track(it.name, it.label, it.detail, it == aspect.value) } else tracks(type))
+        }
         // Floating box in the centre; long lists scroll inside it instead of being cut off.
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
             .pointerInput(Unit) { detectTapGestures { onDismiss() } }, contentAlignment = Alignment.Center) {
@@ -1242,13 +1283,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             ) {
                 Column(Modifier.padding(vertical = 14.dp)) {
                     Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(if (type == "audio") Icons.Filled.Audiotrack else Icons.Filled.Subtitles, null,
+                        Icon(when (type) { "audio" -> Icons.Filled.Audiotrack; "aspect" -> Icons.Filled.AspectRatio; else -> Icons.Filled.Subtitles }, null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.width(12.dp))
-                        Text(if (type == "audio") "Audio" else "Subtitles", style = MaterialTheme.typography.titleMedium,
+                        Text(when (type) { "audio" -> "Audio"; "aspect" -> "Aspect ratio"; else -> "Subtitles" }, style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
                         val count = if (type == "sub") list.size - 1 else list.size
-                        if (count > 0) Text("$count", style = MaterialTheme.typography.labelLarge,
+                        if (count > 0 && type != "aspect") Text("$count", style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Spacer(Modifier.height(8.dp))
@@ -1259,7 +1300,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
                     Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
                         list.forEach { t ->
-                            val pick = { selectTrack(type, t.id); list = tracks(type); onDismiss() }
+                            val pick = {
+                                if (type == "aspect") PlayerAspect.entries.firstOrNull { it.name == t.id }?.let { setAspect(it) }
+                                else { selectTrack(type, t.id); list = tracks(type) }
+                                onDismiss()
+                            }
                             Row(
                                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
                                     .background(if (t.selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
