@@ -1273,9 +1273,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { controls = false; enterPip() }) {
-                            Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
-                        }
                         IconButton(onClick = { trackSheet = "audio"; controls = false }) {
                             Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
@@ -1355,6 +1352,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             if (ahead >= 1 && !compact) Text("   ·   buffered ${clock(ahead)}", color = Color.White.copy(alpha = 0.55f),
                                 style = MaterialTheme.typography.labelMedium)
                             Spacer(Modifier.weight(1f))
+                            // Small window, then full screen in/out, side by side.
+                            if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { controls = false; enterPip() },
+                                modifier = Modifier.size(if (compact) 40.dp else 44.dp)) {
+                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White,
+                                    modifier = Modifier.size(if (compact) 24.dp else 27.dp))
+                            }
                             if (compact) IconButton(onClick = { setFullscreen(true); touchTick++ }, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Filled.Fullscreen, "Full screen", tint = Color.White, modifier = Modifier.size(28.dp))
                             } else if (pageMode) IconButton(onClick = { setFullscreen(false); touchTick++ }, modifier = Modifier.size(44.dp)) {
