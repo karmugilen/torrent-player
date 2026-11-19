@@ -417,6 +417,9 @@ class MainActivity : ComponentActivity() {
             event.subtitles.firstOrNull()?.let { putExtra("subtitles_location", it.uri) }
             if (event.mime.startsWith("video/") && BuiltInPlayer.enabled(this@MainActivity)) {
                 setClass(this@MainActivity, PlayerActivity::class.java)
+                // Started from a torrent's page: the player shows that page under the video.
+                val ui = session.ui.value
+                if (ui.screen == Screen.Files) ui.openTorrentKey?.let { putExtra("detail_key", it) }
             }
         }
         launchedPlaybackUri = event.uri
@@ -443,7 +446,9 @@ class MainActivity : ComponentActivity() {
             }
             // Launch the implicit intent directly so Android owns the choice and
             // can offer its native Just once / Always player selection.
-            viewer.launch(intent)
+            // The built-in page player takes the detail page's place with no slide.
+            if (intent.hasExtra("detail_key")) viewer.launch(intent, androidx.core.app.ActivityOptionsCompat.makeCustomAnimation(this, 0, 0))
+            else viewer.launch(intent)
             return true
         } catch (_: ActivityNotFoundException) {
             session.showError(missing)

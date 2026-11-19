@@ -46,11 +46,20 @@ fun rememberVideoPreviews(entry: DownloadEntry, fileIndex: Int? = null): List<Bi
 
 /** A pack is paged by episode, not three indistinguishable stills from episode one. */
 @Composable
-fun EpisodeVideoPreview(entry: DownloadEntry, modifier: Modifier = Modifier, large: Boolean = false) {
+fun EpisodeVideoPreview(
+    entry: DownloadEntry,
+    modifier: Modifier = Modifier,
+    large: Boolean = false,
+    /** Drawn on top; gets the file index of the episode on screen (null for a single video). */
+    overlay: @Composable BoxScope.(Int?) -> Unit = {},
+) {
     val videos = remember(entry.files, entry.selected) { previewVideos(entry) }
     if (videos.size <= 1) {
         val frames = rememberVideoPreviews(entry)
-        VideoPreviewPager(entry, frames, modifier, large)
+        Box(modifier) {
+            VideoPreviewPager(entry, frames, Modifier.fillMaxSize(), large)
+            overlay(null)
+        }
         return
     }
     val repository = (LocalContext.current.applicationContext as WebtorApp).thumbnails
@@ -83,5 +92,6 @@ fun EpisodeVideoPreview(entry: DownloadEntry, modifier: Modifier = Modifier, lar
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        overlay(current.index)
     }
 }

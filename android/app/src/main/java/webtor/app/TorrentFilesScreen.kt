@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
@@ -57,8 +58,10 @@ fun TorrentFilesScreen(
     onResume: () -> Unit,
     onDrop: () -> Unit = {},
     onDelete: () -> Unit,
+    /** Shown under the built-in player: no top bar, no preview, no Play button, back handled by the player. */
+    embedded: Boolean = false,
 ) {
-    BackHandler(onBack = onBack)
+    if (!embedded) BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -155,7 +158,7 @@ fun TorrentFilesScreen(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            TopAppBar(
+            if (!embedded) TopAppBar(
                 title = { Text("Details", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -205,6 +208,7 @@ fun TorrentFilesScreen(
                 DownloadSummary(
                     entry, error,
                     onPlay = onPlay,
+                    embedded = embedded,
                     magnetAvailable = magnetUri != null,
                     copiedMagnet = copiedMagnet,
                     onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
@@ -319,6 +323,7 @@ private fun DownloadSummary(
     copiedMagnet: Boolean,
     onShareMagnet: () -> Unit,
     onCopyMagnet: () -> Unit,
+    embedded: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val isPaused = entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
@@ -333,7 +338,41 @@ private fun DownloadSummary(
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
     ThemedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (video) EpisodeVideoPreview(entry, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+            // The video most people came here for: where they left off, else the main file.
+            val resume = entry.resumeFile()
+            val playIndex = resume?.index ?: pickPlayIndex(entry)
+            val playable = playIndex != null && entry.canPlay()
+            // Like YouTube: the picture is the player. Tap it and the video starts right there.
+            val inlinePlay = video && !embedded && playable
+            if (video && !embedded) EpisodeVideoPreview(
+                entry, Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                overlay = { page ->
+                    if (inlinePlay) {
+                        val target = page ?: playIndex!!
+                        val ok = !entry.checking || completedPlayFile(entry, target) != null
+                        val continueAt = entry.files.find { it.index == target }
+                            ?.takeIf { resume != null && it.index == resume.index }
+                        Box(
+                            Modifier.fillMaxSize().clickable(enabled = ok) { onPlay(target) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(
+                                    Modifier.size(64.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.55f)),
+                                    contentAlignment = Alignment.Center,
+                                ) { Icon(Icons.Default.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(42.dp)) }
+                                if (continueAt != null) Text(
+                                    "Continue at ${playbackTime(continueAt.playbackPositionMs)}",
+                                    Modifier.padding(top = 8.dp).clip(RoundedCornerShape(8.dp))
+                                        .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 10.dp, vertical = 4.dp),
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                            }
+                        }
+                    }
+                },
+            )
             Text(
                 entry.title,
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
@@ -375,14 +414,11 @@ private fun DownloadSummary(
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
             entry.status?.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.tertiary) }
-            // The video most people came here for: where they left off, else the main file.
-            val resume = entry.resumeFile()
-            val playIndex = resume?.index ?: pickPlayIndex(entry)
             val isVideo = mediaType(entry) == "Video"
-            if (playIndex != null && entry.canPlay()) {
+            if (playable && !inlinePlay && !embedded) {
                 Button(
-                    onClick = { onPlay(playIndex) },
-                    enabled = !entry.checking || completedPlayFile(entry, playIndex) != null,
+                    onClick = { onPlay(playIndex!!) },
+                    enabled = !entry.checking || completedPlayFile(entry, playIndex!!) != null,
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp).heightIn(min = 48.dp),
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)

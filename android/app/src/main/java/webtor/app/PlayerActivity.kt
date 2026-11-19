@@ -75,6 +75,12 @@ import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.runtime.collectAsState
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -182,6 +188,63 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private var firstFileLoaded = false
     private var finishing = false
 
+    /**
+     * Opened from a torrent's page: portrait shows the video at the top with the page
+     * below it, like YouTube; landscape or the fullscreen button makes the same player
+     * fill the screen (one mpv, nothing reloads).
+     */
+    private var detailKey: String? = null
+    private val pageMode get() = detailKey != null
+    /** After the fullscreen buttons force a side, follow the sensor again once the phone is turned that way: 1 portrait, 2 landscape. */
+    @Volatile private var unlockWhen = 0
+    private val orientationListener by lazy {
+        object : android.view.OrientationEventListener(this) {
+            override fun onOrientationChanged(deg: Int) {
+                val want = unlockWhen
+                if (deg < 0 || want == 0) return
+                val portrait = deg < 25 || deg > 335
+                val land = deg in 65..115 || deg in 245..295
+                if ((want == 1 && portrait) || (want == 2 && land && autoRotate())) {
+                    unlockWhen = 0
+                    runOnUiThread { if (!rotationLocked.value) requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_USER }
+                }
+            }
+        }
+    }
+    private fun autoRotate(): Boolean =
+        android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.ACCELEROMETER_ROTATION, 0) == 1
+    private fun isLandscape() = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+
+    private fun setFullscreen(on: Boolean) {
+        rotationLocked.value = false
+        unlockWhen = if (on) 2 else 1
+        requestedOrientation = if (on) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+
+    /** Back: fullscreen goes back to the page; the page goes to the library with the video in a small window. */
+    private fun back() {
+        if (!pageMode) return close()
+        if (isLandscape()) { setFullscreen(false); return }
+        val pip = Build.VERSION.SDK_INT >= 26 &&
+            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+            pipParams()?.let { runCatching { enterPictureInPictureMode(it) }.getOrDefault(false) } == true
+        if (pip) (application as WebtorApp).session.closeFiles() else close()
+    }
+
+    /** A file tapped in the page below the video: switch in place when it is in this playlist. */
+    private fun playFile(index: Int) {
+        val app = application as WebtorApp
+        val entry = app.session.ui.value.library.find { it.key == detailKey } ?: return
+        val name = entry.files.find { it.index == index }?.name
+        val at = items.indexOfFirst { torrentOf(it.uri)?.second == index || (name != null && it.name == name) }
+        if (at >= 0) {
+            if (at != playlistPos.intValue) { markSeek(); mpvSend { MPVLib.command(arrayOf("playlist-play-index", at.toString())) } }
+            return
+        }
+        close()
+        app.session.play(entry, index)
+    }
+
     private val title = mutableStateOf("")
     private val position = mutableDoubleStateOf(0.0)
     private val duration = mutableDoubleStateOf(0.0)
@@ -253,7 +316,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        detailKey = intent.getStringExtra("detail_key")
+        requestedOrientation = if (pageMode) ActivityInfo.SCREEN_ORIENTATION_USER else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (pageMode) orientationListener.takeIf { it.canDetectOrientation() }?.enable()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         if (Build.VERSION.SDK_INT >= 28) {
@@ -271,19 +336,58 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
 
         setContent {
-            androidx.compose.material3.MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme(
-                primary = Color.White, onPrimary = Color.Black,
-            )) { PlayerScreen(
-                surface = { SurfaceView(it).apply {
-                    holder.addCallback(surfaceCallback)
-                    videoView = this
-                    // Keep the PiP hint on the video's real place on screen.
-                    addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
-                        if (l != ol || t != ot || r != or || b != ob) updatePip()
+            val app = application as WebtorApp
+            val ui by app.session.ui.collectAsState()
+            val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            val full = !pageMode || landscape || inPip.value
+            LaunchedEffect(full) {
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    if (full) hide(WindowInsetsCompat.Type.systemBars()) else show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+            GaleTheme(dark = ui.darkTheme, theme = ui.appTheme, reducedEffects = ui.reducedEffects, dynamicColors = ui.dynamicColors) {
+                Column(
+                    Modifier.fillMaxSize()
+                        .background(if (full) Color.Black else MaterialTheme.colorScheme.background)
+                        .then(if (full) Modifier else Modifier.background(Color.Black).statusBarsPadding()),
+                ) {
+                    // Same node in both layouts, so the video surface is kept, never rebuilt.
+                    Box(if (full) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                        androidx.compose.material3.MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme(
+                            primary = Color.White, onPrimary = Color.Black,
+                        )) { PlayerScreen(
+                            surface = { SurfaceView(it).apply {
+                                holder.addCallback(surfaceCallback)
+                                videoView = this
+                                // Keep the PiP hint on the video's real place on screen.
+                                addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+                                    if (l != ol || t != ot || r != or || b != ob) updatePip()
+                                }
+                            } },
+                            onBack = ::back,
+                            compact = !full,
+                        ) }
                     }
-                } },
-                onBack = ::close,
-            ) }
+                    if (!full) {
+                        val entry = ui.library.find { it.key == detailKey }
+                        Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.background)) {
+                            if (entry != null) TorrentFilesScreen(
+                                entry = entry,
+                                error = ui.error,
+                                onBack = ::back,
+                                onPlay = ::playFile,
+                                onToggleFile = { index -> app.session.toggleDownloadFile(entry.key, index) },
+                                onPause = { app.session.pause(entry) },
+                                onResume = { app.session.resume(entry) },
+                                onDrop = { app.session.drop(entry) },
+                                onDelete = { },
+                                embedded = true,
+                            )
+                        }
+                    }
+                }
+            }
         }
         updatePip() // so leaving the app goes straight to picture in picture
     }
@@ -693,9 +797,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         teardown() // free the player now, not later in onDestroy
         super.finish()
+        if (pageMode) {
+            @Suppress("DEPRECATION")
+            overridePendingTransition(0, 0)
+        }
     }
 
     override fun onDestroy() {
+        if (pageMode) runCatching { orientationListener.disable() }
         runCatching { unregisterReceiver(pipReceiver) }
         teardown()
         super.onDestroy()
@@ -859,14 +968,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun toggleRotationLock(): Boolean {
         val lock = !rotationLocked.value
         rotationLocked.value = lock
-        requestedOrientation = if (lock) ActivityInfo.SCREEN_ORIENTATION_LOCKED else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        unlockWhen = 0
+        requestedOrientation = if (lock) ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            else if (pageMode) ActivityInfo.SCREEN_ORIENTATION_USER else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         return lock
     }
 
     private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, SPEED, IGNORE }
 
     @Composable
-    private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit) {
+    private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit, compact: Boolean = false) {
         var controls by remember { mutableStateOf(true) }
         var touchTick by remember { mutableIntStateOf(0) }
         var sliderDragging by remember { mutableStateOf(false) }
@@ -1102,25 +1213,27 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
             AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxSize()) {
-                    val iconSize = 27.dp
+                    val iconSize = if (compact) 24.dp else 27.dp
                     // Shade only top and bottom so the picture stays clear.
-                    Box(Modifier.fillMaxWidth().height(110.dp).align(Alignment.TopCenter)
+                    Box(Modifier.fillMaxWidth().height(if (compact) 64.dp else 110.dp).align(Alignment.TopCenter)
                         .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))))
-                    Box(Modifier.fillMaxWidth().height(170.dp).align(Alignment.BottomCenter)
+                    Box(Modifier.fillMaxWidth().height(if (compact) 80.dp else 170.dp).align(Alignment.BottomCenter)
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))))
 
                     // Top: back and title only.
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = if (compact) 4.dp else 24.dp, vertical = if (compact) 0.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(iconSize))
+                            if (compact) Icon(Icons.Filled.KeyboardArrowDown, "Back", tint = Color.White, modifier = Modifier.size(30.dp))
+                            else Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
                         Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                            Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
+                            if (!compact) Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
                             val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
                             val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
-                            if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                            if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         IconButton(onClick = { trackSheet = "audio"; controls = false }) {
                             Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White, modifier = Modifier.size(iconSize))
@@ -1130,7 +1243,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         }
                         // Tap: next aspect. Hold: pick from a list, like audio and subtitles.
                         val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
-                        Box(
+                        if (!compact) Box(
                             Modifier.size(48.dp).clip(androidx.compose.foundation.shape.CircleShape)
                                 .pointerInput(Unit) {
                                     detectTapGestures(
@@ -1146,7 +1259,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}. Hold for the list.",
                                 tint = Color.White, modifier = Modifier.size(iconSize))
                         }
-                        IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
+                        if (!compact) IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
                             Icon(
                                 if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
                                 if (rotationLocked.value) "Unlock rotation" else "Lock rotation",
@@ -1161,45 +1274,58 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
 
                     // Center: rewind, play/pause, forward.
-                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(64.dp)) {
-                            Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(40.dp))
+                    val side = if (compact) 52.dp else 64.dp
+                    val sideIcon = if (compact) 32.dp else 40.dp
+                    val mid = if (compact) 60.dp else 80.dp
+                    val midIcon = if (compact) 38.dp else 50.dp
+                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (compact) 40.dp else 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(side)) {
+                            Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(sideIcon))
                         }
                         androidx.compose.material3.FilledTonalIconButton(
                             onClick = { togglePause(); touchTick++ },
-                            modifier = Modifier.size(80.dp),
+                            modifier = Modifier.size(mid),
                             colors = androidx.compose.material3.IconButtonDefaults.filledTonalIconButtonColors(
                                 containerColor = Color.Black.copy(alpha = 0.4f), contentColor = Color.White),
                         ) {
                             when {
-                                spinning -> CircularProgressIndicator(Modifier.size(44.dp), color = Color.White, strokeWidth = 3.dp)
-                                isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(50.dp))
-                                else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(50.dp))
+                                spinning -> CircularProgressIndicator(Modifier.size(if (compact) 34.dp else 44.dp), color = Color.White, strokeWidth = 3.dp)
+                                isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(midIcon))
+                                else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(midIcon))
                             }
                         }
-                        IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(64.dp)) {
-                            Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(40.dp))
+                        IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(side)) {
+                            Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(sideIcon))
                         }
                     }
 
                     // Bottom: time, seek bar, then actions.
-                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 28.dp, end = 28.dp, top = 14.dp, bottom = 40.dp)) {
+                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().then(
+                        if (compact) Modifier.padding(horizontal = 8.dp) else Modifier.padding(start = 28.dp, end = 28.dp, top = 14.dp, bottom = 40.dp))) {
                         val shown = when {
                             sliderDragging -> sliderValue.toDouble()
                             else -> pendingSeek ?: pos
                         }
-                        if (Build.VERSION.SDK_INT >= 26) {
-                            IconButton(onClick = { controls = false; enterPip() }, modifier = Modifier.align(Alignment.End)) {
-                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
+                        if (!compact) Row(Modifier.align(Alignment.End)) {
+                            if (Build.VERSION.SDK_INT >= 26) {
+                                IconButton(onClick = { controls = false; enterPip() }) {
+                                    Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
+                                }
+                            }
+                            if (pageMode) IconButton(onClick = { setFullscreen(false); touchTick++ }) {
+                                Icon(Icons.Filled.FullscreenExit, "Exit full screen", tint = Color.White, modifier = Modifier.size(iconSize))
                             }
                         }
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
                             Spacer(Modifier.weight(1f))
                             val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
                             if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f),
                                 style = MaterialTheme.typography.labelLarge)
                             Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
+                            if (compact) IconButton(onClick = { setFullscreen(true); touchTick++ }, modifier = Modifier.size(40.dp)) {
+                                Icon(Icons.Filled.Fullscreen, "Full screen", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
                         }
                         SeekBar(
                             fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
@@ -1218,7 +1344,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             }
 
             trackSheet?.let { type ->
-                TrackSheet(type, onDismiss = { trackSheet = null })
+                // The small player is too short for the list: show it over the whole window.
+                if (compact) androidx.compose.ui.window.Popup(
+                    onDismissRequest = { trackSheet = null },
+                    properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+                ) { TrackSheet(type, onDismiss = { trackSheet = null }) }
+                else TrackSheet(type, onDismiss = { trackSheet = null })
             }
 
             // Double-tap skip: a soft arc on that side with the running total, like MX Player.
@@ -1243,7 +1374,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             // Small pop-up for swipes and seeking.
             popup?.let { text ->
                 Column(
-                    Modifier.align(Alignment.TopCenter).padding(top = 72.dp)
+                    Modifier.align(Alignment.TopCenter).padding(top = if (compact) 12.dp else 72.dp)
                         .clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.6f))
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1264,7 +1395,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             // Hold speed: chip at the top with the current speed. Locked speed stays; tap the chip for normal speed.
             if (fast || speedLocked) {
                 Column(
-                    Modifier.align(Alignment.TopCenter).padding(top = 24.dp)
+                    Modifier.align(Alignment.TopCenter).padding(top = if (compact) 8.dp else 24.dp)
                         .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.55f))
                         .then(if (speedLocked && !fast) Modifier.clickable { speedLocked = false; holdSpeed = 2.0; setSpeed(1.0) } else Modifier)
                         .padding(horizontal = 14.dp, vertical = 6.dp),
