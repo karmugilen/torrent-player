@@ -290,7 +290,7 @@ class MainActivity : ComponentActivity() {
             onPause = session::pause,
             onResume = session::resume,
             onPlay = { entry, index -> session.play(entry, index) },
-            onOpen = session::showFiles,
+            onOpen = { entry -> if (!PlayerActivity.expandIfPlaying(this@MainActivity, entry.key)) session.showFiles(entry) },
             onDelete = session::requestDelete,
             onRetry = session::retry,
             onMessageShown = session::consumeMessage,

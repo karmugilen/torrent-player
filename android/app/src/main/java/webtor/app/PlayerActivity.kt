@@ -154,6 +154,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         /** Calls share it; only create and destroy take it alone, so one slow call never blocks another. */
         private val lock = java.util.concurrent.locks.ReentrantReadWriteLock()
         private val commands = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "mpv-commands") }
+
+        /**
+         * Tapping a torrent whose video is playing in the small window brings that player
+         * back full size, still playing, with its page, like YouTube. False when there is none.
+         */
+        fun expandIfPlaying(context: Context, key: String): Boolean {
+            val p = owner ?: return false
+            if (p.detailKey != key || !p.alive || p.finishing || p.isFinishing || !p.inPip.value) return false
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            return runCatching { am.moveTaskToFront(p.taskId, 0) }.isSuccess
+        }
     }
 
     @Volatile private var alive = false
