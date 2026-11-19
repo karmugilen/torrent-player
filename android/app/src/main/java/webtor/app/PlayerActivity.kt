@@ -702,7 +702,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 runOnUiThread { holdForLength() }
             }
             MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; seekPending.value = false; updateBuffering() }
-            MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip(); if (inPip.value) pipBuffer(true) }
+            MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread {
+                videoRatio.floatValue = (videoAspect.takeIf { it > 0 } ?: (16.0 / 9)).toFloat()
+                updatePip(); if (inPip.value) pipBuffer(true)
+            }
         }
     }
 
@@ -827,6 +830,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
      */
     // Video shape as mpv reports it: kept here so the UI thread never asks a busy mpv.
     @Volatile private var videoAspect = 0.0
+    /** The video's shape for layout: the small player's surface is cut to it, so it holds no black bars. */
+    private val videoRatio = androidx.compose.runtime.mutableFloatStateOf(16f / 9f)
     @Volatile private var videoW = 0
     @Volatile private var videoH = 0
 
@@ -1152,7 +1157,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
         val spinning = (isBuffering && (!isPaused || lengthWait.value)) || (seekingNow && scrubOrigin == null && !sliderDragging)
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
+            // On the page and in the small window the surface is exactly the picture: the bars
+            // around it are the page, not part of the video, so going into PiP carries no black
+            // strip into the small window. Full screen fills the screen (aspect modes need it).
+            AndroidView(factory = surface, modifier = if (compact || tiny || inPip.value)
+                Modifier.align(Alignment.Center).aspectRatio(videoRatio.floatValue.coerceIn(0.3f, 4f)) else Modifier.fillMaxSize())
 
             if (inPip.value || tiny) return@Box
             // Gesture layer: tap, double tap, hold for 2x, swipes.
