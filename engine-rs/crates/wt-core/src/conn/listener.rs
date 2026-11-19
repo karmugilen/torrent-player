@@ -66,13 +66,36 @@ pub struct PeerListener {
 
 impl PeerListener {
     /// Bind TCP and/or uTP listeners based on `ClientConfig`.
+    ///
+    /// TCP and uTP share one port number. A free TCP port can still be taken
+    /// for UDP (on Android, by a stuck old process of the app), which used to
+    /// stop the engine from starting at all. Such a clash retries on a fresh
+    /// port; a configured port that is taken falls back to a fresh one too.
     pub async fn bind(cfg: &ClientConfig) -> Result<Self> {
+        let mut last = None;
+        for attempt in 0..32 {
+            let port = if attempt == 0 { cfg.listen_port } else { 0 };
+            match Self::bind_on(cfg, port).await {
+                Ok(listener) => {
+                    if attempt > 0 {
+                        tracing::warn!(attempt, port = listener.listen_port, "listen port was taken; bound a fresh one");
+                    }
+                    return Ok(listener);
+                }
+                Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::AddrInUse => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(CoreError::Io(last.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::AddrInUse))))
+    }
+
+    async fn bind_on(cfg: &ClientConfig, port: u16) -> Result<Self> {
         let closed = Arc::new(AtomicBool::new(false));
         let (shutdown, _) = watch::channel(false);
         let mut tcp_listeners = Vec::new();
         let mut utp_socket = None;
         let mut utp_socket_v6 = None;
-        let mut bound_port = cfg.listen_port;
+        let mut bound_port = port;
 
         // 1. TCP Listener
         if !cfg.disable_tcp {
