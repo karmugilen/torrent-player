@@ -225,14 +225,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         requestedOrientation = if (on) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
-    /** Back: fullscreen goes back to the page; the page goes to the library with the video in a small window. */
+    /** Back: fullscreen goes back to the page; the page closes the video and goes to the library. */
     private fun back() {
         if (!pageMode) return close()
         if (isLandscape()) { setFullscreen(false); return }
-        val pip = Build.VERSION.SDK_INT >= 26 &&
-            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
-            pipParams()?.let { runCatching { enterPictureInPictureMode(it) }.getOrDefault(false) } == true
-        if (pip) (application as WebtorApp).session.closeFiles() else close()
+        // The page and the video leave together, like leaving a detail page.
+        (application as WebtorApp).session.closeFiles()
+        close()
     }
 
     /** A file tapped in the page below the video: switch in place when it is in this playlist. */
@@ -1261,7 +1260,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     // Top: back and title only.
                     Row(Modifier.fillMaxWidth().padding(horizontal = if (compact) 4.dp else 24.dp, vertical = if (compact) 0.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
-                            if (compact) Icon(Icons.Filled.KeyboardArrowDown, "Back", tint = Color.White, modifier = Modifier.size(30.dp))
+                            if (compact || pageMode) Icon(Icons.Filled.KeyboardArrowDown, if (compact) "Back" else "Exit full screen",
+                                tint = Color.White, modifier = Modifier.size(30.dp))
                             else Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
                         Column(Modifier.weight(1f).padding(start = 4.dp)) {
@@ -1273,7 +1273,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        if (compact && Build.VERSION.SDK_INT >= 26) IconButton(onClick = { controls = false; enterPip() }) {
+                        if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { controls = false; enterPip() }) {
                             Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
                         IconButton(onClick = { trackSheet = "audio"; controls = false }) {
@@ -1342,30 +1342,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
                     // Bottom: time, seek bar, then actions.
                     Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().then(
-                        if (compact) Modifier.padding(horizontal = 8.dp) else Modifier.padding(start = 28.dp, end = 28.dp, top = 14.dp, bottom = 40.dp))) {
+                        if (compact) Modifier.padding(horizontal = 8.dp) else Modifier.padding(start = 32.dp, end = 32.dp, top = 14.dp, bottom = 28.dp))) {
                         val shown = when {
                             sliderDragging -> sliderValue.toDouble()
                             else -> pendingSeek ?: pos
                         }
-                        if (!compact) Row(Modifier.align(Alignment.End)) {
-                            if (Build.VERSION.SDK_INT >= 26) {
-                                IconButton(onClick = { controls = false; enterPip() }) {
-                                    Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White, modifier = Modifier.size(iconSize))
-                                }
-                            }
-                            if (pageMode) IconButton(onClick = { setFullscreen(false); touchTick++ }) {
-                                Icon(Icons.Filled.FullscreenExit, "Exit full screen", tint = Color.White, modifier = Modifier.size(iconSize))
-                            }
-                        }
+                        // As on YouTube: "0:03 / 1:34:17" on the left, the screen-size button on the right.
                         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
-                            Spacer(Modifier.weight(1f))
+                            Text(" / " + clock(dur), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelLarge)
                             val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
-                            if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f),
-                                style = MaterialTheme.typography.labelLarge)
-                            Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
+                            if (ahead >= 1 && !compact) Text("   ·   buffered ${clock(ahead)}", color = Color.White.copy(alpha = 0.55f),
+                                style = MaterialTheme.typography.labelMedium)
+                            Spacer(Modifier.weight(1f))
                             if (compact) IconButton(onClick = { setFullscreen(true); touchTick++ }, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Filled.Fullscreen, "Full screen", tint = Color.White, modifier = Modifier.size(28.dp))
+                            } else if (pageMode) IconButton(onClick = { setFullscreen(false); touchTick++ }, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Filled.FullscreenExit, "Exit full screen", tint = Color.White, modifier = Modifier.size(30.dp))
                             }
                         }
                         SeekBar(
