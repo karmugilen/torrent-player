@@ -7,6 +7,7 @@ pub mod constants;
 pub mod ghost_mode;
 pub mod ghost_pro;
 pub mod idle_direct_play;
+pub mod mp4_index;
 pub mod next_preload;
 pub mod peer_exploration;
 pub mod piece_span;
@@ -31,6 +32,7 @@ pub use ghost_pro::{
 pub use idle_direct_play::{
     any_playback_buffer_filling, playback_window_filling, IdleAction, IdleDirectPlay, IdleTickInput,
 };
+pub use mp4_index::{locate_mp4_index, Mp4Index};
 pub use next_preload::{NextPreload, NextPreloadView, PreloadFile, PreloadStartGate};
 pub use peer_exploration::{PeerExploration, PeerExplorationObservation, PeerKey};
 pub use piece_span::{

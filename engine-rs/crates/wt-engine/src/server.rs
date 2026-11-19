@@ -93,6 +93,10 @@ pub struct TorrentRecord {
     pub(crate) preload_plan: wt_policy::NextPreload,
     /// Go `reconnectPeers`: dialable addresses kept across network handoffs.
     pub(crate) reconnect_peers: Vec<wt_core::PeerInfo>,
+    /// Per file: exact MP4 `moov` range, read from the first bytes served to the player.
+    pub(crate) index_spans: HashMap<usize, wt_policy::Mp4Index>,
+    /// Files whose length the player already has; their index is no longer fetched first.
+    pub(crate) length_known: HashSet<usize>,
 }
 
 impl TorrentRecord {
@@ -732,7 +736,13 @@ impl EngineServer {
         let resolver =
             Arc::new(move |id: &str, file_index: usize, start: i64| this.open_playback_at(id, file_index, start));
 
-        let server = start_stream_server_seekable(0, resolver).await?;
+        let weak = Arc::downgrade(self);
+        let observer: crate::playback::StreamHeadObserver = Arc::new(move |id: &str, file_index: usize, head: &[u8]| {
+            if let Some(server) = weak.upgrade() {
+                server.observe_stream_head(id, file_index, head);
+            }
+        });
+        let server = start_stream_server_seekable(0, resolver, Some(observer)).await?;
         self.stream_port
             .store(server.port() as usize, Ordering::SeqCst);
         *self.stream_server.lock() = Some(server);
@@ -840,6 +850,7 @@ impl EngineServer {
             ("POST", ["file-only"]) => self.handle_file_only(body_str),
             ("POST", ["focus"]) => self.handle_focus(body_str),
             ("POST", ["prefetch"]) => self.handle_prefetch(body_str),
+            ("POST", ["length-known"]) => self.handle_length_known(body_str),
             ("POST", ["configure"]) => self.handle_configure(body_str),
             ("POST", ["select"]) => self.handle_select(body_str),
             ("POST", ["pause"]) => self.handle_pause_resume(body_str, true),
@@ -1201,6 +1212,8 @@ impl EngineServer {
             idle_drop_ready: false,
             preload_plan: Default::default(),
             reconnect_peers: Vec::new(),
+            index_spans: HashMap::new(),
+            length_known: HashSet::new(),
         }));
 
         {
@@ -1394,6 +1407,8 @@ impl EngineServer {
         }
         rec.focused_file = Some(file_index);
         rec.file_only = req.file_only && !rec.direct_play;
+        // A new play needs the length again (a RAM cache may have dropped the index).
+        rec.length_known.remove(&file_index);
         // Go setNextPreloadLocked: warm the next episode only near the end.
         self.set_next_preload(&mut rec, file_index, req.next_file_index);
         if rec.direct_play {
@@ -1518,6 +1533,45 @@ impl EngineServer {
             }
         });
         (200, serde_json::to_vec(&json!({"ok": true, "pieces": end - begin})).unwrap())
+    }
+
+    /// Built-in player: it has the video's length, so the container index no
+    /// longer needs to come first; bandwidth goes forward from the playhead.
+    fn handle_length_known(&self, body: &str) -> (u16, Vec<u8>) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+            return (400, serde_json::to_vec(&json!({"error": "invalid json"})).unwrap());
+        };
+        let (Some(id), Some(file_index)) = (
+            v.get("id").and_then(|x| x.as_str()),
+            v.get("fileIndex").and_then(|x| x.as_u64()),
+        ) else {
+            return (400, serde_json::to_vec(&json!({"error": "invalid json"})).unwrap());
+        };
+        let Some(record) = self.record_by_id(id) else {
+            return (404, serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap());
+        };
+        let mut rec = record.write();
+        if rec.length_known.insert(file_index as usize) {
+            self.refresh_startup_hints(&mut rec);
+        }
+        (200, serde_json::to_vec(&json!({"ok": true})).unwrap())
+    }
+
+    /// First bytes of a file served to a player: if it is an MP4/MOV, fetch its
+    /// whole `moov` index first, wherever it is and however big.
+    pub(crate) fn observe_stream_head(&self, id: &str, file_index: usize, head: &[u8]) {
+        let Some(record) = self.record_by_id(id) else { return };
+        let mut rec = record.write();
+        let Some(length) = rec.torrent.files().into_iter().find(|f| f.index() == file_index).map(|f| f.length()) else {
+            return;
+        };
+        let Some(index) = wt_policy::locate_mp4_index(head, length) else { return };
+        if rec.index_spans.get(&file_index) == Some(&index) {
+            return;
+        }
+        wt_types::events::record("mp4_index", format!("file={file_index} start={} end={} len={length}", index.start, index.end));
+        rec.index_spans.insert(file_index, index);
+        self.refresh_startup_hints(&mut rec);
     }
 
     fn handle_focus(&self, body: &str) -> (u16, Vec<u8>) {

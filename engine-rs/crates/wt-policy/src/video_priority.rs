@@ -13,6 +13,7 @@ use crate::constants::{
     DIRECT_STARTUP_HEAD, DIRECT_STARTUP_TAIL, PLAYBACK_BOOST_HEAD_BYTES, PLAYBACK_BOOST_TAIL_BYTES,
     VIDEO_STARTUP_HEAD_BYTES, VIDEO_STARTUP_TAIL_BYTES,
 };
+use crate::mp4_index::Mp4Index;
 use crate::piece_span::{raise_span, span_from_file, FileLayout};
 
 /// One selected/candidate file for startup hint calculation.
@@ -21,6 +22,11 @@ pub struct VideoFileInput {
     pub index: usize,
     pub display_path: String,
     pub layout: FileLayout,
+    /// Exact `moov` range when the stream's first bytes showed it (MP4/MOV);
+    /// fetched at Now in place of the guessed tail.
+    pub index_span: Option<Mp4Index>,
+    /// The player has the length: the index is no longer needed first.
+    pub length_known: bool,
 }
 
 /// Engine-visible record flags that gate startup hints.
@@ -126,9 +132,16 @@ pub fn video_startup_hints(
         }
         let head_span = span_from_file(&f.layout, ctx.piece_length, 0, length.min(head));
         raise_span(&mut demand, head_span, PiecePriority::Now);
-        if length > tail {
-            let tail_span = span_from_file(&f.layout, ctx.piece_length, length - tail, length);
-            raise_span(&mut demand, tail_span, PiecePriority::Now);
+        // Until the player has the length, the container index comes first:
+        // the exact `moov` range when known (whatever its size), else a guessed tail.
+        if !f.length_known {
+            if let Some(idx) = f.index_span {
+                let span = span_from_file(&f.layout, ctx.piece_length, idx.start.max(0), idx.end.min(length));
+                raise_span(&mut demand, span, PiecePriority::Now);
+            } else if length > tail {
+                let tail_span = span_from_file(&f.layout, ctx.piece_length, length - tail, length);
+                raise_span(&mut demand, tail_span, PiecePriority::Now);
+            }
         }
     }
     for p in &ctx.startup_fetch_pieces {
@@ -184,6 +197,63 @@ mod tests {
         }
     }
 
+    fn one_mp4(pieces: u32, piece_len: i64, index_span: Option<Mp4Index>, length_known: bool)
+        -> ([VideoFileInput; 1], VideoHintContext) {
+        let files = [VideoFileInput {
+            index: 0,
+            display_path: "movie.mp4".into(),
+            layout: layout(pieces, piece_len),
+            index_span,
+            length_known,
+        }];
+        let ctx = VideoHintContext {
+            transfers_allowed: true,
+            configured: true,
+            selected: [0].into_iter().collect(),
+            piece_length: piece_len,
+            ..Default::default()
+        };
+        (files, ctx)
+    }
+
+    #[test]
+    fn whole_moov_at_end_is_now_however_big() {
+        let piece_len = 1 << 20;
+        let pieces = 200u32;
+        // 30 MiB index after the media: far past the guessed 3 MiB tail.
+        let idx = Mp4Index { start: 170 * piece_len, end: 200 * piece_len };
+        let (files, ctx) = one_mp4(pieces, piece_len, Some(idx), false);
+        let demand = video_startup_hints(&files, &ctx);
+        for p in 170..200 {
+            assert_eq!(demand.get(&p), Some(&PiecePriority::Now), "piece {p}");
+        }
+        assert_ne!(demand.get(&169), Some(&PiecePriority::Now));
+    }
+
+    #[test]
+    fn moov_first_extends_the_head_and_skips_the_tail() {
+        let piece_len = 1 << 20;
+        let pieces = 200u32;
+        let idx = Mp4Index { start: 24, end: 12 * piece_len };
+        let (files, ctx) = one_mp4(pieces, piece_len, Some(idx), false);
+        let demand = video_startup_hints(&files, &ctx);
+        assert_eq!(demand.get(&11), Some(&PiecePriority::Now));
+        assert_ne!(demand.get(&(pieces - 1)), Some(&PiecePriority::Now));
+    }
+
+    #[test]
+    fn length_known_drops_the_index_but_keeps_the_head() {
+        let piece_len = 1 << 20;
+        let pieces = 200u32;
+        let idx = Mp4Index { start: 170 * piece_len, end: 200 * piece_len };
+        let (files, ctx) = one_mp4(pieces, piece_len, Some(idx), true);
+        let demand = video_startup_hints(&files, &ctx);
+        assert_eq!(demand.get(&0), Some(&PiecePriority::Now));
+        assert_ne!(demand.get(&180), Some(&PiecePriority::Now));
+        let (files, ctx) = one_mp4(pieces, piece_len, None, true);
+        assert_ne!(video_startup_hints(&files, &ctx).get(&(pieces - 1)), Some(&PiecePriority::Now));
+    }
+
     #[test]
     fn test_video_startup_hints_raise_head_and_tail() {
         let piece_len = 1024 * 1024i64;
@@ -192,6 +262,8 @@ mod tests {
             index: 0,
             display_path: "movie.mp4".into(),
             layout: layout(pieces, piece_len),
+            index_span: None,
+            length_known: false,
         }];
         let mut selected = HashSet::new();
         selected.insert(0);
@@ -226,6 +298,8 @@ mod tests {
                     begin_piece: 0,
                     end_piece: 20,
                 },
+                index_span: None,
+                length_known: false,
             },
             VideoFileInput {
                 index: 1,
@@ -236,6 +310,8 @@ mod tests {
                     begin_piece: 20,
                     end_piece: 24,
                 },
+                index_span: None,
+                length_known: false,
             },
         ];
         let mut selected = HashSet::new();
@@ -264,6 +340,8 @@ mod tests {
             index: 0,
             display_path: "movie.mp4".into(),
             layout: layout(48, piece_len),
+            index_span: None,
+            length_known: false,
         }];
         let mut selected = HashSet::new();
         selected.insert(0);

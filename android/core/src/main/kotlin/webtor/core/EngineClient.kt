@@ -359,6 +359,11 @@ class EngineClient(
             .put("offset", offset.coerceAtLeast(0L)).put("length", length))
     }
 
+    /** Built-in player has the video's length: the engine stops fetching the container index first. */
+    fun lengthKnown(id: String, fileIndex: Int) {
+        post("/length-known", JSONObject().put("id", id).put("fileIndex", fileIndex))
+    }
+
     fun pause(id: String) { post("/pause", JSONObject().put("id", id)) }
     fun resume(id: String) { post("/resume", JSONObject().put("id", id)) }
     fun networkChanged(generation: Long, connected: Boolean) {

@@ -1593,7 +1593,9 @@ impl Drop for PlaybackSession {
 /// `(id, file_index, range_start)`; the start is `-1` when the request has none.
 pub type SeekablePlaybackResolver =
     Arc<dyn Fn(&str, usize, i64) -> io::Result<Arc<PlaybackReader>> + Send + Sync>;
-struct SeekableResolverSource(SeekablePlaybackResolver);
+/// `(id, file_index, first bytes)` seen at offset 0 of a served file.
+pub type StreamHeadObserver = Arc<dyn Fn(&str, usize, &[u8]) + Send + Sync>;
+struct SeekableResolverSource(SeekablePlaybackResolver, Option<StreamHeadObserver>);
 
 impl StreamSource for SeekableResolverSource {
     fn open(&self, id: &str, index: usize) -> io::Result<Arc<dyn StreamReader>> {
@@ -1602,13 +1604,19 @@ impl StreamSource for SeekableResolverSource {
     fn open_at(&self, id: &str, index: usize, start: i64) -> io::Result<Arc<dyn StreamReader>> {
         (self.0)(id, index, start).map(|reader| reader as Arc<dyn StreamReader>)
     }
+    fn observe_head(&self, id: &str, index: usize, head: &[u8]) {
+        if let Some(observe) = &self.1 {
+            observe(id, index, head);
+        }
+    }
 }
 
 pub async fn start_stream_server_seekable(
     port: u16,
     resolver: SeekablePlaybackResolver,
+    head_observer: Option<StreamHeadObserver>,
 ) -> io::Result<Arc<StreamServer>> {
-    stream_http::start_stream_server(port, Arc::new(SeekableResolverSource(resolver))).await
+    stream_http::start_stream_server(port, Arc::new(SeekableResolverSource(resolver, head_observer))).await
 }
 
 

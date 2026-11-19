@@ -83,7 +83,13 @@ impl EngineServer {
         };
         let files: Vec<VideoFileInput> = Self::file_layouts(rec)
             .into_iter()
-            .map(|(index, display_path, layout)| VideoFileInput { index, display_path, layout })
+            .map(|(index, display_path, layout)| VideoFileInput {
+                index,
+                display_path,
+                layout,
+                index_span: rec.index_spans.get(&index).copied(),
+                length_known: rec.length_known.contains(&index),
+            })
             .collect();
         let hints = video_startup_hints(&files, &ctx);
         if hints == rec.playback_coordinator.hints() {

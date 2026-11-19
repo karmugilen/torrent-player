@@ -56,6 +56,9 @@ pub trait StreamSource: Send + Sync {
     fn open_at(&self, id: &str, file_index: usize, _start: i64) -> io::Result<Arc<dyn StreamReader>> {
         self.open(id, file_index)
     }
+    /// The first bytes of a file as they are served (offset 0), so the engine
+    /// can read the container layout (MP4 `moov` position) from them.
+    fn observe_head(&self, _id: &str, _file_index: usize, _head: &[u8]) {}
 }
 
 pub struct StreamServer {
@@ -239,7 +242,8 @@ async fn handle_stream_request(
     ));
     let id = id.to_owned();
     let start = req.headers().get(RANGE).and_then(|v| v.to_str().ok()).map_or(-1, range_start);
-    let opened = tokio::task::spawn_blocking(move || source.open_at(&id, file_index, start))
+    let (open_source, open_id) = (source.clone(), id.clone());
+    let opened = tokio::task::spawn_blocking(move || open_source.open_at(&open_id, file_index, start))
         .await
         .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
     let reader = match opened {
@@ -300,11 +304,15 @@ async fn handle_stream_request(
                 }
                 let want = ((end - off + 1) as usize).min(STREAM_CHUNK_BYTES);
                 let reader_ref = reader_clone.clone();
+                let (head_source, head_id) = (source.clone(), id.clone());
                 let pending_read = tokio::task::spawn_blocking(move || {
                     let mut buf = vec![0u8; want];
                     match reader_ref.read_some(&mut buf, off) {
                         Ok(n) if n > 0 => {
                             buf.truncate(n);
+                            if off == 0 {
+                                head_source.observe_head(&head_id, file_index, &buf);
+                            }
                             Ok(Some(buf))
                         }
                         Ok(_) => Ok(None),

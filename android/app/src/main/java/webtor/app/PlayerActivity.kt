@@ -187,6 +187,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         lengthWait.value = true; updateBuffering()
         if (alive) MPVLib.setPropertyBoolean("pause", true)
     }
+    private var lengthReported: Uri? = null
+    /** Tell the engine once per file that the length is known, so it stops fetching the index first. */
+    private fun reportLength() {
+        val uri = items.getOrNull(playlistPos.intValue)?.uri ?: return
+        if (uri == lengthReported) return
+        lengthReported = uri
+        val (id, index) = torrentOf(uri) ?: return
+        lifecycleScope.launch(Dispatchers.IO) { runCatching { (application as WebtorApp).engineClient.lengthKnown(id, index) } }
+    }
     private fun releaseLength(play: Boolean) {
         if (!lengthWait.value) return
         lengthWait.value = false; updateBuffering()
@@ -382,7 +391,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "time-pos" -> position.doubleValue = value
             "duration" -> runOnUiThread {
                 duration.doubleValue = value
-                if (value > 0) releaseLength(play = true)
+                if (value > 0) { reportLength(); releaseLength(play = true) }
             }
             "demuxer-cache-time" -> cached.doubleValue = value
         }
@@ -413,6 +422,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 val known = MPVLib.getPropertyDouble("duration")
                 if (known != null && known > 0) runOnUiThread {
                     duration.doubleValue = known
+                    reportLength()
                     releaseLength(play = true)
                 }
             }
