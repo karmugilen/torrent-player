@@ -29,7 +29,7 @@ fun playbackEvent(entry: DownloadEntry, file: SavedFile, positionMs: Long = file
     fun item(f: SavedFile) = PlaybackItem(PlaybackProvider.uriFor(entry, f).toString(), f.name)
     val files = playbackFiles(entry,file)
     return UiEvent.OpenContent(item(file).uri, mimeFor(file.name), file.name,
-        files.videos.map(::item), files.subtitles.map(::item), positionMs)
+        files.videos.map(::item), files.subtitles.map(::item), positionMs, entryKey = entry.key)
 }
 
 /** HTTP is the default playback path; canonical content URIs still own bookmarks. */

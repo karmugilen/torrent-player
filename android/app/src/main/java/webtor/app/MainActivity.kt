@@ -437,9 +437,11 @@ class MainActivity : ComponentActivity() {
             event.subtitles.firstOrNull()?.let { putExtra("subtitles_location", it.uri) }
             if (event.mime.startsWith("video/") && BuiltInPlayer.enabled(this@MainActivity)) {
                 setClass(this@MainActivity, PlayerActivity::class.java)
-                // Started from a torrent's page: the player shows that page under the video.
+                // Every torrent video plays on its page (video on top, details below), also
+                // right after adding a torrent, never straight into landscape.
                 val ui = session.ui.value
-                (PlayerActivity.takeNextDetailKey() ?: ui.openTorrentKey?.takeIf { ui.screen == Screen.Files })
+                (PlayerActivity.takeNextDetailKey() ?: event.entryKey
+                    ?: ui.openTorrentKey?.takeIf { ui.screen == Screen.Files })
                     ?.let { putExtra("detail_key", it) }
             }
         }

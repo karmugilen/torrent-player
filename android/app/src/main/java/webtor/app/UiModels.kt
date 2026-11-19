@@ -120,7 +120,9 @@ sealed class UiEvent {
         val playlist: List<PlaybackItem> = emptyList(), val subtitles: List<PlaybackItem> = emptyList(),
         val positionMs: Long = 0L,
         val bookmarkUris: Map<String, String> = emptyMap(),
-        val playbackLeaseKey: String? = null) : UiEvent()
+        val playbackLeaseKey: String? = null,
+        /** Library entry this video belongs to: the built-in player shows its page under the video. */
+        val entryKey: String? = null) : UiEvent()
     data object ExitApp : UiEvent()
     data class ShareText(val text: String) : UiEvent()
 }
