@@ -6,4 +6,11 @@
         <item name="android:windowBackground">#161513</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <!-- Player: black, so window switches (PiP, full screen) never flash the app colour. -->
+    <style name="Theme.Webtor.Player">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+    </style>
 </resources>

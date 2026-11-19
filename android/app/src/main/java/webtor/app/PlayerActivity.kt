@@ -142,16 +142,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     @Volatile private var alive = false
 
+    /** Run [block] on mpv only while this activity owns a live instance (else null). Not from mpv's own callbacks. */
+    private inline fun <T> mpv(block: () -> T): T? = synchronized(lock) { if (alive) block() else null }
+
     /** Release the player once. Detach the picture first so no render thread touches a freed context. */
-    private fun teardown() = synchronized(lock) {
-        if (!alive) return@synchronized
-        alive = false
-        runCatching { MPVLib.removeObserver(this) }
-        runCatching { MPVLib.setPropertyString("vo", "null") }
-        runCatching { MPVLib.setOptionString("force-window", "no") }
-        runCatching { MPVLib.detachSurface() }
-        runCatching { MPVLib.destroy() }
-        if (owner === this) owner = null
+    private fun teardown() {
+        loadJob?.cancel()
+        synchronized(lock) {
+            if (!alive) return
+            alive = false
+            // Waits for any callback in progress, so none runs for this activity afterwards.
+            runCatching { MPVLib.removeObserver(this) }
+            runCatching { MPVLib.setPropertyString("vo", "null") }
+            runCatching { MPVLib.setOptionString("force-window", "no") }
+            runCatching { MPVLib.detachSurface() }
+            runCatching { MPVLib.destroy() }
+            if (owner === this) owner = null
+        }
     }
 
     private data class Item(val uri: Uri, val name: String)
@@ -185,7 +192,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun holdForLength() {
         duration.doubleValue = 0.0
         lengthWait.value = true; updateBuffering()
-        if (alive) MPVLib.setPropertyBoolean("pause", true)
+        mpv { MPVLib.setPropertyBoolean("pause", true) }
     }
     private var lengthReported: Uri? = null
     /** Tell the engine once per file that the length is known, so it stops fetching the index first. */
@@ -199,7 +206,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun releaseLength(play: Boolean) {
         if (!lengthWait.value) return
         lengthWait.value = false; updateBuffering()
-        if (play && alive) MPVLib.setPropertyBoolean("pause", false)
+        if (play) mpv { MPVLib.setPropertyBoolean("pause", false) }
     }
     private val playlistPos = mutableIntStateOf(0)
 
@@ -242,6 +249,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
 
         readIntent(intent)
+        if (isFinishing) return // no video to play
         startMpv()
         androidx.core.content.ContextCompat.registerReceiver(this, pipReceiver, android.content.IntentFilter(pipAction),
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -250,7 +258,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             androidx.compose.material3.MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme(
                 primary = Color.White, onPrimary = Color.Black,
             )) { PlayerScreen(
-                surface = { SurfaceView(it).apply { holder.addCallback(surfaceCallback) } },
+                surface = { SurfaceView(it).apply {
+                    holder.addCallback(surfaceCallback)
+                    videoView = this
+                    // Keep the PiP hint on the video's real place on screen.
+                    addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+                        if (l != ol || t != ot || r != or || b != ob) updatePip()
+                    }
+                } },
                 onBack = ::close,
             ) }
         }
@@ -284,8 +299,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun startMpv() {
         synchronized(lock) {
-            // A previous player still closing must let go before this one starts.
-            owner?.takeIf { it !== this }?.teardown()
+            // A previous player still open (e.g. left in picture in picture) must let go first.
+            // Close it as well: with its mpv gone it could only show a dead, frozen window.
+            owner?.takeIf { it !== this }?.let { if (it.isFinishing) it.teardown() else it.finish() }
             MPVLib.create(applicationContext)
             owner = this
             alive = true
@@ -345,41 +361,46 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private var filesLoaded = false
 
     /** Open the files once a surface is attached. Off the main thread, as mpvEx does, so a slow stream never freezes the UI. */
+    private var loadJob: kotlinx.coroutines.Job? = null
     private fun loadFilesOnce() {
         if (filesLoaded) return
         filesLoaded = true
         val paths = items.map { it.uri }
-        lifecycleScope.launch(Dispatchers.Default) {
+        loadJob = lifecycleScope.launch(Dispatchers.Default) {
             paths.forEachIndexed { i, uri ->
                 if (!alive) return@launch
-                MPVLib.command(arrayOf("loadfile", mpvPath(uri), if (i == 0) "replace" else "append"))
+                val path = mpvPath(uri)
+                // Under the lock: the activity may be torn down on the main thread meanwhile.
+                mpv { MPVLib.command(arrayOf("loadfile", path, if (i == 0) "replace" else "append")) } ?: return@launch
             }
         }
     }
 
     private val surfaceCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
-            if (!alive) return
-            MPVLib.attachSurface(holder.surface)
-            MPVLib.setOptionString("force-window", "yes")
-            MPVLib.setPropertyString("vo", "gpu")
+            mpv {
+                MPVLib.attachSurface(holder.surface)
+                MPVLib.setOptionString("force-window", "yes")
+                MPVLib.setPropertyString("vo", "gpu")
+            } ?: return
             loadFilesOnce()
         }
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-            if (!alive) return
-            MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+            mpv { MPVLib.setPropertyString("android-surface-size", "${width}x$height") }
         }
         override fun surfaceDestroyed(holder: SurfaceHolder) {
-            if (!alive) return
-            MPVLib.setPropertyString("vo", "null")
-            MPVLib.setOptionString("force-window", "no")
-            MPVLib.detachSurface()
+            mpv {
+                MPVLib.setPropertyString("vo", "null")
+                MPVLib.setOptionString("force-window", "no")
+                MPVLib.detachSurface()
+            }
         }
     }
 
     // mpv calls these on its own thread.
     override fun eventProperty(property: String) {}
     override fun eventProperty(property: String, value: Long) {
+        if (!alive) return
         if (property == "playlist-pos" && value >= 0) runOnUiThread {
             if (value.toInt() != playlistPos.intValue) { runCatching { saveFrames() }; synchronized(frames) { frames.clear() } }
             playlistPos.intValue = value.toInt()
@@ -387,9 +408,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
     }
     override fun eventProperty(property: String, value: Double) {
+        if (!alive) return
         when (property) {
             "time-pos" -> position.doubleValue = value
             "duration" -> runOnUiThread {
+                if (!alive) return@runOnUiThread
                 duration.doubleValue = value
                 if (value > 0) { reportLength(); releaseLength(play = true) }
             }
@@ -397,15 +420,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
     }
     override fun eventProperty(property: String, value: Boolean) {
+        if (!alive) return
         when (property) {
             "pause" -> { paused.value = value; runOnUiThread { updatePip() } }
             "paused-for-cache" -> { cacheWait = value; updateBuffering() }
             "seeking" -> { seekWait = value; updateBuffering() }
-            "idle-active" -> if (value && firstFileLoaded) runOnUiThread { close() }
+            "idle-active" -> if (value && firstFileLoaded) runOnUiThread { if (alive) close() }
         }
     }
     override fun eventProperty(property: String, value: String) {}
     override fun event(eventId: Int) {
+        if (!alive) return
         when (eventId) {
             MPVLib.MPV_EVENT_FILE_LOADED -> {
                 if (!firstFileLoaded) {
@@ -438,8 +463,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     data class Track(val id: String, val name: String, val detail: String, val selected: Boolean)
 
     /** Audio or subtitle tracks from mpv's track-list; subtitles get an "Off" row. */
-    fun tracks(type: String): List<Track> {
-        if (!alive) return emptyList()
+    fun tracks(type: String): List<Track> = mpv { readTracks(type) } ?: emptyList()
+
+    private fun readTracks(type: String): List<Track> {
         val count = MPVLib.getPropertyInt("track-list/count") ?: 0
         val list = (0 until count).mapNotNull { i ->
             if (MPVLib.getPropertyString("track-list/$i/type") != type) return@mapNotNull null
@@ -460,17 +486,18 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         return if (type == "sub") listOf(Track("no", "Off", "", list.none { it.selected })) + list else list
     }
 
-    fun selectTrack(type: String, id: String) =
-        MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id)
+    fun selectTrack(type: String, id: String) {
+        mpv { MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id) }
+    }
 
     fun togglePause() {
         if (lengthWait.value) { releaseLength(play = true); return }
-        if (alive) MPVLib.command(arrayOf("cycle", "pause"))
+        mpv { MPVLib.command(arrayOf("cycle", "pause")) }
     }
-    fun seekBy(seconds: Int) = MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes"))
-    fun seekTo(seconds: Double) = MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes"))
-    fun cycle(what: String) = MPVLib.command(arrayOf("osd-msg", "cycle", what))
-    fun next() = MPVLib.command(arrayOf("playlist-next"))
+    fun seekBy(seconds: Int) { mpv { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
+    fun seekTo(seconds: Double) { mpv { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
+    fun cycle(what: String) { mpv { MPVLib.command(arrayOf("osd-msg", "cycle", what)) } }
+    fun next() { mpv { MPVLib.command(arrayOf("playlist-next")) } }
 
     private fun close() {
         if (finishing) return
@@ -494,9 +521,30 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         override fun onReceive(context: Context, intent: Intent) { togglePause() }
     }
 
+    private var videoView: SurfaceView? = null
+
+    /**
+     * Where the picture is on screen, in [ratio]'s shape. With it the system zooms the
+     * real video into and out of the small window; without it Android 12+ shows the
+     * app icon over a plain colour during the switch.
+     */
+    private fun videoRect(ratio: Double): android.graphics.Rect? {
+        val view = videoView ?: return null
+        val r = android.graphics.Rect()
+        if (!view.getGlobalVisibleRect(r) || r.width() <= 0 || r.height() <= 0) return null
+        val w = r.width().toDouble(); val h = r.height().toDouble()
+        return if (w / h > ratio) {
+            val fit = (h * ratio).toInt(); val x = r.left + (r.width() - fit) / 2
+            android.graphics.Rect(x, r.top, x + fit, r.bottom)
+        } else {
+            val fit = (w / ratio).toInt(); val y = r.top + (r.height() - fit) / 2
+            android.graphics.Rect(r.left, y, r.right, y + fit)
+        }
+    }
+
     private fun pipParams(): android.app.PictureInPictureParams? {
-        if (Build.VERSION.SDK_INT < 26 || !alive) return null
-        val aspect = runCatching { MPVLib.getPropertyDouble("video-params/aspect") }.getOrNull()?.takeIf { it > 0 } ?: (16.0 / 9)
+        if (Build.VERSION.SDK_INT < 26 || !alive || finishing || isFinishing || isDestroyed) return null
+        val aspect = mpv { MPVLib.getPropertyDouble("video-params/aspect") }?.takeIf { it > 0 } ?: (16.0 / 9)
         val clamped = aspect.coerceIn(1 / 2.39, 2.39)
         val ratio = android.util.Rational((clamped * 1000).toInt(), 1000)
         val playing = !paused.value
@@ -508,7 +556,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT),
         )
         return android.app.PictureInPictureParams.Builder().setAspectRatio(ratio).setActions(listOf(action)).apply {
-            if (Build.VERSION.SDK_INT >= 31) setAutoEnterEnabled(!finishing).setSeamlessResizeEnabled(true)
+            videoRect(ratio.toDouble())?.let { setSourceRectHint(it) }
+            // Video: no cross-fade while the window resizes (Android's advice for players).
+            if (Build.VERSION.SDK_INT >= 31) setAutoEnterEnabled(!finishing).setSeamlessResizeEnabled(false)
         }.build()
     }
 
@@ -538,7 +588,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun onStop() {
         super.onStop()
         releaseLength(play = false)
-        if (!isFinishing && alive) MPVLib.setPropertyBoolean("pause", true)
+        if (!isFinishing) mpv { MPVLib.setPropertyBoolean("pause", true) }
     }
 
     override fun finish() {
@@ -646,7 +696,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (duration.doubleValue <= 0 || position.doubleValue < 3) return
         val file = java.io.File(cacheDir, "player-frame.jpg")
         file.delete()
-        MPVLib.command(arrayOf("screenshot-to-file", file.path, "video"))
+        mpv { MPVLib.command(arrayOf("screenshot-to-file", file.path, "video")) } ?: return
         if (!file.exists() || file.length() == 0L) return
         val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         android.graphics.BitmapFactory.decodeFile(file.path, bounds)
@@ -692,13 +742,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, (v.coerceIn(0f, 1f) * max).roundToInt(), 0)
     }
 
-    private fun setSpeed(x: Double) = MPVLib.setPropertyDouble("speed", x)
+    private fun setSpeed(x: Double) { mpv { MPVLib.setPropertyDouble("speed", x) } }
 
     private val aspect by lazy { mutableStateOf(PlayerAspect.load(this)) }
     private val rotationLocked = mutableStateOf(false)
 
     /** Fit keeps the whole picture, Crop fills the screen, Stretch ignores the video's shape. */
-    private fun applyAspect(mode: PlayerAspect) {
+    private fun applyAspect(mode: PlayerAspect) = mpv {
         MPVLib.setPropertyString("keepaspect", if (mode == PlayerAspect.STRETCH) "no" else "yes")
         MPVLib.setPropertyString("panscan", if (mode == PlayerAspect.CROP) "1.0" else "0.0")
         MPVLib.setPropertyString("video-aspect-override", when (mode) {
@@ -863,7 +913,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             fun finish(apply: Boolean) {
                                 if (mode == Drag.SEEK) {
                                     if (apply) { pendingSeek = target; seekTo(target) }
-                                    if (!wasPaused) MPVLib.setPropertyBoolean("pause", false)
+                                    if (!wasPaused) mpv { MPVLib.setPropertyBoolean("pause", false) }
                                 }
                                 if (mode != Drag.NONE) { endScrub(); popupLevel = null }
                             }
@@ -890,7 +940,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                         Drag.SEEK -> {
                                             origin = pos; target = pos
                                             wasPaused = paused.value
-                                            if (!wasPaused) MPVLib.setPropertyBoolean("pause", true)
+                                            if (!wasPaused) mpv { MPVLib.setPropertyBoolean("pause", true) }
                                             controls = true; touchTick++ // show the bar while swiping
                                         }
                                         else -> {}
