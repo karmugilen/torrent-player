@@ -1,0 +1,1 @@
+Player: a new video waits until its length is known, then starts at once, with no time limit, so the end time always shows. Google Play: the app no longer requires a landscape screen or Wi-Fi to install. Built with NDK r28 (16 KB page support).
