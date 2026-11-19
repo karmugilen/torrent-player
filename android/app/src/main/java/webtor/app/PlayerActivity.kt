@@ -28,6 +28,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -138,12 +141,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         /** The libmpv instance is process-wide; only its current owner may tear it down. */
         @Volatile private var owner: PlayerActivity? = null
         private val lock = Any()
+        private val commands = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "mpv-commands") }
     }
 
     @Volatile private var alive = false
 
     /** Run [block] on mpv only while this activity owns a live instance (else null). Not from mpv's own callbacks. */
     private inline fun <T> mpv(block: () -> T): T? = synchronized(lock) { if (alive) block() else null }
+
+    /**
+     * Same as [mpv] but off the UI thread, in order. Buttons and gestures use this:
+     * mpv commands wait for the player core, which can be busy reading a slow stream,
+     * and waiting on the UI thread made taps look dead.
+     */
+    private fun mpvSend(block: () -> Unit) { commands.execute { mpv(block) } }
 
     /** Release the player once. Detach the picture first so no render thread touches a freed context. */
     private fun teardown() {
@@ -206,17 +217,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun releaseLength(play: Boolean) {
         if (!lengthWait.value) return
         lengthWait.value = false; updateBuffering()
-        if (play) mpv { MPVLib.setPropertyBoolean("pause", false) }
+        if (play) mpvSend { MPVLib.setPropertyBoolean("pause", false) }
     }
     private val playlistPos = mutableIntStateOf(0)
 
-    /** True while a touch that began on a system gesture edge (home pill, status bar) is in progress. */
+    /** True when the latest touch began on a system gesture edge (home pill, status bar). */
     private var edgeTouch = false
 
     /**
      * Swiping up from the home pill or down from the top belongs to the system.
-     * Those touches never reach the player, so they cannot seek, change volume
-     * or pop up the time overlay.
+     * The gesture layer ignores touches that start there, so they cannot seek,
+     * change volume or pop up the time overlay; buttons there still work.
      */
     override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
         if (ev.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
@@ -228,10 +239,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val top = maxOf(minEdge * 0.6f, (g?.top ?: 0).toFloat())
             edgeTouch = h > 0 && (ev.y >= h - bottom || ev.y <= top)
         }
-        if (edgeTouch) {
-            if (ev.actionMasked == android.view.MotionEvent.ACTION_UP || ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL) edgeTouch = false
-            return true
-        }
+        // Buttons near the edges still get the touch; only the gesture layer skips it.
         return super.dispatchTouchEvent(ev)
     }
 
@@ -487,17 +495,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     fun selectTrack(type: String, id: String) {
-        mpv { MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id) }
+        mpvSend { MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id) }
     }
 
     fun togglePause() {
         if (lengthWait.value) { releaseLength(play = true); return }
-        mpv { MPVLib.command(arrayOf("cycle", "pause")) }
+        mpvSend { MPVLib.command(arrayOf("cycle", "pause")) }
     }
-    fun seekBy(seconds: Int) { mpv { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
-    fun seekTo(seconds: Double) { mpv { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
-    fun cycle(what: String) { mpv { MPVLib.command(arrayOf("osd-msg", "cycle", what)) } }
-    fun next() { mpv { MPVLib.command(arrayOf("playlist-next")) } }
+    fun seekBy(seconds: Int) { mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
+    fun seekTo(seconds: Double) { mpvSend { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
+    fun cycle(what: String) { mpvSend { MPVLib.command(arrayOf("osd-msg", "cycle", what)) } }
+    fun next() { mpvSend { MPVLib.command(arrayOf("playlist-next")) } }
 
     private fun close() {
         if (finishing) return
@@ -742,13 +750,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, (v.coerceIn(0f, 1f) * max).roundToInt(), 0)
     }
 
-    private fun setSpeed(x: Double) { mpv { MPVLib.setPropertyDouble("speed", x) } }
+    private fun setSpeed(x: Double) { mpvSend { MPVLib.setPropertyDouble("speed", x) } }
 
     private val aspect by lazy { mutableStateOf(PlayerAspect.load(this)) }
     private val rotationLocked = mutableStateOf(false)
 
     /** Fit keeps the whole picture, Crop fills the screen, Stretch ignores the video's shape. */
-    private fun applyAspect(mode: PlayerAspect) = mpv {
+    private fun applyAspect(mode: PlayerAspect) = mpvSend {
         MPVLib.setPropertyString("keepaspect", if (mode == PlayerAspect.STRETCH) "no" else "yes")
         MPVLib.setPropertyString("panscan", if (mode == PlayerAspect.CROP) "1.0" else "0.0")
         MPVLib.setPropertyString("video-aspect-override", when (mode) {
@@ -866,10 +874,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     .pointerInput(Unit) {
                         var held = false
                         var streakPress = false
+                        var edgePress = false
                         fun sideOf(x: Float) = when { x < size.width / 3f -> -1; x > size.width * 2f / 3f -> 1; else -> 0 }
                         detectTapGestures(
-                            onPress = { o ->
+                            onPress = press@{ o ->
                                 held = false
+                                edgePress = edgeTouch
+                                if (edgePress) { streakPress = false; tryAwaitRelease(); return@press }
                                 // During a skip streak every tap on the same side adds 10 s at once.
                                 val side = sideOf(o.x)
                                 streakPress = side != 0 && side == skipSide
@@ -884,9 +895,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                     if (held) { if (!speedLocked) setSpeed(1.0); fast = false }
                                 }
                             },
-                            onTap = { if (!held && !streakPress) { controls = !controls; touchTick++ } },
+                            onTap = { if (!held && !streakPress && !edgePress) { controls = !controls; touchTick++ } },
                             onDoubleTap = { o ->
-                                if (!streakPress) {
+                                if (!streakPress && !edgePress) {
                                     val side = sideOf(o.x)
                                     if (side == 0) togglePause()
                                     else { seekBy(10 * side); skipSide = side; skipTotal = 10; skipTick++ }
@@ -901,6 +912,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         // Up/down: left half brightness, right half volume.
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
+                            if (edgeTouch) return@awaitEachGesture // belongs to the system
                             val start = down.position
                             val startAt = System.currentTimeMillis()
                             var mode = Drag.NONE
@@ -913,7 +925,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             fun finish(apply: Boolean) {
                                 if (mode == Drag.SEEK) {
                                     if (apply) { pendingSeek = target; seekTo(target) }
-                                    if (!wasPaused) mpv { MPVLib.setPropertyBoolean("pause", false) }
+                                    if (!wasPaused) mpvSend { MPVLib.setPropertyBoolean("pause", false) }
                                 }
                                 if (mode != Drag.NONE) { endScrub(); popupLevel = null }
                             }
@@ -940,7 +952,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                         Drag.SEEK -> {
                                             origin = pos; target = pos
                                             wasPaused = paused.value
-                                            if (!wasPaused) mpv { MPVLib.setPropertyBoolean("pause", true) }
+                                            if (!wasPaused) mpvSend { MPVLib.setPropertyBoolean("pause", true) }
                                             controls = true; touchTick++ // show the bar while swiping
                                         }
                                         else -> {}
@@ -1003,102 +1015,116 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             }
 
             AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxSize()) {
+                androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+                    // Sizes follow the screen: a phone in landscape is about 360 dp tall, tablets get up to 1.5x.
+                    val k = (minOf(maxWidth, maxHeight) / 360.dp).coerceIn(1f, 1.5f)
+                    // Narrow windows (split screen, small phones) move the actions under the seek bar.
+                    val compact = maxWidth < 620.dp
+                    val tap = 52.dp * k
+                    val glyph = 28.dp * k
+
                     // Shade only top and bottom so the picture stays clear.
-                    Box(Modifier.fillMaxWidth().height(110.dp).align(Alignment.TopCenter)
+                    Box(Modifier.fillMaxWidth().height(120.dp * k).align(Alignment.TopCenter)
                         .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))))
-                    Box(Modifier.fillMaxWidth().height(170.dp).align(Alignment.BottomCenter)
+                    Box(Modifier.fillMaxWidth().height(if (compact) 230.dp * k else 190.dp * k).align(Alignment.BottomCenter)
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))))
 
-                    // Top: back and title only.
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                    @Composable
+                    fun Action(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+                        IconButton(onClick = onClick, modifier = Modifier.size(tap)) {
+                            Icon(icon, label, tint = Color.White, modifier = Modifier.size(glyph))
                         }
-                        Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                            Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
-                            val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
-                            val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
-                            if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = { trackSheet = "audio"; controls = false }) {
-                            Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White)
-                        }
-                        IconButton(onClick = { trackSheet = "sub"; controls = false }) {
-                            Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White)
-                        }
-                        IconButton(onClick = { flash(cycleAspect().label); touchTick++ }) {
-                            Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}", tint = Color.White)
-                        }
-                        IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
-                            Icon(
-                                if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
-                                if (rotationLocked.value) "Unlock rotation" else "Lock rotation",
-                                tint = Color.White,
-                            )
-                        }
+                    }
+                    @Composable
+                    fun Actions() {
+                        Action(Icons.Filled.Audiotrack, "Audio") { trackSheet = "audio"; controls = false }
+                        Action(Icons.Filled.Subtitles, "Subtitles") { trackSheet = "sub"; controls = false }
+                        Action(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}") { flash(cycleAspect().label); touchTick++ }
+                        Action(
+                            if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
+                            if (rotationLocked.value) "Unlock rotation" else "Lock rotation",
+                        ) { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }
                         if (items.size > 1 && playlistPos.intValue < items.size - 1) {
-                            IconButton(onClick = { next(); touchTick++ }) {
-                                Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White)
-                            }
-                        }
-                    }
-
-                    // Center: rewind, play/pause, forward.
-                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(56.dp)) {
-                            Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(36.dp))
-                        }
-                        androidx.compose.material3.FilledTonalIconButton(
-                            onClick = { togglePause(); touchTick++ },
-                            modifier = Modifier.size(72.dp),
-                            colors = androidx.compose.material3.IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = Color.Black.copy(alpha = 0.4f), contentColor = Color.White),
-                        ) {
-                            when {
-                                isBuffering && (!isPaused || lengthWait.value) -> CircularProgressIndicator(Modifier.size(40.dp), color = Color.White, strokeWidth = 3.dp)
-                                isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(44.dp))
-                                else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(44.dp))
-                            }
-                        }
-                        IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(56.dp)) {
-                            Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(36.dp))
-                        }
-                    }
-
-                    // Bottom: time, seek bar, then actions.
-                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 28.dp, end = 28.dp, top = 14.dp, bottom = 40.dp)) {
-                        val shown = when {
-                            sliderDragging -> sliderValue.toDouble()
-                            else -> pendingSeek ?: pos
+                            Action(Icons.Filled.SkipNext, "Next episode") { next(); touchTick++ }
                         }
                         if (Build.VERSION.SDK_INT >= 26) {
-                            IconButton(onClick = { controls = false; enterPip() }, modifier = Modifier.align(Alignment.End)) {
-                                Icon(Icons.Filled.PictureInPictureAlt, "Picture in picture", tint = Color.White)
+                            Action(Icons.Filled.PictureInPictureAlt, "Picture in picture") { controls = false; enterPip() }
+                        }
+                    }
+
+                    // Keep clear of the camera cutout.
+                    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)) {
+                        // Top: back, title, and the actions when there is room.
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Action(Icons.AutoMirrored.Filled.ArrowBack, "Back", onBack)
+                            Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                                Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
+                                    fontSize = MaterialTheme.typography.titleMedium.fontSize * k,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
+                                val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
+                                val info = listOfNotNull(lead, swarm.value).joinToString("  ·  ")
+                                if (info.isNotEmpty()) Text(info, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            if (!compact) Actions()
+                        }
+
+                        // Center: rewind, play/pause, forward.
+                        Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (compact) 32.dp * k else 64.dp * k),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(72.dp * k)) {
+                                Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(46.dp * k))
+                            }
+                            androidx.compose.material3.FilledTonalIconButton(
+                                onClick = { togglePause(); touchTick++ },
+                                modifier = Modifier.size(92.dp * k),
+                                colors = androidx.compose.material3.IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = Color.Black.copy(alpha = 0.45f), contentColor = Color.White),
+                            ) {
+                                when {
+                                    isBuffering && (!isPaused || lengthWait.value) -> CircularProgressIndicator(Modifier.size(50.dp * k), color = Color.White, strokeWidth = 3.dp)
+                                    isPaused -> Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(58.dp * k))
+                                    else -> Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(58.dp * k))
+                                }
+                            }
+                            IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(72.dp * k)) {
+                                Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(46.dp * k))
                             }
                         }
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-                            Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
-                            Spacer(Modifier.weight(1f))
-                            val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
-                            if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f),
-                                style = MaterialTheme.typography.labelLarge)
-                            Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
+
+                        // Bottom: time, seek bar, and the actions on narrow screens.
+                        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                            .padding(start = 24.dp, end = 24.dp, top = 14.dp, bottom = if (compact) 12.dp else 28.dp)) {
+                            val shown = when {
+                                sliderDragging -> sliderValue.toDouble()
+                                else -> pendingSeek ?: pos
+                            }
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+                                val timeStyle = MaterialTheme.typography.labelLarge.copy(fontSize = MaterialTheme.typography.labelLarge.fontSize * k)
+                                Text(clock(shown), color = Color.White, style = timeStyle)
+                                Spacer(Modifier.weight(1f))
+                                val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
+                                if (ahead >= 1) Text("buffered ${clock(ahead)}   ", color = Color.White.copy(alpha = 0.65f), style = timeStyle)
+                                Text(clock(dur), color = Color.White.copy(alpha = 0.8f), style = timeStyle)
+                            }
+                            SeekBar(
+                                fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
+                                cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
+                                onDrag = { f ->
+                                    sliderDragging = true; sliderValue = (f * dur).toFloat()
+                                    seekPopup(sliderValue.toDouble()); touchTick++
+                                },
+                                onDragEnd = {
+                                    pendingSeek = sliderValue.toDouble()
+                                    seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
+                                },
+                            )
+                            if (compact) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly,
+                                    verticalAlignment = Alignment.CenterVertically) { Actions() }
+                            }
                         }
-                        SeekBar(
-                            fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                            cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                            onDrag = { f ->
-                                sliderDragging = true; sliderValue = (f * dur).toFloat()
-                                seekPopup(sliderValue.toDouble()); touchTick++
-                            },
-                            onDragEnd = {
-                                pendingSeek = sliderValue.toDouble()
-                                seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
-                            },
-                        )
                     }
                 }
             }
@@ -1182,7 +1208,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun SeekBar(fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
         var active by remember { mutableStateOf(false) }
         Canvas(
-            Modifier.fillMaxWidth().height(32.dp)
+            Modifier.fillMaxWidth().height(44.dp)
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onPress = { o -> active = true; onDrag((o.x / size.width).coerceIn(0f, 1f)); val tap = tryAwaitRelease(); if (tap) { active = false; onDragEnd() } },
@@ -1196,14 +1222,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     ) { change, _ -> change.consume(); onDrag((change.position.x / size.width).coerceIn(0f, 1f)) }
                 },
         ) {
-            val h = (if (active) 6.dp else 4.dp).toPx()
+            val h = (if (active) 8.dp else 5.dp).toPx()
             val y = size.height / 2 - h / 2
             val r = CornerRadius(h / 2)
             drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(0f, y), Size(size.width, h), r)
             if (cachedFraction > fraction) drawRect(Color.White.copy(alpha = 0.45f),
                 Offset(fraction * size.width, y), Size((cachedFraction - fraction) * size.width, h))
             drawRoundRect(Color.White, Offset(0f, y), Size(fraction * size.width, h), r)
-            drawCircle(Color.White, radius = (if (active) 9.dp else 7.dp).toPx(), center = Offset(fraction * size.width, size.height / 2))
+            drawCircle(Color.White, radius = (if (active) 12.dp else 9.dp).toPx(), center = Offset(fraction * size.width, size.height / 2))
         }
     }
 
