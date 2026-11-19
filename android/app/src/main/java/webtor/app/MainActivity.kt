@@ -37,6 +37,8 @@ class MainActivity : ComponentActivity() {
     private val session get() = vm.session
 
     private var launchedPlaybackUri: String? = null
+    /** The page player covers the detail page; once it does, this page switches to the library underneath. */
+    private var pagePlayerCovering = false
     private var launchedPlaybackItems: Set<String> = emptySet()
     private var launchedBookmarkUris: Map<String, String> = emptyMap()
     private val viewer = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -313,6 +315,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        // Hidden behind the page player now: be the library already, so back and PiP
+        // show it at once instead of a stale copy of the detail page.
+        if (pagePlayerCovering) { pagePlayerCovering = false; session.closeFiles() }
         if (isFinishing) (application as WebtorApp).clearCurrentActivity(this)
         super.onStop()
     }
@@ -419,7 +424,8 @@ class MainActivity : ComponentActivity() {
                 setClass(this@MainActivity, PlayerActivity::class.java)
                 // Started from a torrent's page: the player shows that page under the video.
                 val ui = session.ui.value
-                if (ui.screen == Screen.Files) ui.openTorrentKey?.let { putExtra("detail_key", it) }
+                (PlayerActivity.takeNextDetailKey() ?: ui.openTorrentKey?.takeIf { ui.screen == Screen.Files })
+                    ?.let { putExtra("detail_key", it) }
             }
         }
         launchedPlaybackUri = event.uri
@@ -447,12 +453,17 @@ class MainActivity : ComponentActivity() {
             // Launch the implicit intent directly so Android owns the choice and
             // can offer its native Just once / Always player selection.
             // The built-in page player takes the detail page's place with no slide.
-            if (intent.hasExtra("detail_key")) viewer.launch(intent, androidx.core.app.ActivityOptionsCompat.makeCustomAnimation(this, 0, 0))
+            if (intent.hasExtra("detail_key")) {
+                pagePlayerCovering = true
+                viewer.launch(intent, androidx.core.app.ActivityOptionsCompat.makeCustomAnimation(this, 0, 0))
+            }
             else viewer.launch(intent)
             return true
         } catch (_: ActivityNotFoundException) {
+            pagePlayerCovering = false
             session.showError(missing)
         } catch (_: SecurityException) {
+            pagePlayerCovering = false
             session.showError("The selected app could not access this file. Choose another app when Android asks.")
         }
         return false

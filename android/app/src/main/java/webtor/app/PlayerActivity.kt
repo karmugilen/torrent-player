@@ -159,6 +159,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
          * Tapping a torrent whose video is playing in the small window brings that player
          * back full size, still playing, with its page, like YouTube. False when there is none.
          */
+        /** Page to show under the next player when one page player hands over to another. */
+        @Volatile private var nextDetailKey: String? = null
+        fun takeNextDetailKey(): String? = nextDetailKey.also { nextDetailKey = null }
+
         fun expandIfPlaying(context: Context, key: String): Boolean {
             val p = owner ?: return false
             if (p.detailKey != key || !p.alive || p.finishing || p.isFinishing || !p.inPip.value) return false
@@ -255,6 +259,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             if (at != playlistPos.intValue) { markSeek(); mpvSend { MPVLib.command(arrayOf("playlist-play-index", at.toString())) } }
             return
         }
+        nextDetailKey = detailKey
         close()
         app.session.play(entry, index)
     }
@@ -333,6 +338,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         detailKey = intent.getStringExtra("detail_key")
         requestedOrientation = if (pageMode) ActivityInfo.SCREEN_ORIENTATION_USER else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         if (pageMode) orientationListener.takeIf { it.canDetectOrientation() }?.enable()
+        if (pageMode && Build.VERSION.SDK_INT >= 34) {
+            // In and out with no slide: the page player stands in for the detail page.
+            overrideActivityTransition(OVERRIDE_TRANSITION_OPEN, 0, 0)
+            overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, 0, 0)
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         if (Build.VERSION.SDK_INT >= 28) {
