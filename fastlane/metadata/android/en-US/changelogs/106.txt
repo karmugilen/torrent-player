@@ -1,0 +1,1 @@
+Google Play: the app no longer requires a landscape screen or Wi-Fi to install. Built with NDK r28 (16 KB page support).
