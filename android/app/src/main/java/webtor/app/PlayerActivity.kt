@@ -369,10 +369,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     // mpv calls these on its own thread.
-    override fun eventProperty(property: String) {
-        // Property became unavailable (between files): forget the old length.
-        if (property == "duration") runOnUiThread { duration.doubleValue = 0.0 }
-    }
+    override fun eventProperty(property: String) {}
     override fun eventProperty(property: String, value: Long) {
         if (property == "playlist-pos" && value >= 0) runOnUiThread {
             if (value.toInt() != playlistPos.intValue) { runCatching { saveFrames() }; synchronized(frames) { frames.clear() } }
@@ -411,6 +408,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
                 }
                 loading = false; updateBuffering()
+                // mpv only reports duration when it changes, so an episode with the same
+                // length as the last one may send nothing: read it once here as well.
+                val known = MPVLib.getPropertyDouble("duration")
+                if (known != null && known > 0) runOnUiThread {
+                    duration.doubleValue = known
+                    releaseLength(play = true)
+                }
             }
             MPVLib.MPV_EVENT_START_FILE -> {
                 loading = true; updateBuffering()
