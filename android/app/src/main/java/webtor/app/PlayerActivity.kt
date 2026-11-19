@@ -379,9 +379,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         setContent {
             val app = application as WebtorApp
             val ui by app.session.ui.collectAsState()
+            androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
             val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
                 android.content.res.Configuration.ORIENTATION_LANDSCAPE
-            val full = !pageMode || landscape || inPip.value
+            // The small window, judged by the window's own size: Android shrinks the window
+            // before it reports picture in picture, and for that ~1 s the page layout showed
+            // a black status-bar strip over the video and the controls.
+            val tiny = maxWidth < 420.dp && maxHeight < 420.dp
+            val full = !pageMode || landscape || inPip.value || tiny || maxWidth > maxHeight
+            // Picture sized for the small window from its first frame too, not only once PiP is reported.
+            LaunchedEffect(tiny) { if (tiny && !inPip.value) pipBuffer(true) }
             LaunchedEffect(full) {
                 WindowInsetsControllerCompat(window, window.decorView).apply {
                     if (full) hide(WindowInsetsCompat.Type.systemBars()) else show(WindowInsetsCompat.Type.systemBars())
@@ -441,6 +448,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             } },
                             onBack = ::back,
                             compact = !full,
+                            tiny = tiny,
                         ) }
                     }
                     if (!full) {
@@ -462,6 +470,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
                     }
                 }
+            }
             }
         }
         updatePip() // so leaving the app goes straight to picture in picture
@@ -1058,7 +1067,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, SPEED, IGNORE }
 
     @Composable
-    private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit, compact: Boolean = false) {
+    private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit, compact: Boolean = false, tiny: Boolean = false) {
         var controls by remember { mutableStateOf(true) }
         var touchTick by remember { mutableIntStateOf(0) }
         var sliderDragging by remember { mutableStateOf(false) }
@@ -1145,7 +1154,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
 
-            if (inPip.value) return@Box
+            if (inPip.value || tiny) return@Box
             // Gesture layer: tap, double tap, hold for 2x, swipes.
             Box(
                 Modifier.fillMaxSize()
