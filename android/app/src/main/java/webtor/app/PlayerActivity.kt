@@ -166,8 +166,19 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         fun expandIfPlaying(context: Context, key: String): Boolean {
             val p = owner ?: return false
             if (p.detailKey != key || !p.alive || p.finishing || p.isFinishing || !p.inPip.value) return false
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            return runCatching { am.moveTaskToFront(p.taskId, 0) }.isSuccess
+            android.util.Log.i("webtor-player", "card tap: expanding the small window for $key")
+            // Started from itself, inside its own small-window task: Android expands that task
+            // to full screen and hands the intent to the running player (singleTop), no reload.
+            val ok = runCatching {
+                p.startActivity(Intent(p, PlayerActivity::class.java)
+                    .putExtra("expand_only", true)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            }.onFailure { android.util.Log.w("webtor-player", "expand from small window failed", it) }.isSuccess
+            if (!ok) {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                return runCatching { am.moveTaskToFront(p.taskId, 0) }.isSuccess
+            }
+            return true
         }
     }
 
@@ -1167,7 +1178,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         )
                     }
                     .pointerInput(compact) {
-                        // Small player on the page: swipe up goes full screen (as on YouTube);
+                        // Small player on the page: swipe up goes full screen, swipe down to PiP (as on YouTube);
                         // no brightness, volume or drag-seek there, the page scrolls instead.
                         // Swipes as in mpvEx: measured from where the finger went down.
                         // Clearly sideways (over 30 px and twice the vertical move) seeks
@@ -1206,6 +1217,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                         trackSheet != null -> if (ax > 30f || ay > 30f) Drag.IGNORE else Drag.NONE
                                         compact -> if (ax > 30f || ay > 30f) {
                                             if (dy < -30f && ay > ax) setFullscreen(true)
+                                            // Swipe down: keep playing in the small window, the library behind it.
+                                            else if (dy > 30f && ay > ax) { controls = false; enterPip() }
                                             Drag.IGNORE
                                         } else Drag.NONE
                                         ax > 30f && ax > ay * 2f && System.currentTimeMillis() - startAt > 100 -> Drag.SEEK
