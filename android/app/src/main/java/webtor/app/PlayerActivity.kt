@@ -96,6 +96,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import kotlin.math.roundToInt
 
 /** Picture size in the built-in player, remembered between videos. */
@@ -139,14 +141,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     companion object {
         /** The libmpv instance is process-wide; only its current owner may tear it down. */
         @Volatile private var owner: PlayerActivity? = null
-        private val lock = Any()
+        /** Calls share it; only create and destroy take it alone, so one slow call never blocks another. */
+        private val lock = java.util.concurrent.locks.ReentrantReadWriteLock()
         private val commands = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "mpv-commands") }
     }
 
     @Volatile private var alive = false
 
     /** Run [block] on mpv only while this activity owns a live instance (else null). Not from mpv's own callbacks. */
-    private inline fun <T> mpv(block: () -> T): T? = synchronized(lock) { if (alive) block() else null }
+    private inline fun <T> mpv(block: () -> T): T? = lock.read { if (alive) block() else null }
 
     /**
      * Same as [mpv] but off the UI thread, in order. Buttons and gestures use this:
@@ -158,7 +161,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     /** Release the player once. Detach the picture first so no render thread touches a freed context. */
     private fun teardown() {
         loadJob?.cancel()
-        synchronized(lock) {
+        lock.write {
             if (!alive) return
             alive = false
             // Waits for any callback in progress, so none runs for this activity afterwards.
@@ -190,6 +193,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Volatile private var seekWait = false
     /** Held paused until the total length is known, so playback never starts with no end time. */
     private val lengthWait = mutableStateOf(false)
+    /** The file is open and mpv has no length for it at all: only then may play skip the wait. */
+    @Volatile private var openedWithoutLength = false
     /** A seek the app asked for and mpv has not finished yet; shows the spinner even while paused. */
     private val seekPending = mutableStateOf(false)
     private fun markSeek() { seekPending.value = true }
@@ -198,14 +203,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     /**
      * Start of each file: pause until mpv reports the duration. No time limit: a torrent
      * may need a while to fetch the header or the index at the end of the file, and
-     * starting before that leaves the player with no end time. Tapping play skips the wait.
+     * starting before that leaves the player with no end time. Play does not skip the wait,
+     * unless the file opened with no length at all (it would never come).
      * Runs on the UI thread, like every duration update, so a late reset can never wipe
      * a length that already arrived.
      */
     private fun holdForLength() {
         duration.doubleValue = 0.0
         lengthWait.value = true; updateBuffering()
-        mpv { MPVLib.setPropertyBoolean("pause", true) }
+        mpvSend { MPVLib.setPropertyBoolean("pause", true) }
     }
     private var lengthReported: Uri? = null
     /** Tell the engine once per file that the length is known, so it stops fetching the index first. */
@@ -308,7 +314,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     private fun startMpv() {
-        synchronized(lock) {
+        lock.write {
             // A previous player still open (e.g. left in picture in picture) must let go first.
             // Close it as well: with its mpv gone it could only show a dead, frozen window.
             owner?.takeIf { it !== this }?.let { if (it.isFinishing) it.teardown() else it.finish() }
@@ -357,6 +363,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         listOf(
             "time-pos" to MPVLib.MPV_FORMAT_DOUBLE,
             "duration" to MPVLib.MPV_FORMAT_DOUBLE,
+            "video-params/aspect" to MPVLib.MPV_FORMAT_DOUBLE,
+            "video-params/dw" to MPVLib.MPV_FORMAT_INT64,
+            "video-params/dh" to MPVLib.MPV_FORMAT_INT64,
             "demuxer-cache-time" to MPVLib.MPV_FORMAT_DOUBLE,
             "pause" to MPVLib.MPV_FORMAT_FLAG,
             "paused-for-cache" to MPVLib.MPV_FORMAT_FLAG,
@@ -411,6 +420,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun eventProperty(property: String) {}
     override fun eventProperty(property: String, value: Long) {
         if (!alive) return
+        when (property) {
+            "video-params/dw" -> videoW = value.toInt()
+            "video-params/dh" -> videoH = value.toInt()
+        }
         if (property == "playlist-pos" && value >= 0) runOnUiThread {
             if (value.toInt() != playlistPos.intValue) { runCatching { saveFrames() }; synchronized(frames) { frames.clear() } }
             playlistPos.intValue = value.toInt()
@@ -420,10 +433,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun eventProperty(property: String, value: Double) {
         if (!alive) return
         when (property) {
+            "video-params/aspect" -> videoAspect = value
             "time-pos" -> position.doubleValue = value
             "duration" -> runOnUiThread {
                 if (!alive) return@runOnUiThread
                 duration.doubleValue = value
+                if (value > 0) android.util.Log.i("webtor-player", "length on screen: $value s")
                 if (value > 0) { reportLength(); releaseLength(play = true) }
             }
             "demuxer-cache-time" -> cached.doubleValue = value
@@ -443,25 +458,39 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (!alive) return
         when (eventId) {
             MPVLib.MPV_EVENT_FILE_LOADED -> {
-                if (!firstFileLoaded) {
-                    firstFileLoaded = true
-                    // Later episodes start from the beginning.
-                    MPVLib.setPropertyString("start", "none")
-                    subtitles.forEachIndexed { i, s ->
-                        MPVLib.command(arrayOf("sub-add", mpvPath(s), if (i == 0) "select" else "auto"))
+                // Nothing here may wait on mpv: this thread also delivers the duration,
+                // and mpv can be busy for many seconds fetching the first frame. Calls
+                // made here used to hold the end time back until playback had begun.
+                loading = false; updateBuffering()
+                mpvSend {
+                    // mpv only reports duration when it changes, so an episode with the same
+                    // length as the last one may send nothing: read it once here as well.
+                    val known = MPVLib.getPropertyDouble("duration")
+                    openedWithoutLength = known == null || known <= 0
+                    if (known != null && known > 0) runOnUiThread {
+                        if (!alive) return@runOnUiThread
+                        duration.doubleValue = known
+                        reportLength()
+                        releaseLength(play = true)
                     }
                 }
-                loading = false; updateBuffering()
-                // mpv only reports duration when it changes, so an episode with the same
-                // length as the last one may send nothing: read it once here as well.
-                val known = MPVLib.getPropertyDouble("duration")
-                if (known != null && known > 0) runOnUiThread {
-                    duration.doubleValue = known
-                    reportLength()
-                    releaseLength(play = true)
+                if (!firstFileLoaded) {
+                    firstFileLoaded = true
+                    val subs = subtitles.toList()
+                    mpvSend {
+                        // Later episodes start from the beginning.
+                        MPVLib.setPropertyString("start", "none")
+                        subs.forEachIndexed { i, s ->
+                            MPVLib.command(arrayOf("sub-add", mpvPath(s), if (i == 0) "select" else "auto"))
+                        }
+                    }
                 }
             }
             MPVLib.MPV_EVENT_START_FILE -> {
+                // Paused before mpv gets far with the file: the next episode must not
+                // play a moment before its length is known. Queued, never waited on here.
+                mpvSend { MPVLib.setPropertyBoolean("pause", true) }
+                openedWithoutLength = false
                 loading = true; seekPending.value = false; updateBuffering()
                 runOnUiThread { holdForLength() }
             }
@@ -501,7 +530,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     fun togglePause() {
-        if (lengthWait.value) { releaseLength(play = true); return }
+        if (lengthWait.value) {
+            // No playing before the end time is known.
+            if (openedWithoutLength) releaseLength(play = true)
+            return
+        }
         mpvSend { MPVLib.command(arrayOf("cycle", "pause")) }
     }
     fun seekBy(seconds: Int) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
@@ -554,7 +587,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun pipParams(): android.app.PictureInPictureParams? {
         if (Build.VERSION.SDK_INT < 26 || !alive || finishing || isFinishing || isDestroyed) return null
-        val aspect = mpv { MPVLib.getPropertyDouble("video-params/aspect") }?.takeIf { it > 0 } ?: (16.0 / 9)
+        val aspect = videoAspect.takeIf { it > 0 } ?: (16.0 / 9)
         val clamped = aspect.coerceIn(1 / 2.39, 2.39)
         val ratio = android.util.Rational((clamped * 1000).toInt(), 1000)
         val playing = !paused.value
@@ -585,13 +618,18 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
      * makes mpv reallocate and redraw mid-animation, which flashed a wrong frame.
      * Full screen goes back to the view's size (aspect modes need it).
      */
+    // Video shape as mpv reports it: kept here so the UI thread never asks a busy mpv.
+    @Volatile private var videoAspect = 0.0
+    @Volatile private var videoW = 0
+    @Volatile private var videoH = 0
+
     private fun pipBuffer(on: Boolean) {
         val holder = videoView?.holder ?: return
         if (!on) { holder.setSizeFromLayout(); return }
-        val ratio = (mpv { MPVLib.getPropertyDouble("video-params/aspect") }?.takeIf { it > 0 } ?: (16.0 / 9))
+        val ratio = (videoAspect.takeIf { it > 0 } ?: (16.0 / 9))
             .coerceIn(1 / 2.39, 2.39) // as the PiP window's ratio
-        val dw = mpv { MPVLib.getPropertyInt("video-params/dw") }?.takeIf { it > 0 } ?: 1280
-        val dh = mpv { MPVLib.getPropertyInt("video-params/dh") }?.takeIf { it > 0 } ?: 720
+        val dw = videoW.takeIf { it > 0 } ?: 1280
+        val dh = videoH.takeIf { it > 0 } ?: 720
         // Long side at the video's own resolution, at most 1920 (PiP is small).
         val long = maxOf(dw, dh).coerceIn(640, 1920)
         val (w, h) = if (ratio >= 1) long to (long / ratio).toInt() else (long * ratio).toInt() to long
@@ -619,7 +657,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun onStop() {
         super.onStop()
         releaseLength(play = false)
-        if (!isFinishing) mpv { MPVLib.setPropertyBoolean("pause", true) }
+        if (!isFinishing) mpvSend { MPVLib.setPropertyBoolean("pause", true) }
     }
 
     override fun finish() {
