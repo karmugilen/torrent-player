@@ -161,7 +161,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
          */
         /** Page to show under the next player when one page player hands over to another. */
         @Volatile private var nextDetailKey: String? = null
-        fun takeNextDetailKey(): String? = nextDetailKey.also { nextDetailKey = null }
+        @Volatile private var nextDetailAt = 0L
+        /** The next player started within a few seconds shows [key]'s page under the video. */
+        fun showPageFor(key: String) { nextDetailKey = key; nextDetailAt = android.os.SystemClock.elapsedRealtime() }
+        fun takeNextDetailKey(): String? {
+            val key = nextDetailKey; nextDetailKey = null
+            return key?.takeIf { android.os.SystemClock.elapsedRealtime() - nextDetailAt < 30_000 }
+        }
 
         fun expandIfPlaying(context: Context, key: String): Boolean {
             val p = owner ?: return false
@@ -270,7 +276,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             if (at != playlistPos.intValue) { markSeek(); mpvSend { MPVLib.command(arrayOf("playlist-play-index", at.toString())) } }
             return
         }
-        nextDetailKey = detailKey
+        detailKey?.let { showPageFor(it) }
         close()
         app.session.play(entry, index)
     }

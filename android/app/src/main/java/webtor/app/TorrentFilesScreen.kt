@@ -334,7 +334,6 @@ private fun DownloadSummary(
         else -> colors.primaryContainer to colors.onPrimaryContainer
     }
     val label = downloadSummaryLabel(entry, error)
-    val video = entry.files.any { it.index in entry.selected && it.name.isVideoName() }
     val percent = (entry.progress.coerceIn(0f, 1f) * 100).toInt()
     ThemedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -342,37 +341,7 @@ private fun DownloadSummary(
             val resume = entry.resumeFile()
             val playIndex = resume?.index ?: pickPlayIndex(entry)
             val playable = playIndex != null && entry.canPlay()
-            // Like YouTube: the picture is the player. Tap it and the video starts right there.
-            val inlinePlay = video && !embedded && playable
-            if (video && !embedded) EpisodeVideoPreview(
-                entry, Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-                overlay = { page ->
-                    if (inlinePlay) {
-                        val target = page ?: playIndex!!
-                        val ok = !entry.checking || completedPlayFile(entry, target) != null
-                        val continueAt = entry.files.find { it.index == target }
-                            ?.takeIf { resume != null && it.index == resume.index }
-                        Box(
-                            Modifier.fillMaxSize().clickable(enabled = ok) { onPlay(target) },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(
-                                    Modifier.size(64.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.55f)),
-                                    contentAlignment = Alignment.Center,
-                                ) { Icon(Icons.Default.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(42.dp)) }
-                                if (continueAt != null) Text(
-                                    "Continue at ${playbackTime(continueAt.playbackPositionMs)}",
-                                    Modifier.padding(top = 8.dp).clip(RoundedCornerShape(8.dp))
-                                        .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 10.dp, vertical = 4.dp),
-                                    color = Color.White,
-                                    style = MaterialTheme.typography.labelLarge,
-                                )
-                            }
-                        }
-                    }
-                },
-            )
+            // No big picture here: a library card opens its video playing, with this page under it.
             Text(
                 entry.title,
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
@@ -415,7 +384,7 @@ private fun DownloadSummary(
             error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
             entry.status?.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.tertiary) }
             val isVideo = mediaType(entry) == "Video"
-            if (playable && !inlinePlay && !embedded) {
+            if (playable && !embedded) {
                 Button(
                     onClick = { onPlay(playIndex!!) },
                     enabled = !entry.checking || completedPlayFile(entry, playIndex!!) != null,

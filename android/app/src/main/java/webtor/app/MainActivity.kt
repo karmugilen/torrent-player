@@ -292,7 +292,7 @@ class MainActivity : ComponentActivity() {
             onPause = session::pause,
             onResume = session::resume,
             onPlay = { entry, index -> session.play(entry, index) },
-            onOpen = { entry -> if (!PlayerActivity.expandIfPlaying(this@MainActivity, entry.key)) session.showFiles(entry) },
+            onOpen = ::openCard,
             onDelete = session::requestDelete,
             onRetry = session::retry,
             onMessageShown = session::consumeMessage,
@@ -385,6 +385,21 @@ class MainActivity : ComponentActivity() {
         } catch (_: SecurityException) {
             session.showError("The file picker could not be opened. Try sharing the torrent from your Files app.")
         }
+    }
+
+    /**
+     * Tapping a card: a video starts playing at once on its page (video at the top, details
+     * below), like YouTube. The one already in the small window comes back instead. Anything
+     * that cannot play right now opens the plain detail page.
+     */
+    private fun openCard(entry: DownloadEntry) {
+        if (PlayerActivity.expandIfPlaying(this, entry.key)) return
+        val index = entry.resumeFile()?.index ?: pickPlayIndex(entry)
+        val playable = index != null && entry.canPlay() && mediaType(entry) == "Video" &&
+            BuiltInPlayer.enabled(this) && (!entry.checking || completedPlayFile(entry, index) != null)
+        if (!playable) { session.showFiles(entry); return }
+        PlayerActivity.showPageFor(entry.key)
+        session.play(entry, index)
     }
 
     private fun requestNotifications() {
