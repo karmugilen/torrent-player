@@ -1028,42 +1028,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun setBrightness(slider: Float) {
         val linear = sliderToLinear(slider.coerceIn(0.01f, 1f)).coerceIn(0.004f, 1f)
-        // One brightness for player and phone: with permission, set the phone's own value.
-        // Then nothing overrides it, quick settings shows the same level and both move together.
-        if (android.provider.Settings.System.canWrite(this) && runCatching {
-                val r = contentResolver
-                if (android.provider.Settings.System.getInt(r, android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE, 0) ==
-                    android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC) {
-                    // Auto brightness ignores a set level; choosing one by hand turns it off, as on the phone.
-                    android.provider.Settings.System.putInt(r, android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE,
-                        android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
-                }
-                val v = (linear * 255f).roundToInt().coerceIn(1, 255)
-                if (android.provider.Settings.System.getInt(r, android.provider.Settings.System.SCREEN_BRIGHTNESS, -1) != v)
-                    android.provider.Settings.System.putInt(r, android.provider.Settings.System.SCREEN_BRIGHTNESS, v)
-            }.isSuccess) {
-            ownBrightness = null
-            if (window.attributes.screenBrightness >= 0) window.attributes = window.attributes.apply {
-                screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-            }
-            return
-        }
         ownBrightness = linear
         window.attributes = window.attributes.apply { screenBrightness = linear }
     }
 
-    private val askBrightnessSync = mutableStateOf(false)
-
-    /** After the first brightness swipe without permission, offer once to link it with the phone. */
-    private fun maybeAskBrightnessSync() {
-        if (android.provider.Settings.System.canWrite(this)) return
-        val prefs = getSharedPreferences("player", MODE_PRIVATE)
-        if (prefs.getBoolean("brightnessSyncAsked", false)) return
-        prefs.edit().putBoolean("brightnessSyncAsked", true).apply()
-        askBrightnessSync.value = true
-    }
-
-    // Without that permission the player holds its own brightness, and Android locks the quick settings slider
+    // While the player holds its own brightness, Android locks the quick settings slider
     // ("controlled by the app"). So hand brightness back when the shade comes down, and on
     // return take it again only if the phone's brightness was left alone there.
     private var ownBrightness: Float? = null
@@ -1288,7 +1257,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                     if (apply) { pendingSeek = target; seekTo(target) }
                                     if (!wasPaused) mpvSend { MPVLib.setPropertyBoolean("pause", false) }
                                 }
-                                if (mode == Drag.BRIGHTNESS && apply) maybeAskBrightnessSync()
                                 if (mode != Drag.NONE) { endScrub(); popupLevel = null }
                             }
                             while (true) {
@@ -1368,24 +1336,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             }
                         }
                     },
-            )
-
-            if (askBrightnessSync.value) androidx.compose.material3.AlertDialog(
-                onDismissRequest = { askBrightnessSync.value = false },
-                title = { Text("Link brightness with your phone?") },
-                text = { Text("Allow \"Modify system settings\" once. Swiping brightness here will then set your phone's brightness, so the player and quick settings always match.") },
-                confirmButton = {
-                    androidx.compose.material3.TextButton(onClick = {
-                        askBrightnessSync.value = false
-                        runCatching {
-                            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS,
-                                android.net.Uri.parse("package:$packageName")))
-                        }
-                    }) { Text("Allow") }
-                },
-                dismissButton = {
-                    androidx.compose.material3.TextButton(onClick = { askBrightnessSync.value = false }) { Text("Not now") }
-                },
             )
 
             // Spinner only when controls are hidden; with controls, the play button shows it.
