@@ -10,6 +10,7 @@
 # and ~/.config/webtor/credentials.env (see docs/SIGNING.md).
 #
 # Downloads persist in $CACHE (default ~/.cache/webtor-release): srclib clones,
+# sdkmanager zips (NDK 711 MB, build-tools) and the gradlew-fdroid Gradle dist,
 # apt archives, NDK, Gradle, rustup and cargo. Every one is pinned (commits,
 # checksums), so a warm run gives the same APK as a cold one; only the
 # downloading is skipped. Delete the folder to start cold.
@@ -44,7 +45,7 @@ git ls-remote https://github.com/karmugilen/torrent-player.git | grep -q "^$COMM
     { echo "Push $COMMIT to GitHub first" >&2; exit 1; }
 
 echo "Building $NAME ($CODE) from $COMMIT"
-mkdir -p "$WORK" "$CACHE"/{apt,ndk,gradle,cargo,rustup,home-build}
+mkdir -p "$WORK" "$CACHE"/{apt,ndk,gradle,cargo,rustup,home-build,user-cache,root-cache}
 $DOCKER pull -q "$IMAGE"
 # The Gradle cache mount hides the image's gradle.properties (no daemon, no
 # JDK auto-download, network timeouts): copy it in from the image each run.
@@ -115,6 +116,8 @@ $DOCKER run --rm ${DOCKER_RUN_ARGS:-} \
     -v "$CACHE/cargo:/home/vagrant/.cargo" \
     -v "$CACHE/rustup:/home/vagrant/.rustup" \
     -v "$CACHE/home-build:/home/vagrant/build" \
+    -v "$CACHE/user-cache:/home/vagrant/.cache" \
+    -v "$CACHE/root-cache:/root/.cache" \
     -v "$WORK/fdroiddata:/builds/fdroiddata" \
     -v "$ROOT/scripts/fdroid-ci-build.sh:/run.sh:ro" \
     "$IMAGE" bash /run.sh "webtor.app:$CODE" >"$WORK/build.log" 2>&1 ||
