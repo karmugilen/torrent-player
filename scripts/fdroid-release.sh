@@ -96,6 +96,11 @@ text = re.sub(r"^CurrentVersionCode: .*$", f"CurrentVersionCode: {code}", text, 
 open(path, "w").write(text)
 PY
 
+# The cached build dir keeps srclib clones, but fdroid reuses an app clone it
+# finds there without fetching, so a new commit is missing ("unable to read
+# tree"). Clone the app fresh every run; it is small.
+rm -rf "$CACHE/home-build/webtor.app" "$CACHE/home-build/.fdroidvcs-webtor.app"
+
 # git:// (port 9418) is blocked on some networks; Savannah also serves the
 # freetype srclib over https. DOCKER_RUN_ARGS adds more docker run options.
 # shellcheck disable=SC2086
