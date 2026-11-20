@@ -56,7 +56,7 @@ if [ $PUBLISH = 0 ]; then
 fi
 
 # 4. GitHub release; the tag is created with the APK so it never exists alone.
-{ cat "$NOTES"; printf '\n---\nSHA-256 `%s`\n' "$SHA"; } >"$WORK/notes.md"
+{ cat "$NOTES"; printf '\n\n---\nSHA-256 `%s`\n' "$SHA"; } >"$WORK/notes.md"
 gh release create "$TAG" "$APK" -R "$REPO" --target "$COMMIT" --title "$NAME" \
     --notes-file "$WORK/notes.md" --latest
 curl -sfL "https://github.com/$REPO/releases/download/$TAG/$(basename "$APK")" |
