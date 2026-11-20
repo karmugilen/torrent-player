@@ -67,7 +67,10 @@ open(path, "w").write(text)
 PY
 
 $DOCKER pull -q "$IMAGE"
-$DOCKER run --rm \
+# Extra docker run arguments, e.g. -e GIT_CONFIG_* to fetch a srclib over
+# https when its git:// host is unreachable.
+# shellcheck disable=SC2086
+$DOCKER run --rm ${DOCKER_RUN_ARGS:-} \
     -v "$WORK/fdroiddata:/builds/fdroiddata" \
     -v "$ROOT/scripts/fdroid-ci-build.sh:/run.sh:ro" \
     "$IMAGE" bash /run.sh "webtor.app:$CODE" >"$WORK/build.log" 2>&1 ||
