@@ -101,13 +101,14 @@ PY
 # tree"). Clone the app fresh every run; it is small.
 rm -rf "$CACHE/home-build/webtor.app" "$CACHE/home-build/.fdroidvcs-webtor.app"
 
-# git:// (port 9418) is blocked on some networks; Savannah also serves the
-# freetype srclib over https. DOCKER_RUN_ARGS adds more docker run options.
+# git:// (port 9418) is blocked on some networks, and Savannah's https is often
+# too overloaded to clone from, so take the freetype srclib from freedesktop's
+# GitLab mirror (same history). DOCKER_RUN_ARGS adds more docker run options.
 # shellcheck disable=SC2086
 $DOCKER run --rm ${DOCKER_RUN_ARGS:-} \
     -e GIT_CONFIG_COUNT=1 \
-    -e GIT_CONFIG_KEY_0=url.https://git.savannah.nongnu.org/r/.insteadOf \
-    -e GIT_CONFIG_VALUE_0=git://git.sv.nongnu.org/ \
+    -e GIT_CONFIG_KEY_0=url.https://gitlab.freedesktop.org/freetype/freetype.git.insteadOf \
+    -e GIT_CONFIG_VALUE_0=git://git.sv.nongnu.org/freetype/freetype2.git \
     -v "$CACHE/apt:/var/cache/apt/archives" \
     -v "$CACHE/ndk:/opt/android-sdk/ndk" \
     -v "$CACHE/gradle:/home/vagrant/.gradle" \
