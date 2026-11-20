@@ -55,6 +55,10 @@ runs F-Droid's own `verify_apks` check before it reports success.
 
 ## History
 
+- 2.5.0 (108): page player, series, brightness. Build steps unchanged except
+  `ndk: r28c` (Gradle pins NDK 28.2.13676358 since 2.4.6); checkupdates would copy
+  the r26b block, so it needs an fdroiddata merge request with the 108 block.
+  `scripts/fdroid-release.sh` now sets `ndk:` from Gradle's `ndkVersion`.
 - 2.4.4 (104): built-in video player. Build steps changed: Debian `meson`,
   `ninja-build`, `pkg-config` and autotools, srclibs dav1d, FFmpeg, freetype,
   fribidi, harfbuzz, libass, libplacebo and mpv copied into `android/mpv/deps`,

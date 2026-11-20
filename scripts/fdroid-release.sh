@@ -15,6 +15,13 @@ COMMIT="$(git -C "$ROOT" rev-parse "${1:-HEAD}")"
 GRADLE="$(git -C "$ROOT" show "$COMMIT:android/app/build.gradle.kts")"
 NAME="$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' <<<"$GRADLE")"
 CODE="$(sed -n 's/^ *versionCode = \([0-9]*\)$/\1/p' <<<"$GRADLE")"
+# F-Droid names NDKs by release (r28c); Gradle pins the full version.
+NDKVER="$(sed -n 's/^ *ndkVersion = "\(.*\)"$/\1/p' <<<"$GRADLE")"
+case "$NDKVER" in
+    26.1.10909125) NDK=r26b ;;
+    28.2.13676358) NDK=r28c ;;
+    *) echo "Unknown ndkVersion $NDKVER: add its F-Droid name here" >&2; exit 1 ;;
+esac
 WORK="${WORK:-/tmp/fdroid-release}"
 IMAGE=registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie
 DOCKER="${DOCKER:-sudo docker}"
@@ -34,9 +41,9 @@ git clone -q --depth 1 https://gitlab.com/fdroid/fdroiddata.git "$WORK/fdroiddat
 # Add this version as a copy of the recipe's last build, as checkupdates would.
 # When the build steps change, the repo's webtor.app.yml carries this version's
 # block and that block is used instead.
-python3 - "$WORK/fdroiddata/metadata/webtor.app.yml" "$NAME" "$CODE" "$COMMIT" "$ROOT/webtor.app.yml" <<'PY'
+python3 - "$WORK/fdroiddata/metadata/webtor.app.yml" "$NAME" "$CODE" "$COMMIT" "$ROOT/webtor.app.yml" "$NDK" <<'PY'
 import re, sys
-path, name, code, commit, ours = sys.argv[1:]
+path, name, code, commit, ours, ndk = sys.argv[1:]
 text = open(path).read()
 if re.search(rf"^    versionCode: {code}$", text, re.M):
     sys.exit(0)
@@ -52,6 +59,7 @@ for b in blocks(open(ours).read()):
 block = re.sub(r"^  - versionName: .*$", f"  - versionName: {name}", block, flags=re.M)
 block = re.sub(r"^    versionCode: .*$", f"    versionCode: {code}", block, flags=re.M)
 block = re.sub(r"^    commit: .*$", f"    commit: {commit}", block, flags=re.M)
+block = re.sub(r"^    ndk: .*$", f"    ndk: {ndk}", block, flags=re.M)
 text = text[:last.end()].rstrip("\n") + "\n\n" + block + "\n" + text[last.end():].lstrip("\n")
 text = re.sub(r"^CurrentVersion: .*$", f"CurrentVersion: {name}", text, flags=re.M)
 text = re.sub(r"^CurrentVersionCode: .*$", f"CurrentVersionCode: {code}", text, flags=re.M)
