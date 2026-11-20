@@ -69,6 +69,7 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
@@ -1690,28 +1691,40 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
 
-            // Hold speed: chip at the top with the current speed. Locked speed stays; tap the chip for normal speed.
+            // Hold speed: one small pill at the top. The hint shows briefly at the start of a hold.
+            // Locked speed stays; tap the pill for normal speed.
+            var speedHint by remember { mutableStateOf(false) }
+            LaunchedEffect(fast) {
+                speedHint = fast
+                if (fast) { kotlinx.coroutines.delay(1500); speedHint = false }
+            }
             if (fast || speedLocked) {
                 Column(
-                    Modifier.align(Alignment.TopCenter).padding(top = if (compact) 8.dp else 24.dp)
-                        .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.55f))
-                        .then(if (speedLocked && !fast) Modifier.clickable { speedLocked = false; holdSpeed = 2.0; setSpeed(1.0) } else Modifier)
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    Modifier.align(Alignment.TopCenter).padding(top = if (compact) 6.dp else 16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(speedLabel(holdSpeed), color = Color.White, style = MaterialTheme.typography.titleSmall)
-                        Spacer(Modifier.width(4.dp))
-                        Icon(if (speedLocked) Icons.Filled.Lock else Icons.Filled.FastForward, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    Row(
+                        Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.5f))
+                            .then(if (speedLocked && !fast) Modifier.clickable { speedLocked = false; holdSpeed = 2.0; setSpeed(1.0) } else Modifier)
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(speedLabel(holdSpeed), color = Color.White, style = MaterialTheme.typography.labelMedium)
+                        Spacer(Modifier.width(3.dp))
+                        Icon(if (speedLocked) Icons.Filled.Lock else Icons.Filled.FastForward, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                        if (speedLocked && !fast) {
+                            Spacer(Modifier.width(3.dp))
+                            Icon(Icons.Filled.Close, "Normal speed", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(12.dp))
+                        }
                     }
-                    Text(
-                        when {
-                            fast && !speedLocked -> "slide ← → to change · swipe up to keep"
-                            fast -> "speed kept"
-                            else -> "tap for normal speed"
-                        },
-                        color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall,
-                    )
+                    if (speedHint && !speedLocked) {
+                        Text(
+                            "← → speed · ↑ keep",
+                            color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(top = 3.dp).clip(RoundedCornerShape(50))
+                                .background(Color.Black.copy(alpha = 0.4f)).padding(horizontal = 8.dp, vertical = 1.dp),
+                        )
+                    }
                 }
             }
         }
