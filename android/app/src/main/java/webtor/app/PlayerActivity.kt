@@ -1164,13 +1164,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             } else prefetchFor(target, dur)
         }
         fun endScrub() { scrubOrigin = null; popup = null; popupSub = null }
-        val flashScope = androidx.compose.runtime.rememberCoroutineScope()
-        var flashJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-        fun flash(text: String) {
-            popup = text; popupSub = null; popupLevel = null
-            flashJob?.cancel()
-            flashJob = flashScope.launch { delay(1200); if (popup == text) popup = null }
-        }
 
         // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
         val spinning = (isBuffering && (!isPaused || lengthWait.value)) || (seekingNow && scrubOrigin == null && !sliderDragging)
@@ -1369,7 +1362,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             Modifier.size(48.dp).clip(androidx.compose.foundation.shape.CircleShape)
                                 .pointerInput(Unit) {
                                     detectTapGestures(
-                                        onTap = { flash(cycleAspect().label); touchTick++ },
+                                        onTap = { cycleAspect(); touchTick++ },
                                         onLongPress = {
                                             haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                                             trackSheet = "aspect"; controls = false
@@ -1381,7 +1374,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             Icon(Icons.Filled.AspectRatio, "Aspect ratio: ${aspect.value.label}. Hold for the list.",
                                 tint = Color.White, modifier = Modifier.size(iconSize))
                         }
-                        if (!compact) IconButton(onClick = { flash(if (toggleRotationLock()) "Rotation locked" else "Auto-rotate"); touchTick++ }) {
+                        if (!compact) IconButton(onClick = { toggleRotationLock(); touchTick++ }) {
                             Icon(
                                 if (rotationLocked.value) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
                                 if (rotationLocked.value) "Unlock rotation" else "Lock rotation",

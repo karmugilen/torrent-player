@@ -261,8 +261,6 @@ class MainActivity : ComponentActivity() {
                     if (askPlayer) {
                         fun pick(builtIn: Boolean) {
                             BuiltInPlayer.setEnabled(this@MainActivity, builtIn); askPlayer = false
-                            android.widget.Toast.makeText(this@MainActivity,
-                                "You can change the video player later in Settings > Playback", android.widget.Toast.LENGTH_LONG).show()
                         }
                         AlertDialog(
                             onDismissRequest = {},

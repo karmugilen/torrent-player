@@ -1,7 +1,6 @@
 package webtor.app
 
 import android.os.SystemClock
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -216,7 +215,6 @@ fun TorrentFilesScreen(
                         magnetUri?.let {
                             clipboardManager.setText(AnnotatedString(it))
                             copiedMagnet = true
-                            Toast.makeText(context, "Magnet link copied", Toast.LENGTH_SHORT).show()
                         }
                     },
                 )
@@ -776,7 +774,6 @@ private fun TechnicalSection(
                 .fillMaxWidth()
                 .clickable(enabled = infoHash != "—") {
                     clipboardManager.setText(AnnotatedString(infoHash))
-                    Toast.makeText(context, "Info hash copied", Toast.LENGTH_SHORT).show()
                 },
             monospace = true,
         )
