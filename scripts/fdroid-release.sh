@@ -9,7 +9,7 @@
 # Needs docker (DOCKER="sudo docker" by default), the Android SDK build-tools
 # and ~/.config/webtor/credentials.env (see docs/SIGNING.md).
 #
-# Downloads persist in $CACHE (default ~/.cache/webtor-fdroid): srclib clones,
+# Downloads persist in $CACHE (default ~/.cache/webtor-release): srclib clones,
 # apt archives, NDK, Gradle, rustup and cargo. Every one is pinned (commits,
 # checksums), so a warm run gives the same APK as a cold one; only the
 # downloading is skipped. Delete the folder to start cold.
@@ -31,7 +31,7 @@ case "$NDKVER" in
     28.2.13676358) NDK=r28c ;;
     *) echo "Unknown ndkVersion $NDKVER: add its F-Droid name here" >&2; exit 1 ;;
 esac
-CACHE="${CACHE:-$HOME/.cache/webtor-fdroid}"
+CACHE="${CACHE:-$HOME/.cache/webtor-release}"
 WORK="${WORK:-$CACHE/work}"
 IMAGE=registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie
 DOCKER="${DOCKER:-sudo docker}"

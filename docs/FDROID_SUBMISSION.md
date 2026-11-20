@@ -48,7 +48,7 @@ F-Droid's buildserver image, not with a local Gradle: local builds differ in
    request. With `recipe: same`, F-Droid's checkupdates picks up the tag.
 5. Never replace an APK that has been published. Fix problems in a new version.
 
-Downloads persist in `~/.cache/webtor-fdroid` (srclib clones, apt archives,
+Downloads persist in `~/.cache/webtor-release` (srclib clones, apt archives,
 NDK, Gradle, rustup, cargo); only downloading is skipped, every build step
 still runs from a clean checkout, so the APK is the same as from a cold run.
 Delete the folder to start cold. `fdroid-release.sh` sets the recipe's `ndk:`

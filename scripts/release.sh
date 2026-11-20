@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLISH=0
 [ "${1:-}" = --publish ] && PUBLISH=1
 REPO=karmugilen/torrent-player
-CACHE="${CACHE:-$HOME/.cache/webtor-fdroid}"
+CACHE="${CACHE:-$HOME/.cache/webtor-release}"
 WORK="${WORK:-$CACHE/work}"
 cd "$ROOT"
 
