@@ -8,6 +8,15 @@
 # Usage: scripts/fdroid-release.sh [commit]   (default HEAD; must be on GitHub)
 # Needs docker (DOCKER="sudo docker" by default), the Android SDK build-tools
 # and ~/.config/webtor/credentials.env (see docs/SIGNING.md).
+#
+# Downloads persist in $CACHE (default ~/.cache/webtor-fdroid): srclib clones,
+# apt archives, NDK, Gradle, rustup and cargo. Every one is pinned (commits,
+# checksums), so a warm run gives the same APK as a cold one; only the
+# downloading is skipped. Delete the folder to start cold.
+#
+# Writes $WORK/plan: "recipe: same" when checkupdates can add this version by
+# copying the last build block, "recipe: changed" when fdroiddata needs a merge
+# request with $WORK/fdroiddata/metadata/webtor.app.yml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +31,8 @@ case "$NDKVER" in
     28.2.13676358) NDK=r28c ;;
     *) echo "Unknown ndkVersion $NDKVER: add its F-Droid name here" >&2; exit 1 ;;
 esac
-WORK="${WORK:-/tmp/fdroid-release}"
+CACHE="${CACHE:-$HOME/.cache/webtor-fdroid}"
+WORK="${WORK:-$CACHE/work}"
 IMAGE=registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie
 DOCKER="${DOCKER:-sudo docker}"
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
@@ -34,18 +44,32 @@ git ls-remote https://github.com/karmugilen/torrent-player.git | grep -q "^$COMM
     { echo "Push $COMMIT to GitHub first" >&2; exit 1; }
 
 echo "Building $NAME ($CODE) from $COMMIT"
-rm -rf "$WORK"
-mkdir -p "$WORK"
-git clone -q --depth 1 https://gitlab.com/fdroid/fdroiddata.git "$WORK/fdroiddata"
+mkdir -p "$WORK" "$CACHE"/{apt,ndk,gradle,cargo,rustup,home-build}
+$DOCKER pull -q "$IMAGE"
+# The Gradle cache mount hides the image's gradle.properties (no daemon, no
+# JDK auto-download, network timeouts): copy it in from the image each run.
+# Files written by root in the container would block the reset below.
+$DOCKER run --rm -v "$CACHE:/c" "$IMAGE" sh -c \
+    "cp /home/vagrant/.gradle/gradle.properties /c/gradle/ && chown -R $(id -u):$(id -g) /c"
+if [ -d "$WORK/fdroiddata/.git" ]; then
+    git -C "$WORK/fdroiddata" fetch -q --depth 1 origin master
+    git -C "$WORK/fdroiddata" reset -q --hard FETCH_HEAD
+    git -C "$WORK/fdroiddata" clean -q -ffdx
+else
+    rm -rf "$WORK/fdroiddata"
+    git clone -q --depth 1 https://gitlab.com/fdroid/fdroiddata.git "$WORK/fdroiddata"
+fi
+rm -f "$WORK/plan" "$WORK"/*.apk
 
 # Add this version as a copy of the recipe's last build, as checkupdates would.
 # When the build steps change, the repo's webtor.app.yml carries this version's
 # block and that block is used instead.
-python3 - "$WORK/fdroiddata/metadata/webtor.app.yml" "$NAME" "$CODE" "$COMMIT" "$ROOT/webtor.app.yml" "$NDK" <<'PY'
+python3 - "$WORK/fdroiddata/metadata/webtor.app.yml" "$NAME" "$CODE" "$COMMIT" "$ROOT/webtor.app.yml" "$NDK" "$WORK/plan" <<'PY'
 import re, sys
-path, name, code, commit, ours, ndk = sys.argv[1:]
+path, name, code, commit, ours, ndk, plan = sys.argv[1:]
 text = open(path).read()
 if re.search(rf"^    versionCode: {code}$", text, re.M):
+    open(plan, "w").write("recipe: already has this version\n")
     sys.exit(0)
 def blocks(t):
     return list(re.finditer(r"^  - versionName: .*?(?=^\S|^  - )", t, re.M | re.S))
@@ -60,21 +84,37 @@ block = re.sub(r"^  - versionName: .*$", f"  - versionName: {name}", block, flag
 block = re.sub(r"^    versionCode: .*$", f"    versionCode: {code}", block, flags=re.M)
 block = re.sub(r"^    commit: .*$", f"    commit: {commit}", block, flags=re.M)
 block = re.sub(r"^    ndk: .*$", f"    ndk: {ndk}", block, flags=re.M)
+# Same build steps as the last block (only version and commit differ) means
+# F-Droid's checkupdates adds this version by itself; otherwise open an MR.
+def steps(b):
+    return re.sub(r"^(  - versionName|    versionCode|    commit): .*\n", "", b, flags=re.M).strip()
+same = steps(block) == steps(last.group(0))
+open(plan, "w").write("recipe: same\n" if same else "recipe: changed\n")
 text = text[:last.end()].rstrip("\n") + "\n\n" + block + "\n" + text[last.end():].lstrip("\n")
 text = re.sub(r"^CurrentVersion: .*$", f"CurrentVersion: {name}", text, flags=re.M)
 text = re.sub(r"^CurrentVersionCode: .*$", f"CurrentVersionCode: {code}", text, flags=re.M)
 open(path, "w").write(text)
 PY
 
-$DOCKER pull -q "$IMAGE"
-# Extra docker run arguments, e.g. -e GIT_CONFIG_* to fetch a srclib over
-# https when its git:// host is unreachable.
+# git:// (port 9418) is blocked on some networks; Savannah also serves the
+# freetype srclib over https. DOCKER_RUN_ARGS adds more docker run options.
 # shellcheck disable=SC2086
 $DOCKER run --rm ${DOCKER_RUN_ARGS:-} \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=url.https://git.savannah.nongnu.org/r/.insteadOf \
+    -e GIT_CONFIG_VALUE_0=git://git.sv.nongnu.org/ \
+    -v "$CACHE/apt:/var/cache/apt/archives" \
+    -v "$CACHE/ndk:/opt/android-sdk/ndk" \
+    -v "$CACHE/gradle:/home/vagrant/.gradle" \
+    -v "$CACHE/cargo:/home/vagrant/.cargo" \
+    -v "$CACHE/rustup:/home/vagrant/.rustup" \
+    -v "$CACHE/home-build:/home/vagrant/build" \
     -v "$WORK/fdroiddata:/builds/fdroiddata" \
     -v "$ROOT/scripts/fdroid-ci-build.sh:/run.sh:ro" \
     "$IMAGE" bash /run.sh "webtor.app:$CODE" >"$WORK/build.log" 2>&1 ||
     { tail -40 "$WORK/build.log"; echo "F-Droid build failed; log: $WORK/build.log" >&2; exit 1; }
+
+$DOCKER run --rm -v "$CACHE:/c" "$IMAGE" chown -R "$(id -u):$(id -g)" /c
 
 UNSIGNED="$WORK/fdroiddata/tmp/webtor.app_$CODE.apk"
 [ -f "$UNSIGNED" ] || { echo "No $UNSIGNED; log: $WORK/build.log" >&2; exit 1; }
@@ -97,7 +137,11 @@ GOT="$("$APKSIGNER" verify --print-certs "$OUT" | sed -n 's/^Signer #1 certifica
 cp "$UNSIGNED" "$WORK/webtor.app_$CODE.unsigned.apk"
 
 # The check F-Droid runs before publishing: copy our signature onto its build.
-git clone -q --depth 1 https://gitlab.com/fdroid/fdroidserver.git "$WORK/fdroidserver"
+if [ -d "$WORK/fdroidserver/.git" ]; then
+    git -C "$WORK/fdroidserver" pull -q --ff-only
+else
+    git clone -q --depth 1 https://gitlab.com/fdroid/fdroidserver.git "$WORK/fdroidserver"
+fi
 cp "$OUT" "$WORK/signed.apk"
 $DOCKER run --rm -v "$WORK:/w" "$IMAGE" bash -c '
     mkdir /tmp/v && cd /tmp/v && PYTHONPATH=/w/fdroidserver python3 -c "
@@ -111,3 +155,4 @@ sys.exit(common.verify_apks(\"/w/signed.apk\", sys.argv[1], \"/tmp/v\"))
 echo "F-Droid verification: OK"
 echo "Signed $OUT"
 echo "sha256 $(sha256sum "$OUT" | cut -d' ' -f1)"
+cat "$WORK/plan"

@@ -34,19 +34,26 @@ F-Droid's buildserver image, not with a local Gradle: local builds differ in
 
 1. Raise `versionCode` and `versionName` in `android/app/build.gradle.kts` and
    add `fastlane/metadata/android/en-US/changelogs/<versionCode>.txt`
-   (500 characters or fewer).
+   (500 characters or fewer). Check every claim in it against the code.
 2. Commit and push the branch to GitHub. Do not tag yet.
-3. Run `scripts/fdroid-release.sh` (defaults to `HEAD`). It clones fdroiddata,
-   adds the build as checkupdates would, runs the fdroiddata CI build job in
-   `registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie`
-   (`scripts/fdroid-ci-build.sh`, including F-Droid's source and APK scans),
-   signs the APK with the release key (see [SIGNING.md](SIGNING.md)) and checks
-   that the signer is the allowed key. The APK lands in
-   `artifacts/torrent-player-<versionName>.apk`.
-4. Create the GitHub release with that APK in one step, so the tag never exists
-   without the APK:
-   `gh release create v<versionName> artifacts/torrent-player-<versionName>.apk --target <commit> ...`
+3. Run `scripts/release.sh`. It checks the tree, changelog, push and tag, runs
+   `scripts/fdroid-release.sh` (the fdroiddata CI build job in
+   `registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie`, F-Droid's
+   source and APK scans, signing with the release key, F-Droid's own
+   `verify_apks`), checks 16 KB alignment and prints the plan.
+4. Run `scripts/release.sh --publish`. It creates the GitHub release with the
+   APK in one step (so the tag never exists without the APK), checks the
+   uploaded file's SHA-256 and, only when the build block differs from the
+   last one in fdroiddata (`recipe: changed`), opens the fdroiddata merge
+   request. With `recipe: same`, F-Droid's checkupdates picks up the tag.
 5. Never replace an APK that has been published. Fix problems in a new version.
+
+Downloads persist in `~/.cache/webtor-fdroid` (srclib clones, apt archives,
+NDK, Gradle, rustup, cargo); only downloading is skipped, every build step
+still runs from a clean checkout, so the APK is the same as from a cold run.
+Delete the folder to start cold. `fdroid-release.sh` sets the recipe's `ndk:`
+from Gradle's `ndkVersion` and fetches the freetype srclib over https, since
+`git://` (port 9418) is blocked on some networks.
 
 Sign with `apksigner sign --alignment-preserved` (the script does). Without it,
 build-tools 35 and newer re-align the zip while signing, and F-Droid's

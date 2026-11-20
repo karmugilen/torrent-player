@@ -7,6 +7,11 @@ CI_PROJECT_DIR=/builds/fdroiddata
 cd $CI_PROJECT_DIR
 source /etc/profile.d/bsenv.sh
 export ANDROID_HOME=/opt/android-sdk
+# fdroid-release.sh mounts persistent caches (apt archives, NDK, Gradle,
+# rustup/cargo, srclib clones). Keep downloaded .debs so the next run reuses
+# them. Every cached download is pinned (srclib commits, Cargo.lock checksums,
+# NDK checksum), so the APK is the same as from a cold run.
+rm -f /etc/apt/apt.conf.d/docker-clean
 build=${1:-webtor.app:98}
 
 chown -R $(whoami) .
@@ -34,7 +39,8 @@ git -C $BOOTSTRAP_BUILDSERVER checkout -B master b33507043e6750065745dd2d8c35d3b
 git -C $BOOTSTRAP_BUILDSERVER pull origin master --ff-only
 cp $BOOTSTRAP_BUILDSERVER/roles/production_hardening/files/gitconfig $CI_PROJECT_DIR/../.gitconfig
 
-for d in logs tmp unsigned $home_vagrant/.android $home_vagrant/.gradle $home_vagrant/metadata; do
+for d in logs tmp unsigned $home_vagrant/.android $home_vagrant/.gradle $home_vagrant/metadata \
+         $home_vagrant/.cargo $home_vagrant/.rustup $home_vagrant/build; do
     test -d $d || mkdir $d
     chown -R vagrant $d
 done
@@ -54,7 +60,9 @@ fdroid="sudo --preserve-env --user vagrant
 apt-get install -y sudo
 apt-get install -y openjdk-21-jdk-headless
 update-alternatives --set java /usr/lib/jvm/java-21-openjdk-amd64/bin/java
-cp -R $CI_PROJECT_DIR/build $home_vagrant/build
+# $home_vagrant/build may be a mounted cache holding earlier srclib clones;
+# fetchsrclibs then only fetches what is new.
+cp -R $CI_PROJECT_DIR/build/. $home_vagrant/build/
 appid=${build%:*}
 cp -R metadata/$appid.yml $home_vagrant/metadata
 chown -R vagrant $home_vagrant $CI_PROJECT_DIR
