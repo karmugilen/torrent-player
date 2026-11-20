@@ -401,6 +401,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         startMpv()
         androidx.core.content.ContextCompat.registerReceiver(this, pipReceiver, android.content.IntentFilter(pipAction),
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+        // While the small window plays over the library, keep the card's "Left off" current.
+        lifecycleScope.launch {
+            while (alive && !finishing) {
+                kotlinx.coroutines.delay(10_000)
+                if (inPip.value && !paused.value) savePosition()
+            }
+        }
 
         setContent {
             val app = application as WebtorApp
@@ -874,6 +881,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val item = items[at]
         title.value = item.name
         position.doubleValue = 0.0; cached.doubleValue = 0.0
+        duration.doubleValue = 0.0 // the old episode's length must not show under the new title
         spans.value = emptyList(); fileDone.value = null; currentFile = null
         val target = fileOf(item)
         val start = target?.second?.takeIf { it.playbackPositionMs > 1000 }?.playbackPositionMs?.div(1000.0)
@@ -1004,6 +1012,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPip.value = isInPictureInPictureMode
         pipBuffer(isInPictureInPictureMode)
+        // The library shows behind the small window: give it this episode and spot now.
+        if (isInPictureInPictureMode) savePosition()
         // The page went into the small window with its video: the app behind it goes back to
         // the library, not to a second copy of the same page. Tapping the card brings it back.
         if (isInPictureInPictureMode && pageMode) {
@@ -1012,6 +1022,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         // Closed from the small window: stop and report the position.
         if (!isInPictureInPictureMode && lifecycle.currentState == androidx.lifecycle.Lifecycle.State.CREATED) close()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (!finishing) savePosition()
     }
 
     override fun onStop() {

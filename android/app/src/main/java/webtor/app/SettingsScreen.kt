@@ -407,6 +407,7 @@ fun SettingsScreen(
                             else -> null
                         },
                         options = listOf(
+                            AppTheme.AMOLED to "AMOLED black",
                             AppTheme.AERO to "Aero",
                             AppTheme.ANTIQUITY to "Antiquity",
                             AppTheme.RETRO to "Retro",

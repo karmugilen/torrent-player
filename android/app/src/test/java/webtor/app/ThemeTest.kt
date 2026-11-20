@@ -8,10 +8,11 @@ import org.junit.Test
 
 class ThemeTest {
     @Test
-    fun parseSavedThemeDefaultsToAeroAndHandlesUnknown() {
-        assertEquals(AppTheme.AERO, parseSavedTheme(null))
-        assertEquals(AppTheme.AERO, parseSavedTheme(""))
-        assertEquals(AppTheme.AERO, parseSavedTheme("unknown_theme"))
+    fun parseSavedThemeDefaultsToAmoledAndHandlesUnknown() {
+        assertEquals(AppTheme.AMOLED, parseSavedTheme(null))
+        assertEquals(AppTheme.AMOLED, parseSavedTheme(""))
+        assertEquals(AppTheme.AMOLED, parseSavedTheme("unknown_theme"))
+        assertEquals(AppTheme.AMOLED, parseSavedTheme("amoled"))
         assertEquals(AppTheme.AERO, parseSavedTheme("AERO"))
         assertEquals(AppTheme.ANTIQUITY, parseSavedTheme("antiquity"))
         assertEquals(AppTheme.RETRO, parseSavedTheme("Retro"))
@@ -77,6 +78,17 @@ class ThemeTest {
             assertEquals(1f, colors.surface.alpha)
             assertEquals(1f, colors.background.alpha)
         }
-        assertTrue(UiState().dynamicColors)
+    }
+
+    @Test fun defaultLookIsAmoledPureBlack() {
+        val state = UiState()
+        assertEquals(AppTheme.AMOLED, state.appTheme)
+        assertTrue(state.darkTheme)
+        assertFalse(state.dynamicColors) // wallpaper colors would replace the black palette
+        val black = androidx.compose.ui.graphics.Color.Black
+        val dark = themeColorScheme(AppTheme.AMOLED, dark = true)
+        assertEquals(black, dark.background)
+        assertEquals(black, dark.surface)
+        assertNotEquals(black, dark.surfaceContainer) // cards stay visible on black
     }
 }

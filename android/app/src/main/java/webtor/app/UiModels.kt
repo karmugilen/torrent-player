@@ -20,7 +20,7 @@ data class DeleteRequest(
     val title: String,
 )
 
-enum class AppTheme { AERO, ANTIQUITY, RETRO, WADA }
+enum class AppTheme { AMOLED, AERO, ANTIQUITY, RETRO, WADA }
 
 data class UiState(
     val screen: Screen = Screen.Library,
@@ -53,8 +53,8 @@ data class UiState(
     val seedWiFiOnly: Boolean = true,
     val seedChargingOnly: Boolean = false,
     val darkTheme: Boolean = true,
-    val appTheme: AppTheme = AppTheme.AERO,
-    val dynamicColors: Boolean = true,
+    val appTheme: AppTheme = AppTheme.AMOLED,
+    val dynamicColors: Boolean = false,
     val reducedEffects: Boolean = false,
     val directPlayDefault: Boolean = false,
     val playbackMethod: PlaybackMethod = PlaybackMethod.HTTP,

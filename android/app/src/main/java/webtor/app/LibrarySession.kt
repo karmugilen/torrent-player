@@ -185,8 +185,8 @@ class LibrarySession(
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
                         darkTheme = settings.getBoolean("darkTheme", true),
-                        appTheme = parseSavedTheme(settings.getString("appTheme", "AERO")),
-                        dynamicColors = settings.getBoolean("dynamicColors", true),
+                        appTheme = parseSavedTheme(settings.getString("appTheme", "AMOLED")),
+                        dynamicColors = settings.getBoolean("dynamicColors", false),
                         reducedEffects = settings.getBoolean("reducedEffects", false),
                         directPlayDefault = settings.getBoolean("directPlayDefault", false),
                         playbackMethod = PlaybackMethod.entries.firstOrNull {
@@ -2932,8 +2932,9 @@ class LibrarySession(
 internal fun parseSavedTheme(name: String?): AppTheme = when (name?.uppercase()) {
     "ANTIQUITY" -> AppTheme.ANTIQUITY
     "RETRO" -> AppTheme.RETRO
+    "AERO" -> AppTheme.AERO
     "WADA" -> AppTheme.WADA
-    else -> AppTheme.AERO
+    else -> AppTheme.AMOLED
 }
 
 /** The video Play next opens after [ended], in natural episode order. */

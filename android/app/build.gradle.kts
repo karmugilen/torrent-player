@@ -77,8 +77,8 @@ android {
         applicationId = providers.gradleProperty("webtor.applicationId").getOrElse("webtor.app")
         minSdk = 26
         targetSdk = 36
-        versionCode = 108
-        versionName = "2.5.0"
+        versionCode = 109
+        versionName = "2.5.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters.add("arm64-v8a")

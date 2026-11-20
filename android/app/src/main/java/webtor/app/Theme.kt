@@ -19,8 +19,79 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowInsetsControllerCompat
 
-val LocalAppTheme = compositionLocalOf { AppTheme.AERO }
+val LocalAppTheme = compositionLocalOf { AppTheme.AMOLED }
 val LocalReducedEffects = compositionLocalOf { false }
+
+// --- 0. AMOLED THEME (default) ---
+// Pure black background and surfaces so OLED pixels switch off; cards and
+// sheets sit on near-black greys so they stay visible. Neutral white accent.
+private val AmoledDarkColors = darkColorScheme(
+    primary = Color(0xFFE6E6E6),
+    onPrimary = Color(0xFF000000),
+    primaryContainer = Color(0xFF2A2A2A),
+    onPrimaryContainer = Color(0xFFF2F2F2),
+    inversePrimary = Color(0xFF3A3A3A),
+    secondary = Color(0xFFBDBDBD),
+    onSecondary = Color(0xFF000000),
+    secondaryContainer = Color(0xFF242424),
+    onSecondaryContainer = Color(0xFFE6E6E6),
+    tertiary = Color(0xFF9E9E9E),
+    onTertiary = Color(0xFF000000),
+    tertiaryContainer = Color(0xFF1F1F1F),
+    onTertiaryContainer = Color(0xFFE0E0E0),
+    background = Color(0xFF000000),
+    onBackground = Color(0xFFEDEDED),
+    surface = Color(0xFF000000),
+    onSurface = Color(0xFFEDEDED),
+    surfaceVariant = Color(0xFF1A1A1A),
+    onSurfaceVariant = Color(0xFFB3B3B3),
+    surfaceTint = Color(0xFF000000),
+    inverseSurface = Color(0xFFEDEDED),
+    inverseOnSurface = Color(0xFF000000),
+    error = Color(0xFFFF8A80),
+    onError = Color(0xFF000000),
+    errorContainer = Color(0xFF5C1010),
+    onErrorContainer = Color(0xFFFFDAD6),
+    outline = Color(0xFF6E6E6E),
+    outlineVariant = Color(0xFF2E2E2E),
+    scrim = Color(0xFF000000),
+    surfaceBright = Color(0xFF262626),
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF0A0A0A),
+    surfaceContainer = Color(0xFF121212),
+    surfaceContainerHigh = Color(0xFF1A1A1A),
+    surfaceContainerHighest = Color(0xFF222222),
+    surfaceDim = Color(0xFF000000),
+)
+
+private val AmoledLightColors = lightColorScheme(
+    primary = Color(0xFF1A1A1A),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFE0E0E0),
+    onPrimaryContainer = Color(0xFF000000),
+    secondary = Color(0xFF424242),
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFE6E6E6),
+    onSecondaryContainer = Color(0xFF111111),
+    tertiary = Color(0xFF616161),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFEEEEEE),
+    onTertiaryContainer = Color(0xFF111111),
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF111111),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF111111),
+    surfaceVariant = Color(0xFFEDEDED),
+    onSurfaceVariant = Color(0xFF444444),
+    surfaceTint = Color(0xFFFFFFFF),
+    outline = Color(0xFF8A8A8A),
+    outlineVariant = Color(0xFFD6D6D6),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF7F7F7),
+    surfaceContainer = Color(0xFFF2F2F2),
+    surfaceContainerHigh = Color(0xFFECECEC),
+    surfaceContainerHighest = Color(0xFFE6E6E6),
+)
 
 // --- 1. AERO THEME (optional cool blue palette) ---
 private val AeroLightColors = lightColorScheme(
@@ -271,6 +342,7 @@ private val WadaDarkColors = darkColorScheme(
 )
 
 fun themeColorScheme(theme: AppTheme, dark: Boolean): ColorScheme = when (theme) {
+    AppTheme.AMOLED -> if (dark) AmoledDarkColors else AmoledLightColors
     AppTheme.AERO -> if (dark) AeroDarkColors else AeroLightColors
     AppTheme.ANTIQUITY -> if (dark) AntiquityDarkColors else AntiquityLightColors
     AppTheme.RETRO -> if (dark) RetroDarkColors else RetroLightColors
@@ -348,8 +420,8 @@ fun ThemedScreenContainer(modifier: Modifier = Modifier, content: @Composable Bo
 }
 
 @Composable
-fun GaleTheme(dark: Boolean = true, theme: AppTheme = AppTheme.AERO,
-    reducedEffects: Boolean = false, dynamicColors: Boolean = true, content: @Composable () -> Unit) {
+fun GaleTheme(dark: Boolean = true, theme: AppTheme = AppTheme.AMOLED,
+    reducedEffects: Boolean = false, dynamicColors: Boolean = false, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val dynamic = dynamicColors && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val colors = if (dynamic) {
