@@ -118,7 +118,12 @@ class MainActivity : ComponentActivity() {
             handleIncoming(intent)
         }
         setContent {
-            val state by session.ui.collectAsState()
+            // Follow the live state only while this screen is on show. Behind the player (or in
+            // the background) it keeps the last picture instead of redrawing stats every second.
+            val owner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+            val state by androidx.compose.runtime.produceState(session.ui.value, owner) {
+                owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { session.ui.collect { value = it } }
+            }
             val screenStates = rememberSaveableStateHolder()
             GaleTheme(
                 dark = state.darkTheme,

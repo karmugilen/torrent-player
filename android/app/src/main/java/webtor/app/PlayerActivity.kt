@@ -79,6 +79,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -378,7 +380,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
         setContent {
             val app = application as WebtorApp
-            val ui by app.session.ui.collectAsState()
+            // Only the theme here: the whole library state changes every second with download
+            // stats, and the player (most of all in picture in picture) must not redraw for it.
+            val look by remember {
+                app.session.ui.map { Look(it.darkTheme, it.appTheme, it.reducedEffects, it.dynamicColors) }
+                    .distinctUntilChanged()
+            }.collectAsState(app.session.ui.value.let { Look(it.darkTheme, it.appTheme, it.reducedEffects, it.dynamicColors) })
             val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
                 android.content.res.Configuration.ORIENTATION_LANDSCAPE
             val full = !pageMode || landscape || inPip.value
@@ -387,7 +394,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     if (full) hide(WindowInsetsCompat.Type.systemBars()) else show(WindowInsetsCompat.Type.systemBars())
                 }
             }
-            GaleTheme(dark = ui.darkTheme, theme = ui.appTheme, reducedEffects = ui.reducedEffects, dynamicColors = ui.dynamicColors) {
+            GaleTheme(dark = look.dark, theme = look.theme, reducedEffects = look.reduced, dynamicColors = look.dynamic) {
                 // How far the page has pushed the video up: 0 (all shown) down to minus its height.
                 // The video scrolls away with the page and comes back when the list is at its top.
                 val shift = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
@@ -444,6 +451,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         ) }
                     }
                     if (!full) {
+                        // The page below the video reads the full state; it is gone in fullscreen and PiP.
+                        val ui by app.session.ui.collectAsState()
                         val entry = ui.library.find { it.key == detailKey }
                         Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.background)) {
                             if (entry != null) TorrentFilesScreen(
@@ -539,8 +548,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "audio-set-media-role" to "yes",
             "tls-verify" to "no",
             "cache" to "yes",
-            "demuxer-max-bytes" to "64MiB",
-            "demuxer-max-back-bytes" to "64MiB",
+            // The torrent engine already holds the data on the phone; mpv needs only a short
+            // read-ahead of its own, not a second large copy in memory.
+            "demuxer-max-bytes" to "32MiB",
+            "demuxer-max-back-bytes" to "16MiB",
             "hr-seek" to "no",
             "hr-seek-framedrop" to "yes",
             "cache-pause-initial" to "no",
@@ -636,7 +647,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (!alive) return
         when (property) {
             "video-params/aspect" -> videoAspect = value
-            "time-pos" -> position.doubleValue = value
+            // mpv reports this every frame; redrawing the controls that often costs CPU,
+            // most of all in picture in picture where they are hidden. Small steps are enough.
+            "time-pos" -> {
+                val step = if (inPip.value) 1.0 else 0.25
+                if (kotlin.math.abs(value - position.doubleValue) >= step) position.doubleValue = value
+            }
             "duration" -> runOnUiThread {
                 if (!alive) return@runOnUiThread
                 duration.doubleValue = value
@@ -1612,3 +1628,6 @@ private fun clock(seconds: Double): String {
     val s = seconds.toLong().coerceAtLeast(0)
     return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
 }
+
+/** The few settings the player's theme needs, so it skips every other state change. */
+private data class Look(val dark: Boolean, val theme: AppTheme, val reduced: Boolean, val dynamic: Boolean)
