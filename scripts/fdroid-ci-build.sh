@@ -65,6 +65,23 @@ update-alternatives --set java /usr/lib/jvm/java-21-openjdk-amd64/bin/java
 cp -R $CI_PROJECT_DIR/build/. $home_vagrant/build/
 appid=${build%:*}
 cp -R metadata/$appid.yml $home_vagrant/metadata
+# fdroid lists NDKs it finds under $ANDROID_HOME/ndk by revision only
+# (28.2.13676358), but recipes ask by release name (r28c), so a cached NDK was
+# not found and its 711 MB zip was downloaded again. Name each cached NDK by
+# its release. These are the dirs sdkmanager installed (checksum-checked).
+if [ ! -e $home_vagrant/config.yml ]; then
+    echo "ndk_paths:" >$home_vagrant/config.yml
+    for p in $ANDROID_HOME/ndk/*/source.properties; do
+        [ -f "$p" ] || continue
+        rel=$(sed -n 's/^Pkg.ReleaseName *= *//p' "$p")
+        if [ -n "$rel" ]; then echo "  $rel: $(dirname "$p")" >>$home_vagrant/config.yml; fi
+    done
+    if grep -q '^  ' $home_vagrant/config.yml; then
+        chmod 600 $home_vagrant/config.yml
+    else
+        rm $home_vagrant/config.yml
+    fi
+fi
 chown -R vagrant $home_vagrant $CI_PROJECT_DIR
 pushd $home_vagrant
 ln -s $CI_PROJECT_DIR $home_vagrant/fdroiddata
