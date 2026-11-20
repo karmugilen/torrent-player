@@ -357,9 +357,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         detailKey = intent.getStringExtra("detail_key")
         requestedOrientation = if (pageMode) ActivityInfo.SCREEN_ORIENTATION_USER else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         if (pageMode) orientationListener.takeIf { it.canDetectOrientation() }?.enable()
-        listOf(android.provider.Settings.System.SCREEN_BRIGHTNESS, android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE).forEach {
-            runCatching { contentResolver.registerContentObserver(android.provider.Settings.System.getUriFor(it), false, systemBrightnessWatch) }
-        }
         if (pageMode && Build.VERSION.SDK_INT >= 34) {
             // In and out with no slide: the page player stands in for the detail page.
             overrideActivityTransition(OVERRIDE_TRANSITION_OPEN, 0, 0)
@@ -905,7 +902,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     override fun onDestroy() {
         if (pageMode) runCatching { orientationListener.disable() }
-        runCatching { contentResolver.unregisterContentObserver(systemBrightnessWatch) }
         runCatching { unregisterReceiver(pipReceiver) }
         teardown()
         super.onDestroy()
@@ -1019,8 +1015,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private val audio by lazy { getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager }
 
     // Brightness is shown and dragged on the same scale as the phone's own brightness slider
-    // (Android's gamma curve), starts from the phone's level, and gives way to it as soon as
-    // the phone's brightness is changed (quick settings, auto brightness), so both stay the same.
+    // (Android's gamma curve) and starts from the phone's level. Once set it stays for this
+    // player, like other players: auto brightness rewrites the phone's value every few seconds.
     private fun systemBrightnessLinear(): Float = runCatching {
         android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255f
     }.getOrDefault(0.5f)
@@ -1032,15 +1028,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun setBrightness(slider: Float) {
         window.attributes = window.attributes.apply { screenBrightness = sliderToLinear(slider.coerceIn(0.01f, 1f)).coerceIn(0.004f, 1f) }
-    }
-
-    private val systemBrightnessWatch = object : android.database.ContentObserver(android.os.Handler(android.os.Looper.getMainLooper())) {
-        override fun onChange(selfChange: Boolean) {
-            // The phone's brightness moved: drop the player's own level and follow the phone.
-            if (window.attributes.screenBrightness >= 0) window.attributes = window.attributes.apply {
-                screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-            }
-        }
     }
 
     private fun linearToSlider(linear: Float): Float {
