@@ -59,6 +59,8 @@ fun TorrentFilesScreen(
     onDelete: () -> Unit,
     /** Shown under the built-in player: no top bar, no preview, no Play button, back handled by the player. */
     embedded: Boolean = false,
+    /** File index the player above is showing now, marked in the list. */
+    playingIndex: Int? = null,
 ) {
     if (!embedded) BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
@@ -208,6 +210,7 @@ fun TorrentFilesScreen(
                     entry, error,
                     onPlay = onPlay,
                     embedded = embedded,
+                    playingIndex = playingIndex,
                     magnetAvailable = magnetUri != null,
                     copiedMagnet = copiedMagnet,
                     onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
@@ -293,6 +296,7 @@ fun TorrentFilesScreen(
                     canToggle = !busy && !entry.checking && entry.metadataReady,
                     pairedSubtitles = subtitleMap[stem].orEmpty(),
                     upNext = if (entry.paused) null else upNextLabel(entry.liveStatus()?.nextPreload, file.index),
+                    playing = file.index == playingIndex,
                 )
             }
             // Diagnostics follow files
@@ -322,6 +326,7 @@ private fun DownloadSummary(
     onShareMagnet: () -> Unit,
     onCopyMagnet: () -> Unit,
     embedded: Boolean = false,
+    playingIndex: Int? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val isPaused = entry.paused || entry.lifecycleState == EntryLifecycleState.PAUSED ||
@@ -336,11 +341,29 @@ private fun DownloadSummary(
     ThemedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             // The video most people came here for: where they left off, else the main file.
-            val resume = entry.resumeFile()
-            val playIndex = resume?.index ?: pickPlayIndex(entry)
+            val playIndex = seriesResumeIndex(entry)
+            val resume = entry.files.find { it.index == playIndex }?.takeIf { it.playbackPositionMs > 0L }
             val playable = playIndex != null && entry.canPlay()
             // No big picture here: a library card opens its video playing, with this page under it.
-            Text(
+            // A series shows the episode playing now, large, with the torrent's name under it.
+            val episode = playingIndex?.takeIf { entry.hasMultipleVideos() }
+                ?.let { i -> entry.files.find { it.index == i } }?.let { episodeTitle(it.name) }
+            if (episode != null) {
+                Text(
+                    episode,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colors.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    entry.title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else Text(
                 entry.title,
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                 color = colors.onSurface,
@@ -588,6 +611,7 @@ private fun TorrentFileRow(
     directPlay: Boolean = false,
     pairedSubtitles: List<String> = emptyList(),
     upNext: String? = null,
+    playing: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val isVideo = file.name.isVideoName() || file.path.isVideoName()
@@ -615,10 +639,10 @@ private fun TorrentFileRow(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
-        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow),
+        colors = CardDefaults.cardColors(containerColor = if (playing) colors.secondaryContainer else colors.surfaceContainerLow),
         border = BorderStroke(
-            1.dp,
-            if (priorityDownload) colors.primary else colors.outlineVariant.copy(alpha = 0.6f),
+            if (playing) 2.dp else 1.dp,
+            if (playing || priorityDownload) colors.primary else colors.outlineVariant.copy(alpha = 0.6f),
         ),
     ) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -659,6 +683,13 @@ private fun TorrentFileRow(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                    if (playing) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.primary, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Playing", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold), color = colors.primary)
+                        }
                     }
                     if (priorityDownload) {
                         Text("Priority download", style = MaterialTheme.typography.labelSmall, color = colors.primary)
@@ -711,7 +742,7 @@ private fun TorrentFileRow(
                     trackColor = colors.surfaceContainerHighest,
                 )
             }
-            if (canPlayVideo || canOpenOther) {
+            if ((canPlayVideo || canOpenOther) && !playing) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                     FilledTonalButton(
                         onClick = onPlay,

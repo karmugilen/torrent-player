@@ -15,7 +15,9 @@ fun playbackFiles(entry: DownloadEntry, file: SavedFile): PlaybackFiles {
     val playable = entry.files.filter {
         (it.index in entry.selected || (!entry.directPlay && it.isVerifiedComplete)) && (entry.directPlay || it.uri != null)
     }
-    val playlist = playable.filter { it.name.isVideoName() }.sortedBy { naturalMediaKey(it.path) }
+    // Samples and trailers stay out of the episode run; one picked on its own plays alone.
+    val playlist = if (isExtraVideo(file.path)) listOf(file)
+        else playable.filter { it.name.isVideoName() && !isExtraVideo(it.path) }.sortedBy { naturalMediaKey(it.path) }
     val stem = file.path.substringBeforeLast('.').lowercase(java.util.Locale.ROOT)
     val subtitles = playable.filter {
         val path = it.path.lowercase(java.util.Locale.ROOT)
@@ -57,7 +59,7 @@ fun playbackTime(positionMs: Long): String {
     else "%d:%02d".format(java.util.Locale.ROOT,seconds/60,seconds%60)
 }
 
-fun currentResumePosition(entry: DownloadEntry): Long = entry.files.find { it.index == pickPlayIndex(entry) }?.playbackPositionMs ?: 0L
+fun currentResumePosition(entry: DownloadEntry): Long = entry.files.find { it.index == seriesResumeIndex(entry) }?.playbackPositionMs ?: 0L
 
 fun returnedPlaybackUri(returned: String?, launched: String?, playlist: Set<String>): String? = when {
     returned != null -> returned.takeIf { it == launched || it in playlist }

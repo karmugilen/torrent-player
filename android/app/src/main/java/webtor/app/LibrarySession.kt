@@ -1348,7 +1348,7 @@ class LibrarySession(
         }
     }
 
-    fun recordPlaybackPosition(uri: String, positionMs: Long, durationMs: Long) {
+    fun recordPlaybackPosition(uri: String, positionMs: Long, durationMs: Long, autoNext: Boolean = true) {
         if (positionMs < 0) return
         scope.launchCommand {
             val entry = _ui.value.library.find { e -> e.files.any { PlaybackProvider.uriFor(e, it).toString() == uri } } ?: return@launchCommand
@@ -1357,7 +1357,7 @@ class LibrarySession(
                 if (PlaybackProvider.uriFor(e, f).toString() != uri) f else f.withPlaybackPosition(positionMs, durationMs)
             }) }
             persist()
-            maybePlayNext(uri, entry.key, ended, positionMs, durationMs)
+            if (autoNext) maybePlayNext(uri, entry.key, ended, positionMs, durationMs)
         }
     }
 
@@ -1373,6 +1373,30 @@ class LibrarySession(
         val next = nextVideoAfter(current, ended) ?: return
         playNextLatchedUri = uri
         play(current, next.index)
+    }
+
+    /**
+     * The built-in player moved to another episode of the same torrent by itself (next,
+     * previous, a tap in the list): point the engine at that file, as Play does, without
+     * opening a new player.
+     */
+    fun playerSwitched(entryKey: String, fileIndex: Int) {
+        scope.launchCommand {
+            val current = _ui.value.library.find { it.key == entryKey } ?: return@launchCommand
+            val id = current.engineId ?: return@launchCommand
+            val file = current.files.find { it.index == fileIndex } ?: return@launchCommand
+            if (completedPlayFile(current, fileIndex) != null) return@launchCommand
+            runCatching {
+                withContext(io) {
+                    client.play(
+                        id, fileIndex, file.resumeByteHint(),
+                        boost = _ui.value.playBoost, fileOnly = _ui.value.fileOnlyPlayback && !current.directPlay,
+                        adaptiveBuffer = _ui.value.adaptiveBuffer, burstAwareBuffer = _ui.value.burstAwareBuffer,
+                        nextFileIndex = nextEpisodeToWarm(current, file, _ui.value.playNext)?.index,
+                    )
+                }
+            }
+        }
     }
 
     fun play(entry: DownloadEntry, fileIndex: Int? = null, fromStart: Boolean = false) {
@@ -2917,7 +2941,7 @@ internal fun nextVideoAfter(entry: DownloadEntry, ended: SavedFile): SavedFile? 
     val order = compareBy<SavedFile> { naturalMediaKey(it.path) }.thenBy { it.index }
     val next = entry.files
         .filter { file ->
-            (file.name.isVideoName() || file.path.isVideoName()) &&
+            (file.name.isVideoName() || file.path.isVideoName()) && !isExtraVideo(file.path) &&
                 file.index != ended.index &&
                 (file.index in entry.selected || file.isVerifiedComplete) &&
                 order.compare(ended, file) < 0

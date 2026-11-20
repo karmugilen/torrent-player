@@ -47,7 +47,10 @@ class MainActivity : ComponentActivity() {
         fun number(key: String): Long? = (data?.extras?.get(key) as? Number)?.toLong()
         val position = number("extra_position") ?: number("position")
         val uri = returnedPlaybackUri(data?.data?.toString(), launchedPlaybackUri, launchedPlaybackItems)
-        if (position != null && uri != null) session.recordPlaybackPosition(launchedBookmarkUris[uri] ?: uri, position, number("extra_duration") ?: number("duration") ?: 0L)
+        // The built-in player plays the next episode itself; only other players hand that to the app.
+        val builtIn = data?.getBooleanExtra("webtor_builtin", false) == true
+        if (position != null && uri != null) session.recordPlaybackPosition(launchedBookmarkUris[uri] ?: uri, position,
+            number("extra_duration") ?: number("duration") ?: 0L, autoNext = !builtIn)
         (application as WebtorApp).httpPlaybackLease.finish(launchedPlaybackUri)
         session.finishPlayback(launchedBookmarkUris[launchedPlaybackUri] ?: launchedPlaybackUri)
         launchedPlaybackUri = null
@@ -397,7 +400,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun openCard(entry: DownloadEntry) {
         if (PlayerActivity.expandIfPlaying(this, entry.key)) return
-        val index = entry.resumeFile()?.index ?: pickPlayIndex(entry)
+        val index = seriesResumeIndex(entry)
         val playable = index != null && entry.canPlay() && mediaType(entry) == "Video" &&
             BuiltInPlayer.enabled(this) && (!entry.checking || completedPlayFile(entry, index) != null)
         if (!playable) { session.showFiles(entry); return }
@@ -428,6 +431,7 @@ class MainActivity : ComponentActivity() {
             putExtra(Intent.EXTRA_TITLE, event.name)
             putExtra("title", event.name)
             putExtra("return_result", true)
+            event.entryKey?.let { putExtra("entry_key", it) }
             // MX-compatible players use an integer; VLC accepts either numeric type.
             putExtra("position", event.positionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
             putExtra("video_list", event.playlist.map { Uri.parse(it.uri) }.toTypedArray())

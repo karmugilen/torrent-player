@@ -74,6 +74,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Fullscreen
@@ -236,6 +237,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private var subtitles: List<Uri> = emptyList()
     private var startSeconds = 0.0
     private var firstFileLoaded = false
+    /** Playlist place of the video picked to play; its sidecar subtitles come with the intent. */
+    private var startIndex = 0
+    /** Library key of the torrent playing, for per-torrent audio and subtitle choices. */
+    private var torrentKey: String? = null
+    /** Episode end reached and handled (saved, card shown or player closed). */
+    private var endHandled = false
+    /** Playlist place of the next episode while the "Up next" card shows. */
+    private val nextCard = mutableStateOf<Int?>(null)
     private var finishing = false
 
     /**
@@ -287,7 +296,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val name = entry.files.find { it.index == index }?.name
         val at = items.indexOfFirst { torrentOf(it.uri)?.second == index || (name != null && it.name == name) }
         if (at >= 0) {
-            if (at != playlistPos.intValue) { markSeek(); mpvSend { MPVLib.command(arrayOf("playlist-play-index", at.toString())) } }
+            switchTo(at)
             return
         }
         detailKey?.let { showPageFor(it) }
@@ -481,6 +490,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 onDrop = { app.session.drop(entry) },
                                 onDelete = { },
                                 embedded = true,
+                                playingIndex = items.getOrNull(playlistPos.intValue)?.let { fileOf(it)?.second?.index },
                             )
                         }
                     }
@@ -499,13 +509,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val names = intent.getStringArrayExtra("video_list.name")
         items = if (list.isEmpty()) listOf(Item(data, name)) else {
             val all = list.mapIndexed { i, u -> Item(u, names?.getOrNull(i) ?: u.lastPathSegment.orEmpty()) }
-            // Play from the chosen video onward, like "play next".
+            // The whole run of episodes, starting at the chosen one, so Previous works too.
             val at = all.indexOfFirst { it.uri == data }
-            if (at < 0) listOf(Item(data, name)) else all.drop(at)
+            if (at < 0) listOf(Item(data, name)) else { startIndex = at; all }
         }
         subtitles = intent.getParcelableArrayExtra("subs")?.mapNotNull { it as? Uri }.orEmpty()
         startSeconds = (intent.extras?.get("position") as? Number)?.toLong()?.div(1000.0) ?: 0.0
-        title.value = items.first().name
+        torrentKey = intent.getStringExtra("detail_key") ?: intent.getStringExtra("entry_key")
+        playlistPos.intValue = startIndex
+        title.value = items[startIndex].name
     }
 
     /** mpv opens http directly; content URIs go through a descriptor mpv closes itself. */
@@ -516,7 +528,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
      */
     private fun addSubtitles(subs: List<Uri>) {
         if (subs.isEmpty()) return
+        val episode = playlistPos.intValue
         lifecycleScope.launch(Dispatchers.IO) {
+            // A kept subtitle choice picks the track once all are in; else the first file is shown.
+            val kept = trackPref("sub") != null
             val dir = java.io.File(cacheDir, "player-subs").apply { deleteRecursively(); mkdirs() }
             subs.forEachIndexed { i, uri ->
                 val name = (uri.lastPathSegment ?: "sub$i").substringAfterLast('/').ifBlank { "sub$i" }
@@ -526,9 +541,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         else contentResolver.openInputStream(uri)
                     stream?.use { input -> file.outputStream().use { input.copyTo(it) } } != null
                 }.getOrDefault(false)
-                if (!ok || !alive) return@forEachIndexed
-                mpvSend { MPVLib.command(arrayOf("sub-add", file.path, if (i == 0) "select" else "auto")) }
+                if (!ok || !alive || episode != playlistPos.intValue) return@forEachIndexed
+                mpvSend { MPVLib.command(arrayOf("sub-add", file.path, if (i == 0 && !kept) "select" else "auto")) }
             }
+            if (kept && alive && episode == playlistPos.intValue) applyTrackPrefs(listOf("sub"))
         }
     }
 
@@ -571,7 +587,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "hr-seek-framedrop" to "yes",
             "cache-pause-initial" to "no",
             "network-timeout" to "0",
-            "keep-open" to "no",
+            // Stay on the last frame at the end: the app decides what comes next (Up next card).
+            "keep-open" to "yes",
             "idle" to "yes",
             "force-window" to "no",
             "save-position-on-quit" to "no",
@@ -599,7 +616,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "paused-for-cache" to MPVLib.MPV_FORMAT_FLAG,
             "seeking" to MPVLib.MPV_FORMAT_FLAG,
             "idle-active" to MPVLib.MPV_FORMAT_FLAG,
-            "playlist-pos" to MPVLib.MPV_FORMAT_INT64,
+            "eof-reached" to MPVLib.MPV_FORMAT_FLAG,
         ).forEach { (k, f) -> MPVLib.observeProperty(k, f) }
 
         if (startSeconds > 1) MPVLib.setPropertyString("start", "%.3f".format(java.util.Locale.ROOT, startSeconds))
@@ -612,14 +629,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun loadFilesOnce() {
         if (filesLoaded) return
         filesLoaded = true
-        val paths = items.map { it.uri }
+        // One episode at a time in mpv; the app keeps the run and moves through it (switchTo).
+        val uri = items[playlistPos.intValue].uri
         loadJob = lifecycleScope.launch(Dispatchers.Default) {
-            paths.forEachIndexed { i, uri ->
-                if (!alive) return@launch
-                val path = mpvPath(uri)
-                // Under the lock: the activity may be torn down on the main thread meanwhile.
-                mpv { MPVLib.command(arrayOf("loadfile", path, if (i == 0) "replace" else "append")) } ?: return@launch
-            }
+            if (!alive) return@launch
+            val path = mpvPath(uri)
+            // Under the lock: the activity may be torn down on the main thread meanwhile.
+            mpv { MPVLib.command(arrayOf("loadfile", path, "replace")) }
         }
     }
 
@@ -652,11 +668,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "video-params/dw" -> videoW = value.toInt()
             "video-params/dh" -> videoH = value.toInt()
         }
-        if (property == "playlist-pos" && value >= 0) runOnUiThread {
-            if (value.toInt() != playlistPos.intValue) { runCatching { saveFrames() }; synchronized(frames) { frames.clear() } }
-            playlistPos.intValue = value.toInt()
-            items.getOrNull(value.toInt())?.let { title.value = it.name }
-        }
     }
     override fun eventProperty(property: String, value: Double) {
         if (!alive) return
@@ -684,6 +695,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "paused-for-cache" -> { cacheWait = value; updateBuffering() }
             "seeking" -> { seekWait = value; updateBuffering() }
             "idle-active" -> if (value && firstFileLoaded) runOnUiThread { if (alive) close() }
+            "eof-reached" -> runOnUiThread {
+                if (!alive) return@runOnUiThread
+                if (value) onEpisodeEnd() else { endHandled = false; nextCard.value = null }
+            }
         }
     }
     override fun eventProperty(property: String, value: String) {}
@@ -707,13 +722,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         releaseLength(play = true)
                     }
                 }
-                if (!firstFileLoaded) {
-                    firstFileLoaded = true
-                    val subs = subtitles.toList()
-                    // Later episodes start from the beginning.
-                    mpvSend { MPVLib.setPropertyString("start", "none") }
-                    addSubtitles(subs)
-                }
+                firstFileLoaded = true
+                // Each episode sets its own start (switchTo); none carries over.
+                mpvSend { MPVLib.setPropertyString("start", "none") }
+                applyTrackPrefs(listOf("audio", "sub"))
+                addSubtitles(subtitlesFor(playlistPos.intValue))
             }
             MPVLib.MPV_EVENT_START_FILE -> {
                 // Paused before mpv gets far with the file: the next episode must not
@@ -755,7 +768,55 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     fun selectTrack(type: String, id: String) {
-        mpvSend { MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id) }
+        mpvSend {
+            MPVLib.setPropertyString(if (type == "audio") "aid" else "sid", id)
+            // Kept for the next episode and, per torrent, for the next time it plays.
+            val pref = if (id == "no") TrackPrefs.Pref(true, null, null, false)
+                else trackInfos(type).firstOrNull { it.id.toString() == id }?.let { TrackPrefs.Pref(false, it.lang, it.title, it.external) }
+            if (pref != null) {
+                synchronized(sessionPrefs) { sessionPrefs[type] = pref }
+                torrentKey?.let { TrackPrefs.save(this, it, type, pref) }
+            }
+        }
+    }
+
+    private class TrackInfo(val id: Int, val lang: String?, val title: String?, val external: Boolean)
+
+    /** Only on mpv's command thread or under [mpv]. */
+    private fun trackInfos(type: String): List<TrackInfo> {
+        val count = MPVLib.getPropertyInt("track-list/count") ?: 0
+        return (0 until count).mapNotNull { i ->
+            if (MPVLib.getPropertyString("track-list/$i/type") != type) return@mapNotNull null
+            TrackInfo(
+                MPVLib.getPropertyInt("track-list/$i/id") ?: return@mapNotNull null,
+                MPVLib.getPropertyString("track-list/$i/lang")?.ifBlank { null },
+                MPVLib.getPropertyString("track-list/$i/title")?.ifBlank { null },
+                MPVLib.getPropertyBoolean("track-list/$i/external") == true,
+            )
+        }
+    }
+
+    /** Choices made in this player; used on the command thread only. */
+    private val sessionPrefs = HashMap<String, TrackPrefs.Pref>()
+
+    private fun trackPref(type: String): TrackPrefs.Pref? =
+        torrentKey?.let { TrackPrefs.load(this, it, type) } ?: synchronized(sessionPrefs) { sessionPrefs[type] }
+
+    /**
+     * The kept audio and subtitle choice on this episode: the same track by language and
+     * name, else the same language, else mpv's default. Subtitles Off stays off.
+     */
+    private fun applyTrackPrefs(types: List<String>) = mpvSend {
+        types.forEach { type ->
+            val p = trackPref(type) ?: return@forEach
+            val prop = if (type == "audio") "aid" else "sid"
+            if (p.off) { if (type == "sub") MPVLib.setPropertyString("sid", "no"); return@forEach }
+            val list = trackInfos(type)
+            val match = list.firstOrNull { it.lang == p.lang && it.title == p.title && it.external == p.external }
+                ?: (if (p.external) list.firstOrNull { it.external && (p.lang == null || it.lang == p.lang) } else null)
+                ?: p.lang?.let { l -> list.firstOrNull { it.lang == l } }
+            match?.let { MPVLib.setPropertyString(prop, it.id.toString()) }
+        }
     }
 
     fun togglePause() {
@@ -769,7 +830,70 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     fun seekBy(seconds: Int) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
     fun seekTo(seconds: Double) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
     fun cycle(what: String) { mpvSend { MPVLib.command(arrayOf("osd-msg", "cycle", what)) } }
-    fun next() { mpvSend { MPVLib.command(arrayOf("playlist-next")) } }
+    fun next() = switchTo(playlistPos.intValue + 1)
+    fun previous() = switchTo(playlistPos.intValue - 1)
+
+    /** Library torrent and file behind a playlist item (engine stream or app content URI). */
+    private fun fileOf(item: Item): Pair<DownloadEntry, SavedFile>? {
+        val library = (application as WebtorApp).session.ui.value.library
+        val (entry, index) = torrentOf(item.uri)?.let { (id, i) -> (library.find { it.engineId == id } ?: return null) to i }
+            ?: item.uri.takeIf { it.scheme == "content" && it.pathSegments.size >= 2 }?.let { u ->
+                (library.find { it.key == u.pathSegments[0] } ?: return null) to (u.pathSegments[1].toIntOrNull() ?: return null)
+            }
+            ?: return null
+        return entry to (entry.files.find { it.index == index } ?: return null)
+    }
+
+    /** Sidecar subtitles of episode [at]: the picked one's came with the intent, others are looked up. */
+    private fun subtitlesFor(at: Int): List<Uri> {
+        if (at == startIndex) return subtitles.toList()
+        val (entry, file) = items.getOrNull(at)?.let(::fileOf) ?: return emptyList()
+        return runCatching { playbackFiles(entry, file).subtitles.map { PlaybackProvider.uriFor(entry, it) } }.getOrDefault(emptyList())
+    }
+
+    /** Keep where the current episode is, as the library bookmark (no Play next from here: the player does that). */
+    private fun savePosition(atEnd: Boolean = false) {
+        val item = items.getOrNull(playlistPos.intValue) ?: return
+        val dur = duration.doubleValue
+        if (dur <= 0) return
+        val (entry, file) = fileOf(item) ?: return
+        val posMs = ((if (atEnd) dur else position.doubleValue) * 1000).toLong()
+        (application as WebtorApp).session.recordPlaybackPosition(
+            PlaybackProvider.uriFor(entry, file).toString(), posMs, (dur * 1000).toLong(), autoNext = false)
+    }
+
+    /** Move to episode [at] in this same player: save the one left, open the new one at its own bookmark. */
+    private fun switchTo(at: Int) {
+        if (at !in items.indices || finishing || !alive) return
+        nextCard.value = null
+        if (at == playlistPos.intValue) return
+        savePosition()
+        runCatching { saveFrames() }; synchronized(frames) { frames.clear() }
+        endHandled = false
+        playlistPos.intValue = at
+        val item = items[at]
+        title.value = item.name
+        position.doubleValue = 0.0; cached.doubleValue = 0.0
+        spans.value = emptyList(); fileDone.value = null; currentFile = null
+        val target = fileOf(item)
+        val start = target?.second?.takeIf { it.playbackPositionMs > 1000 }?.playbackPositionMs?.div(1000.0)
+        target?.let { (entry, file) -> (application as WebtorApp).session.playerSwitched(entry.key, file.index) }
+        loading = true; updateBuffering()
+        mpvSend {
+            MPVLib.setPropertyString("start", start?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "none")
+            MPVLib.command(arrayOf("loadfile", mpvPath(item.uri), "replace"))
+        }
+    }
+
+    /** End of an episode: keep it as watched, then the Up next card, or close after the last one. */
+    private fun onEpisodeEnd() {
+        if (finishing || endHandled || duration.doubleValue <= 0) return
+        endHandled = true
+        savePosition(atEnd = true)
+        val next = playlistPos.intValue + 1
+        if (next >= items.size) { close(); return }
+        nextCard.value = next
+    }
 
     private fun close() {
         if (finishing) return
@@ -780,6 +904,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             item?.let { data = it.uri }
             putExtra("position", (position.doubleValue * 1000).toLong())
             putExtra("duration", (duration.doubleValue * 1000).toLong())
+            putExtra("webtor_builtin", true)
         }
         setResult(Activity.RESULT_OK, result)
         finish()
@@ -905,6 +1030,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 item?.let { data = it.uri }
                 putExtra("position", (position.doubleValue * 1000).toLong())
                 putExtra("duration", (duration.doubleValue * 1000).toLong())
+                putExtra("webtor_builtin", true)
             })
         }
         teardown() // free the player now, not later in onDestroy
@@ -1329,7 +1455,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
 
-            AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
+            AnimatedVisibility(controls && nextCard.value == null, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxSize()) {
                     val iconSize = if (compact) 24.dp else 27.dp
                     // Shade only top and bottom so the picture stays clear.
@@ -1346,7 +1472,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             else Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(iconSize))
                         }
                         Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                            if (!compact) Text(title.value, color = Color.White, style = MaterialTheme.typography.titleMedium,
+                            if (!compact) Text(episodeTitle(title.value), color = Color.White, style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             // Downloads show progress; Direct Play keeps video in RAM, so a percentage means nothing there.
                             val lead = if (directPlay.value) "Direct Play · streaming from RAM" else fileDone.value?.let { "$it% downloaded" }
@@ -1385,11 +1511,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 tint = Color.White, modifier = Modifier.size(iconSize),
                             )
                         }
-                        if (items.size > 1 && playlistPos.intValue < items.size - 1) {
-                            IconButton(onClick = { next(); touchTick++ }) {
-                                Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White, modifier = Modifier.size(iconSize))
-                            }
-                        }
                     }
 
                     // Center: rewind, play/pause, forward.
@@ -1397,7 +1518,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     val sideIcon = if (compact) 32.dp else 40.dp
                     val mid = if (compact) 60.dp else 80.dp
                     val midIcon = if (compact) 38.dp else 50.dp
-                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (compact) 40.dp else 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // A series adds Previous and Next episode on both sides.
+                    val episodes = items.size > 1
+                    val at = playlistPos.intValue
+                    val gap = when { compact && episodes -> 14.dp; compact -> 40.dp; episodes -> 40.dp; else -> 56.dp }
+                    Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(gap), verticalAlignment = Alignment.CenterVertically) {
+                        if (episodes) IconButton(onClick = { previous(); touchTick++ }, enabled = at > 0, modifier = Modifier.size(side)) {
+                            Icon(Icons.Filled.SkipPrevious, "Previous episode", tint = Color.White.copy(alpha = if (at > 0) 1f else 0.35f),
+                                modifier = Modifier.size(sideIcon))
+                        }
                         IconButton(onClick = { seekBy(-10); touchTick++ }, modifier = Modifier.size(side)) {
                             Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = Color.White, modifier = Modifier.size(sideIcon))
                         }
@@ -1415,6 +1544,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         }
                         IconButton(onClick = { seekBy(10); touchTick++ }, modifier = Modifier.size(side)) {
                             Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = Color.White, modifier = Modifier.size(sideIcon))
+                        }
+                        if (episodes) IconButton(onClick = { next(); touchTick++ }, enabled = at < items.size - 1, modifier = Modifier.size(side)) {
+                            Icon(Icons.Filled.SkipNext, "Next episode", tint = Color.White.copy(alpha = if (at < items.size - 1) 1f else 0.35f),
+                                modifier = Modifier.size(sideIcon))
                         }
                     }
 
@@ -1457,6 +1590,38 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 seekTo(sliderValue.toDouble()); sliderDragging = false; endScrub(); touchTick++
                             },
                         )
+                    }
+                }
+            }
+
+            // Up next: the following episode starts in 5 s (Play next on); Cancel stays on this one.
+            nextCard.value?.let { upNext ->
+                val auto = remember(upNext) { (application as WebtorApp).session.ui.value.playNext }
+                var left by remember(upNext) { mutableIntStateOf(5) }
+                // Counts in the small window too; only the card is hidden there.
+                LaunchedEffect(upNext) {
+                    if (!auto) return@LaunchedEffect
+                    while (left > 0) { delay(1000); left-- }
+                    switchTo(upNext)
+                }
+                if (!inPip.value) Column(
+                    Modifier.align(Alignment.Center).padding(horizontal = 16.dp)
+                        .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.75f))
+                        .padding(horizontal = if (compact) 14.dp else 20.dp, vertical = if (compact) 8.dp else 14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(if (auto) "Up next in $left" else "Up next", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                    Text(episodeTitle(items.getOrNull(upNext)?.name.orEmpty()), color = Color.White,
+                        style = if (compact) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(if (compact) 4.dp else 10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { nextCard.value = null; controls = true }) { Text("Cancel", color = Color.White) }
+                        androidx.compose.material3.Button(onClick = { switchTo(upNext) }) {
+                            Icon(Icons.Filled.SkipNext, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Play now")
+                        }
                     }
                 }
             }

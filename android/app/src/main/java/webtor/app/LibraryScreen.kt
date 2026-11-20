@@ -385,8 +385,7 @@ fun LibraryScreen(
                         val selectedVideos = entry.files.count {
                             it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName())
                         }
-                        val resume = entry.resumeFile()
-                        onPlay(entry, if (selectedVideos > 1) resume?.index else null)
+                        onPlay(entry, if (selectedVideos > 1) seriesResumeIndex(entry) else null)
                     },
                     onOpen = {
                         if (inSelectionMode) {
@@ -559,7 +558,7 @@ private fun TorrentRow(
                 ) {
                     val selectedVideos = entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
                     val isMultiVideo = selectedVideos.size > 1
-                    val resumeIndex = if (isMultiVideo) entry.resumeFile()?.index else null
+                    val resumeIndex = if (isMultiVideo) seriesContinueIndex(entry) else null
                     val playsResume = resumeIndex != null
                     val canPlay = entry.canPlay()
                     val isVideo = mediaType(entry) == "Video"

@@ -105,7 +105,7 @@ fun pickPlayIndex(entry: DownloadEntry): Int? {
     val files = entry.files.filter { it.index in entry.selected }.ifEmpty {
         entry.files.filter { it.uri != null && it.isVerifiedComplete }
     }
-    val videos = files.filter { it.name.isVideoName() }
+    val videos = files.filter { it.name.isVideoName() }.let { all -> all.filterNot { isExtraVideo(it.path) }.ifEmpty { all } }
     return if (videos.size > 1) videos.minByOrNull { naturalMediaKey(it.path) }?.index
     else (videos.ifEmpty { files }).maxByOrNull { it.length }?.index
 }
