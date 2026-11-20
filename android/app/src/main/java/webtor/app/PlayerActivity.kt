@@ -1027,7 +1027,32 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     private fun setBrightness(slider: Float) {
-        window.attributes = window.attributes.apply { screenBrightness = sliderToLinear(slider.coerceIn(0.01f, 1f)).coerceIn(0.004f, 1f) }
+        val linear = sliderToLinear(slider.coerceIn(0.01f, 1f)).coerceIn(0.004f, 1f)
+        ownBrightness = linear
+        window.attributes = window.attributes.apply { screenBrightness = linear }
+    }
+
+    // While the player holds its own brightness, Android locks the quick settings slider
+    // ("controlled by the app"). So hand brightness back when the shade comes down, and on
+    // return take it again only if the phone's brightness was left alone there.
+    private var ownBrightness: Float? = null
+    private var systemAtHandBack: Float? = null
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        val own = ownBrightness ?: return
+        if (!hasFocus) {
+            systemAtHandBack = systemBrightnessLinear()
+            window.attributes = window.attributes.apply {
+                screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            }
+        } else {
+            val before = systemAtHandBack ?: return
+            systemAtHandBack = null
+            if (kotlin.math.abs(systemBrightnessLinear() - before) < 0.5f / 255f) {
+                window.attributes = window.attributes.apply { screenBrightness = own }
+            } else ownBrightness = null // changed in quick settings: follow the phone from now on
+        }
     }
 
     private fun linearToSlider(linear: Float): Float {
