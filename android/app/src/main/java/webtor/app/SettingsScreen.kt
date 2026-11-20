@@ -136,6 +136,18 @@ fun SettingsScreen(
                         selected = builtIn,
                         onSelect = { builtIn = it; BuiltInPlayer.setEnabled(ctx, it) },
                     )
+                    if (builtIn) {
+                        GroupDivider()
+                        var remember by remember { mutableStateOf(BuiltInPlayer.rememberBrightness(ctx)) }
+                        ChoiceSetting(
+                            title = "Remember brightness",
+                            supporting = if (remember) "Every video opens at the brightness you last set in the player."
+                                else "The player starts at your phone's brightness.",
+                            options = listOf(false to "Off", true to "On"),
+                            selected = remember,
+                            onSelect = { remember = it; BuiltInPlayer.setRememberBrightness(ctx, it) },
+                        )
+                    }
                 }
             }
             item(key = "downloads") {

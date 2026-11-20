@@ -142,6 +142,18 @@ object BuiltInPlayer {
     fun setEnabled(context: Context, value: Boolean) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean(KEY, value).apply()
     }
+    // Off by default, as in mpvEx.
+    fun rememberBrightness(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("rememberBrightness", false)
+    fun setRememberBrightness(context: Context, value: Boolean) {
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean("rememberBrightness", value).apply()
+    }
+    /** Level last set in the player, or -1 when none was saved. */
+    fun savedBrightness(context: Context): Float =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getFloat("savedBrightness", -1f)
+    fun setSavedBrightness(context: Context, value: Float) {
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putFloat("savedBrightness", value).apply()
+    }
 }
 
 /**
@@ -355,6 +367,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         detailKey = intent.getStringExtra("detail_key")
+        if (BuiltInPlayer.rememberBrightness(this)) BuiltInPlayer.savedBrightness(this).takeIf { it >= 0f }?.let { saved ->
+            window.attributes = window.attributes.apply { screenBrightness = saved }
+        }
         requestedOrientation = if (pageMode) ActivityInfo.SCREEN_ORIENTATION_USER else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         if (pageMode) orientationListener.takeIf { it.canDetectOrientation() }?.enable()
         if (pageMode && Build.VERSION.SDK_INT >= 34) {
@@ -1014,32 +1029,21 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private val audio by lazy { getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager }
 
-    // Brightness is shown and dragged on the same scale as the phone's own brightness slider
-    // (Android's gamma curve) and starts from the phone's level. Once set it stays for this
-    // player, like other players: auto brightness rewrites the phone's value every few seconds.
-    private fun systemBrightnessLinear(): Float = runCatching {
-        android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255f
-    }.getOrDefault(0.5f)
-
+    // Brightness as in mpvEx: the player's own level for its window, never the phone's setting.
+    // It starts from the phone's brightness (0-255 read as 0-1) and, with "Remember brightness"
+    // on, every video opens at the level last set here.
     private fun currentBrightness(): Float {
         val w = window.attributes.screenBrightness
-        return linearToSlider(if (w >= 0) w else systemBrightnessLinear())
+        if (w >= 0) return w
+        return runCatching {
+            android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255f
+        }.getOrDefault(0f)
     }
 
-    private fun setBrightness(slider: Float) {
-        window.attributes = window.attributes.apply { screenBrightness = sliderToLinear(slider.coerceIn(0.01f, 1f)).coerceIn(0.004f, 1f) }
-    }
-
-    private fun linearToSlider(linear: Float): Float {
-        val v = linear.coerceIn(0f, 1f) * 12f
-        val g = if (v <= 1f) 0.5f * kotlin.math.sqrt(v) else 0.17883277f * kotlin.math.ln(v - 0.28466892f) + 0.55991073f
-        return g.coerceIn(0f, 1f)
-    }
-
-    private fun sliderToLinear(slider: Float): Float {
-        val g = slider.coerceIn(0f, 1f)
-        val v = if (g <= 0.5f) (g / 0.5f) * (g / 0.5f) else kotlin.math.exp((g - 0.55991073f) / 0.17883277f) + 0.28466892f
-        return (v / 12f).coerceIn(0f, 1f)
+    private fun setBrightness(v: Float) {
+        val level = v.coerceIn(0f, 1f)
+        window.attributes = window.attributes.apply { screenBrightness = level }
+        if (BuiltInPlayer.rememberBrightness(this)) BuiltInPlayer.setSavedBrightness(this, level)
     }
 
     private fun volumeFraction(): Float {
@@ -1276,7 +1280,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                         popup = "Volume ${(v * 100).roundToInt()}%"; popupSub = null; popupLevel = v
                                     }
                                     Drag.BRIGHTNESS -> {
-                                        val v = (level - dy / (size.height * 0.8f)).coerceIn(0.01f, 1f)
+                                        val v = (level - dy / (size.height * 0.8f)).coerceIn(0f, 1f)
                                         setBrightness(v)
                                         popup = "Brightness ${(v * 100).roundToInt()}%"; popupSub = null; popupLevel = v
                                     }
