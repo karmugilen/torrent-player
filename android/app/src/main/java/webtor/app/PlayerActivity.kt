@@ -1704,7 +1704,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 kotlinx.coroutines.delay(1200)
                 aspectLabel = null
             }
-            AnimatedVisibility(aspectLabel != null && !inPip.value, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
+            AnimatedVisibility(aspectLabel != null && !inPip.value, enter = fadeIn(), exit = fadeOut(),
+                // Halfway between the top bar and the play button, so it never covers either.
+                modifier = Modifier.align(androidx.compose.ui.BiasAlignment(0f, -0.5f))) {
                 Text(aspectLabel.orEmpty(), color = Color.White, style = MaterialTheme.typography.headlineMedium,
                     modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.6f))
                         .padding(horizontal = 24.dp, vertical = 12.dp))
