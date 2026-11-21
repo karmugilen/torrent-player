@@ -3,6 +3,7 @@ package webtor.app
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -286,6 +287,7 @@ fun TorrentFilesScreen(
                 val stem = file.path.substringBeforeLast('.').lowercase(Locale.ROOT)
                 TorrentFileRow(
                     file = file,
+                    entry = entry,
                     isSelected = file.index in entry.selected,
                     paused = entry.paused,
                     canPlay = !busy && (!entry.checking || completedPlayFile(entry, file.index) != null),
@@ -601,6 +603,7 @@ private fun SectionTitle(title: String, subtitle: String? = null) {
 @Composable
 private fun TorrentFileRow(
     file: SavedFile,
+    entry: DownloadEntry,
     isSelected: Boolean,
     paused: Boolean,
     canPlay: Boolean,
@@ -657,6 +660,7 @@ private fun TorrentFileRow(
                     enabled = canToggle,
                     modifier = Modifier.size(48.dp),
                 )
+                if (isVideo) FileThumb(entry, file, playing)
                 Column(Modifier.weight(1f).padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
@@ -844,4 +848,31 @@ internal fun upNextLabel(preload: webtor.core.NextPreload?, fileIndex: Int): Str
     preload.ready -> "Up next · start loaded"
     preload.active -> "Up next · loading start"
     else -> "Up next · loads near the end"
+}
+
+/** Small still of this video, from the same keyframe the library uses. */
+@Composable
+private fun FileThumb(entry: DownloadEntry, file: SavedFile, playing: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    val frames = rememberVideoPreviews(entry, file.index)
+    val frame = frames?.let { it.getOrNull(if (entry.directPlay) it.lastIndex else it.size / 2) }
+    Box(
+        Modifier.padding(top = 4.dp).width(88.dp).aspectRatio(16f / 9f)
+            .clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (frame != null) {
+            androidx.compose.foundation.Image(
+                frame.asImageBitmap(), contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
+        }
+        if (playing) Box(Modifier.align(Alignment.BottomStart).padding(3.dp).clip(MaterialTheme.shapes.extraSmall)
+            .background(colors.primary).padding(horizontal = 4.dp, vertical = 1.dp)) {
+            Text("Playing", style = MaterialTheme.typography.labelSmall, color = colors.onPrimary)
+        }
+    }
 }

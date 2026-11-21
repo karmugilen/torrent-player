@@ -116,7 +116,7 @@ import kotlin.math.roundToInt
 
 /** Picture size in the built-in player, remembered between videos. */
 enum class PlayerAspect(val label: String, val detail: String) {
-    FIT("Fit", "Whole picture, bars if needed"), CROP("Crop", "Fill the screen, edges cut"),
+    FIT("Best fit", "Whole picture, bars if needed"), CROP("Crop", "Fill the screen, edges cut"),
     STRETCH("Stretch", "Fill the screen, shape ignored"), R16_9("16:9", "Show as widescreen"),
     R4_3("4:3", "Show as classic TV");
 
@@ -1217,8 +1217,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun cycleAspect(): PlayerAspect = setAspect(aspect.value.next())
 
+    /** Bumped on every user change, so the big center label shows once. */
+    private val aspectFlash = mutableIntStateOf(0)
+
     private fun setAspect(mode: PlayerAspect): PlayerAspect {
         aspect.value = mode
+        aspectFlash.intValue++
         PlayerAspect.save(this, mode)
         applyAspect(mode)
         return mode
@@ -1690,6 +1694,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         Text(it, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
                     }
                 }
+            }
+
+            // Aspect change: show the new mode big in the center for a moment.
+            var aspectLabel by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(aspectFlash.intValue) {
+                if (aspectFlash.intValue == 0) return@LaunchedEffect
+                aspectLabel = aspect.value.label
+                kotlinx.coroutines.delay(1200)
+                aspectLabel = null
+            }
+            AnimatedVisibility(aspectLabel != null && !inPip.value, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
+                Text(aspectLabel.orEmpty(), color = Color.White, style = MaterialTheme.typography.headlineMedium,
+                    modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 24.dp, vertical = 12.dp))
             }
 
             // Hold speed: one small pill at the top. The hint shows briefly at the start of a hold.
