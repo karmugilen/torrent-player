@@ -1,18 +1,10 @@
 package webtor.app
 
 import android.graphics.Bitmap
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -47,21 +39,20 @@ fun rememberVideoPreviews(entry: DownloadEntry, fileIndex: Int? = null): List<Bi
 }
 
 /**
- * One video, or the episode being watched in a pack: the same three pictures
- * to swipe through either way. A pack adds a small "2/10" mark.
+ * The first video's three pictures to swipe through, for one video or a pack.
  */
 @Composable
 fun EpisodeVideoPreview(
     entry: DownloadEntry,
     modifier: Modifier = Modifier,
     large: Boolean = false,
-    /** Drawn on top; gets the file index of the episode shown (null for a single video). */
-    overlay: @Composable BoxScope.(Int?) -> Unit = {},
+    /** Drawn on top of the pictures. */
+    overlay: @Composable BoxScope.() -> Unit = {},
 ) {
     // Always the first video's 3 frames, for a pack too.
     val frames = rememberVideoPreviews(entry, firstPreviewVideo(entry)?.index)
     Box(modifier) {
         VideoPreviewPager(entry, frames, Modifier.fillMaxSize(), large)
-        overlay(null)
+        overlay()
     }
 }

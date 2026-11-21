@@ -1431,14 +1431,11 @@ impl EngineServer {
             rec.playback_coordinator.prepare_resume(file_index, offset.clamp(0, (file.length - 1).max(0)));
         }
         self.apply_transfer_state(&mut rec);
-        let thumb_id = rec.id.clone();
         drop(rec);
         if let Some(storage) = self.storage_for_torrent(&torrent) {
             storage.set_startup_file(file_index);
         }
         self.notify_change();
-        // Thumbnails follow the episode playing.
-        self.spawn_thumb_keyframes(thumb_id);
         let stream_url = format!(
             "http://127.0.0.1:{}/torrent/{}/file/{}",
             self.stream_port.load(Ordering::SeqCst),
@@ -1605,8 +1602,6 @@ impl EngineServer {
             self.apply_transfer_state(&mut rec);
             drop(rec);
             self.notify_change();
-            // Thumbnails follow the episode in focus.
-            self.spawn_thumb_keyframes(req.id.clone());
             (
                 200,
                 serde_json::to_vec(&OkResponse {
@@ -1885,7 +1880,7 @@ impl EngineServer {
             drop(rec);
             self.notify_change();
             if !pause {
-                // A pause ended the thumbnail planner; pick up the missing episodes.
+                // A pause ended the thumbnail planner; start it again.
                 self.spawn_thumb_keyframes(req.id.clone());
             }
             (
@@ -2728,12 +2723,8 @@ impl crate::playback::PlaybackHost for EngineServer {
             .map_or(0, |r| r.read().torrent.nudge_urgent_requests())
     }
     fn on_focus_changed(&self, id: &str, index: usize) {
-        let changed = self.records.read().get(id).is_some_and(|r| {
-            let mut rec = r.write();
-            rec.focused_file.replace(index) != Some(index)
-        });
-        if changed {
-            self.spawn_thumb_keyframes(id.to_string());
+        if let Some(r) = self.records.read().get(id) {
+            r.write().focused_file = Some(index);
         }
     }
     fn piece_complete(&self, id: &str, piece: u32) -> bool {

@@ -513,8 +513,8 @@ private fun TorrentRow(
                     modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                         .then(if (playEnabled) Modifier.clickable(onClick = watch) else Modifier),
                     large = true,
-                ) { fileIndex ->
-                    val file = fileIndex?.let { i -> entry.files.firstOrNull { it.index == i } } ?: entry.resumeFile()
+                ) {
+                    val file = entry.resumeFile()
                     val watched = file?.takeIf { showsPlaybackBar(it.playbackPositionMs, it.playbackDurationMs) }
                         ?.let { playbackFraction(it.playbackPositionMs, it.playbackDurationMs) }
                     watched?.let { fraction ->

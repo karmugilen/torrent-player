@@ -23,9 +23,6 @@ use crate::playback::PlaybackHost;
 use crate::seek_index::{thumb_keyframe_set, video_index, KEYFRAME_FETCH_BYTES};
 use crate::server::{EngineServer, TorrentRecord};
 
-/// Videos fetched at once: a season pack finishes episode by episode instead
-/// of ten half-done pictures, and a playing video keeps most of the speed.
-const FILES_AT_ONCE: usize = 2;
 const POLL: Duration = Duration::from_millis(300);
 /// Give up after this long without a new index or frame. Paused time does
 /// not count: a pause ends the planner and resume starts it again.
@@ -126,10 +123,6 @@ struct FilePlan {
     index_pieces: Vec<usize>,
     /// Pieces of the file head a decoder reads on open (Matroska first cluster).
     head_pieces: Vec<usize>,
-    /// Where the last index read stopped (file offset, length).
-    miss: Option<(i64, i64)>,
-    /// Last state written to the log; logged again only when it changes.
-    logged: String,
 }
 
 impl EngineServer {
@@ -241,7 +234,6 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
     let mut ready = Vec::new();
     let mut all_done = true;
     let mut progressed = false;
-    let mut asking = 0usize;
     for &index in &targets {
         let Some(&(offset, length)) = files.get(&index) else { continue };
         let plan = plans.entry(index).or_default();
@@ -283,15 +275,10 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                 }
                 None => {
                     all_done = false;
-                    plan.miss = miss.get();
                     let ends = [
                         (offset, offset + HEAD_BYTES.min(length)),
                         (offset + (length - TAIL_BYTES).max(0), offset + length),
                     ];
-                    if asking >= FILES_AT_ONCE {
-                        continue;
-                    }
-                    asking += 1;
                     let missing = miss.get().map(|(abs, len)| (offset + abs, offset + abs + len));
                     for (start, end) in ends.into_iter().chain(missing) {
                         for p in span_pieces(start, end, piece_length) {
@@ -345,36 +332,11 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         if !missing.is_empty() {
             all_done = false;
         }
-        if !missing.is_empty() && asking < FILES_AT_ONCE {
-            asking += 1;
+        if !missing.is_empty() {
             demand.extend(missing.into_iter().map(|p| (p as u32, priority)));
         }
         if !have.is_empty() {
             ready.push((index, Some(have)));
-        }
-    }
-    for &index in &targets {
-        let Some(plan) = plans.get_mut(&index) else { continue };
-        let complete = |p: &usize| storage.piece_complete(*p);
-        let state = match &plan.found {
-            _ if plan.unindexed => "unindexed".to_string(),
-            None => format!("index miss={:?}", plan.miss),
-            Some(found) => {
-                let (offset, length) = files.get(&index).copied().unwrap_or_default();
-                let mut pieces: Vec<usize> = found.iter()
-                    .flat_map(|&(from, at, _)| thumb_pieces(offset + from, offset + at, piece_length, offset, offset + length))
-                    .chain(plan.head_pieces.iter().copied())
-                    .collect();
-                pieces.sort_unstable();
-                pieces.dedup();
-                let have: Vec<_> = pieces.iter().filter(|p| complete(p)).collect();
-                format!("frames={} pieces={pieces:?} have={have:?}", found.len())
-            }
-        };
-        let asked = demand.len();
-        if state != plan.logged {
-            log::info!("thumb file={index} {state} demand={asked} playing={playing} dp={direct_play}");
-            plan.logged = state;
         }
     }
     if paused {
