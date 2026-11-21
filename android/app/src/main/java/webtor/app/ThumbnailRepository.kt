@@ -135,9 +135,14 @@ class ThumbnailRepository(
         val complete = !entry.directPlay && (entry.complete || video.isVerifiedComplete)
         val key = cacheKey(entry, video)
         val previewClient = engineHost?.let { webtor.core.EngineClient(it) }
-        val liveState = if (entry.directPlay && !entry.paused && entry.engineId != null && previewClient != null) {
-            runCatching { previewClient.previewState(entry.engineId, video.index) }.getOrNull()
-        } else null
+        // The engine plans one keyframe per video (Add screen, Download and
+        // Direct Play alike): decode exactly that, once its bytes are here.
+        if (!entry.paused && entry.engineId != null && previewClient != null) {
+            val state = runCatching { previewClient.previewState(entry.engineId, video.index) }.getOrNull()
+            if (state != null) return keyframePreview(entry, video, key, state, capturedGlobal, capturedEntry)
+        }
+        // No engine for this entry: a saved file decoded locally below.
+        val liveState: webtor.core.LivePreviewState? = null
         val refreshing = liveState?.active == true
         val liveToken = liveState?.let { "${it.signature}:${it.byteOffset / (512L * 1024L)}" }.orEmpty()
         val requestElapsed = SystemClock.elapsedRealtime()
@@ -203,6 +208,60 @@ class ThumbnailRepository(
             if (deferred.isCompleted) synchronized(inFlight) {
                 if (inFlight[operationKey] === deferred) inFlight.remove(operationKey)
             }
+        }
+    }
+
+    /** Frames already published for [key], memory first. */
+    private fun knownFrames(key: String): List<Bitmap> {
+        synchronized(memory) { memory[key]?.frames?.takeIf { it.isNotEmpty() }?.let { return it } }
+        return loadFramesFromDisk(key)
+    }
+
+    private suspend fun keyframePreview(
+        entry: DownloadEntry,
+        video: SavedFile,
+        key: String,
+        state: webtor.core.LivePreviewState,
+        capturedGlobal: Long,
+        capturedEntry: Long,
+    ): List<Bitmap> {
+        val token = when {
+            state.keyframeUs != null -> "kf:${state.keyframeUs}"
+            state.noKeyframeIndex -> "kf:none"
+            else -> return knownFrames(key) // engine still fetching: wait, never guess
+        }
+        synchronized(memory) {
+            memory[key]?.takeIf { it.liveToken == token && it.frames.isNotEmpty() }?.let { return it.frames }
+        }
+        val marker = File(cache, "$key.kf")
+        if (runCatching { marker.readText() }.getOrNull() == token) {
+            val disk = loadFramesFromDisk(key)
+            if (disk.isNotEmpty()) {
+                synchronized(publicationLock) {
+                    if (isStale(capturedGlobal, capturedEntry, entry.key)) return emptyList()
+                    putMemory(key, CachedPreview(disk, false, liveProgressBucket(video.progress), token))
+                }
+                return disk
+            }
+        }
+        val engineId = entry.engineId ?: return knownFrames(key)
+        val frames = extractSlots.withPermit {
+            withTimeoutOrNull(EXTRACT_TIMEOUT_MS) {
+                val lock = synchronized(keyLocks) { keyLocks.getOrPut(key) { Any() } }
+                synchronized(lock) {
+                    if (isStale(capturedGlobal, capturedEntry, entry.key)) emptyList()
+                    else extractNativePreview(engineId, video, readMediaFacts(key), key, capturedGlobal, capturedEntry, entry.key, state)
+                }
+            }
+        }.orEmpty()
+        if (frames.isEmpty()) return knownFrames(key)
+        return synchronized(publicationLock) {
+            if (isStale(capturedGlobal, capturedEntry, entry.key)) return@synchronized emptyList()
+            persistFramesAtomically(key, frames, complete = false)
+            runCatching { marker.writeText(token) }
+            trimCache()
+            putMemory(key, CachedPreview(frames, false, liveProgressBucket(video.progress), token))
+            frames
         }
     }
 
@@ -341,22 +400,15 @@ class ThumbnailRepository(
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
 
-            val frames = ArrayList<Bitmap>(3)
-            val tried = HashSet<Long>()
-            var firstOffsetUs = -1L
-            val bodyOffsetUs = if (liveState?.active == true && video.length > 0L && actualDuration > 0L) {
-                (liveState.byteOffset.toDouble() / video.length * actualDuration * 1000.0).toLong()
-                    .coerceIn(0L, (actualDuration * 1000L - 1L).coerceAtLeast(0L))
-            } else null
-            val candidates = (previewTargetTimesUs(key, actualDuration, playbackOffsetUs = bodyOffsetUs) +
-                listOfNotNull(facts?.successfulOffsetUs, 0L)).distinct()
-            for (candidate in candidates) {
-                val frame = grabNonDark(retriever, candidate, actualDuration, tried)
-                if (frame != null) {
-                    if (frames.isEmpty()) firstOffsetUs = candidate
-                    if (distinctFrames(frames + frame).size > frames.size) frames.add(frame)
-                    if (!video.isVerifiedComplete || frames.size >= 3) break
-                }
+            // One frame: the keyframe the engine fetched. Without a container
+            // index (AVI and the like) the engine has none, so take 27%.
+            val targetUs = liveState?.keyframeUs
+                ?: if (liveState?.noKeyframeIndex == true && actualDuration > 0L) actualDuration * 1000L * 27L / 100L else null
+            val frames = ArrayList<Bitmap>(1)
+            val firstOffsetUs = targetUs ?: -1L
+            if (targetUs != null) {
+                runCatching { frameAt(retriever, targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) }
+                    .getOrNull()?.let { frames.add(scale(it)) }
             }
 
             if (frames.isNotEmpty() && !isStale(capturedGlobal, capturedEntry, entryKey)) {
@@ -737,7 +789,7 @@ class ThumbnailRepository(
     companion object {
         private const val LIVE_REFRESH_MS = 12_000L
         private const val EXTRACT_TIMEOUT_MS = 10_000L
-        private const val ALGORITHM = "v11"
+        private const val ALGORITHM = "v12"
         private const val COMPLETE_BUCKET = 101
         private const val MAX_MEMORY_BYTES = 32L * 1024L * 1024L
         private const val MAX_RETRY_ATTEMPTS = 3

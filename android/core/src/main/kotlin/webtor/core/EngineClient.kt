@@ -108,7 +108,19 @@ data class TorrentStatus(
 /** [active] once the current episode nears its end; [ready] when its head and tail are verified. */
 data class NextPreload(val fileIndex: Int, val active: Boolean, val ready: Boolean)
 
-data class LivePreviewState(val active: Boolean, val byteOffset: Long, val signature: String)
+/** [keyframeUs]: time of the keyframe the engine keeps cached for this file's thumbnail. */
+/**
+ * [keyframeUs]: the engine holds the bytes of the thumbnail keyframe at this time.
+ * [noKeyframeIndex]: the container has no keyframe index (e.g. AVI); none will come.
+ * Neither set: the engine is still fetching the index or the keyframe.
+ */
+data class LivePreviewState(
+    val active: Boolean,
+    val byteOffset: Long,
+    val signature: String,
+    val keyframeUs: Long? = null,
+    val noKeyframeIndex: Boolean = false,
+)
 
 data class PlayInfo(
     val id: String,
@@ -323,7 +335,13 @@ class EngineClient(
 
     fun previewState(id: String, fileIndex: Int): LivePreviewState {
         val json = get("/preview-state/$id?fileIndex=$fileIndex")
-        return LivePreviewState(json.optBoolean("active"), json.optLong("byteOffset").coerceAtLeast(0L), json.optString("signature"))
+        return LivePreviewState(
+            json.optBoolean("active"),
+            json.optLong("byteOffset").coerceAtLeast(0L),
+            json.optString("signature"),
+            json.optLong("keyframeUs", -1L).takeIf { it >= 0L },
+            json.optBoolean("noKeyframeIndex"),
+        )
     }
 
     fun metadata(id: String): String = get("/metadata/$id").getString("torrentData")

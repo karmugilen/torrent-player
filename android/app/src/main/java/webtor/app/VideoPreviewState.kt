@@ -37,7 +37,8 @@ fun rememberVideoPreviews(entry: DownloadEntry, fileIndex: Int? = null): List<Bi
                 if (next.isNotEmpty()) frames = next else if (frames == null) frames = emptyList()
                 if ((!current.directPlay && previewVideo(current, video.index)?.isVerifiedComplete == true) ||
                     current.paused || current.engineId == null) break
-                delay(4_000L)
+                // Waiting for the engine's keyframe: look again soon.
+                delay(if (next.isEmpty()) 1_500L else 4_000L)
             }
         }
     }

@@ -485,7 +485,7 @@ class DownloadEntryTest {
     fun thumbnailCacheKeyUsesStableIdentityNotHashCode() {
         val video = file(2, 12345, 0.5, "ep.mkv")
         val e = entry(listOf(video), setOf(2)).copy(key = "AbCDef")
-        assertEquals("v11-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
+        assertEquals("v12-abcdef-2-12345", ThumbnailRepository.cacheKey(e, video))
         assertEquals("safe_name", ThumbnailRepository.sanitize("Safe/Name"))
     }
 
