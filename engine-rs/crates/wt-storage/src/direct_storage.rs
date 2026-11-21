@@ -528,6 +528,50 @@ mod tests {
     }
 
     #[test]
+    fn thumb_piece_joins_startup_cache_and_survives_restart() {
+        let base = fixture_dir("thumb");
+        let piece_length = 1 << 20;
+        let (info, data) = single_file_info("movie.mkv", piece_length * 12, piece_length, true);
+        let client = DocumentStorageClient::new(&base);
+        client.set_cache_limit(64 * piece_length).unwrap();
+        let hash = InfoHash([7; 20]);
+        let st = open_direct_play(&client, &info, hash, &[0]).unwrap();
+        assert!(!st.startup_fetch_pieces(false).contains(&6), "body piece is not startup");
+
+        st.set_thumb_pieces(0, vec![6]);
+        assert!(st.startup_fetch_pieces(false).contains(&6), "thumb piece is fetched with startup");
+
+        let p = st.piece_at(6);
+        let begin = 6 * piece_length as usize;
+        p.write_at(&data[begin..begin + piece_length as usize], 0).unwrap();
+        p.mark_complete().unwrap();
+        let path6 = st.startup_piece_path(6);
+        for _ in 0..200 {
+            if path6.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(path6.exists(), "thumb piece saved to the startup cache");
+        let _ = st.close();
+        unregister_startup_cache(&base, &hash.to_hex());
+
+        let client2 = DocumentStorageClient::new(&base);
+        client2.set_cache_limit(64 * piece_length).unwrap();
+        let warm = open_direct_play(&client2, &info, hash, &[0]).unwrap();
+        warm.set_thumb_pieces(0, vec![6]);
+        assert!(warm.piece_complete(6), "thumb piece loaded from disk without network");
+        let mut buf = vec![0u8; 4096];
+        let (got, ok) = warm.read_verified_preview(&mut buf, begin as i64 + 100);
+        assert!(ok && got > 0);
+        assert_eq!(&buf[..got], &data[begin + 100..begin + 100 + got]);
+        assert!(!warm.startup_fetch_pieces(false).contains(&6), "no refetch after restart");
+        let _ = warm.close();
+        unregister_startup_cache(&base, &hash.to_hex());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn direct_play_evicts_partial_without_returning_fabricated_bytes() {
         let base = fixture_dir("evict");
         let piece_length = 8i64;

@@ -266,6 +266,9 @@ pub struct StorageInner {
     pub startup_saved: wt_types::IndexMap<usize, bool>,
     pub startup_on_disk: wt_types::IndexMap<usize, bool>,
     pub startup_order: Vec<usize>,
+    /// Per video file: pieces holding its thumbnail keyframe, kept in the
+    /// startup cache after that file's head and tail.
+    pub thumb_pieces: wt_types::IndexMap<usize, Vec<usize>>,
     pub startup_file: usize,
     pub startup_planned: bool,
     pub direct_selected: Vec<usize>,
@@ -384,6 +387,7 @@ impl DocumentTorrentStorage {
                 startup_saved: Default::default(),
                 startup_on_disk: Default::default(),
                 startup_order: Vec::new(),
+                thumb_pieces: Default::default(),
                 startup_file: 0,
                 startup_planned: false,
                 direct_selected: Vec::new(),

@@ -29,10 +29,12 @@ impl DocumentTorrentStorage {
                 continue;
             }
             let name = &inner.files[i].path;
-            if Some(i) != first_file && !is_video_file_name(name) {
+            // A file with a thumbnail keyframe was already read as a video.
+            if Some(i) != first_file && !is_video_file_name(name) && !inner.thumb_pieces.contains_key(&i) {
                 continue;
             }
-            for p in startup_file_pieces(&inner.files[i], inner.chunk_length) {
+            let thumb = inner.thumb_pieces.get(&i).cloned().unwrap_or_default();
+            for p in startup_file_pieces(&inner.files[i], inner.chunk_length).into_iter().chain(thumb) {
                 if seen.insert(p) {
                     let piece_len = info.piece(p as u32).length;
                     if budget + piece_len > DIRECT_STARTUP_TOTAL_BUDGET {
@@ -230,6 +232,54 @@ impl DocumentTorrentStorage {
             self.validate_startup_pieces_locked(&mut inner, &missing);
         }
         planned
+    }
+
+    /// Keep `pieces` (a thumbnail keyframe of video `file`) in the startup
+    /// cache: fetched with the other startup pieces, saved to disk, read by
+    /// cached-only previews. Pieces already on disk are loaded now.
+    pub fn set_thumb_pieces(&self, file: usize, pieces: Vec<usize>) {
+        let mut inner = self.inner.lock();
+        if !inner.stream || inner.closed || file >= inner.files.len()
+            || inner.thumb_pieces.get(&file) == Some(&pieces)
+        {
+            return;
+        }
+        inner.thumb_pieces.insert(file, pieces);
+        let first = inner.startup_planned.then_some(inner.startup_file);
+        inner.startup_order = self.startup_plan_locked(&inner, first);
+        let order = inner.startup_order.clone();
+        let mut load = HashSet::new();
+        for p in order {
+            if inner.startup_pieces.insert(p, true).is_none() && self.startup_file_on_disk_locked(&inner, p) {
+                load.insert(p);
+            }
+        }
+        if !load.is_empty() {
+            self.validate_startup_pieces_locked(&mut inner, &load);
+        }
+    }
+
+    /// Load the startup-cache pieces of `file` (head, tail, thumbnail) that
+    /// are saved on disk but not loaded yet, so previews and index reads
+    /// see them without the network.
+    pub fn load_startup_file(&self, file: usize) {
+        let mut inner = self.inner.lock();
+        if !inner.stream || inner.closed || file >= inner.files.len() {
+            return;
+        }
+        let thumb = inner.thumb_pieces.get(&file).cloned().unwrap_or_default();
+        let load: HashSet<usize> = startup_file_pieces(&inner.files[file], inner.chunk_length)
+            .into_iter()
+            .chain(thumb)
+            .filter(|p| {
+                inner.startup_pieces.contains_key(p)
+                    && !inner.completed.contains_key(p)
+                    && inner.startup_on_disk.get(p).copied().unwrap_or(false)
+            })
+            .collect();
+        if !load.is_empty() {
+            self.validate_startup_pieces_locked(&mut inner, &load);
+        }
     }
 
     pub fn startup_fetch_pieces(&self, playing: bool) -> Vec<usize> {
