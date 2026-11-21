@@ -877,7 +877,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         nextCard.value = null
         if (at == playlistPos.intValue) return
         savePosition()
-        runCatching { saveFrames() }; synchronized(frames) { frames.clear() }
         endHandled = false
         playlistPos.intValue = at
         val item = items[at]
@@ -907,7 +906,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun close() {
         if (finishing) return
-        runCatching { captureFrame(); saveFrames() }
         finishing = true
         val item = items.getOrNull(playlistPos.intValue) ?: items.firstOrNull()
         val result = Intent().apply {
@@ -1039,7 +1037,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     override fun finish() {
         if (!finishing) {
-            runCatching { saveFrames() }
             // System back or idle end: still report where playback stopped.
             finishing = true
             val item = items.getOrNull(playlistPos.intValue) ?: items.firstOrNull()
@@ -1145,36 +1142,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private fun readyAt(fraction: Float): Boolean? {
         val list = spans.value.takeIf { it.isNotEmpty() } ?: return null
         return list.firstOrNull { fraction >= it.from && fraction <= it.to }?.let { it.done >= 0.99f }
-    }
-
-    // ---- Library previews from the player ----
-
-    private val frames = ArrayList<android.graphics.Bitmap>()
-
-    /** Grab the current picture through mpv, scaled down for the library card. */
-    private fun captureFrame() {
-        if (!alive) return
-        if (duration.doubleValue <= 0 || position.doubleValue < 3) return
-        val file = java.io.File(cacheDir, "player-frame.jpg")
-        file.delete()
-        mpv { MPVLib.command(arrayOf("screenshot-to-file", file.path, "video")) } ?: return
-        if (!file.exists() || file.length() == 0L) return
-        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        android.graphics.BitmapFactory.decodeFile(file.path, bounds)
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= 480) sample *= 2
-        val bmp = android.graphics.BitmapFactory.decodeFile(file.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
-        file.delete()
-        if (bmp != null) synchronized(frames) { frames += bmp; while (frames.size > 3) frames.removeAt(0) }
-    }
-
-    private fun saveFrames() {
-        val item = items.getOrNull(playlistPos.intValue) ?: return
-        val (id, index) = torrentOf(item.uri) ?: return
-        val entry = libraryEntry(id) ?: return
-        val video = entry.files.find { it.index == index } ?: return
-        val list = synchronized(frames) { frames.toList() }
-        (application as WebtorApp).thumbnails.putPlayerFrames(entry, video, list)
     }
 
     // ---- Volume, brightness, speed ----
@@ -1290,13 +1257,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         LaunchedEffect(skipTick) {
             if (skipSide != 0) { delay(800); skipSide = 0; skipTotal = 0 }
-        }
-        LaunchedEffect(Unit) {
-            delay(8000)
-            while (true) {
-                if (!paused.value && !buffering.value) withContext(Dispatchers.IO) { runCatching { captureFrame() } }
-                delay(90_000)
-            }
         }
         LaunchedEffect(Unit) {
             while (true) {

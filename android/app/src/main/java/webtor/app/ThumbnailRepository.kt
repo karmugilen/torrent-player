@@ -104,38 +104,10 @@ class ThumbnailRepository(
         previewsOnIo(entry, fileIndex)
     }
 
-    /**
-     * Frames captured by the built-in player while it played this file. They win
-     * over extraction, so the library never downloads video just for a preview.
-     */
-    fun putPlayerFrames(entry: DownloadEntry, video: SavedFile, frames: List<Bitmap>) {
-        if (frames.isEmpty()) return
-        val key = cacheKey(entry, video)
-        synchronized(publicationLock) {
-            if (persistFramesAtomically(key, frames.takeLast(3), complete = false)) {
-                runCatching { File(cache, "$key.player").writeText("1") }
-                // The saved keyframe set was just replaced: decode it again next time.
-                runCatching { File(cache, "$key.kf").delete() }
-            }
-            putMemory(key, CachedPreview(frames.takeLast(3), true, COMPLETE_BUCKET))
-        }
-    }
-
-    private fun playerFrames(key: String): List<Bitmap>? {
-        if (!File(cache, "$key.player").exists()) return null
-        synchronized(memory) { memory[key]?.frames?.takeIf { it.isNotEmpty() }?.let { return it } }
-        return loadFramesFromDisk(key).takeIf { it.isNotEmpty() }?.also {
-            putMemory(key, CachedPreview(it, true, COMPLETE_BUCKET))
-        }
-    }
-
     private suspend fun previewsOnIo(entry: DownloadEntry, fileIndex: Int?): List<Bitmap> {
         val capturedGlobal = globalEpoch.get()
         val capturedEntry = getEntryEpoch(entry.key)
         val video = previewVideo(entry, fileIndex) ?: return emptyList()
-        // A full set from the player wins; one stray frame gives way to the
-        // engine's three swipeable keyframes.
-        playerFrames(cacheKey(entry, video))?.takeIf { it.size >= 3 }?.let { return it }
         val complete = !entry.directPlay && (entry.complete || video.isVerifiedComplete)
         val key = cacheKey(entry, video)
         val previewClient = engineHost?.let { webtor.core.EngineClient(it) }
