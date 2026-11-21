@@ -123,10 +123,9 @@ fun previewVideos(entry: DownloadEntry): List<SavedFile> =
 
 fun firstPreviewVideo(entry: DownloadEntry): SavedFile? {
     val videos = previewVideos(entry)
-    // Same pick as the engine's thumbnail planner: playing or last played, else
-    // the first episode, samples and trailers last.
-    return videos.find { it.index == entry.focusedFile }
-        ?: videos.firstOrNull { !isExtraVideo(it.path) } ?: videos.firstOrNull()
+    // Same pick as the engine's thumbnail planner: always the first video in
+    // name order (samples and trailers last), whatever is playing.
+    return videos.firstOrNull { !isExtraVideo(it.path) } ?: videos.firstOrNull()
 }
 
 /** An explicit episode must never fall back to another episode's image. */

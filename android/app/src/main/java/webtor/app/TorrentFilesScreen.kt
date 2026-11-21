@@ -661,7 +661,12 @@ private fun TorrentFileRow(
                     modifier = Modifier.size(48.dp),
                 )
                 Column(Modifier.weight(1f).padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (isVideo) FileThumb(entry, file, playing, watched)
+                    // No pictures here: just the watched part as a thin red line.
+                    if (isVideo) watched?.let { fraction ->
+                        Box(Modifier.fillMaxWidth().height(3.dp).clip(MaterialTheme.shapes.extraSmall).background(colors.surfaceContainerHighest)) {
+                            Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Color(0xFFE53935)))
+                        }
+                    }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             file.name,
@@ -688,7 +693,7 @@ private fun TorrentFileRow(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    if (playing && !isVideo) {
+                    if (playing) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.primary, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
@@ -850,31 +855,3 @@ internal fun upNextLabel(preload: webtor.core.NextPreload?, fileIndex: Int): Str
     else -> "Up next · loads near the end"
 }
 
-/** Small still of this video, from the same keyframe the library uses. */
-@Composable
-private fun FileThumb(entry: DownloadEntry, file: SavedFile, playing: Boolean, watched: Float?) {
-    val colors = MaterialTheme.colorScheme
-    val frames = rememberVideoPreviews(entry, file.index)
-    Box(
-        Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-            .clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
-        contentAlignment = Alignment.Center,
-    ) {
-        // Swipe through the 3 stills, like the home page.
-        if (!frames.isNullOrEmpty()) {
-            VideoPreviewPager(entry.copy(title = file.name), frames, Modifier.fillMaxSize())
-        } else {
-            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(32.dp))
-        }
-        // Watched part, red line along the bottom like YouTube.
-        watched?.let { fraction ->
-            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.3f))) {
-                Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Color(0xFFE53935)))
-            }
-        }
-        if (playing) Box(Modifier.align(Alignment.TopStart).padding(6.dp).clip(MaterialTheme.shapes.extraSmall)
-            .background(colors.primary).padding(horizontal = 4.dp, vertical = 1.dp)) {
-            Text("Playing", style = MaterialTheme.typography.labelSmall, color = colors.onPrimary)
-        }
-    }
-}

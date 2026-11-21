@@ -2018,7 +2018,7 @@ impl EngineServer {
                 byte_offset: rec.playback_coordinator.preview_position(file.index()),
                 completed_piece_indices: pieces,
                 keyframes_us: rec.thumb_keyframes.get(&file.index())
-                    .map(|v| v.iter().map(|s| (s * 1e6) as i64).collect()).unwrap_or_default(),
+                    .map(|v| v.iter().map(|s| (s * 1e6).round() as i64).collect()).unwrap_or_default(),
                 no_keyframe_index: rec.thumb_unindexed.contains(&file.index()),
             });
         (200, serde_json::to_vec(&response).unwrap())

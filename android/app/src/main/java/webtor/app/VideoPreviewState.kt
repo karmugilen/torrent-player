@@ -58,24 +58,10 @@ fun EpisodeVideoPreview(
     /** Drawn on top; gets the file index of the episode shown (null for a single video). */
     overlay: @Composable BoxScope.(Int?) -> Unit = {},
 ) {
-    val videos = remember(entry.files, entry.selected) { previewVideos(entry) }
-    // The episode playing or last played (focusedFile), else the first.
-    val video = firstPreviewVideo(entry)
-    val frames = rememberVideoPreviews(entry, video?.index)
+    // Always the first video's 3 frames, for a pack too.
+    val frames = rememberVideoPreviews(entry, firstPreviewVideo(entry)?.index)
     Box(modifier) {
         VideoPreviewPager(entry, frames, Modifier.fillMaxSize(), large)
-        if (videos.size > 1 && video != null) {
-            Text(
-                "${videos.indexOf(video) + 1}/${videos.size}",
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                color = Color.White,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        overlay(if (videos.size > 1) video?.index else null)
+        overlay(null)
     }
 }

@@ -58,17 +58,14 @@ fn span_pieces(start: i64, end: i64, piece_length: i64) -> impl Iterator<Item = 
     (first..=last).map(|p| p as u32)
 }
 
-/// The one video to plan, as for a single-video torrent: the one playing or
-/// last played (`focused`), else the first episode in name order (samples
-/// and trailers last). Once configured, only selected videos count. The app
-/// shows the same video (`firstPreviewVideo`).
-pub fn thumb_targets(files: &[(usize, String, i64)], selected: &[usize], configured: bool, focused: Option<usize>) -> Vec<usize> {
+/// The one video to plan, as for a single-video torrent: the first episode
+/// in name order (samples and trailers last), whatever is playing. Once
+/// configured, only selected videos count. The app shows the same video
+/// (`firstPreviewVideo`).
+pub fn thumb_targets(files: &[(usize, String, i64)], selected: &[usize], configured: bool) -> Vec<usize> {
     let videos: Vec<&(usize, String, i64)> = files.iter()
         .filter(|(i, name, len)| *len > 0 && wt_storage::is_video_file_name(name) && (!configured || selected.contains(i)))
         .collect();
-    if let Some(f) = focused.filter(|f| videos.iter().any(|v| v.0 == *f)) {
-        return vec![f];
-    }
     videos.iter()
         .min_by_key(|(_, path, _)| (is_extra_video(path), natural_key(path)))
         .map(|v| vec![v.0])
@@ -127,6 +124,8 @@ struct FilePlan {
     /// Pieces holding the container index (MP4 moov, MKV head + Cues): what
     /// a player reads before it knows the video's times. Kept with the thumbnail.
     index_pieces: Vec<usize>,
+    /// Pieces of the file head a decoder reads on open (Matroska first cluster).
+    head_pieces: Vec<usize>,
     /// Where the last index read stopped (file offset, length).
     miss: Option<(i64, i64)>,
     /// Last state written to the log; logged again only when it changes.
@@ -174,7 +173,7 @@ impl EngineServer {
                     let pending = {
                         let r = record.read();
                         !r.torrent.closed() && r.torrent.info().is_some() && !r.paused
-                            && thumb_targets(&file_list(&r), &r.selected, r.configured, r.focused_file).iter()
+                            && thumb_targets(&file_list(&r), &r.selected, r.configured).iter()
                                 .any(|i| !r.thumb_keyframes.contains_key(i) && !r.thumb_unindexed.contains(i))
                     };
                     if pending && !gave_up {
@@ -215,7 +214,7 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         }
         let files: HashMap<usize, (i64, i64)> = rec.torrent.files().into_iter()
             .map(|f| (f.index(), (f.offset(), f.length()))).collect();
-        let targets = thumb_targets(&file_list(&rec), &rec.selected, rec.configured, rec.focused_file);
+        let targets = thumb_targets(&file_list(&rec), &rec.selected, rec.configured);
         // The record's piece_length is only filled at configure; a magnet draft has metadata already.
         let piece_length = rec.torrent.info().map(|i| i.piece_length).unwrap_or(rec.piece_length);
         (files, targets, (rec.configured, rec.direct_play), piece_length,
@@ -276,6 +275,8 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                     index_pieces.sort_unstable();
                     index_pieces.dedup();
                     plan.index_pieces = index_pieces;
+                    plan.head_pieces = span_pieces(offset, offset + found.open_bytes().min(length), piece_length)
+                        .map(|p| p as usize).collect();
                     progressed = true;
                     let set = thumb_keyframe_set(&found, offset, length, piece_length);
                     if set.is_empty() { plan.unindexed = true } else { plan.found = Some(set) }
@@ -313,7 +314,11 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         }
         let Some(found) = plan.found.clone() else { continue };
         let per_frame: Vec<Vec<usize>> = found.iter()
-            .map(|&(from, at, _)| thumb_pieces(offset + from, offset + at, piece_length, offset, offset + length))
+            .map(|&(from, at, _)| {
+                let mut need = thumb_pieces(offset + from, offset + at, piece_length, offset, offset + length);
+                need.extend(plan.head_pieces.iter().copied());
+                need
+            })
             .collect();
         let mut pieces: Vec<usize> = per_frame.iter().flatten().copied().collect();
         pieces.sort_unstable();
@@ -358,6 +363,7 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                 let (offset, length) = files.get(&index).copied().unwrap_or_default();
                 let mut pieces: Vec<usize> = found.iter()
                     .flat_map(|&(from, at, _)| thumb_pieces(offset + from, offset + at, piece_length, offset, offset + length))
+                    .chain(plan.head_pieces.iter().copied())
                     .collect();
                 pieces.sort_unstable();
                 pieces.dedup();
@@ -434,20 +440,18 @@ mod tests {
     }
 
     #[test]
-    fn plans_one_video_focused_or_first_skipping_samples() {
+    fn plans_the_first_video_skipping_samples() {
         let files = vec![
             (0, "a/sample.mkv".to_string(), 10),
             (1, "a/movie.mp4".to_string(), 900),
             (2, "a/subs.srt".to_string(), 5000),
             (3, "a/other.mkv".to_string(), 50),
         ];
-        assert_eq!(thumb_targets(&files, &[], false, None), vec![1]);
-        assert_eq!(thumb_targets(&files, &[0, 2, 3], true, None), vec![3]);
-        // Playing the sample: show the sample.
-        assert_eq!(thumb_targets(&files, &[0, 2, 3], true, Some(0)), vec![0]);
-        // Focus on a file that is not selected: back to the first video.
-        assert_eq!(thumb_targets(&files, &[0, 2, 3], true, Some(1)), vec![3]);
-        assert!(thumb_targets(&files, &[], true, None).is_empty());
+        assert_eq!(thumb_targets(&files, &[], false), vec![1]);
+        assert_eq!(thumb_targets(&files, &[0, 2, 3], true), vec![3]);
+        // Only the sample selected: show the sample.
+        assert_eq!(thumb_targets(&files, &[0, 2], true), vec![0]);
+        assert!(thumb_targets(&files, &[], true).is_empty());
     }
 
     #[test]
@@ -457,8 +461,8 @@ mod tests {
             (1, "Show/Show.S01E10.mkv".to_string(), 900),
             (2, "Show/Show.S01E2.mkv".to_string(), 800),
         ];
-        assert_eq!(thumb_targets(&files, &[], false, None), vec![2]);
-        assert_eq!(thumb_targets(&files, &[0, 1, 2], true, Some(1)), vec![1]);
+        assert_eq!(thumb_targets(&files, &[], false), vec![2]);
+        assert_eq!(thumb_targets(&files, &[0, 1, 2], true), vec![2]);
     }
 
     #[test]

@@ -24,7 +24,17 @@ pub struct VideoIndex {
     pub clusters: Vec<(i64, i64)>,
 }
 
+/// Most of a file's head kept for a thumbnail: header, tracks, first frames.
+pub const THUMB_HEAD_MAX: i64 = 8 << 20;
+
 impl VideoIndex {
+    /// Bytes from the file start a decoder reads when it opens the file:
+    /// Matroska players load the first cluster, which can lie MBs in.
+    pub fn open_bytes(&self) -> i64 {
+        self.clusters.iter().map(|c| c.1).min()
+            .map_or(0, |first| (first + KEYFRAME_FETCH_BYTES).min(THUMB_HEAD_MAX))
+    }
+
     /// Where a decoder starts reading to reach the keyframe at `at`.
     pub fn read_start(&self, at: i64) -> i64 {
         self.clusters.binary_search_by_key(&at, |c| c.0).map_or(at, |i| self.clusters[i].1.min(at))
@@ -707,6 +717,9 @@ mod tests {
         assert_eq!(index.read_start(12345), 12345);
         let set = thumb_keyframe_set(&index, 0, file.len() as i64, 1 << 20);
         assert!(set.contains(&(segment + 2000, segment + 2900, 25.0)));
+        // Opening the file reads up to the first cluster's first frame.
+        assert_eq!(index.open_bytes(), segment + 1000 + KEYFRAME_FETCH_BYTES);
+        assert_eq!(VideoIndex::default().open_bytes(), 0);
     }
 
     fn mp4_box(kind: &[u8], body: &[u8]) -> Vec<u8> {
