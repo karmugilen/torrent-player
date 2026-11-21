@@ -5,7 +5,7 @@
 const READ_STEP: i64 = 4 << 20;
 const MAX_INDEX_BYTES: i64 = 32 << 20;
 /// Bytes fetched at each chosen keyframe: enough to decode the first frame.
-const KEYFRAME_FETCH_BYTES: i64 = 512 << 10;
+pub const KEYFRAME_FETCH_BYTES: i64 = 512 << 10;
 
 /// Verified bytes at a file offset; `None` while they are not downloaded.
 pub type ReadRange<'a> = &'a dyn Fn(i64, i64) -> Option<Vec<u8>>;

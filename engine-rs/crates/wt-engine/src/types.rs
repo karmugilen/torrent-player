@@ -463,6 +463,9 @@ pub struct PreviewStateResponse {
     pub active: bool,
     pub byte_offset: i64,
     pub signature: String,
+    /// Time of the keyframe kept for this file's thumbnail, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframe_us: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

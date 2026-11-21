@@ -497,6 +497,14 @@ mod tests {
         assert!(!path1.exists(), "partial opening piece must not persist");
         assert!(!path6.exists(), "body piece must not persist");
 
+        // The startup writer saves in the background; corrupt the saved copy.
+        for _ in 0..200 {
+            if path0.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(path0.exists(), "verified startup head is saved");
         // Corruption must not be trusted as a warm start.
         if path0.exists() {
             fs::write(&path0, vec![3u8; (piece_length as usize) + 32]).unwrap();
@@ -523,6 +531,22 @@ mod tests {
             );
         }
         let _ = warm.close();
+        unregister_startup_cache(&base, &hash.to_hex());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn single_file_video_gets_startup_cache_before_play() {
+        // Single-file torrents keep an empty file path; the torrent name says video.
+        let base = fixture_dir("single");
+        let piece_length = 1 << 20;
+        let (info, _) = single_file_info("movie.mkv", piece_length * 12, piece_length, true);
+        let client = DocumentStorageClient::new(&base);
+        client.set_cache_limit(64 * piece_length).unwrap();
+        let hash = InfoHash([5; 20]);
+        let st = open_direct_play(&client, &info, hash, &[0]).unwrap();
+        assert_eq!(st.startup_fetch_pieces(false), vec![0, 1, 10, 11]);
+        let _ = st.close();
         unregister_startup_cache(&base, &hash.to_hex());
         let _ = fs::remove_dir_all(&base);
     }

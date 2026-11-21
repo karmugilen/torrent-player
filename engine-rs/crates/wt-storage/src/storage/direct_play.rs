@@ -28,7 +28,12 @@ impl DocumentTorrentStorage {
             if i >= inner.files.len() {
                 continue;
             }
-            let name = &inner.files[i].path;
+            // A single-file torrent stores an empty path; its name is the torrent's.
+            let name = if inner.files[i].path.is_empty() && inner.files.len() == 1 {
+                &info.name
+            } else {
+                &inner.files[i].path
+            };
             // A file with a thumbnail keyframe was already read as a video.
             if Some(i) != first_file && !is_video_file_name(name) && !inner.thumb_pieces.contains_key(&i) {
                 continue;

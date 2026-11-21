@@ -6,6 +6,7 @@ pub mod connections;
 pub mod ghost;
 pub mod seek_index;
 pub mod telemetry;
+pub mod thumb_keyframe;
 pub mod peer_exploration;
 pub mod ctl_http;
 pub mod jni;

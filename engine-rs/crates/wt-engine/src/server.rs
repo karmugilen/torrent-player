@@ -95,6 +95,8 @@ pub struct TorrentRecord {
     pub(crate) reconnect_peers: Vec<wt_core::PeerInfo>,
     /// Per file: exact MP4 `moov` range, read from the first bytes served to the player.
     pub(crate) index_spans: HashMap<usize, wt_policy::Mp4Index>,
+    /// Per video file: seconds of the keyframe kept for its thumbnail.
+    pub(crate) thumb_keyframes: HashMap<usize, f64>,
     /// Files whose length the player already has; their index is no longer fetched first.
     pub(crate) length_known: HashSet<usize>,
 }
@@ -1213,6 +1215,7 @@ impl EngineServer {
             preload_plan: Default::default(),
             reconnect_peers: Vec::new(),
             index_spans: HashMap::new(),
+            thumb_keyframes: HashMap::new(),
             length_known: HashSet::new(),
         }));
 
@@ -1740,7 +1743,11 @@ impl EngineServer {
             None
         };
         self.apply_transfer_state(&mut rec);
+        let thumb_id = stream.then(|| rec.id.clone());
         drop(rec);
+        if let Some(id) = thumb_id {
+            self.spawn_thumb_keyframes(id, storage.clone());
+        }
         if let Some((progress, info, selected)) = verification {
             let weak = self.self_ref.get().cloned().unwrap_or_default();
             self.client.inner.tokio_handle.spawn_blocking(move || {
@@ -1990,6 +1997,7 @@ impl EngineServer {
                 }),
                 byte_offset: rec.playback_coordinator.preview_position(file.index()),
                 completed_piece_indices: pieces,
+                keyframe_us: rec.thumb_keyframes.get(&file.index()).map(|s| (s * 1e6) as i64),
             });
         (200, serde_json::to_vec(&response).unwrap())
     }
