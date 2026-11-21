@@ -436,6 +436,8 @@ pub fn open_preview(
     let server_weak_hook = server.self_ref.get().cloned().unwrap_or_default();
     let rec_weak = Arc::downgrade(&rec_arc);
     let storage_hook = storage.clone();
+    let thumb_hook = rec.thumb_planner.clone();
+    let has_video = rec.torrent.files().iter().any(|f| wt_storage::is_video_file_name(&f.path()));
     let torrent_hook = rec.torrent.clone();
     let handle = server.next_reader_id.fetch_add(1, Ordering::SeqCst);
 
@@ -467,7 +469,9 @@ pub fn open_preview(
             }
             srv.preview_readers.lock().remove(&handle);
         }
-        if is_temp {
+        // The thumbnail planner keeps the prepare-time pieces it fetched.
+        let planner_holds = has_video && thumb_hook.load(Ordering::SeqCst);
+        if is_temp && !planner_holds {
             storage_hook.release_preview_temp();
             for piece in 0..torrent_hook.num_pieces() {
                 torrent_hook.update_piece_completion(piece);

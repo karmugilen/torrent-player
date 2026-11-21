@@ -502,20 +502,24 @@ impl DocumentTorrentStorage {
             }
         }
 
-        let inner = self.inner.lock();
+        // Verified bytes live in RAM, in the on-disk startup cache (Direct
+        // Play after a restart), or in the files: read each piece from where it is.
         let mut n = 0usize;
-        let info = inner.info.as_ref()?.clone();
         while n < buf.len() {
+            let inner = self.inner.lock();
+            let info = inner.info.as_ref()?.clone();
             let cur_abs = abs + n as i64;
             let index = (cur_abs / inner.chunk_length) as usize;
             if !inner.completed.get(&index).copied().unwrap_or(false) {
                 return None;
             }
-            let data = inner.cache.get(&index)?;
-            let piece_off = (cur_abs % inner.chunk_length) as usize;
-            let p_len = info.piece(index as u32).length as usize;
-            let want = (buf.len() - n).min(p_len - piece_off);
-            buf[n..n + want].copy_from_slice(&data[piece_off..piece_off + want]);
+            let piece_off = cur_abs % inner.chunk_length;
+            let piece = info.piece(index as u32);
+            let want = (buf.len() - n).min((piece.length - piece_off) as usize);
+            let got = self.read_piece_data_unlocked(inner, piece, &mut buf[n..n + want], piece_off).ok()?;
+            if got != want {
+                return None;
+            }
             n += want;
         }
         Some(buf)
@@ -554,7 +558,7 @@ impl DocumentTorrentStorage {
         inner.stream = true;
         inner.attached = true;
         inner.preview_temp = true;
-        inner.max_cache_bytes = PREVIEW_BUDGET_BYTES;
+        inner.max_cache_bytes = PREVIEW_CACHE_BYTES;
         inner.startup_pieces.clear();
         inner.startup_saved.clear();
         inner.stream_demand.clear();

@@ -27,6 +27,10 @@ impl DocumentTorrentStorage {
         if inner.info.is_none() {
             return Err(StorageError::Other("metadata not ready".into()));
         }
+        // The Add-screen preview (and its thumbnail planner) may still hold it.
+        if inner.preview_temp {
+            self.release_preview_temp_locked(&mut inner);
+        }
         if inner.attached {
             return Err(StorageError::Other("storage already configured".into()));
         }

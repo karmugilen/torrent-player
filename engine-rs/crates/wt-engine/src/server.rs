@@ -97,6 +97,10 @@ pub struct TorrentRecord {
     pub(crate) index_spans: HashMap<usize, wt_policy::Mp4Index>,
     /// Per video file: seconds of the keyframe kept for its thumbnail.
     pub(crate) thumb_keyframes: HashMap<usize, f64>,
+    /// Video files whose container has no keyframe index (thumbnail falls back to a time guess).
+    pub(crate) thumb_unindexed: HashSet<usize>,
+    /// Set while the thumbnail planner thread runs for this torrent.
+    pub(crate) thumb_planner: Arc<std::sync::atomic::AtomicBool>,
     /// Files whose length the player already has; their index is no longer fetched first.
     pub(crate) length_known: HashSet<usize>,
 }
@@ -1216,6 +1220,8 @@ impl EngineServer {
             reconnect_peers: Vec::new(),
             index_spans: HashMap::new(),
             thumb_keyframes: HashMap::new(),
+            thumb_unindexed: HashSet::new(),
+            thumb_planner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             length_known: HashSet::new(),
         }));
 
@@ -1238,6 +1244,7 @@ impl EngineServer {
         }
         self.supplement_trackers(&rec);
         self.watch_metadata(&torrent, &rec);
+        self.spawn_thumb_keyframes(id.clone());
         self.start_metadata_sources(&torrent, metadata_sources);
         self.notify_change();
 
@@ -1743,11 +1750,12 @@ impl EngineServer {
             None
         };
         self.apply_transfer_state(&mut rec);
-        let thumb_id = stream.then(|| rec.id.clone());
+        // The prepare-time preview storage was just replaced: thumbnail pieces
+        // must be fetched (or reloaded from the startup cache) again.
+        rec.thumb_keyframes.clear();
+        let thumb_id = rec.id.clone();
         drop(rec);
-        if let Some(id) = thumb_id {
-            self.spawn_thumb_keyframes(id, storage.clone());
-        }
+        self.spawn_thumb_keyframes(thumb_id);
         if let Some((progress, info, selected)) = verification {
             let weak = self.self_ref.get().cloned().unwrap_or_default();
             self.client.inner.tokio_handle.spawn_blocking(move || {
@@ -1998,6 +2006,7 @@ impl EngineServer {
                 byte_offset: rec.playback_coordinator.preview_position(file.index()),
                 completed_piece_indices: pieces,
                 keyframe_us: rec.thumb_keyframes.get(&file.index()).map(|s| (s * 1e6) as i64),
+                no_keyframe_index: rec.thumb_unindexed.contains(&file.index()),
             });
         (200, serde_json::to_vec(&response).unwrap())
     }

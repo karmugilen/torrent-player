@@ -119,7 +119,7 @@ fn test_cache_resize_keeps_direct_play_readable_and_preview_bounded() {
     let preview = wt_storage::DocumentTorrentStorage::new(Some(info), hash, tmp.path());
     preview.attach_preview_temp(0).unwrap();
     preview.set_cache_limit(256 << 20);
-    assert_eq!(preview.max_cache_bytes(), wt_storage::PREVIEW_BUDGET_BYTES, "setting expanded preview budget");
+    assert_eq!(preview.max_cache_bytes(), wt_storage::PREVIEW_CACHE_BYTES, "setting expanded preview budget");
     preview.release_preview_temp();
     assert_eq!(preview.max_cache_bytes(), 256 << 20, "release lost configured budget");
 }

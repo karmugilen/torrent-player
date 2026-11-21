@@ -38,6 +38,9 @@ pub const DIRECT_STARTUP_BUDGET: i64 = 8 << 20;
 pub const DIRECT_STARTUP_TOTAL_BUDGET: i64 = 1 << 30;
 pub const DIRECT_PRELOAD_BUDGET: i64 = 8 << 20;
 pub const PREVIEW_BUDGET_BYTES: i64 = 8 << 20;
+/// RAM for a not-yet-configured torrent's preview: container index plus one
+/// thumbnail keyframe piece (pieces can be 16 MiB).
+pub const PREVIEW_CACHE_BYTES: i64 = 64 << 20;
 pub const MEMORY_LIMIT_OVERHEAD: i64 = 256 * 1024 * 1024;
 
 /// Test/seam hook replacing `File::sync_all` during checkpoint drain.

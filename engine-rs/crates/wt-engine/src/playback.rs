@@ -237,6 +237,8 @@ struct CoordinatorInner {
     hints: HashMap<u32, PiecePriority>,
     focus: HashMap<u32, PiecePriority>,
     preview_demand: HashMap<u32, PiecePriority>,
+    /// Pieces the thumbnail planner needs: container index, then one keyframe.
+    thumb_demand: HashMap<u32, PiecePriority>,
     resume_demand: HashMap<u32, PiecePriority>,
     effective: HashMap<u32, PiecePriority>,
     play_boost: HashMap<usize, bool>,
@@ -267,6 +269,7 @@ impl PlaybackPriorityCoordinator {
                 hints: HashMap::new(),
                 focus: HashMap::new(),
                 preview_demand: HashMap::new(),
+                thumb_demand: HashMap::new(),
                 resume_demand: HashMap::new(),
                 effective: HashMap::new(),
                 play_boost: HashMap::new(),
@@ -339,6 +342,15 @@ impl PlaybackPriorityCoordinator {
     pub fn set_hints(&self, demand: HashMap<u32, PiecePriority>) {
         let mut inner = self.inner.lock();
         inner.hints = demand;
+        Self::apply_locked(&mut inner);
+    }
+
+    pub fn set_thumb_demand(&self, demand: HashMap<u32, PiecePriority>) {
+        let mut inner = self.inner.lock();
+        if inner.thumb_demand == demand {
+            return;
+        }
+        inner.thumb_demand = demand;
         Self::apply_locked(&mut inner);
     }
 
@@ -463,6 +475,7 @@ impl PlaybackPriorityCoordinator {
         raise(&mut next, &g.focus);
         raise(&mut next, &g.resume_demand);
         raise(&mut next, &g.preview_demand);
+        raise(&mut next, &g.thumb_demand);
 
         // Cap priorities when multiple readers compete (Go applyLocked).
         let multi = g.owners.len() > 1;

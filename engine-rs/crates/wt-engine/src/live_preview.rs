@@ -17,6 +17,7 @@ pub struct PreviewStateInput {
     pub completed_piece_indices: Vec<u32>,
     /// Thumbnail keyframe time, microseconds.
     pub keyframe_us: Option<i64>,
+    pub no_keyframe_index: bool,
 }
 
 /// XOR-fold completed piece indices the way Go does
@@ -64,6 +65,7 @@ pub fn build_preview_state(input: PreviewStateInput) -> PreviewStateResponse {
         byte_offset: input.byte_offset,
         signature: preview_cache_signature(&input.completed_piece_indices),
         keyframe_us: input.keyframe_us,
+        no_keyframe_index: input.no_keyframe_index,
     }
 }
 
@@ -101,6 +103,7 @@ mod tests {
             byte_offset: 42,
             completed_piece_indices: vec![1],
             keyframe_us: None,
+            no_keyframe_index: false,
         });
         assert!(resp.active);
         assert_eq!(resp.byte_offset, 42);
