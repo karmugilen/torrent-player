@@ -11,7 +11,7 @@
 //! already here. Before configure the bytes sit in the preview RAM cache; in
 //! Direct Play the keyframe piece also joins the on-disk startup cache.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -73,6 +73,9 @@ struct FilePlan {
     unindexed: bool,
     /// Storage mode the startup cache was told about, `(configured, direct_play)`.
     cached_for: Option<(bool, bool)>,
+    /// Pieces holding the container index (MP4 moov, MKV head + Cues): what
+    /// a player reads before it knows the video's times. Kept with the thumbnail.
+    index_pieces: Vec<usize>,
 }
 
 impl EngineServer {
@@ -176,18 +179,36 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         }
         if plan.found.is_none() && !plan.unindexed {
             let miss = Cell::new(None);
+            let reads = RefCell::new(Vec::new());
             let read = |abs: i64, len: i64| {
-                let got = storage.copy_verified_range(offset + abs, len);
-                if got.is_none() && miss.get().is_none() {
+                let mut got = storage.copy_verified_range(offset + abs, len);
+                // After a restart the index may be in the startup cache on disk.
+                if got.is_none() && configured && direct_play
+                    && storage.load_saved_range(offset + abs, offset + abs + len)
+                {
+                    got = storage.copy_verified_range(offset + abs, len);
+                }
+                if got.is_some() {
+                    reads.borrow_mut().push((offset + abs, offset + abs + len));
+                } else if miss.get().is_none() {
                     miss.set(Some((abs, len)));
                 }
                 got
             };
             match video_index(&read, length) {
-                Some(found) => match thumb_keyframe(&found, THUMB_FRACTION) {
-                    Some(at) => plan.found = Some(at),
-                    None => plan.unindexed = true,
-                },
+                Some(found) => {
+                    let mut index_pieces: Vec<usize> = reads.borrow().iter()
+                        .flat_map(|&(start, end)| span_pieces(start, end, piece_length))
+                        .map(|p| p as usize)
+                        .collect();
+                    index_pieces.sort_unstable();
+                    index_pieces.dedup();
+                    plan.index_pieces = index_pieces;
+                    match thumb_keyframe(&found, THUMB_FRACTION) {
+                        Some(at) => plan.found = Some(at),
+                        None => plan.unindexed = true,
+                    }
+                }
                 None => {
                     all_done = false;
                     let ends = [
@@ -207,6 +228,10 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
             }
         }
         if plan.unindexed {
+            if configured && direct_play && plan.cached_for != Some(mode) {
+                storage.set_thumb_pieces(index, plan.index_pieces.clone());
+                plan.cached_for = Some(mode);
+            }
             ready.push((index, None));
             continue;
         }
@@ -214,9 +239,14 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         let pieces = thumb_pieces(offset + at, piece_length, offset, offset + length);
         if plan.cached_for != Some(mode) {
             wt_types::events::record("thumb_keyframe", format!(
-                "file={index} at={at} secs={secs:.2} pieces={pieces:?} configured={configured} dp={direct_play}"));
+                "file={index} at={at} secs={secs:.2} pieces={pieces:?} index={:?} configured={configured} dp={direct_play}",
+                plan.index_pieces));
             if configured && direct_play {
-                storage.set_thumb_pieces(index, pieces.clone());
+                let mut keep = plan.index_pieces.clone();
+                keep.extend(pieces.iter().copied());
+                keep.sort_unstable();
+                keep.dedup();
+                storage.set_thumb_pieces(index, keep);
             }
             plan.cached_for = Some(mode);
         }

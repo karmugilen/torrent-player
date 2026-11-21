@@ -596,6 +596,53 @@ mod tests {
     }
 
     #[test]
+    fn index_pieces_read_first_are_saved_and_found_by_range_after_restart() {
+        let base = fixture_dir("index");
+        let piece_length = 1 << 20;
+        let (info, data) = single_file_info("movie.mp4", piece_length * 12, piece_length, true);
+        let client = DocumentStorageClient::new(&base);
+        client.set_cache_limit(64 * piece_length).unwrap();
+        let hash = InfoHash([9; 20]);
+        let st = open_direct_play(&client, &info, hash, &[0]).unwrap();
+
+        // The index (pieces 4-5) completes first, as the planner reads it, then joins the cache.
+        for i in [4usize, 5] {
+            let begin = i * piece_length as usize;
+            let p = st.piece_at(i);
+            p.write_at(&data[begin..begin + piece_length as usize], 0).unwrap();
+            p.mark_complete().unwrap();
+        }
+        st.set_thumb_pieces(0, vec![4, 5, 7]);
+        for i in [4usize, 5] {
+            let path = st.startup_piece_path(i);
+            for _ in 0..200 {
+                if path.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(path.exists(), "index piece {i} saved though it completed before joining");
+        }
+        let _ = st.close();
+        unregister_startup_cache(&base, &hash.to_hex());
+
+        // After a restart nobody knows the index pieces yet: a range lookup loads them.
+        let client2 = DocumentStorageClient::new(&base);
+        client2.set_cache_limit(64 * piece_length).unwrap();
+        let warm = open_direct_play(&client2, &info, hash, &[0]).unwrap();
+        assert!(!warm.piece_complete(5));
+        let start = 4 * piece_length + 100;
+        assert!(warm.load_saved_range(start, 5 * piece_length + 200));
+        assert!(warm.piece_complete(4) && warm.piece_complete(5));
+        let got = warm.copy_verified_range(start, piece_length).expect("index bytes from disk");
+        assert_eq!(&got[..], &data[start as usize..(start + piece_length) as usize]);
+        assert!(!warm.load_saved_range(8 * piece_length, 9 * piece_length), "nothing saved there");
+        let _ = warm.close();
+        unregister_startup_cache(&base, &hash.to_hex());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn direct_play_evicts_partial_without_returning_fabricated_bytes() {
         let base = fixture_dir("evict");
         let piece_length = 8i64;

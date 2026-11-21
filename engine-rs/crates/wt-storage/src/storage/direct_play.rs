@@ -262,6 +262,35 @@ impl DocumentTorrentStorage {
         if !load.is_empty() {
             self.validate_startup_pieces_locked(&mut inner, &load);
         }
+        // Pieces already read (the index the planner just parsed) completed
+        // before they joined the cache: save them now, not on a later download.
+        let ready: Vec<usize> = inner.startup_order.iter().copied()
+            .filter(|p| inner.completed.contains_key(p) && !inner.startup_saved.contains_key(p))
+            .collect();
+        for p in ready {
+            self.save_startup_piece_locked(&mut inner, p);
+        }
+    }
+
+    /// Load saved startup-cache pieces covering bytes `start..end` (torrent
+    /// offsets) that are on disk but not loaded. After a restart the planner
+    /// does not yet know which pieces hold the index, so it asks by range.
+    /// Returns whether any piece was loaded.
+    pub fn load_saved_range(&self, start: i64, end: i64) -> bool {
+        let mut inner = self.inner.lock();
+        if !inner.stream || inner.closed || inner.chunk_length <= 0 || end <= start {
+            return false;
+        }
+        let first = (start / inner.chunk_length) as usize;
+        let last = ((end - 1) / inner.chunk_length) as usize;
+        let load: HashSet<usize> = (first..=last)
+            .filter(|p| !inner.completed.contains_key(p) && self.startup_file_on_disk_locked(&inner, *p))
+            .collect();
+        if load.is_empty() {
+            return false;
+        }
+        self.validate_startup_pieces_locked(&mut inner, &load);
+        load.iter().any(|p| inner.completed.contains_key(p))
     }
 
     /// Load the startup-cache pieces of `file` (head, tail, thumbnail) that
@@ -649,9 +678,11 @@ impl DocumentTorrentStorage {
             .as_ref()
             .map(|i| i.piece(index as u32).length)
             .unwrap_or(0);
+        // Bounded queue, but one piece always fits: pieces over 16 MiB are saved too.
         if data.len() as i64 != length
-            || inner.startup_pending_bytes + data.len()
-                > (DIRECT_STARTUP_BUDGET + DIRECT_PRELOAD_BUDGET) as usize
+            || (inner.startup_pending_bytes > 0
+                && inner.startup_pending_bytes + data.len()
+                    > (DIRECT_STARTUP_BUDGET + DIRECT_PRELOAD_BUDGET) as usize)
         {
             return;
         }
