@@ -120,6 +120,8 @@ data class LivePreviewState(
     val signature: String,
     val keyframeUs: Long? = null,
     val noKeyframeIndex: Boolean = false,
+    /** Up to 3 thumbnail keyframe times, in time order, whose bytes are here. */
+    val keyframesUs: List<Long> = emptyList(),
 )
 
 data class PlayInfo(
@@ -341,6 +343,7 @@ class EngineClient(
             json.optString("signature"),
             json.optLong("keyframeUs", -1L).takeIf { it >= 0L },
             json.optBoolean("noKeyframeIndex"),
+            json.optJSONArray("keyframesUs")?.let { a -> (0 until a.length()).map { a.getLong(it) } }.orEmpty(),
         )
     }
 

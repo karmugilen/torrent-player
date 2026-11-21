@@ -96,7 +96,8 @@ pub struct TorrentRecord {
     /// Per file: exact MP4 `moov` range, read from the first bytes served to the player.
     pub(crate) index_spans: HashMap<usize, wt_policy::Mp4Index>,
     /// Per video file: seconds of the keyframe kept for its thumbnail.
-    pub(crate) thumb_keyframes: HashMap<usize, f64>,
+    /// Thumbnail keyframe times per file, seconds, in time order (those whose bytes are here).
+    pub(crate) thumb_keyframes: HashMap<usize, Vec<f64>>,
     /// Video files whose container has no keyframe index (thumbnail falls back to a time guess).
     pub(crate) thumb_unindexed: HashSet<usize>,
     /// Set while the thumbnail planner thread runs for this torrent.
@@ -2005,7 +2006,8 @@ impl EngineServer {
                 }),
                 byte_offset: rec.playback_coordinator.preview_position(file.index()),
                 completed_piece_indices: pieces,
-                keyframe_us: rec.thumb_keyframes.get(&file.index()).map(|s| (s * 1e6) as i64),
+                keyframes_us: rec.thumb_keyframes.get(&file.index())
+                    .map(|v| v.iter().map(|s| (s * 1e6) as i64).collect()).unwrap_or_default(),
                 no_keyframe_index: rec.thumb_unindexed.contains(&file.index()),
             });
         (200, serde_json::to_vec(&response).unwrap())

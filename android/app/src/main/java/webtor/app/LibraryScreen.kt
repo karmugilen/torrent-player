@@ -33,6 +33,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -151,13 +152,24 @@ fun LibraryScreen(
                 )
             } else {
                 TopAppBar(
+                    // Logo + name, like YouTube's header.
                     title = {
-                        Text(
-                            "Downloads",
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                fontWeight = FontWeight.Bold,
-                            ),
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.foundation.Image(
+                                androidx.compose.ui.res.painterResource(R.drawable.ic_launcher_foreground),
+                                contentDescription = null,
+                                // The icon art fills the middle 60%; zoom past the padding.
+                                modifier = Modifier.size(30.dp).scale(1.7f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Torrent Player",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = (-0.5).sp,
+                                ),
+                            )
+                        }
                     },
                     actions = {
                         IconButton(onClick = onSettings) {
@@ -476,6 +488,27 @@ private fun TorrentRow(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // YouTube style: wide picture on top, red watched line along its bottom.
+            if (entry.files.any { it.index in entry.selected && it.name.isVideoName() }) {
+                EpisodeVideoPreview(
+                    entry = entry,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                    large = true,
+                ) { fileIndex ->
+                    val file = fileIndex?.let { i -> entry.files.firstOrNull { it.index == i } } ?: entry.resumeFile()
+                    val watched = file?.takeIf { showsPlaybackBar(it.playbackPositionMs, it.playbackDurationMs) }
+                        ?.let { playbackFraction(it.playbackPositionMs, it.playbackDurationMs) }
+                    watched?.let { fraction ->
+                        Box(
+                            Modifier.align(Alignment.BottomStart).fillMaxWidth().height(4.dp)
+                                .clip(RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp))
+                                .background(Color.White.copy(alpha = 0.3f)),
+                        ) {
+                            Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Color(0xFFE53935)))
+                        }
+                    }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -486,15 +519,6 @@ private fun TorrentRow(
                         checked = isSelected,
                         onCheckedChange = { onToggleSelect() },
                         modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-
-                if (entry.files.any { it.index in entry.selected && it.name.isVideoName() }) {
-                    EpisodeVideoPreview(
-                        entry = entry,
-                        modifier = Modifier
-                            .width(128.dp)
-                            .aspectRatio(16f / 9f),
                     )
                 }
                 Column(

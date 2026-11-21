@@ -855,18 +855,14 @@ internal fun upNextLabel(preload: webtor.core.NextPreload?, fileIndex: Int): Str
 private fun FileThumb(entry: DownloadEntry, file: SavedFile, playing: Boolean, watched: Float?) {
     val colors = MaterialTheme.colorScheme
     val frames = rememberVideoPreviews(entry, file.index)
-    val frame = frames?.let { it.getOrNull(if (entry.directPlay) it.lastIndex else it.size / 2) }
     Box(
         Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             .clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
         contentAlignment = Alignment.Center,
     ) {
-        if (frame != null) {
-            androidx.compose.foundation.Image(
-                frame.asImageBitmap(), contentDescription = null,
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
+        // Swipe through the 3 stills, like the home page.
+        if (!frames.isNullOrEmpty()) {
+            VideoPreviewPager(entry.copy(title = file.name), frames, Modifier.fillMaxSize())
         } else {
             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(32.dp))
         }

@@ -15,8 +15,8 @@ pub struct PreviewStateInput {
     /// Absolute torrent offsets of completed pieces that overlap the file.
     /// Used to build the cache signature.
     pub completed_piece_indices: Vec<u32>,
-    /// Thumbnail keyframe time, microseconds.
-    pub keyframe_us: Option<i64>,
+    /// Thumbnail keyframe times, microseconds, in time order.
+    pub keyframes_us: Vec<i64>,
     pub no_keyframe_index: bool,
 }
 
@@ -64,7 +64,9 @@ pub fn build_preview_state(input: PreviewStateInput) -> PreviewStateResponse {
         active: input.active,
         byte_offset: input.byte_offset,
         signature: preview_cache_signature(&input.completed_piece_indices),
-        keyframe_us: input.keyframe_us,
+        // Older apps read one time: the middle frame.
+        keyframe_us: input.keyframes_us.get(input.keyframes_us.len() / 2).copied(),
+        keyframes_us: input.keyframes_us,
         no_keyframe_index: input.no_keyframe_index,
     }
 }
@@ -91,9 +93,10 @@ mod tests {
 
     #[test]
     fn preview_state_carries_thumb_keyframe_time() {
-        let resp = build_preview_state(PreviewStateInput { keyframe_us: Some(1_500_000), ..Default::default() });
+        let resp = build_preview_state(PreviewStateInput { keyframes_us: vec![1_000_000, 1_500_000, 9_000_000], ..Default::default() });
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["keyframeUs"], 1_500_000);
+        assert_eq!(v["keyframesUs"], serde_json::json!([1_000_000, 1_500_000, 9_000_000]));
     }
 
     #[test]
@@ -102,7 +105,7 @@ mod tests {
             active: true,
             byte_offset: 42,
             completed_piece_indices: vec![1],
-            keyframe_us: None,
+            keyframes_us: Vec::new(),
             no_keyframe_index: false,
         });
         assert!(resp.active);

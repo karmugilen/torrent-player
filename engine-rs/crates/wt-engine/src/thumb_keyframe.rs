@@ -1,10 +1,11 @@
-//! One-keyframe thumbnails, for every torrent from the moment metadata arrives.
+//! Three-keyframe thumbnails, for every torrent from the moment metadata arrives.
 //!
 //! ```text
 //!  metadata -> fetch container index (head/tail, moov/cues)
-//!           -> pick the keyframe nearest 27% of the video
-//!           -> fetch only that keyframe's piece(s)
-//!           -> publish its time on /preview-state (keyframeUs)
+//!           -> pick 3 keyframes (seek_index::thumb_keyframe_set):
+//!              small pieces: 27%, 50%, 73%; big pieces: all inside one piece
+//!           -> fetch only those keyframes' piece(s)
+//!           -> publish their times on /preview-state (keyframesUs)
 //! ```
 //!
 //! The app decodes exactly that time, so the decoder only reads bytes that are
@@ -19,11 +20,9 @@ use std::time::Duration;
 use wt_core::PiecePriority;
 
 use crate::playback::PlaybackHost;
-use crate::seek_index::{thumb_keyframe, video_index, KEYFRAME_FETCH_BYTES};
+use crate::seek_index::{thumb_keyframe_set, video_index, KEYFRAME_FETCH_BYTES};
 use crate::server::{EngineServer, TorrentRecord};
 
-/// Where in the video the thumbnail comes from.
-const THUMB_FRACTION: f64 = 0.27;
 const POLL: Duration = Duration::from_millis(300);
 const MAX_RUN: Duration = Duration::from_secs(15 * 60);
 /// About every 2 s (passes are 300 ms apart).
@@ -68,8 +67,8 @@ fn file_list(rec: &TorrentRecord) -> Vec<(usize, String, i64)> {
 
 #[derive(Default)]
 struct FilePlan {
-    /// (byte offset in file, seconds) of the chosen keyframe.
-    found: Option<(i64, f64)>,
+    /// (byte offset in file, seconds) of the chosen keyframes, in time order.
+    found: Option<Vec<(i64, f64)>>,
     unindexed: bool,
     /// Storage mode the startup cache was told about, `(configured, direct_play)`.
     cached_for: Option<(bool, bool)>,
@@ -204,10 +203,8 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                     index_pieces.sort_unstable();
                     index_pieces.dedup();
                     plan.index_pieces = index_pieces;
-                    match thumb_keyframe(&found, THUMB_FRACTION) {
-                        Some(at) => plan.found = Some(at),
-                        None => plan.unindexed = true,
-                    }
+                    let set = thumb_keyframe_set(&found, offset, length, piece_length);
+                    if set.is_empty() { plan.unindexed = true } else { plan.found = Some(set) }
                 }
                 None => {
                     all_done = false;
@@ -235,11 +232,16 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
             ready.push((index, None));
             continue;
         }
-        let Some((at, secs)) = plan.found else { continue };
-        let pieces = thumb_pieces(offset + at, piece_length, offset, offset + length);
+        let Some(found) = plan.found.clone() else { continue };
+        let per_frame: Vec<Vec<usize>> = found.iter()
+            .map(|&(at, _)| thumb_pieces(offset + at, piece_length, offset, offset + length))
+            .collect();
+        let mut pieces: Vec<usize> = per_frame.iter().flatten().copied().collect();
+        pieces.sort_unstable();
+        pieces.dedup();
         if plan.cached_for != Some(mode) {
             wt_types::events::record("thumb_keyframe", format!(
-                "file={index} at={at} secs={secs:.2} pieces={pieces:?} index={:?} configured={configured} dp={direct_play}",
+                "file={index} frames={found:?} pieces={pieces:?} index={:?} configured={configured} dp={direct_play}",
                 plan.index_pieces));
             if configured && direct_play {
                 let mut keep = plan.index_pieces.clone();
@@ -250,12 +252,18 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
             }
             plan.cached_for = Some(mode);
         }
+        // Publish each frame as soon as its bytes are here; the first shows early.
+        let have: Vec<f64> = found.iter().zip(&per_frame)
+            .filter(|(_, ps)| ps.iter().all(|&p| storage.piece_complete(p)))
+            .map(|(&(_, secs), _)| secs)
+            .collect();
         let missing: Vec<usize> = pieces.iter().copied().filter(|&p| !storage.piece_complete(p)).collect();
-        if missing.is_empty() {
-            ready.push((index, Some(secs)));
-        } else {
+        if !missing.is_empty() {
             all_done = false;
             demand.extend(missing.into_iter().map(|p| (p as u32, priority)));
+        }
+        if !have.is_empty() {
+            ready.push((index, Some(have)));
         }
     }
     let waiting = !demand.is_empty();
@@ -273,7 +281,7 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
             let mut changed = false;
             for (index, secs) in ready {
                 changed |= match secs {
-                    Some(secs) => rec.thumb_keyframes.insert(index, secs).is_none(),
+                    Some(secs) => rec.thumb_keyframes.insert(index, secs.clone()).as_ref() != Some(&secs),
                     None => rec.thumb_unindexed.insert(index),
                 };
             }

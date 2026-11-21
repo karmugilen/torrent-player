@@ -35,6 +35,58 @@ pub fn thumb_keyframe(index: &VideoIndex, fraction: f64) -> Option<(i64, f64)> {
         .min_by(|a, b| (a.1 - target).abs().total_cmp(&(b.1 - target).abs()))
 }
 
+/// Pieces at most this big: spread the 3 thumbnails over the whole video
+/// (a few MB extra). Bigger: take all 3 from the first one's piece, free.
+pub const SPREAD_PIECE_MAX: i64 = 4 << 20;
+/// Thumbnails closer than this in time look alike; skip them.
+const THUMB_MIN_GAP_SECS: f64 = 4.0;
+
+/// Up to three thumbnail keyframes `(byte offset in file, seconds)`, in time order.
+///
+/// ```text
+///  small pieces:  27% ......... 50% ......... 73%     (one piece each)
+///  big pieces:    [ first . middle . last ]           (all in the 27% piece)
+/// ```
+pub fn thumb_keyframe_set(index: &VideoIndex, file_offset: i64, file_length: i64, piece_length: i64) -> Vec<(i64, f64)> {
+    let Some(first) = thumb_keyframe(index, 0.27) else { return Vec::new() };
+    let mut picked: Vec<(i64, f64)> = if piece_length > 0 && piece_length <= SPREAD_PIECE_MAX {
+        [0.27, 0.5, 0.73].iter().filter_map(|&f| thumb_keyframe(index, f)).collect()
+    } else if piece_length > 0 {
+        // Keyframes whose fetch window lies inside the first one's pieces.
+        let window = |at: i64| {
+            let start = file_offset + at;
+            let end = (start + KEYFRAME_FETCH_BYTES).min(file_offset + file_length);
+            (start / piece_length, (end - 1) / piece_length)
+        };
+        let (lo, hi) = window(first.0);
+        let mut inside: Vec<(i64, f64)> = index.keyframes.iter().copied()
+            .filter(|&(at, _)| at >= 0 && at < file_length && { let (a, b) = window(at); a >= lo && b <= hi })
+            .collect();
+        inside.sort_by(|a, b| a.1.total_cmp(&b.1));
+        match (inside.first().copied(), inside.last().copied()) {
+            (Some(early), Some(late)) => {
+                let mid_t = (early.1 + late.1) / 2.0;
+                let mid = inside.iter().copied().min_by(|a, b| (a.1 - mid_t).abs().total_cmp(&(b.1 - mid_t).abs()));
+                std::iter::once(early).chain(mid).chain(std::iter::once(late)).collect()
+            }
+            _ => vec![first],
+        }
+    } else {
+        vec![first]
+    };
+    picked.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut out: Vec<(i64, f64)> = Vec::with_capacity(3);
+    for k in picked {
+        if out.last().map_or(true, |last: &(i64, f64)| k.1 - last.1 >= THUMB_MIN_GAP_SECS) {
+            out.push(k);
+        }
+    }
+    if out.is_empty() {
+        out.push(first);
+    }
+    out
+}
+
 /// `None`: the index is not downloaded yet, try again. `Some(empty)`: this
 /// file has no index we can use.
 pub fn video_index(read: ReadRange<'_>, length: i64) -> Option<VideoIndex> {
@@ -538,6 +590,38 @@ fn mkv_cue_position(point: &[u8]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 100 min video, 1 MB/s, a keyframe every 2 s.
+    fn movie() -> VideoIndex {
+        let keyframes: Vec<(i64, f64)> = (0..3000).map(|i| (i as i64 * 2_000_000, i as f64 * 2.0)).collect();
+        VideoIndex { offsets: keyframes.iter().map(|k| k.0).collect(), duration: Some(6000.0), keyframes }
+    }
+
+    #[test]
+    fn small_pieces_spread_three_thumbs_over_the_video() {
+        let set = thumb_keyframe_set(&movie(), 0, 6_000_000_000, 1 << 20);
+        let secs: Vec<f64> = set.iter().map(|k| k.1).collect();
+        assert_eq!(secs, vec![1620.0, 3000.0, 4380.0]);
+    }
+
+    #[test]
+    fn big_pieces_take_three_thumbs_from_one_piece() {
+        let piece = 16i64 << 20;
+        let set = thumb_keyframe_set(&movie(), 0, 6_000_000_000, piece);
+        assert_eq!(set.len(), 3);
+        let first_piece = set[0].0 / piece;
+        for (at, _) in &set {
+            assert_eq!(at / piece, first_piece);
+            assert_eq!((at + KEYFRAME_FETCH_BYTES - 1) / piece, first_piece);
+        }
+        assert!(set[2].1 - set[0].1 >= 8.0);
+    }
+
+    #[test]
+    fn close_keyframes_collapse_to_one() {
+        let index = VideoIndex { offsets: vec![0], duration: Some(10.0), keyframes: vec![(0, 0.0), (100, 1.0)] };
+        assert_eq!(thumb_keyframe_set(&index, 0, 1000, 16 << 20).len(), 1);
+    }
 
     fn read_from(data: &[u8]) -> impl Fn(i64, i64) -> Option<Vec<u8>> + '_ {
         move |at, len| {

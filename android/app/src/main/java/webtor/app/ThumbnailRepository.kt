@@ -226,6 +226,7 @@ class ThumbnailRepository(
         capturedEntry: Long,
     ): List<Bitmap> {
         val token = when {
+            state.keyframesUs.isNotEmpty() -> "kf:${state.keyframesUs.joinToString(",")}"
             state.keyframeUs != null -> "kf:${state.keyframeUs}"
             state.noKeyframeIndex -> "kf:none"
             else -> return knownFrames(key) // engine still fetching: wait, never guess
@@ -400,13 +401,15 @@ class ThumbnailRepository(
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             val actualDuration = if (duration > 0L) duration else facts?.durationMs ?: 0L
 
-            // One frame: the keyframe the engine fetched. Without a container
+            // Up to 3 frames: the keyframes the engine fetched. Without a container
             // index (AVI and the like) the engine has none, so take 27%.
-            val targetUs = liveState?.keyframeUs
-                ?: if (liveState?.noKeyframeIndex == true && actualDuration > 0L) actualDuration * 1000L * 27L / 100L else null
-            val frames = ArrayList<Bitmap>(1)
-            val firstOffsetUs = targetUs ?: -1L
-            if (targetUs != null) {
+            val targets = liveState?.keyframesUs?.takeIf { it.isNotEmpty() }
+                ?: listOfNotNull(liveState?.keyframeUs
+                    ?: if (liveState?.noKeyframeIndex == true && actualDuration > 0L) actualDuration * 1000L * 27L / 100L else null)
+            val frames = ArrayList<Bitmap>(3)
+            val firstOffsetUs = targets.firstOrNull() ?: -1L
+            for (targetUs in targets.take(3)) {
+                if (closed.get() || isStale(capturedGlobal, capturedEntry, entryKey)) break
                 runCatching { frameAt(retriever, targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) }
                     .getOrNull()?.let { frames.add(scale(it)) }
             }
