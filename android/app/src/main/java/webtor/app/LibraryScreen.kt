@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -478,6 +479,20 @@ private fun TorrentRow(
 ) {
     val busy = entry.controlsBusy()
     val progress by animateFloatAsState(entry.progress, tween(200), label = "downloadProgress")
+    // Tap the picture to watch (YouTube style); the rest of the card opens details.
+    val selectedVideos = entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
+    val isMultiVideo = selectedVideos.size > 1
+    val resumeIndex = if (isMultiVideo) seriesContinueIndex(entry) else null
+    val canPlay = entry.canPlay()
+    val playIndex = resumeIndex ?: pickPlayIndex(entry)
+    val playEnabled = !inSelectionMode && !busy && (canPlay || entry.complete) &&
+        (!entry.checking || completedPlayFile(entry, playIndex) != null)
+    val watch = when {
+        resumeIndex != null -> onPlay
+        isMultiVideo -> onOpen
+        canPlay -> onPlay
+        else -> onOpen
+    }
 
     ThemedCard(
         modifier = Modifier
@@ -495,7 +510,8 @@ private fun TorrentRow(
             if (entry.files.any { it.index in entry.selected && it.name.isVideoName() }) {
                 EpisodeVideoPreview(
                     entry = entry,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                        .then(if (playEnabled) Modifier.clickable(onClick = watch) else Modifier),
                     large = true,
                 ) { fileIndex ->
                     val file = fileIndex?.let { i -> entry.files.firstOrNull { it.index == i } } ?: entry.resumeFile()
@@ -541,6 +557,10 @@ private fun TorrentRow(
                             modifier = Modifier.weight(1f),
                         )
                         StatusMark(entry)
+                        if (!inSelectionMode) IconButton(onClick = onDelete, enabled = !busy, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Delete, contentDescription = "Remove download",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                        }
                     }
                     Text(
                         text = entryTelemetry(entry),
@@ -577,75 +597,26 @@ private fun TorrentRow(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            if (!inSelectionMode) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    val selectedVideos = entry.files.filter { it.index in entry.selected && (it.name.isVideoName() || it.path.isVideoName()) }
-                    val isMultiVideo = selectedVideos.size > 1
-                    val resumeIndex = if (isMultiVideo) seriesContinueIndex(entry) else null
-                    val playsResume = resumeIndex != null
-                    val canPlay = entry.canPlay()
-                    val isVideo = mediaType(entry) == "Video"
-                    val playIndex = resumeIndex ?: pickPlayIndex(entry)
-
-                    if (canPlay || entry.complete) {
-                        Button(
-                            onClick = when {
-                                playsResume -> onPlay
-                                isMultiVideo -> onOpen
-                                canPlay -> onPlay
-                                else -> onOpen
-                            },
-                            enabled = !busy && (!entry.checking || completedPlayFile(entry, playIndex) != null),
-                        ) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = null)
-                            Spacer(Modifier.width(4.dp))
-                            Text(if (playsResume || (!isMultiVideo && entry.resumeFile() != null)) "Continue" else if (isVideo) "Play" else "Open")
+            // Direct Play has no buttons: it streams while you watch and pauses when you leave.
+            if (!inSelectionMode && !entry.directPlay) {
+                val small = PaddingValues(horizontal = 14.dp, vertical = 0.dp)
+                val smallMod = Modifier.height(32.dp)
+                when {
+                    busy -> OutlinedButton(onClick = {}, enabled = false, contentPadding = small, modifier = smallMod) {
+                        Text(entry.stateLabel(), style = MaterialTheme.typography.labelMedium)
+                    }
+                    entry.error != null -> OutlinedButton(onClick = onRetry, contentPadding = small, modifier = smallMod) {
+                        Text("Retry", style = MaterialTheme.typography.labelMedium)
+                    }
+                    entry.complete -> Unit
+                    entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING) -> {
+                        val hasAnyUri = entry.files.any { it.index in entry.selected && !it.uri.isNullOrBlank() }
+                        OutlinedButton(onClick = onResume, contentPadding = small, modifier = smallMod) {
+                            Text(if (!hasAnyUri) "Download" else "Resume", style = MaterialTheme.typography.labelMedium)
                         }
                     }
-
-                    when {
-                        busy -> OutlinedButton(
-                            onClick = {},
-                            enabled = false,
-                        ) {
-                            Text(entry.stateLabel())
-                        }
-                        entry.error != null -> OutlinedButton(
-                            onClick = onRetry,
-                        ) {
-                            Text("Retry")
-                        }
-                        entry.complete -> Unit
-                        entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING) -> {
-                            val hasAnyUri = entry.files.any { it.index in entry.selected && !it.uri.isNullOrBlank() }
-                            OutlinedButton(
-                                onClick = onResume,
-                            ) {
-                                Text(if (!hasAnyUri) "Download" else "Resume")
-                            }
-                        }
-                        else -> OutlinedButton(
-                            onClick = onPause,
-                        ) {
-                            Text("Pause")
-                        }
-                    }
-
-                    Spacer(Modifier.weight(1f))
-
-                    IconButton(
-                        onClick = onDelete,
-                        enabled = !busy,
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = "Remove download",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    else -> OutlinedButton(onClick = onPause, contentPadding = small, modifier = smallMod) {
+                        Text("Pause", style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }

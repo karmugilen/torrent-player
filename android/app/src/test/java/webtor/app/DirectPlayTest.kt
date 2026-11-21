@@ -75,8 +75,7 @@ class DirectPlayTest {
         val entry=entry()
         assertTrue(entryTelemetry(entry).contains("cached"))
         assertFalse(entryTelemetry(entry).contains(" of "))
-        val notification=downloadNotification(listOf(entry))!!
-        assertTrue(notification.text.startsWith("Direct Play"))
-        assertEquals(0,notification.progress)
+        // Direct Play streams only while the player is open: no notification.
+        assertNull(downloadNotification(listOf(entry)))
     }
 }

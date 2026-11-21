@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
         val builtIn = data?.getBooleanExtra("webtor_builtin", false) == true
         if (position != null && uri != null) session.recordPlaybackPosition(launchedBookmarkUris[uri] ?: uri, position,
             number("extra_duration") ?: number("duration") ?: 0L, autoNext = !builtIn)
+        if (builtIn && uri != null) session.pauseDirectPlayAfterPlayer(launchedBookmarkUris[uri] ?: uri)
         (application as WebtorApp).httpPlaybackLease.finish(launchedPlaybackUri)
         session.finishPlayback(launchedBookmarkUris[launchedPlaybackUri] ?: launchedPlaybackUri)
         launchedPlaybackUri = null

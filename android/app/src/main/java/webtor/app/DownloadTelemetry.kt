@@ -50,7 +50,9 @@ data class DownloadNotification(
     val streaming: Boolean = false,
 )
 
-fun downloadNotification(entries: List<DownloadEntry>, playbackKeys: Set<String> = emptySet()): DownloadNotification? {
+fun downloadNotification(all: List<DownloadEntry>, playbackKeys: Set<String> = emptySet()): DownloadNotification? {
+    // Direct Play shows no notification: it only streams while the player is open.
+    val entries = all.filter { !it.directPlay }
     val active = entries.filter { it.hasActiveTransfer() }
     if (active.isEmpty()) {
         val seeds = entries.filter { !it.paused && !it.isDeleting && it.liveStatus()?.seeding == true }

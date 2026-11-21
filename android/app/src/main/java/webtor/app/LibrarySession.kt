@@ -1361,6 +1361,15 @@ class LibrarySession(
         }
     }
 
+    /** Left the built-in player: a Direct Play torrent stops streaming until played again. */
+    fun pauseDirectPlayAfterPlayer(uri: String) {
+        scope.launchCommand {
+            val entry = _ui.value.library.find { e -> e.files.any { PlaybackProvider.uriFor(e, it).toString() == uri } }
+                ?: return@launchCommand
+            if (entry.directPlay && !entry.paused && entry.engineId != null && !entry.isDeleting) pause(entry)
+        }
+    }
+
     private fun maybePlayNext(uri: String, entryKey: String, ended: SavedFile?, positionMs: Long, durationMs: Long) {
         val atEnd = durationMs > 0L && positionMs >= durationMs - 3_000L
         if (!atEnd) {

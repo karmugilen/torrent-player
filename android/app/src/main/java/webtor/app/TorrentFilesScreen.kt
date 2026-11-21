@@ -157,7 +157,6 @@ fun TorrentFilesScreen(
         }
     }
 
-    CompactDensity {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -174,7 +173,7 @@ fun TorrentFilesScreen(
                             Text("Drop")
                         }
                     }
-                    if (!busy && !entry.complete) {
+                    if (!busy && !entry.complete && !entry.directPlay) {
                         if (entry.paused || (entry.engineId == null && entry.lifecycleState != EntryLifecycleState.DOWNLOADING)) {
                             TextButton(onClick = onResume) {
                                 Text("Resume")
@@ -316,7 +315,6 @@ fun TorrentFilesScreen(
             }
             item { TechnicalSection(entry, status, telemetry, entry.selected.size) }
         }
-    }
     }
 }
 
