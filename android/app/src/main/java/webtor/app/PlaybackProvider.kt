@@ -20,21 +20,8 @@ import java.io.FileNotFoundException
 class PlaybackProvider : ContentProvider() {
     override fun onCreate() = true
 
-    private fun target(uri: Uri): Pair<DownloadEntry, SavedFile> {
-        val parts = uri.pathSegments
-        if (parts.size != 3) throw FileNotFoundException("Invalid playback URI")
-        val app = context!!.applicationContext as WebtorApp
-        val entry = app.session.ui.value.library.find { it.key == parts[0] }
-            ?: DownloadStorage(app).load().find { it.key == parts[0] }
-            ?: throw FileNotFoundException("Download was removed")
-        val index = parts[1].toIntOrNull()
-        val file = entry.files.find {
-            it.index == index && (it.index in entry.selected || (!entry.directPlay && it.isVerifiedComplete))
-        }
-            ?: throw FileNotFoundException("File is not selected")
-        if (entry.isDeleting || (!entry.directPlay && file.uri == null)) throw FileNotFoundException("File is unavailable")
-        return entry to file
-    }
+    private fun target(uri: Uri): Pair<DownloadEntry, SavedFile> =
+        target(context!!.applicationContext as WebtorApp, uri)
 
     override fun getType(uri: Uri): String = mimeFor(target(uri).second.name)
 
@@ -104,6 +91,67 @@ class PlaybackProvider : ContentProvider() {
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?) = 0
 
     companion object {
+        private fun target(app: WebtorApp, uri: Uri): Pair<DownloadEntry, SavedFile> {
+            val parts = uri.pathSegments
+            if (parts.size != 3) throw FileNotFoundException("Invalid playback URI")
+            val entry = app.session.ui.value.library.find { it.key == parts[0] }
+                ?: DownloadStorage(app).load().find { it.key == parts[0] }
+                ?: throw FileNotFoundException("Download was removed")
+            val index = parts[1].toIntOrNull()
+            val file = entry.files.find {
+                it.index == index && (it.index in entry.selected || (!entry.directPlay && it.isVerifiedComplete))
+            }
+                ?: throw FileNotFoundException("File is not selected")
+            if (entry.isDeleting || (!entry.directPlay && file.uri == null)) throw FileNotFoundException("File is unavailable")
+            return entry to file
+        }
+
+        fun isOwn(uri: Uri): Boolean = uri.scheme == "content" && uri.authority == "${BuildConfig.APPLICATION_ID}.playback"
+
+        /**
+         * Read one of our own playback files from inside this app, never through [openFile].
+         * Its proxy descriptor is served by this same process: a read waiting on it when the
+         * app is force-stopped leaves a thread stuck in the kernel, and Android then cannot
+         * start the app again until the phone restarts.
+         */
+        fun openInApp(app: WebtorApp, uri: Uri): java.io.InputStream {
+            val (entry, file) = target(app, uri)
+            if (!entry.directPlay && file.isVerifiedComplete) {
+                return app.contentResolver.openInputStream(Uri.parse(file.uri))
+                    ?: throw FileNotFoundException("Downloaded file is unavailable")
+            }
+            val id = entry.engineId ?: throw FileNotFoundException("Resume the download before playing")
+            val handle = app.engine.openPlayback(id, file.index)
+            if (handle == 0L) throw FileNotFoundException("Cannot open torrent stream")
+            val lease = app.playbackLeases.acquire(entry.key)
+            return object : java.io.InputStream() {
+                private var pos = 0L
+                private var closed = false
+                override fun read(): Int {
+                    val one = ByteArray(1)
+                    return if (read(one, 0, 1) <= 0) -1 else one[0].toInt() and 0xff
+                }
+                override fun read(b: ByteArray, off: Int, len: Int): Int {
+                    if (closed) throw java.io.IOException("closed")
+                    if (len == 0) return 0
+                    if (pos >= file.length) return -1
+                    val want = minOf(len.toLong(), file.length - pos, 1L shl 20).toInt()
+                    val buf = if (off == 0) b else ByteArray(want)
+                    val n = app.engine.readPlayback(handle, pos, want, buf)
+                    if (n < 0) throw java.io.IOException("torrent read failed")
+                    if (n == 0) return -1
+                    if (buf !== b) System.arraycopy(buf, 0, b, off, n)
+                    pos += n
+                    return n
+                }
+                override fun close() {
+                    if (closed) return
+                    closed = true
+                    try { app.engine.closePlayback(handle) } finally { lease.close() }
+                }
+            }
+        }
+
         fun uriFor(entry: DownloadEntry, file: SavedFile): Uri = Uri.Builder()
             .scheme("content").authority("${BuildConfig.APPLICATION_ID}.playback")
             .appendPath(entry.key).appendPath(file.index.toString()).appendPath(file.name).build()

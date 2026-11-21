@@ -546,6 +546,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 val file = java.io.File(dir, "$i-" + name.replace(Regex("[^A-Za-z0-9._-]"), "_"))
                 val ok = runCatching {
                     val stream = if (uri.scheme == "http" || uri.scheme == "https") java.net.URL(uri.toString()).openStream()
+                        else if (PlaybackProvider.isOwn(uri)) PlaybackProvider.openInApp(application as WebtorApp, uri)
                         else contentResolver.openInputStream(uri)
                     stream?.use { input -> file.outputStream().use { input.copyTo(it) } } != null
                 }.getOrDefault(false)

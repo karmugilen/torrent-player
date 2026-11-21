@@ -1470,7 +1470,10 @@ class LibrarySession(
                 }
                 if (fileOnly) activeFileOnlyPlayback = content.uri to id
                 if (_ui.value.preloadStart) awaitPlaybackPreload(id, targetIndex, file.length)
-                _events.send(if (_ui.value.playbackMethod == PlaybackMethod.HTTP) httpPlaybackEvent(content, current, file, info.streamUrl) else content)
+                // The built-in player always streams: a proxy file read inside this same app
+                // hangs the process for good if the app is force-stopped mid-read.
+                val http = _ui.value.playbackMethod == PlaybackMethod.HTTP || BuiltInPlayer.enabled(app)
+                _events.send(if (http) httpPlaybackEvent(content, current, file, info.streamUrl) else content)
                 persist()
                 syncService()
             } catch (t: Throwable) {
