@@ -23,8 +23,13 @@ use crate::playback::PlaybackHost;
 use crate::seek_index::{thumb_keyframe_set, video_index, KEYFRAME_FETCH_BYTES};
 use crate::server::{EngineServer, TorrentRecord};
 
+/// Videos fetched at once: a season pack finishes episode by episode instead
+/// of ten half-done pictures, and a playing video keeps most of the speed.
+const FILES_AT_ONCE: usize = 2;
 const POLL: Duration = Duration::from_millis(300);
-const MAX_RUN: Duration = Duration::from_secs(15 * 60);
+/// Give up after this long without a new index or frame. Paused time does
+/// not count: a pause ends the planner and resume starts it again.
+const MAX_IDLE: Duration = Duration::from_secs(15 * 60);
 /// About every 2 s (passes are 300 ms apart).
 const WAKE_EVERY_PASSES: usize = 7;
 static WAKE_TICK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
@@ -89,9 +94,17 @@ impl EngineServer {
         let thread_flag = flag.clone();
         let spawned = std::thread::Builder::new().name("wt-thumb-keyframe".into()).spawn(move || {
             let mut plans: HashMap<usize, FilePlan> = HashMap::new();
-            let started = std::time::Instant::now();
-            while let Some(done) = plan_once(&weak, &id, &mut plans) {
-                if done || started.elapsed() > MAX_RUN {
+            let mut last_progress = std::time::Instant::now();
+            let mut gave_up = false;
+            while let Some((done, progressed)) = plan_once(&weak, &id, &mut plans) {
+                if progressed {
+                    last_progress = std::time::Instant::now();
+                }
+                if done {
+                    break;
+                }
+                if last_progress.elapsed() > MAX_IDLE {
+                    gave_up = true;
                     break;
                 }
                 std::thread::sleep(POLL);
@@ -113,7 +126,7 @@ impl EngineServer {
                             && thumb_targets(&file_list(&r), &r.selected, r.configured).iter()
                                 .any(|i| !r.thumb_keyframes.contains_key(i) && !r.thumb_unindexed.contains(i))
                     };
-                    if pending && started.elapsed() <= MAX_RUN {
+                    if pending && !gave_up {
                         server.spawn_thumb_keyframes(id);
                     }
                 }
@@ -125,9 +138,10 @@ impl EngineServer {
     }
 }
 
-/// One planning pass. `None` ends the planner (torrent gone); else whether
-/// every target has its thumbnail keyframe (or has none to find).
-fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap<usize, FilePlan>) -> Option<bool> {
+/// One planning pass. `None` ends the planner (torrent gone or paused; resume
+/// starts it again); else (every target has its keyframes or has none to find,
+/// this pass found a new index or frame).
+fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap<usize, FilePlan>) -> Option<(bool, bool)> {
     let server = weak.upgrade()?;
     let record = server.record_by_id(id)?;
     let (files, targets, mode, piece_length, hash, coordinator, playing) = {
@@ -138,10 +152,13 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         // Not configured and not a draft: a restore or seed whose configure is
         // moments away. Wait for it rather than borrow preview storage.
         if !rec.configured && !rec.prepared {
-            return Some(false);
+            return Some((false, false));
         }
-        if rec.torrent.info().is_none() || rec.paused || rec.checking {
-            return Some(false);
+        if rec.paused {
+            return None;
+        }
+        if rec.torrent.info().is_none() || rec.checking {
+            return Some((false, false));
         }
         let files: HashMap<usize, (i64, i64)> = rec.torrent.files().into_iter()
             .map(|f| (f.index(), (f.offset(), f.length()))).collect();
@@ -153,13 +170,13 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
     };
     let (configured, direct_play) = mode;
     if targets.is_empty() {
-        return Some(true);
+        return Some((true, false));
     }
     let storage = server.storage.get_storage(&hash)?;
     if !configured {
         // Draft (Add screen): fetch into the preview RAM cache.
         if storage.attach_preview_temp(targets[0]).is_err() {
-            return Some(false);
+            return Some((false, false));
         }
         if server.payload_transfers_allowed.load(Ordering::SeqCst) {
             record.read().torrent.allow_data_download();
@@ -170,6 +187,8 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
     let mut demand: HashMap<u32, PiecePriority> = HashMap::new();
     let mut ready = Vec::new();
     let mut all_done = true;
+    let mut progressed = false;
+    let mut asking = 0usize;
     for &index in &targets {
         let Some(&(offset, length)) = files.get(&index) else { continue };
         let plan = plans.entry(index).or_default();
@@ -203,6 +222,7 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                     index_pieces.sort_unstable();
                     index_pieces.dedup();
                     plan.index_pieces = index_pieces;
+                    progressed = true;
                     let set = thumb_keyframe_set(&found, offset, length, piece_length);
                     if set.is_empty() { plan.unindexed = true } else { plan.found = Some(set) }
                 }
@@ -212,6 +232,10 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                         (offset, offset + HEAD_BYTES.min(length)),
                         (offset + (length - TAIL_BYTES).max(0), offset + length),
                     ];
+                    if asking >= FILES_AT_ONCE {
+                        continue;
+                    }
+                    asking += 1;
                     let missing = miss.get().map(|(abs, len)| (offset + abs, offset + abs + len));
                     for (start, end) in ends.into_iter().chain(missing) {
                         for p in span_pieces(start, end, piece_length) {
@@ -260,6 +284,9 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
         let missing: Vec<usize> = pieces.iter().copied().filter(|&p| !storage.piece_complete(p)).collect();
         if !missing.is_empty() {
             all_done = false;
+        }
+        if !missing.is_empty() && asking < FILES_AT_ONCE {
+            asking += 1;
             demand.extend(missing.into_iter().map(|p| (p as u32, priority)));
         }
         if !have.is_empty() {
@@ -286,6 +313,7 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                 };
             }
             if changed {
+                progressed = true;
                 rec.torrent.update_all_piece_completion();
                 if configured && direct_play {
                     server.refresh_startup_hints(&mut rec);
@@ -300,7 +328,7 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
     if all_done && !configured && server.preview_active.lock().is_none() {
         record.read().torrent.disallow_data_download();
     }
-    Some(all_done)
+    Some((all_done, progressed))
 }
 
 #[cfg(test)]

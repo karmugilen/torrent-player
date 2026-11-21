@@ -1876,7 +1876,12 @@ impl EngineServer {
             let mut rec = r.write();
             rec.paused = pause;
             self.apply_transfer_state(&mut rec);
+            drop(rec);
             self.notify_change();
+            if !pause {
+                // A pause ended the thumbnail planner; pick up the missing episodes.
+                self.spawn_thumb_keyframes(req.id.clone());
+            }
             (
                 200,
                 serde_json::to_vec(&OkResponse { ok: true, id: None }).unwrap(),
