@@ -1361,11 +1361,28 @@ class LibrarySession(
         }
     }
 
-    /** No player left on this torrent: Direct Play stops downloading until played again. */
+    /**
+     * No player left on this torrent: Direct Play stops downloading until played
+     * again. But first the home card gets its picture: keep going until the
+     * engine has at least 1 thumbnail frame of the first video (10 min at most).
+     */
     fun pauseDirectPlayAfterPlayer(key: String) {
-        scope.launchCommand {
-            val entry = _ui.value.library.find { it.key == key } ?: return@launchCommand
-            if (entry.directPlay && !entry.paused && entry.engineId != null && !entry.isDeleting) pause(entry)
+        scope.launch {
+            val stillDirect = { e: DownloadEntry? -> e != null && e.directPlay && !e.paused && e.engineId != null && !e.isDeleting }
+            val deadline = android.os.SystemClock.elapsedRealtime() + 10 * 60_000L
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                val entry = _ui.value.library.find { it.key == key }
+                if (!stillDirect(entry) || PlayerActivity.playing(key)) return@launch
+                val video = firstPreviewVideo(entry!!) ?: break
+                val state = runCatching { withContext(io) { client.previewState(entry.engineId!!, video.index) } }.getOrNull()
+                if (state == null || state.keyframesUs.isNotEmpty() || state.keyframeUs != null || state.noKeyframeIndex) break
+                delay(3_000)
+            }
+            scope.launchCommand {
+                val entry = _ui.value.library.find { it.key == key } ?: return@launchCommand
+                // Played again while the picture loaded: that player owns it now.
+                if (stillDirect(entry) && !PlayerActivity.playing(key)) pause(entry)
+            }
         }
     }
 

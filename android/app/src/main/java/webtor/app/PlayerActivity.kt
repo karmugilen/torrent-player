@@ -179,6 +179,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         @Volatile private var nextDetailKey: String? = null
         @Volatile private var nextDetailAt = 0L
         /** The next player started within a few seconds shows [key]'s page under the video. */
+        /** A live player shows torrent [key]. */
+        fun playing(key: String): Boolean = owner?.let { it.torrentKey == key && it.alive && !it.finishing } == true
         fun showPageFor(key: String) { nextDetailKey = key; nextDetailAt = android.os.SystemClock.elapsedRealtime() }
         fun takeNextDetailKey(): String? {
             val key = nextDetailKey; nextDetailKey = null
