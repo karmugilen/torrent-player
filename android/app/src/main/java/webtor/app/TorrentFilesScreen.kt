@@ -157,6 +157,7 @@ fun TorrentFilesScreen(
         }
     }
 
+    CompactDensity {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -315,6 +316,7 @@ fun TorrentFilesScreen(
             }
             item { TechnicalSection(entry, status, telemetry, entry.selected.size) }
         }
+    }
     }
 }
 

@@ -100,6 +100,7 @@ fun LibraryScreen(
     }
     val activityLine = libraryActivityLine(state.library)
 
+    CompactDensity {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
@@ -159,14 +160,15 @@ fun LibraryScreen(
                                 androidx.compose.ui.res.painterResource(R.drawable.ic_launcher_foreground),
                                 contentDescription = null,
                                 // The icon art fills the middle 60%; zoom past the padding.
-                                modifier = Modifier.size(30.dp).scale(1.7f),
+                                modifier = Modifier.size(24.dp).scale(1.7f),
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 "Torrent Player",
-                                style = MaterialTheme.typography.titleLarge.copy(
+                                style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    letterSpacing = (-0.5).sp,
+                                    fontSize = 19.sp,
+                                    letterSpacing = (-0.6).sp,
                                 ),
                             )
                         }
@@ -448,6 +450,7 @@ fun LibraryScreen(
                 }
             },
         )
+    }
     }
 }
 
