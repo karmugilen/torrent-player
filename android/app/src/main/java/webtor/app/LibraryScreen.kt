@@ -700,6 +700,8 @@ private fun StatusMark(entry: DownloadEntry) {
         (entry.metadataReady && (entry.lifecycleState == EntryLifecycleState.STOPPED || entry.engineId == null))
     val (label, bg, fg) = when {
         entry.error != null -> Triple("Needs attention", colors.errorContainer, colors.onErrorContainer)
+        // Direct Play is just "Direct Play": it streams while you watch, rests otherwise.
+        entry.directPlay && !entry.isDeleting -> Triple("Direct Play", colors.secondaryContainer, colors.onSecondaryContainer)
         entry.complete -> Triple("Complete", colors.primaryContainer, colors.onPrimaryContainer)
         isPaused -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)
         entry.controlsBusy() -> Triple(entry.stateLabel(), colors.tertiaryContainer, colors.onTertiaryContainer)

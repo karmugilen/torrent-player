@@ -1052,6 +1052,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         teardown() // free the player now, not later in onDestroy
         super.finish()
+        // No video and no small window left on this torrent: Direct Play stops downloading.
+        // A moment later, so a player taking over the same torrent (page <-> full screen) keeps it.
+        torrentKey?.let { key ->
+            val app = application as WebtorApp
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                val next = owner
+                if (next == null || !next.alive || next.finishing || next.torrentKey != key) app.session.pauseDirectPlayAfterPlayer(key)
+            }, 800)
+        }
         if (pageMode) {
             @Suppress("DEPRECATION")
             overridePendingTransition(0, 0)
