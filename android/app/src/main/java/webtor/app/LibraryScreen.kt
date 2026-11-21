@@ -672,9 +672,7 @@ fun VideoPreviewPager(
         return
     }
     val pager = rememberPagerState(pageCount = { ready.size })
-    LaunchedEffect(ready.lastOrNull()) {
-        if (entry.directPlay && ready.size > 1) pager.scrollToPage(ready.lastIndex)
-    }
+    // Always start at the first picture; swipe right for the later ones.
     Box(modifier = modifier.clip(shape)) {
         HorizontalPager(
             state = pager,

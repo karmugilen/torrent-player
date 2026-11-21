@@ -79,7 +79,7 @@ fun EpisodeVideoPreview(
             // does not queue a native preview for every offscreen episode.
             val frames = if (page == pager.settledPage) rememberVideoPreviews(entry, video.index)
                 else repository.cached(entry, video.index)
-            val frame = frames?.let { it.getOrNull(if (entry.directPlay) it.lastIndex else it.size / 2) }
+            val frame = frames?.firstOrNull()
             VideoPreviewPager(entry.copy(title = video.name), frame?.let { listOf(it) }, Modifier.fillMaxSize(), large)
         }
         val current = videos[pager.currentPage.coerceIn(videos.indices)]
