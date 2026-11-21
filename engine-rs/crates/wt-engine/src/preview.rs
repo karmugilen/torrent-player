@@ -330,7 +330,8 @@ pub fn open_preview(
     let mut rec = rec_arc.write();
     rec.refresh();
 
-    if rec.paused || rec.error.is_some() {
+    // A paused Direct Play preview reads only saved pieces (see cached_only).
+    if rec.paused && !rec.direct_play || rec.error.is_some() {
         return Err(std::io::Error::other("torrent unavailable for preview"));
     }
     if rec.torrent.info().is_none() {
@@ -398,7 +399,7 @@ pub fn open_preview(
             return Ok(got);
         }
         if cached_only {
-            return Err(std::io::Error::other("preview range is not cached yet"));
+            return Err(std::io::Error::other(format!("preview range is not cached yet: abs={abs} len={want} got={got}")));
         }
         // Unverified bytes require payload transfers to be allowed:
         if let Some(srv) = server_weak.upgrade() {

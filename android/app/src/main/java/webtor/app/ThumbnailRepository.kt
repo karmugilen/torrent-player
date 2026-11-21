@@ -137,7 +137,8 @@ class ThumbnailRepository(
         val previewClient = engineHost?.let { webtor.core.EngineClient(it) }
         // The engine plans one keyframe per video (Add screen, Download and
         // Direct Play alike): decode exactly that, once its bytes are here.
-        if (!entry.paused && entry.engineId != null && previewClient != null) {
+        // A paused Direct Play still answers: its frames are in the saved startup cache.
+        if ((!entry.paused || entry.directPlay) && entry.engineId != null && previewClient != null) {
             val state = runCatching { previewClient.previewState(entry.engineId, video.index) }.getOrNull()
             if (state != null) return keyframePreview(entry, video, key, state, capturedGlobal, capturedEntry)
         }

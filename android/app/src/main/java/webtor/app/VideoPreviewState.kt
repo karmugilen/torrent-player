@@ -3,8 +3,6 @@ package webtor.app
 import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,63 +34,48 @@ fun rememberVideoPreviews(entry: DownloadEntry, fileIndex: Int? = null): List<Bi
                 val next = repository.previews(current, video.index)
                 if (next.isNotEmpty()) frames = next else if (frames == null) frames = emptyList()
                 if ((!current.directPlay && previewVideo(current, video.index)?.isVerifiedComplete == true) ||
-                    current.paused || current.engineId == null) break
+                    current.engineId == null) break
+                // A paused download fetches nothing; a paused Direct Play may still be
+                // reading its saved frames, so look until they show.
+                if (current.paused && (!current.directPlay || next.isNotEmpty())) break
                 // Waiting for the engine's keyframe: look again soon.
-                delay(if (next.isEmpty()) 1_500L else 4_000L)
+                delay(if (next.isEmpty()) (if (current.paused) 5_000L else 1_500L) else 4_000L)
             }
         }
     }
     return frames
 }
 
-/** A pack is paged by episode, not three indistinguishable stills from episode one. */
+/**
+ * One video, or the episode being watched in a pack: the same three pictures
+ * to swipe through either way. A pack adds a small "2/10" mark.
+ */
 @Composable
 fun EpisodeVideoPreview(
     entry: DownloadEntry,
     modifier: Modifier = Modifier,
     large: Boolean = false,
-    /** Drawn on top; gets the file index of the episode on screen (null for a single video). */
+    /** Drawn on top; gets the file index of the episode shown (null for a single video). */
     overlay: @Composable BoxScope.(Int?) -> Unit = {},
 ) {
     val videos = remember(entry.files, entry.selected) { previewVideos(entry) }
-    if (videos.size <= 1) {
-        val frames = rememberVideoPreviews(entry)
-        Box(modifier) {
-            VideoPreviewPager(entry, frames, Modifier.fillMaxSize(), large)
-            overlay(null)
-        }
-        return
-    }
-    val repository = (LocalContext.current.applicationContext as WebtorApp).thumbnails
-    val pager = rememberPagerState(
-        initialPage = videos.indexOfFirst { it.index == entry.focusedFile }.coerceAtLeast(0),
-        pageCount = { videos.size },
-    )
-    LaunchedEffect(entry.key, entry.focusedFile) {
-        val focused = videos.indexOfFirst { it.index == entry.focusedFile }
-        if (focused >= 0) pager.scrollToPage(focused)
-    }
+    // The episode playing or last played (focusedFile), else the first.
+    val video = firstPreviewVideo(entry)
+    val frames = rememberVideoPreviews(entry, video?.index)
     Box(modifier) {
-        HorizontalPager(state = pager, key = { videos[it].index }, modifier = Modifier.fillMaxSize()) { page ->
-            val video = videos[page]
-            // Only the settled episode starts decoding; swiping through a large pack
-            // does not queue a native preview for every offscreen episode.
-            val frames = if (page == pager.settledPage) rememberVideoPreviews(entry, video.index)
-                else repository.cached(entry, video.index)
-            val frame = frames?.firstOrNull()
-            VideoPreviewPager(entry.copy(title = video.name), frame?.let { listOf(it) }, Modifier.fillMaxSize(), large)
+        VideoPreviewPager(entry, frames, Modifier.fillMaxSize(), large)
+        if (videos.size > 1 && video != null) {
+            Text(
+                "${videos.indexOf(video) + 1}/${videos.size}",
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        val current = videos[pager.currentPage.coerceIn(videos.indices)]
-        Text(
-            "${pager.currentPage + 1}/${videos.size} · ${current.name}",
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp))
-                .padding(horizontal = 6.dp, vertical = 4.dp),
-            color = Color.White,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        overlay(current.index)
+        overlay(if (videos.size > 1) video?.index else null)
     }
 }

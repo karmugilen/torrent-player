@@ -19,6 +19,16 @@ pub struct VideoIndex {
     /// `(byte offset, seconds)` per keyframe, by offset; empty when the
     /// index has no times.
     pub keyframes: Vec<(i64, f64)>,
+    /// Matroska: `(keyframe offset, its cluster's start)`, by keyframe offset.
+    /// A decoder seeking there reads from the cluster start, often MBs before.
+    pub clusters: Vec<(i64, i64)>,
+}
+
+impl VideoIndex {
+    /// Where a decoder starts reading to reach the keyframe at `at`.
+    pub fn read_start(&self, at: i64) -> i64 {
+        self.clusters.binary_search_by_key(&at, |c| c.0).map_or(at, |i| self.clusters[i].1.min(at))
+    }
 }
 
 /// Where a thumbnail should come from: the keyframe nearest `fraction` of
@@ -41,21 +51,23 @@ pub const SPREAD_PIECE_MAX: i64 = 4 << 20;
 /// Thumbnails closer than this in time look alike; skip them.
 const THUMB_MIN_GAP_SECS: f64 = 4.0;
 
-/// Up to three thumbnail keyframes `(byte offset in file, seconds)`, in time order.
+/// Up to three thumbnail keyframes `(read start, keyframe offset, seconds)`
+/// (offsets in the file), in time order. The bytes a decoder needs for one
+/// are `read start .. keyframe offset + KEYFRAME_FETCH_BYTES`.
 ///
 /// ```text
 ///  small pieces:  27% ......... 50% ......... 73%     (one piece each)
 ///  big pieces:    [ first . middle . last ]           (all in the 27% piece)
 /// ```
-pub fn thumb_keyframe_set(index: &VideoIndex, file_offset: i64, file_length: i64, piece_length: i64) -> Vec<(i64, f64)> {
+pub fn thumb_keyframe_set(index: &VideoIndex, file_offset: i64, file_length: i64, piece_length: i64) -> Vec<(i64, i64, f64)> {
     let Some(first) = thumb_keyframe(index, 0.27) else { return Vec::new() };
     let mut picked: Vec<(i64, f64)> = if piece_length > 0 && piece_length <= SPREAD_PIECE_MAX {
         [0.27, 0.5, 0.73].iter().filter_map(|&f| thumb_keyframe(index, f)).collect()
     } else if piece_length > 0 {
         // Keyframes whose fetch window lies inside the first one's pieces.
         let window = |at: i64| {
-            let start = file_offset + at;
-            let end = (start + KEYFRAME_FETCH_BYTES).min(file_offset + file_length);
+            let start = file_offset + index.read_start(at);
+            let end = (file_offset + at + KEYFRAME_FETCH_BYTES).min(file_offset + file_length);
             (start / piece_length, (end - 1) / piece_length)
         };
         let (lo, hi) = window(first.0);
@@ -84,7 +96,7 @@ pub fn thumb_keyframe_set(index: &VideoIndex, file_offset: i64, file_length: i64
     if out.is_empty() {
         out.push(first);
     }
-    out
+    out.into_iter().map(|(at, secs)| (index.read_start(at), at, secs)).collect()
 }
 
 /// `None`: the index is not downloaded yet, try again. `Some(empty)`: this
@@ -193,6 +205,7 @@ fn mp4_offsets(read: ReadRange<'_>, length: i64) -> Option<VideoIndex> {
                 offsets: keyframes.iter().map(|k| k.0).collect(),
                 duration: mp4_duration(&moov),
                 keyframes: keyframes.into_iter().filter_map(|(o, t)| Some((o, t?))).collect(),
+                clusters: Vec::new(),
             });
         }
         off += size;
@@ -438,7 +451,8 @@ fn mkv_offsets(read: ReadRange<'_>, length: i64) -> Option<VideoIndex> {
     Some(VideoIndex {
         offsets: points.iter().map(|p| p.0).collect(),
         duration: mkv_duration(&head, segment),
-        keyframes: points.into_iter().filter_map(|(o, t)| Some((o, t? as f64 * scale))).collect(),
+        keyframes: points.iter().filter_map(|&(o, _, t)| Some((o, t? as f64 * scale))).collect(),
+        clusters: points.iter().map(|&(o, c, _)| (o, c)).collect(),
     })
 }
 
@@ -533,13 +547,14 @@ fn mkv_seek_head_cues(seek_head: &[u8]) -> Option<i64> {
 }
 
 /// `(absolute offset, CueTime ticks)` per cue point, by offset.
-fn mkv_cue_offsets(cues: &[u8], segment: i64) -> Vec<(i64, Option<u64>)> {
+/// `(keyframe offset, cluster start, time)` per cue point, by offset.
+fn mkv_cue_offsets(cues: &[u8], segment: i64) -> Vec<(i64, i64, Option<u64>)> {
     let mut out = Vec::new();
     let mut at = 0;
     while let Some((id, start, end)) = ebml_element(cues, at) {
         if id == MKV_CUE_POINT {
-            if let Some((offset, time)) = cues.get(start..end).and_then(mkv_cue_point) {
-                out.push((segment + offset, time));
+            if let Some(((cluster, relative), time)) = cues.get(start..end).and_then(mkv_cue_point) {
+                out.push((segment + cluster + relative, segment + cluster, time));
             }
         }
         at = end;
@@ -549,7 +564,7 @@ fn mkv_cue_offsets(cues: &[u8], segment: i64) -> Vec<(i64, Option<u64>)> {
     out
 }
 
-fn mkv_cue_point(point: &[u8]) -> Option<(i64, Option<u64>)> {
+fn mkv_cue_point(point: &[u8]) -> Option<((i64, i64), Option<u64>)> {
     let time = mkv_cue_time(point);
     mkv_cue_position(point).map(|o| (o, time))
 }
@@ -565,7 +580,8 @@ fn mkv_cue_time(point: &[u8]) -> Option<u64> {
     None
 }
 
-fn mkv_cue_position(point: &[u8]) -> Option<i64> {
+/// `(cluster position, relative position)` from the segment start.
+fn mkv_cue_position(point: &[u8]) -> Option<(i64, i64)> {
     let mut at = 0;
     while let Some((id, start, end)) = ebml_element(point, at) {
         if id == MKV_CUE_TRACK_POSITIONS {
@@ -580,7 +596,10 @@ fn mkv_cue_position(point: &[u8]) -> Option<i64> {
                 }
                 inner = end;
             }
-            return i64::try_from(cluster?.checked_add(relative)?).ok();
+            let cluster = i64::try_from(cluster?).ok()?;
+            let relative = i64::try_from(relative).ok()?;
+            cluster.checked_add(relative)?;
+            return Some((cluster, relative));
         }
         at = end;
     }
@@ -594,13 +613,13 @@ mod tests {
     /// 100 min video, 1 MB/s, a keyframe every 2 s.
     fn movie() -> VideoIndex {
         let keyframes: Vec<(i64, f64)> = (0..3000).map(|i| (i as i64 * 2_000_000, i as f64 * 2.0)).collect();
-        VideoIndex { offsets: keyframes.iter().map(|k| k.0).collect(), duration: Some(6000.0), keyframes }
+        VideoIndex { offsets: keyframes.iter().map(|k| k.0).collect(), duration: Some(6000.0), keyframes, clusters: Vec::new() }
     }
 
     #[test]
     fn small_pieces_spread_three_thumbs_over_the_video() {
         let set = thumb_keyframe_set(&movie(), 0, 6_000_000_000, 1 << 20);
-        let secs: Vec<f64> = set.iter().map(|k| k.1).collect();
+        let secs: Vec<f64> = set.iter().map(|k| k.2).collect();
         assert_eq!(secs, vec![1620.0, 3000.0, 4380.0]);
     }
 
@@ -609,17 +628,18 @@ mod tests {
         let piece = 16i64 << 20;
         let set = thumb_keyframe_set(&movie(), 0, 6_000_000_000, piece);
         assert_eq!(set.len(), 3);
-        let first_piece = set[0].0 / piece;
-        for (at, _) in &set {
+        let first_piece = set[0].1 / piece;
+        for (start, at, _) in &set {
+            assert_eq!(start, at);
             assert_eq!(at / piece, first_piece);
             assert_eq!((at + KEYFRAME_FETCH_BYTES - 1) / piece, first_piece);
         }
-        assert!(set[2].1 - set[0].1 >= 8.0);
+        assert!(set[2].2 - set[0].2 >= 8.0);
     }
 
     #[test]
     fn close_keyframes_collapse_to_one() {
-        let index = VideoIndex { offsets: vec![0], duration: Some(10.0), keyframes: vec![(0, 0.0), (100, 1.0)] };
+        let index = VideoIndex { offsets: vec![0], duration: Some(10.0), keyframes: vec![(0, 0.0), (100, 1.0)], clusters: Vec::new() };
         assert_eq!(thumb_keyframe_set(&index, 0, 1000, 16 << 20).len(), 1);
     }
 
@@ -643,11 +663,20 @@ mod tests {
     }
 
     fn mkv(cues: &[(u64, u64)]) -> Vec<u8> {
+        mkv_relative(&cues.iter().map(|&(t, p)| (t, p, 0)).collect::<Vec<_>>())
+    }
+
+    /// Cue points `(time, cluster position, relative position)`.
+    fn mkv_relative(cues: &[(u64, u64, u64)]) -> Vec<u8> {
         let info = [uint(MKV_TIMECODE_SCALE, 1_000_000), ebml(MKV_DURATION, &100_000f64.to_be_bytes())].concat();
         let points: Vec<u8> = cues
             .iter()
-            .flat_map(|&(time, pos)| {
-                ebml(MKV_CUE_POINT, &[uint(MKV_CUE_TIME, time), ebml(MKV_CUE_TRACK_POSITIONS, &[uint(0xF7, 1), uint(MKV_CUE_CLUSTER_POSITION, pos)].concat())].concat())
+            .flat_map(|&(time, pos, rel)| {
+                let mut track = [uint(0xF7, 1), uint(MKV_CUE_CLUSTER_POSITION, pos)].concat();
+                if rel > 0 {
+                    track.extend(uint(MKV_CUE_RELATIVE_POSITION, rel));
+                }
+                ebml(MKV_CUE_POINT, &[uint(MKV_CUE_TIME, time), ebml(MKV_CUE_TRACK_POSITIONS, &track)].concat())
             })
             .collect();
         let segment = [ebml(MKV_INFO, &info), ebml(MKV_CUES, &points), vec![0; 4096]].concat();
@@ -664,6 +693,20 @@ mod tests {
         assert_eq!(index.keyframes, vec![(segment + 1000, 0.0), (segment + 2000, 25.0), (segment + 3000, 50.0)]);
         assert_eq!(thumb_keyframe(&index, 0.25), Some((segment + 2000, 25.0)));
         assert_eq!(thumb_keyframe(&index, 0.45), Some((segment + 3000, 50.0)));
+    }
+
+    #[test]
+    fn mkv_thumb_reads_from_the_cluster_start() {
+        let file = mkv_relative(&[(0, 1000, 0), (25_000, 2000, 900), (50_000, 3000, 0)]);
+        let read = read_from(&file);
+        let index = video_index(&read, file.len() as i64).unwrap();
+        let segment = (4 + 8) + (4 + 8);
+        assert_eq!(index.keyframes[1], (segment + 2900, 25.0));
+        assert_eq!(index.read_start(segment + 2900), segment + 2000);
+        assert_eq!(index.read_start(segment + 3000), segment + 3000);
+        assert_eq!(index.read_start(12345), 12345);
+        let set = thumb_keyframe_set(&index, 0, file.len() as i64, 1 << 20);
+        assert!(set.contains(&(segment + 2000, segment + 2900, 25.0)));
     }
 
     fn mp4_box(kind: &[u8], body: &[u8]) -> Vec<u8> {
