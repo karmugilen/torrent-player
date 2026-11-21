@@ -660,8 +660,8 @@ private fun TorrentFileRow(
                     enabled = canToggle,
                     modifier = Modifier.size(48.dp),
                 )
-                if (isVideo) FileThumb(entry, file, playing)
                 Column(Modifier.weight(1f).padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (isVideo) FileThumb(entry, file, playing, watched)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             file.name,
@@ -688,7 +688,7 @@ private fun TorrentFileRow(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    if (playing) {
+                    if (playing && !isVideo) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.primary, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
@@ -699,7 +699,7 @@ private fun TorrentFileRow(
                         Text("Priority download", style = MaterialTheme.typography.labelSmall, color = colors.primary)
                     }
                     upNext?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.tertiary) }
-                    watched?.let { fraction ->
+                    if (!isVideo) watched?.let { fraction ->
                         Box(
                             Modifier
                                 .fillMaxWidth()
@@ -852,12 +852,12 @@ internal fun upNextLabel(preload: webtor.core.NextPreload?, fileIndex: Int): Str
 
 /** Small still of this video, from the same keyframe the library uses. */
 @Composable
-private fun FileThumb(entry: DownloadEntry, file: SavedFile, playing: Boolean) {
+private fun FileThumb(entry: DownloadEntry, file: SavedFile, playing: Boolean, watched: Float?) {
     val colors = MaterialTheme.colorScheme
     val frames = rememberVideoPreviews(entry, file.index)
     val frame = frames?.let { it.getOrNull(if (entry.directPlay) it.lastIndex else it.size / 2) }
     Box(
-        Modifier.padding(top = 4.dp).width(88.dp).aspectRatio(16f / 9f)
+        Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             .clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
         contentAlignment = Alignment.Center,
     ) {
@@ -868,9 +868,15 @@ private fun FileThumb(entry: DownloadEntry, file: SavedFile, playing: Boolean) {
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
-            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(32.dp))
         }
-        if (playing) Box(Modifier.align(Alignment.BottomStart).padding(3.dp).clip(MaterialTheme.shapes.extraSmall)
+        // Watched part, red line along the bottom like YouTube.
+        watched?.let { fraction ->
+            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.3f))) {
+                Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Color(0xFFE53935)))
+            }
+        }
+        if (playing) Box(Modifier.align(Alignment.TopStart).padding(6.dp).clip(MaterialTheme.shapes.extraSmall)
             .background(colors.primary).padding(horizontal = 4.dp, vertical = 1.dp)) {
             Text("Playing", style = MaterialTheme.typography.labelSmall, color = colors.onPrimary)
         }
