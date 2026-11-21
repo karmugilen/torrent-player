@@ -114,6 +114,8 @@ class ThumbnailRepository(
         synchronized(publicationLock) {
             if (persistFramesAtomically(key, frames.takeLast(3), complete = false)) {
                 runCatching { File(cache, "$key.player").writeText("1") }
+                // The saved keyframe set was just replaced: decode it again next time.
+                runCatching { File(cache, "$key.kf").delete() }
             }
             putMemory(key, CachedPreview(frames.takeLast(3), true, COMPLETE_BUCKET))
         }
@@ -131,7 +133,9 @@ class ThumbnailRepository(
         val capturedGlobal = globalEpoch.get()
         val capturedEntry = getEntryEpoch(entry.key)
         val video = previewVideo(entry, fileIndex) ?: return emptyList()
-        playerFrames(cacheKey(entry, video))?.let { return it }
+        // A full set from the player wins; one stray frame gives way to the
+        // engine's three swipeable keyframes.
+        playerFrames(cacheKey(entry, video))?.takeIf { it.size >= 3 }?.let { return it }
         val complete = !entry.directPlay && (entry.complete || video.isVerifiedComplete)
         val key = cacheKey(entry, video)
         val previewClient = engineHost?.let { webtor.core.EngineClient(it) }
@@ -261,6 +265,7 @@ class ThumbnailRepository(
             if (isStale(capturedGlobal, capturedEntry, entry.key)) return@synchronized emptyList()
             persistFramesAtomically(key, frames, complete = false)
             runCatching { marker.writeText(token) }
+            runCatching { File(cache, "$key.player").delete() }
             trimCache()
             putMemory(key, CachedPreview(frames, false, liveProgressBucket(video.progress), token))
             frames
