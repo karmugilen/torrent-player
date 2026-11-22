@@ -2,6 +2,7 @@
 
 - **One session, one worktree.** Work on your own branch in your own worktree (Orca makes one). Before committing, run `git worktree list`: if another worktree has your branch checked out, stop and ask the user. To undo committed work, use `git revert`, never reset.
 - **Phone build:** `scripts/phone-build.sh <name>` (release key, saved in `artifacts/`, refuses while the player is open). Reinstall an old build with `scripts/install-apk.sh <name>`.
+- **GitHub has one branch, `karmugilen/rust-engine`** (F-Droid builds from `v*` tags). Push there: `git push origin HEAD:karmugilen/rust-engine`; make no other branches on GitHub.
 - **Before a build, push or release:** read the webtor section of `~/jornalAndLog/MISTAKES.md`. Releases go out weekly on Sundays only.
 - **Engine:** Rust, in `engine-rs/` (Android build: `engine-rs/docs/ANDROID_BUILD.md`). Read `docs/DIRECT_PLAY.md` before code that reads the play buffer: most buffered bytes are blocks received but not yet verified.
 - **Player logs:** logcat tags `webtor-player` (app) and `webtor-mpv` (mpv warnings and errors).
