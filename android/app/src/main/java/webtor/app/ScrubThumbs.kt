@@ -51,8 +51,8 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
         if (bmp == null) {
             val missing = bytes?.firstMissing
             note("no frame at ${timeUs / 1000} ms, missing byte $missing")
-            // Reopening is slow; only start clean if it keeps failing.
-            if (++failures >= 6) { dropRetriever(); failures = 0 }
+            // Reopening is slow and reads other pieces: only after ~6 s of misses.
+            if (++failures >= 40) { dropRetriever(); failures = 0 }
             return Result.Missing(missing)
         }
         failures = 0
