@@ -8,6 +8,9 @@
         <file alias="AddDialog.qml">AddDialog.qml</file>
         <file alias="DeleteDialog.qml">DeleteDialog.qml</file>
         <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="PeersPage.qml">PeersPage.qml</file>
+        <file alias="world-map.json">world-map.json</file>
+        <file alias="licenses/peer-map-data.txt">licenses/peer-map-data.txt</file>
         <file alias="i18n/en.json">i18n/en.json</file>
     </qresource>
 </RCC>

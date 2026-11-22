@@ -8,6 +8,7 @@
 #include <QLocalSocket>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSortFilterProxyModel>
@@ -16,6 +17,7 @@
 #include <cstdio>
 
 #include "addsession.h"
+#include "connections.h"
 #include "engine.h"
 #include "format.h"
 #include "library.h"
@@ -23,6 +25,7 @@
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
+#include "worldmap.h"
 
 static QString serverName() {
     return QString("torrentplayer-%1").arg(qEnvironmentVariable("USER", "user"));
@@ -72,6 +75,8 @@ int main(int argc, char *argv[]) {
     server.listen(serverName());
 
     QQuickStyle::setStyle("Material");
+    qmlRegisterType<Connections>("Webtor", 1, 0, "TorrentConnections");
+    qmlRegisterType<WorldMap>("Webtor", 1, 0, "WorldMap");
 
     Translator translator;
     app.installTranslator(&translator);

@@ -1,0 +1,12 @@
+Offline peer country data: DB-IP IP to Country Lite, October 2026.
+Source: https://download.db-ip.com/free/dbip-country-lite-2026-10.mmdb.gz
+Copyright DB-IP.com, licensed under Creative Commons Attribution 4.0 International.
+https://db-ip.com/db/lite.php
+https://creativecommons.org/licenses/by/4.0/
+Unmodified MMDB SHA-256: dbd70ccfa2a13627eaf4913d19920a1a229f1b3c5439ac01c509995b6364202a
+
+World outlines and country label points: Natural Earth, public domain.
+Source: https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_admin_0_countries.geojson
+https://www.naturalearthdata.com/about/terms-of-use/
+Adaptation: retained exterior polygon rings and country label coordinates,
+rounded polygon coordinates to two decimal places, removed unrelated properties.

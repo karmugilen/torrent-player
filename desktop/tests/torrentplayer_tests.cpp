@@ -7,6 +7,7 @@
 #include <QtTest>
 
 #include "addsession.h"
+#include "connections.h"
 #include "engine.h"
 #include "format.h"
 #include "library.h"
@@ -196,6 +197,63 @@ private slots:
         QVERIFY(catalog.open(QIODevice::ReadOnly));
         const auto object = QJsonDocument::fromJson(catalog.readAll()).object();
         QCOMPARE(object.value("%n peers").toObject().value("one").toString(), QString("%n peer"));
+    }
+
+    void parsesConnectionsSnapshot() {
+        const QJsonObject root = QJsonDocument::fromJson(R"({
+            "id":"abc","paused":false,
+            "peers":[
+                {"address":"8.8.8.8:1234","transport":"TCP","client":"Local peer",
+                 "downloaded":4096,"uploaded":1024,"country":"US"},
+                {"address":"203.0.113.1:6881","transport":"uTP","client":"qBittorrent",
+                 "downloaded":100,"uploaded":50,"country":"DE","source":"C",
+                 "bittorrentVersion":"v2","downloadRate":2048.5,"peerCompletion":0.42},
+                {"address":"2001:db8::1:51413","transport":"TCP","client":"",
+                 "downloaded":0,"uploaded":0}
+            ]
+        })").object();
+        QVERIFY(!Connections::parsePaused(root));
+        const auto peers = Connections::parsePeers(root);
+        QCOMPARE(peers.size(), 3);
+        QCOMPARE(peers[0].address, QString("8.8.8.8:1234"));
+        QCOMPARE(peers[0].country, QString("US"));
+        QCOMPARE(peers[0].downloaded, 4096);
+        QCOMPARE(peers[0].uploaded, 1024);
+        QCOMPARE(peers[0].downloadRate, -1.0);
+        QCOMPARE(peers[0].progress, -1.0);
+        QVERIFY(!peers[0].holePunched);
+        QCOMPARE(peers[1].transport, QString("uTP"));
+        QVERIFY(peers[1].holePunched);
+        QCOMPARE(peers[1].bittorrentVersion, QString("v2"));
+        QCOMPARE(peers[1].downloadRate, 2048.5);
+        QCOMPARE(peers[1].progress, 0.42);
+        QCOMPARE(peers[2].client, QString());
+
+        const QHash<QString, QVariantMap> labels{
+            {"US", {{"code", "US"}, {"name", "United States"}, {"longitude", -100.0}, {"latitude", 40.0}}},
+            {"DE", {{"code", "DE"}, {"name", "Germany"}, {"longitude", 10.0}, {"latitude", 51.0}}},
+        };
+        const QVariantList countries = Connections::countryCounts(peers, labels);
+        QCOMPARE(countries.size(), 2);
+        // Equal counts sort by country code.
+        QCOMPARE(countries[0].toMap().value("code").toString(), QString("DE"));
+        QCOMPARE(countries[0].toMap().value("count").toInt(), 1);
+        QCOMPARE(countries[0].toMap().value("name").toString(), QString("Germany"));
+        QCOMPARE(countries[1].toMap().value("code").toString(), QString("US"));
+        QCOMPARE(countries[1].toMap().value("name").toString(), QString("United States"));
+
+        const QJsonObject paused = QJsonDocument::fromJson(R"({"id":"abc","paused":true,"peers":[]})").object();
+        QVERIFY(Connections::parsePaused(paused));
+        QVERIFY(Connections::parsePeers(paused).isEmpty());
+    }
+
+    void loadsWorldMapLabels() {
+        QFile file(QStringLiteral(":/world-map.json"));
+        QVERIFY2(file.open(QIODevice::ReadOnly), "world-map.json missing from resources");
+        const auto labels = Connections::loadMapLabels(file.readAll());
+        QVERIFY(labels.contains("US"));
+        QCOMPARE(labels.value("DE").value("name").toString(), QString("Germany"));
+        QVERIFY(labels.value("FJ").value("longitude").toDouble() != 0);
     }
 };
 
