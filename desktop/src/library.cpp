@@ -729,6 +729,7 @@ void Library::play(const QString &key, int fileIndex) {
             save();
             const QJsonObject file = fileByIndex(e->files, fileIndex);
             emit playReady({{"key", key},
+                            {"engineId", e->id},
                             {"fileIndex", fileIndex},
                             {"url", url},
                             {"title", file.value("name").toString(reply.value("name").toString())},
