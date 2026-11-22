@@ -1,6 +1,7 @@
-QT += core gui qml quick quickcontrols2 dbus network multimedia concurrent
+QT += core gui qml quick quickcontrols2 dbus network multimedia concurrent opengl
 
-CONFIG += c++17 release
+CONFIG += c++17 release link_pkgconfig
+PKGCONFIG += mpv
 TARGET = torrentplayer
 TEMPLATE = app
 
@@ -14,7 +15,9 @@ HEADERS += \
     src/filepicker.h \
     src/portalfilepicker.h \
     src/theme.h \
-    src/translator.h
+    src/translator.h \
+    src/mpvitem.h \
+    src/playback.h
 
 SOURCES += \
     src/main.cpp \
@@ -26,6 +29,8 @@ SOURCES += \
     src/links.cpp \
     src/portalfilepicker.cpp \
     src/theme.cpp \
-    src/translator.cpp
+    src/translator.cpp \
+    src/mpvitem.cpp \
+    src/playback.cpp
 
 RESOURCES += src/resources.qrc

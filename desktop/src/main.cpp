@@ -10,6 +10,7 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QSortFilterProxyModel>
 #include <QStandardPaths>
 #include <QUrl>
@@ -19,6 +20,8 @@
 #include "engine.h"
 #include "format.h"
 #include "library.h"
+#include "mpvitem.h"
+#include "playback.h"
 #include "portalfilepicker.h"
 #include "subtitles.h"
 #include "theme.h"
@@ -72,6 +75,10 @@ int main(int argc, char *argv[]) {
     server.listen(serverName());
 
     QQuickStyle::setStyle("Material");
+    // The player draws through libmpv's OpenGL render API.
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+    qmlRegisterType<MpvPlayer>("TorrentPlayer", 1, 0, "MpvPlayer");
+    qmlRegisterType<PlaybackControl>("TorrentPlayer", 1, 0, "PlaybackControl");
 
     Translator translator;
     app.installTranslator(&translator);

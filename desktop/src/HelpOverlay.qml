@@ -25,12 +25,15 @@ Rectangle {
         [qsTr("Player"), [
             ["Space", qsTr("Play or pause")],
             ["← →", qsTr("Back or forward 10 seconds")],
+            [qsTr("Hold →"), qsTr("Play at 2x while held")],
             ["Shift+← →", qsTr("Back or forward 1 minute")],
             ["↑ ↓", qsTr("Volume")],
             ["M", qsTr("Mute")],
-            ["F", qsTr("Full screen")],
+            ["F", qsTr("Full screen (or double-click)")],
             ["C", qsTr("Next subtitles")],
-            ["V", qsTr("Open in mpv")]]]
+            [".", qsTr("Next frame")],
+            ["V", qsTr("Open in mpv")],
+            ["Esc", qsTr("Back")]]]
     ]
 
     RowLayout {

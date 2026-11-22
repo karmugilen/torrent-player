@@ -112,6 +112,8 @@ public:
     Q_INVOKABLE void openFolder(const QString &key) const;
     Q_INVOKABLE void savePosition(const QString &key, int fileIndex, qint64 positionMs);
     Q_INVOKABLE void captureThumbnail(const QString &key, QObject *videoSink);
+    // Where the home card's picture goes; a frame saved there is picked up on the next poll.
+    Q_INVOKABLE QString thumbnailPath(const QString &key) const;
     // First video to play: the one last watched, else the largest selected video.
     // Where a fully downloaded file is on disk, or empty while it isn't.
     Q_INVOKABLE QString finishedFilePath(const QString &key, int fileIndex) const;
@@ -147,7 +149,6 @@ private:
     Entry *find(const QString &key);
     void touch(const QString &key);
     QString torrentFilePath(const QString &key) const;
-    QString thumbnailPath(const QString &key) const;
     QVariantList subtitlesFor(const Entry &entry, int videoIndex) const;
 
     Engine *m_engine;

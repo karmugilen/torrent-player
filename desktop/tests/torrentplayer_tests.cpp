@@ -11,6 +11,7 @@
 #include "format.h"
 #include "library.h"
 #include "links.h"
+#include "playback.h"
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
@@ -196,6 +197,79 @@ private slots:
         QVERIFY(catalog.open(QIODevice::ReadOnly));
         const auto object = QJsonDocument::fromJson(catalog.readAll()).object();
         QCOMPARE(object.value("%n peers").toObject().value("one").toString(), QString("%n peer"));
+    }
+
+    void prefetchOffsetFollowsBitrate() {
+        const qint64 mib = 1 << 20;
+        // Halfway through a 100 MiB file starts 2 MiB before the 50 MiB estimate.
+        QCOMPARE(PlaybackControl::prefetchOffset(100 * mib, 60000, 120000), 48 * mib);
+        // Near the start never goes below zero; past the end stays inside the file.
+        QCOMPARE(PlaybackControl::prefetchOffset(100 * mib, 1000, 120000), qint64(0));
+        QCOMPARE(PlaybackControl::prefetchOffset(100 * mib, 999999, 120000), 98 * mib);
+        QCOMPARE(PlaybackControl::prefetchOffset(0, 1000, 120000), qint64(0));
+        QCOMPARE(PlaybackControl::prefetchOffset(100 * mib, 1000, 0), qint64(0));
+        QCOMPARE(PlaybackControl::PrefetchLength, 10 * mib);
+    }
+
+    void fileOffsetSumsEarlierFiles() {
+        const QJsonArray files{file(2, "c.srt", 50), file(0, "a.nfo", 100), file(1, "b.mkv", 1000)};
+        QCOMPARE(PlaybackControl::fileOffset(files, 0), qint64(0));
+        QCOMPARE(PlaybackControl::fileOffset(files, 1), qint64(100));
+        QCOMPARE(PlaybackControl::fileOffset(files, 2), qint64(1100));
+    }
+
+    void piecesMapToFileFractions() {
+        // 10 pieces of 100 bytes; the file is bytes 150..950 (pieces 1..9).
+        const QJsonObject pieces{
+            {"pieceLength", 100},
+            {"buckets", QJsonArray{
+                QJsonObject{{"start", 0}, {"end", 1}, {"total", 2}, {"verified", 2}},
+                QJsonObject{{"start", 2}, {"end", 3}, {"total", 2}, {"verified", 2}},
+                QJsonObject{{"start", 4}, {"end", 5}, {"total", 2}, {"verified", 1}},
+                QJsonObject{{"start", 6}, {"end", 7}, {"total", 2}, {"verified", 0}},
+                QJsonObject{{"start", 8}, {"end", 9}, {"total", 2}, {"verified", 2}}}}};
+        const auto spans = PlaybackControl::spansFromPieces(pieces, 150, 800);
+        QCOMPARE(spans.size(), 5);
+        QCOMPARE(spans[0].from, 0.0);
+        QCOMPARE(spans[0].to, 50.0 / 800);
+        QCOMPARE(spans[2].done, 0.5);
+        QCOMPARE(spans[4].to, 1.0);
+
+        const auto ready = PlaybackControl::mergeReady(spans);
+        QCOMPARE(ready.size(), 2);
+        QCOMPARE(ready[0].first, 0.0);
+        QCOMPARE(ready[0].second, 250.0 / 800);
+        QCOMPARE(ready[1].first, 650.0 / 800);
+        QCOMPARE(ready[1].second, 1.0);
+
+        QCOMPARE(PlaybackControl::readyAt(spans, 0.1), QVariant(true));
+        QCOMPARE(PlaybackControl::readyAt(spans, 0.5), QVariant(false));
+        QCOMPARE(PlaybackControl::readyAt(spans, 0.95), QVariant(true));
+        QVERIFY(!PlaybackControl::readyAt({}, 0.5).isValid());
+        // No piece length: nothing known.
+        QVERIFY(PlaybackControl::spansFromPieces(QJsonObject{{"buckets", QJsonArray{}}}, 0, 10).isEmpty());
+    }
+
+    void scrubSeeksLiveOnlyWhereReady() {
+        // Downloaded spot, last seek long ago: seek now.
+        auto step = PlaybackControl::scrubDecision(90000, 60000, 60000, 65000, true, 1000, false);
+        QCOMPARE(step.value("action").toString(), QString("seek"));
+        QCOMPARE(step.value("label").toString(), QString("1:30  [+0:30]"));
+        QCOMPARE(step.value("note").toString(), QString());
+        // Within 250 ms of the last live seek, or while mpv is still seeking: wait.
+        QCOMPARE(PlaybackControl::scrubDecision(90000, 60000, 60000, 65000, true, 100, false).value("action").toString(), QString("wait"));
+        QCOMPARE(PlaybackControl::scrubDecision(90000, 60000, 60000, 65000, true, 1000, true).value("action").toString(), QString("wait"));
+        // In mpv's buffer counts as ready even when not downloaded.
+        QCOMPARE(PlaybackControl::scrubDecision(62000, 60000, 60000, 65000, false, 1000, false).value("action").toString(), QString("seek"));
+        // Not downloaded and not buffered: prefetch, seek on release, say it will buffer.
+        step = PlaybackControl::scrubDecision(30000, 3725000, 3725000, 3730000, false, 1000, false);
+        QCOMPARE(step.value("action").toString(), QString("prefetch"));
+        QCOMPARE(step.value("note").toString(), QString("will buffer"));
+        QCOMPARE(step.value("label").toString(), QString("0:30  [-1:01:35]"));
+        // Nothing known yet: prefetch, but no "will buffer".
+        step = PlaybackControl::scrubDecision(30000, 60000, 60000, 65000, QVariant(), 1000, false);
+        QCOMPARE(step.value("action").toString(), QString("prefetch"));
+        QCOMPARE(step.value("note").toString(), QString());
     }
 };
 
