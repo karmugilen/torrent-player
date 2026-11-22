@@ -2,6 +2,7 @@
 """Upload an App Bundle to a Google Play track and send it for review.
 
     play-upload.py KEY.json PACKAGE BUNDLE.aab TRACK "RELEASE NAME" NOTES.txt
+    play-upload.py KEY.json PACKAGE --check     log in and list tracks; changes nothing
 
 KEY.json is a Google Cloud service account key that has release rights on the
 app in Play Console (Users and permissions). TRACK is the API track name: the
@@ -61,12 +62,27 @@ def call(method: str, url: str, auth: str, body=None, raw: "bytes | None" = None
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=600) as r:
-            return json.load(r)
+            data = r.read()
+            return json.loads(data) if data else {}
     except urllib.error.HTTPError as e:
         sys.exit(f"play-upload: {method} {url.split('?')[0]} -> {e.code}: {e.read().decode()[:800]}")
 
 
+def check(key_path: str, package: str):
+    with open(key_path) as f:
+        auth = token(json.load(f))
+    base = f"{API}/{package}/edits"
+    edit = call("POST", base, auth, body={})["id"]
+    for t in call("GET", f"{base}/{edit}/tracks", auth).get("tracks", []):
+        rel = [f"{r.get('name')} ({r.get('status')})" for r in t.get("releases", [])]
+        print(f"play-upload: track {t['track']}: {', '.join(rel) or '-'}")
+    call("DELETE", f"{base}/{edit}", auth, raw=b"")
+    print("play-upload: key works; nothing changed")
+
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[3] == "--check":
+        return check(sys.argv[1], sys.argv[2])
     if len(sys.argv) != 7:
         sys.exit(__doc__)
     key_path, package, bundle, track, name, notes_path = sys.argv[1:]

@@ -55,6 +55,11 @@ git ls-remote --heads origin | grep -q "refs/heads/$BRANCH$" || fail "origin has
 git merge-base --is-ancestor "origin/$BRANCH" HEAD || fail "origin/$BRANCH has commits you do not have: pull first"
 git ls-remote --tags origin | grep -q "refs/tags/v$NAME$" && fail "tag v$NAME already exists"
 [ "$(date +%u)" = 7 ] || echo "note: today is not Sunday (weekly releases go out on Sundays)"
+if [ -f "$PLAY_KEY" ]; then
+    python3 "$ROOT/scripts/play-upload.py" "$PLAY_KEY" "$PLAY_PACKAGE" --check | tail -1 || fail "Play key check failed"
+else
+    echo "note: no Play key at $PLAY_KEY; Play will be manual"
+fi
 echo "notes: $NOTES ($(wc -c <"$NOTES") chars)$([ -f "$LONG" ] && echo ", long GitHub notes: $LONG")"
 
 # ---- 2. Version bump ---------------------------------------------------------
