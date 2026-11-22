@@ -1,0 +1,92 @@
+{
+  "_about": "Defaults and tuning shared by the Android and desktop apps. See shared/README.md.",
+  "version": 1,
+
+  "settings": {
+    "_source": "android/app/src/main/java/webtor/app/UiModels.kt (UiState defaults), LibrarySession.kt start() (settings.get* defaults and coerceIn ranges, setDownloadRateKiB options), SettingsScreen.kt (what is shown and its choices), PlayerActivity.kt (BuiltInPlayer, rememberBrightness). Keys are the Android SharedPreferences keys. 'platforms' lists the apps that have the setting (default: both). Ranges: 'min'/'max' clamp a saved value; with only 'options', a saved value outside them falls back to the default.",
+
+    "directPlayDefault": { "default": false, "visible": true, "group": "downloads", "label": "When adding a torrent", "options": [false, true], "optionLabels": ["Download", "Direct Play"] },
+
+    "idleDropMinutes": { "default": 15, "visible": true, "group": "playback", "label": "Stop idle Direct Play", "unit": "minutes", "min": 0, "max": 240, "options": [0, 5, 15, 30], "optionLabels": ["Off", "5 min", "15 min", "30 min"] },
+    "playbackMethod": { "default": "HTTP", "visible": true, "group": "playback", "label": "How players get the video", "options": ["HTTP", "CONTENT_URI"], "optionLabels": ["Stream", "File proxy"], "platforms": ["android"] },
+    "builtInPlayer": { "default": true, "visible": true, "group": "player", "label": "Video player", "options": [true, false], "optionLabels": ["Built-in", "External app"], "platforms": ["android"] },
+    "rememberBrightness": { "default": false, "visible": true, "group": "player", "label": "Remember brightness", "platforms": ["android"] },
+
+    "networkPolicy": { "default": "ANY", "visible": true, "group": "network", "label": "Transfer on", "options": ["ANY", "WIFI_ONLY", "UNMETERED"], "optionLabels": ["Any network", "Wi-Fi", "Unmetered"] },
+    "downloadRateKiB": { "default": 0, "visible": true, "group": "network", "label": "Download speed limit", "unit": "KiB/s", "options": [0, 1024, 4096, 8192], "optionLabels": ["None", "1 MB/s", "4 MB/s", "8 MB/s"] },
+    "maxPeers": { "default": 55, "visible": true, "group": "network", "label": "Peers per torrent", "min": 8, "max": 500 },
+    "antiDpiEnabled": { "default": false, "visible": true, "group": "network", "label": "Anti-DPI" },
+
+    "seedingEnabled": { "default": true, "visible": true, "group": "seeding", "label": "Seed finished downloads" },
+    "seedRatioMilli": { "default": 1000, "visible": true, "group": "seeding", "label": "Stop at share ratio", "unit": "ratio x1000", "min": 100, "max": 10000, "options": [500, 1000, 2000], "optionLabels": ["0.5×", "1×", "2×"] },
+    "seedTimeMinutes": { "default": 60, "visible": true, "group": "seeding", "label": "Or after seeding for", "unit": "minutes", "min": 1, "max": 1440, "options": [15, 60, 180], "optionLabels": ["15 min", "1 hour", "3 hours"] },
+    "seedUploadKiB": { "default": 256, "visible": true, "group": "seeding", "label": "Upload speed limit", "unit": "KiB/s", "min": 16, "max": 4096, "options": [128, 256, 512], "optionLabels": ["128 KiB/s", "256 KiB/s", "512 KiB/s"] },
+    "seedWiFiOnly": { "default": true, "visible": true, "group": "seeding", "label": "Only on Wi-Fi" },
+    "seedChargingOnly": { "default": false, "visible": true, "group": "seeding", "label": "Only while charging" },
+
+    "pauseOnLowBattery": { "default": false, "visible": true, "group": "device", "label": "Pause on low battery", "batteryPercent": 15 },
+    "ramCacheAuto": { "default": true, "visible": true, "group": "device", "label": "Memory per torrent: Auto" },
+    "ramCacheMiB": { "default": 64, "visible": true, "group": "device", "label": "Memory per torrent", "unit": "MiB", "min": 16, "max": 1024, "steps": "ramCache.stepsMiB" },
+
+    "darkTheme": { "default": true, "visible": true, "group": "appearance", "label": "Dark mode", "platforms": ["android"] },
+    "appTheme": { "default": "AMOLED", "visible": true, "group": "appearance", "label": "Palette", "options": ["AMOLED", "AERO", "ANTIQUITY", "RETRO", "WADA"], "optionLabels": ["AMOLED black", "Aero", "Antiquity", "Retro", "Wada"], "platforms": ["android"] },
+    "dynamicColors": { "default": false, "visible": true, "group": "appearance", "label": "Wallpaper colors", "platforms": ["android"] },
+    "reducedEffects": { "default": false, "visible": true, "group": "appearance", "label": "Reduce motion", "platforms": ["android"] }
+  },
+
+  "info": {
+    "_source": "android/app/src/main/java/webtor/app/SettingsScreen.kt ('Incoming port' row). Shown in settings but not a setting: the engine reports it.",
+    "listenPort": { "visible": true, "group": "network", "label": "Incoming port", "from": "GET /stats listenPort" }
+  },
+
+  "ramCache": {
+    "_source": "android/app/src/main/java/webtor/app/RamCachePolicy.kt (autoRamCacheMiB), Formatters.kt (RAM_CACHE_STEPS_MIB), LibrarySession.kt applyAutoRamCache (active transfer count).",
+    "stepsMiB": [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
+    "auto": {
+      "_rule": "reserve = max(lowMemoryThreshold, total / reserveTotalDivisor); available = max(0, availableBytes - reserve); budget = min(total / budgetTotalDivisor, available / budgetAvailableDivisor); perTransfer = budget / max(1, activeTransfers) in MiB; result = the first of autoStepsMiB that is <= perTransfer, else minMiB. Low-RAM devices and an unknown total get minMiB. activeTransfers counts torrents not paused, not being deleted, and either unfinished or seeding (at least 1).",
+      "reserveTotalDivisor": 10,
+      "budgetTotalDivisor": 16,
+      "budgetAvailableDivisor": 4,
+      "autoStepsMiB": [128, 64],
+      "minMiB": 64,
+      "maxMiB": 128,
+      "_maxReason": "At most 128 MiB: on a 7.6 GB phone 256 MiB pushed the phone into swap during playback. 128 MiB still streams smoothly."
+    }
+  },
+
+  "play": {
+    "_source": "android/app/src/main/java/webtor/app/UiModels.kt (playBoost, fileOnlyPlayback, adaptiveBuffer, burstAwareBuffer, preloadStart, playNext) and LibrarySession.kt play paths (client.play(...)). Fixed built-in mode, not user switches (TransferDecision.kt RETIRED_EXPERIMENT_PREF_KEYS). The /play body gets 'boost', 'fileOnly', 'adaptiveBuffer', 'burstAwareBuffer' only when true.",
+    "boost": true,
+    "fileOnly": true,
+    "_fileOnly": "Sent as fileOnly only for downloads, never for Direct Play torrents (fileOnlyPlayback && !directPlay).",
+    "adaptiveBuffer": true,
+    "burstAwareBuffer": false,
+    "preloadStart": false,
+    "_preloadStart": "When true the app waits for the playback preload before opening the player.",
+    "playNext": true,
+    "_playNext": "Warms the next episode (/play nextFileIndex) and auto-plays it after 5 s.",
+    "playNextCountdownSeconds": 5
+  },
+
+  "engine": {
+    "_source": "android/app/src/main/java/webtor/app/LibrarySession.kt start() (the values it POSTs after the engine is ready), UiModels.kt defaults, core/src/main/kotlin/webtor/core/EngineClient.kt (one POST /settings per field). Hidden: Android has no switch for these.",
+    "ghostMode": false,
+    "ghostProMode": true,
+    "claudeSeekMode": true,
+    "hedgeRequests": true,
+    "slowPeerYield": true,
+    "dropChokers": true,
+    "deadlineSeek": false,
+    "peerExploration": false,
+    "fastPeerSearch": false,
+    "dialRatePerSec": 30,
+    "fastPeerSearchDialRatePerSec": 80,
+    "_dialRatePerSec": "dialRatePerSec is fastPeerSearch ? fastPeerSearchDialRatePerSec : dialRatePerSec; the engine clamps it to 10..80.",
+    "startOrder": [
+      "maxPeers", "downloadRateBytesSec", "dialRatePerSec", "peerExploration", "ghostMode", "ghostProMode",
+      "claudeSeekMode", "hedgeRequests", "slowPeerYield", "dropChokers", "deadlineSeek", "idleDropMinutes",
+      "ramCacheBytes", "seeding", "payloadTransfersAllowed", "bypass"
+    ],
+    "_startOrder": "Order of the POSTs after the engine starts. 'seeding' is one POST /settings {seedingEnabled, seedingAllowed, seedRatioMilli, seedTimeMinutes, uploadRateBytesSec (seedUploadKiB*1024 when seeding is on, else 0)}; 'bypass' is POST /bypass {enabled: antiDpiEnabled}."
+  }
+}
