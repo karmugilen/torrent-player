@@ -20,6 +20,7 @@
 #include "format.h"
 #include "library.h"
 #include "portalfilepicker.h"
+#include "settings.h"
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
@@ -84,6 +85,9 @@ int main(int argc, char *argv[]) {
     Theme theme;
     Format format;
     Engine engine(data + "/engine");
+    // User settings from shared/policy.json defaults; the engine hears them on every start.
+    Settings settings(Settings::defaultPath());
+    EngineSettings engineSettings(&engine, &settings);
     Library library(&engine, data, downloads + "/Torrent Player");
     AddSession adder(&engine, &library);
     Subtitles subtitles;
@@ -100,6 +104,7 @@ int main(int argc, char *argv[]) {
     qml.rootContext()->setContextProperty("theme", &theme);
     qml.rootContext()->setContextProperty("fmt", &format);
     qml.rootContext()->setContextProperty("engine", &engine);
+    qml.rootContext()->setContextProperty("settings", &settings);
     qml.rootContext()->setContextProperty("library", &library);
     qml.rootContext()->setContextProperty("libraryView", &libraryView);
     qml.rootContext()->setContextProperty("adder", &adder);

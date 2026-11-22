@@ -9,5 +9,6 @@
         <file alias="DeleteDialog.qml">DeleteDialog.qml</file>
         <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
+        <file alias="policy.json">../../shared/policy.json</file>
     </qresource>
 </RCC>
