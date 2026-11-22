@@ -89,8 +89,10 @@ class SeekReadiness {
 
     companion object {
         const val READY_SHARE = 0.99f
-        /** Wait this long after the finger moves, so only the spot it rests on is fetched. */
-        const val PREFETCH_DELAY_MS = 150L
+        /** Wait this long after the finger moves, so only the spot it rests on is fetched.
+         *  The window stays 10 MB: the engine fetches it all at one priority, so a bigger
+         *  one would share peers with the first bytes and slow the seek down. */
+        const val PREFETCH_DELAY_MS = 50L
         const val PREFETCH_BEFORE = 2L shl 20
         const val PREFETCH_LENGTH = 10L shl 20
 
