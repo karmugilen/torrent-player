@@ -1,0 +1,9 @@
+{
+  "%n peers": { "one": "%n peer", "other": "%n peers" },
+  "%n downloads stop while Torrent Player is closed. They continue the next time you open it.": {
+    "one": "A download stops while Torrent Player is closed. It continues the next time you open it.",
+    "other": "%n downloads stop while Torrent Player is closed. They continue the next time you open it."
+  },
+  "Asking peers for the file list · %n peers": { "one": "Asking peers for the file list · %n peer", "other": "Asking peers for the file list · %n peers" },
+  "Buffering · %1 · %n peers": { "one": "Buffering · %1 · %n peer", "other": "Buffering · %1 · %n peers" }
+}

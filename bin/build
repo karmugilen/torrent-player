@@ -1,0 +1,22 @@
+#!/bin/sh
+# Builds the Rust engine (engine-host) and the Qt app into build/.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ENGINE_SRC="${TORRENTPLAYER_ENGINE_SRC:-$HOME/orca/workspaces/torrent-player/bt20-holepunch-merge/engine-rs}"
+
+mkdir -p "$ROOT/build"
+
+if [ ! -f "$ENGINE_SRC/Cargo.toml" ]; then
+  echo "Engine source not found at $ENGINE_SRC" >&2
+  echo "Set TORRENTPLAYER_ENGINE_SRC to the torrent-player repo's engine-rs folder." >&2
+  exit 1
+fi
+cargo build --release --manifest-path "$ENGINE_SRC/Cargo.toml" -p wt-engine --bin engine-host
+install -m755 "$ENGINE_SRC/target/release/engine-host" "$ROOT/build/engine-host"
+
+cd "$ROOT/build"
+qmake6 "$ROOT/torrentplayer.pro"
+make -j"$(nproc)"
+
+echo "Built $ROOT/build/torrentplayer"
