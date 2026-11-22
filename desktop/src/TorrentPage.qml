@@ -68,6 +68,11 @@ Page {
             }
             Button { text: qsTr("Open folder"); flat: true; onClicked: library.openFolder(torrentKey) }
             Button {
+                text: qsTr("Peers")
+                flat: true
+                onClicked: win.openPeers(torrentKey)
+            }
+            Button {
                 text: qsTr("Remove…")
                 flat: true
                 Material.foreground: win.danger

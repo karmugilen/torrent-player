@@ -16,7 +16,9 @@ HEADERS += \
     src/theme.h \
     src/translator.h \
     src/policy.h \
-    src/settings.h
+    src/settings.h \
+    src/connections.h \
+    src/worldmap.h
 
 SOURCES += \
     src/main.cpp \
@@ -30,6 +32,8 @@ SOURCES += \
     src/theme.cpp \
     src/translator.cpp \
     src/policy.cpp \
-    src/settings.cpp
+    src/settings.cpp \
+    src/connections.cpp \
+    src/worldmap.cpp
 
 RESOURCES += src/resources.qrc

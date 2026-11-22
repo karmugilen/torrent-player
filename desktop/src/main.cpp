@@ -8,6 +8,7 @@
 #include <QLocalSocket>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSortFilterProxyModel>
@@ -16,6 +17,7 @@
 #include <cstdio>
 
 #include "addsession.h"
+#include "connections.h"
 #include "engine.h"
 #include "format.h"
 #include "library.h"
@@ -24,6 +26,7 @@
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
+#include "worldmap.h"
 
 // Written by desktop/bin/build from Android versionName into build/app_version.h.
 #if __has_include("app_version.h")
@@ -81,6 +84,8 @@ int main(int argc, char *argv[]) {
     server.listen(serverName());
 
     QQuickStyle::setStyle("Material");
+    qmlRegisterType<Connections>("Webtor", 1, 0, "TorrentConnections");
+    qmlRegisterType<WorldMap>("Webtor", 1, 0, "WorldMap");
 
     Translator translator;
     app.installTranslator(&translator);

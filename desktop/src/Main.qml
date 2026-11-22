@@ -56,6 +56,9 @@ ApplicationWindow {
             return
         stack.push(torrentPage, { torrentKey: key })
     }
+    function openPeers(key) {
+        stack.push(peersPage, { torrentKey: key })
+    }
     function goHome() {
         stack.pop(null)
     }
@@ -228,6 +231,7 @@ ApplicationWindow {
 
     Component { id: torrentPage; TorrentPage {} }
     Component { id: playerPage; PlayerPage {} }
+    Component { id: peersPage; PeersPage {} }
 
     AddDialog { id: addDialog }
     DeleteDialog { id: deleteDialog }
