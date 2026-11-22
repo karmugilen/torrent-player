@@ -141,6 +141,24 @@ else
     echo "short notes only (write $LONG next time for the detailed style)"
 fi
 
+# ---- 7b. Linux package (optional; never blocks the Android release) ------------
+step "7b/8 Linux package (optional)"
+LINUX_PKG=""
+if ! command -v qmake6 >/dev/null 2>&1; then
+    echo "note: qmake6 not found; skipping Linux package"
+elif (
+    cd "$ROOT/desktop/pkgbuild"
+    makepkg -f --noconfirm
+    PKG="torrentplayer-${NAME}-1-x86_64.pkg.tar.zst"
+    [ -f "$PKG" ] || exit 1
+    gh release upload "v$NAME" "$PKG" -R "$REPO" --clobber
+); then
+    LINUX_PKG="torrentplayer-${NAME}-1-x86_64.pkg.tar.zst"
+    echo "Linux package attached: $LINUX_PKG"
+else
+    echo "note: Linux package step failed; Android release is unaffected"
+fi
+
 # ---- 8. Google Play closed test ------------------------------------------------
 step "8/8 Google Play ($PLAY_TRACK)"
 if [ -f "$PLAY_KEY" ]; then
@@ -164,4 +182,5 @@ cat <<EOF
   F-Droid  picks up v$NAME by itself (a few days)
   Play     $PLAY
   APK sha256 $APK_SHA
+  Linux    ${LINUX_PKG:-not attached}
 EOF

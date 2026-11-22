@@ -2,10 +2,18 @@
 # Builds the Rust engine (engine-host) from this repo's engine-rs and the Qt app into build/.
 # TORRENTPLAYER_SKIP_ENGINE=1 builds only the Qt app (quick checks; the app then finds
 # engine-host through TORRENTPLAYER_ENGINE or /usr/lib/torrentplayer).
+# App version comes from Android versionName in android/app/build.gradle.kts.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 ENGINE_SRC="${TORRENTPLAYER_ENGINE_SRC:-$ROOT/../engine-rs}"
+GRADLE="$ROOT/../android/app/build.gradle.kts"
+
+VERSION=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' "$GRADLE")
+[ -n "$VERSION" ] || {
+  echo "Could not read versionName from $GRADLE" >&2
+  exit 1
+}
 
 mkdir -p "$ROOT/build"
 
@@ -19,7 +27,9 @@ if [ "${TORRENTPLAYER_SKIP_ENGINE:-0}" != 1 ]; then
 fi
 
 cd "$ROOT/build"
+# Header (not qmake DEFINES) so the dotted version stays a string through make.
+printf '#define APP_VERSION "%s"\n' "$VERSION" >"$ROOT/build/app_version.h"
 qmake6 "$ROOT/torrentplayer.pro"
 make -j"$(nproc)"
 
-echo "Built $ROOT/build/torrentplayer"
+echo "Built $ROOT/build/torrentplayer ($VERSION)"
