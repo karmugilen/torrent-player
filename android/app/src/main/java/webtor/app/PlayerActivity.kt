@@ -99,6 +99,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -1744,19 +1746,30 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     @Composable
     private fun SeekBar(fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
         var active by remember { mutableStateOf(false) }
+        val drag by rememberUpdatedState(onDrag)
+        val dragEnd by rememberUpdatedState(onDragEnd)
         Canvas(
             Modifier.fillMaxWidth().height(40.dp)
                 .pointerInput(Unit) {
-                    detectTapGestures(
-                        onPress = { o -> active = true; onDrag((o.x / size.width).coerceIn(0f, 1f)); val tap = tryAwaitRelease(); if (tap) { active = false; onDragEnd() } },
-                    )
-                }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { o -> active = true; onDrag((o.x / size.width).coerceIn(0f, 1f)) },
-                        onDragEnd = { active = false; onDragEnd() },
-                        onDragCancel = { active = false; onDragEnd() },
-                    ) { change, _ -> change.consume(); onDrag((change.position.x / size.width).coerceIn(0f, 1f)) }
+                    // One handler for tap and drag: the finger may leave the thin bar
+                    // (up or down) and the seek still follows it and lands on release.
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        down.consume()
+                        active = true
+                        drag((down.position.x / size.width).coerceIn(0f, 1f))
+                        try {
+                            while (true) {
+                                val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) { change.consume(); break }
+                                if (change.positionChanged()) drag((change.position.x / size.width).coerceIn(0f, 1f))
+                                change.consume()
+                            }
+                        } finally {
+                            active = false
+                            dragEnd()
+                        }
+                    }
                 },
         ) {
             val h = (if (active) 6.dp else 4.5.dp).toPx()
