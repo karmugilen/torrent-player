@@ -27,9 +27,9 @@ fun rememberVideoPreviews(entry: DownloadEntry, fileIndex: Int? = null): List<Bi
                 if (next.isNotEmpty()) frames = next else if (frames == null) frames = emptyList()
                 if ((!current.directPlay && previewVideo(current, video.index)?.isVerifiedComplete == true) ||
                     current.engineId == null) break
-                // A paused download fetches nothing; a paused Direct Play may still be
-                // reading its saved frames, so look until they show.
-                if (current.paused && (!current.directPlay || next.isNotEmpty())) break
+                // Paused fetches nothing new, but the engine may still be reading
+                // the saved frames (Direct Play cache or downloaded pieces): look until they show.
+                if (current.paused && next.isNotEmpty()) break
                 // Waiting for the engine's keyframe: look again soon.
                 delay(if (next.isEmpty()) (if (current.paused) 5_000L else 1_500L) else 4_000L)
             }
