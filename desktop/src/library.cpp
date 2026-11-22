@@ -471,7 +471,15 @@ void Library::exportFinished(Entry &e) {
 // ---------------------------------------------------------------- thumbnails
 
 void Library::makeThumbnail(Entry &e) {
-    if (!e.thumbnail.isEmpty() || e.thumbnailBusy || e.thumbnailAttempts >= 4 || e.id.isEmpty())
+    if (!e.thumbnail.isEmpty() || e.thumbnailBusy)
+        return;
+    // A frame the player saved (thumbnailPath).
+    if (QFileInfo::exists(thumbnailPath(e.key))) {
+        e.thumbnail = thumbnailPath(e.key);
+        save();
+        return;
+    }
+    if (e.thumbnailAttempts >= 4 || e.id.isEmpty())
         return;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (now - e.thumbnailTriedAt < 30000)

@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
-import QtMultimedia
+import TorrentPlayer
 
 Page {
     id: page
@@ -11,128 +11,158 @@ Page {
     readonly property string torrentKey: media.key || ""
     readonly property string pageTitle: media.title || ""
     readonly property bool active: StackView.status === StackView.Active && !win.dialogOpen
-    property bool resumed: false
     property bool controlsVisible: true
     property bool thumbnailTaken: false
-    property int subtitleChoice: -1      // torrent subtitle index, -1 none
+    property bool left_: false
+    property int subtitleChoice: -1      // torrent subtitle index, -2 a picked file, -1 none
     property string subtitleLabel: ""
+    property string pendingSubtitlePath: ""
+    property bool holdFast: false        // Right held: 2x until released
     readonly property var torrent: library.revision >= 0 ? library.details(torrentKey) : ({})
+    readonly property var embeddedSubtitles: player.subtitleTracks.filter(t => !t.external)
     background: Rectangle { color: "black" }
 
     function showControls() {
         controlsVisible = true
         hideTimer.restart()
     }
+    function clampMs(ms) { return Math.max(0, player.duration > 0 ? Math.min(player.duration, ms) : ms) }
+    // Arrow skips: ask the engine for the spot first, as a seek-bar release does.
     function seekBy(ms) {
-        player.position = Math.max(0, Math.min(player.duration, player.position + ms))
+        const target = clampMs(player.position + ms)
+        playback.prefetchNow(target)
+        player.seek(target, false)
         showControls()
         osd.show((ms > 0 ? "+" : "−") + Math.abs(ms / 1000) + " s")
     }
+    function seekTo(ms) {
+        const target = clampMs(ms)
+        playback.prefetchNow(target)
+        player.seek(target, false)
+        showControls()
+    }
     function togglePlay() {
-        if (player.playbackState === MediaPlayer.PlayingState) player.pause()
-        else player.play()
+        player.paused = !player.paused
         showControls()
     }
     function toggleFullScreen() {
         if (win.visibility === Window.FullScreen) win.showNormal()
         else win.showFullScreen()
     }
+    function changeVolume(step) {
+        player.volume = Math.max(0, Math.min(1, player.volume + step))
+        player.muted = false
+        osd.show(qsTr("Volume %1").arg(fmt.percent(player.volume)))
+    }
+    function toggleMute() {
+        player.muted = !player.muted
+        osd.show(player.muted ? qsTr("Muted") : qsTr("Sound on"))
+    }
+    function openInMpv() {
+        if (library.openInMpv(page.media.url, player.position, page.pageTitle))
+            player.paused = true
+    }
+    // An external subtitle mpv already has is selected again, not added twice.
+    function selectExternal(path, label) {
+        const known = player.subtitleTracks.find(t => t.external && t.externalFilename === path)
+        if (known) player.subtitleId = known.id
+        else player.addSubtitle(path, label)
+    }
     function loadSubtitleFile(path) {
-        player.activeSubtitleTrack = -1
+        pendingSubtitle.stop()
         subtitleChoice = -2
         subtitleLabel = path.split("/").pop()
-        subtitles.load(path, subtitleLabel)
+        selectExternal(path, subtitleLabel)
+        osd.show(subtitleLabel)
     }
     function chooseTorrentSubtitle(sub) {
-        player.activeSubtitleTrack = -1
+        pendingSubtitle.stop()
         subtitleChoice = sub.index
         subtitleLabel = sub.label
-        if (sub.ready) {
-            subtitles.load(sub.path, sub.label)
+        const path = sub.ready ? sub.path : library.finishedFilePath(torrentKey, sub.index)
+        if (path !== "") {
+            selectExternal(path, sub.label)
         } else {
             // Not downloaded yet: fetch it (it's small) and load it when it lands.
             library.setFileSelected(torrentKey, sub.index, true)
-            subtitles.clear()
+            player.subtitleId = -1
             pendingSubtitle.restart()
             osd.show(qsTr("Downloading %1…").arg(sub.label))
         }
     }
-    function subtitlesOff() {
+    function chooseEmbedded(track) {
+        pendingSubtitle.stop()
         subtitleChoice = -1
         subtitleLabel = ""
-        subtitles.clear()
-        player.activeSubtitleTrack = -1
+        player.subtitleId = track.id
+    }
+    function subtitlesOff() {
+        pendingSubtitle.stop()
+        subtitleChoice = -1
+        subtitleLabel = ""
+        player.subtitleId = -1
+    }
+    function currentSubtitleName() {
+        if (subtitleChoice !== -1) return subtitleLabel
+        const t = player.subtitleTracks.find(t => t.id === player.subtitleId)
+        return t ? t.label : ""
     }
     function cycleSubtitles() {
         // Off → each torrent subtitle → each embedded track → off.
         const list = media.subtitles || []
-        const embedded = player.subtitleTracks.length
         let order = [{ kind: "off" }]
         for (const s of list) order.push({ kind: "file", sub: s })
-        for (let i = 0; i < embedded; ++i) order.push({ kind: "track", track: i })
+        for (const t of embeddedSubtitles) order.push({ kind: "track", track: t })
         let current = 0
         for (let i = 0; i < order.length; ++i) {
             const o = order[i]
             if ((o.kind === "file" && o.sub.index === subtitleChoice) ||
-                (o.kind === "track" && o.track === player.activeSubtitleTrack && subtitleChoice === -1))
+                (o.kind === "track" && subtitleChoice === -1 && o.track.id === player.subtitleId))
                 current = i
         }
         const next = order[(current + 1) % order.length]
         if (next.kind === "off") { subtitlesOff(); osd.show(qsTr("Subtitles off")) }
         else if (next.kind === "file") { chooseTorrentSubtitle(next.sub); osd.show(next.sub.label) }
-        else { subtitlesOff(); player.activeSubtitleTrack = next.track; osd.show(trackName(player.subtitleTracks[next.track], next.track)) }
-    }
-    function trackName(meta, i) {
-        const lang = meta ? meta.stringValue(MediaMetaData.Language) : ""
-        const title = meta ? meta.stringValue(MediaMetaData.Title) : ""
-        return [title, lang].filter(x => x && x !== "").join(" · ") || qsTr("Track %1").arg(i + 1)
+        else { chooseEmbedded(next.track); osd.show(next.track.label) }
     }
     function leave() {
+        if (left_) return
+        left_ = true
         // Near the end counts as watched, so the next play starts over.
         const position = player.duration > 0 && player.position > player.duration * 0.95 ? 0 : player.position
         library.savePosition(torrentKey, media.fileIndex, position)
+        player.speed = 1.0
         player.stop()
-        subtitles.clear()
         if (win.visibility === Window.FullScreen)
             win.showNormal()
     }
 
     StackView.onRemoved: leave()
-    Component.onDestruction: if (player.playbackState !== MediaPlayer.StoppedState) leave()
+    Component.onDestruction: leave()
+    onActiveChanged: if (active) keyCatcher.forceActiveFocus()
 
-    MediaPlayer {
-        id: player
-        source: page.media.url || ""
-        audioOutput: AudioOutput { id: audio; volume: 1.0 }
-        videoOutput: video
-        onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia) {
-                if (!page.resumed) {
-                    page.resumed = true
-                    const start = page.media.startMs || 0
-                    if (start > 5000 && (duration <= 0 || start < duration - 10000)) {
-                        position = start
-                        osd.show(qsTr("Resumed at %1").arg(fmt.clock(start)))
-                    }
-                    play()
-                }
-            }
-        }
-        onErrorOccurred: (error, errorString) => errorBox.message = errorString
-        Component.onCompleted: play()
+    readonly property var engineHandle: engine
+    PlaybackControl {
+        id: playback
+        engine: page.engineHandle
+        media: page.media
+        durationMs: player.duration
     }
 
-    VideoOutput {
-        id: video
+    MpvPlayer {
+        id: player
         anchors.fill: parent
-        fillMode: VideoOutput.PreserveAspectFit
+        startMs: (page.media.startMs || 0) > 5000 ? page.media.startMs : 0
+        source: page.media.url || ""
+        onFileLoaded: if (startMs > 0) osd.show(qsTr("Resumed at %1").arg(fmt.clock(startMs)))
+        onScreenshotSaved: (path, ok) => { if (!ok) page.thumbnailTaken = false }
     }
 
     // A frame for the home card, once real picture is on screen.
     Timer {
         interval: 8000
-        running: player.playbackState === MediaPlayer.PlayingState && !page.thumbnailTaken
-        onTriggered: { page.thumbnailTaken = true; library.captureThumbnail(page.torrentKey, video.videoSink) }
+        running: !player.paused && !player.buffering && player.loaded && !page.thumbnailTaken && !page.torrent.thumbnail
+        onTriggered: { page.thumbnailTaken = true; player.screenshotTo(library.thumbnailPath(page.torrentKey)) }
     }
     Timer {
         id: pendingSubtitle
@@ -142,46 +172,49 @@ Page {
             const path = library.finishedFilePath(page.torrentKey, page.subtitleChoice)
             if (path !== "") {
                 stop()
-                subtitles.load(path, page.subtitleLabel)
+                page.selectExternal(path, page.subtitleLabel)
             }
         }
     }
 
-    // External subtitles.
-    Label {
-        anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: controlsVisible ? 120 : 48 }
-        width: parent.width * 0.8
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.Wrap
-        text: subtitles.loaded ? subtitles.textAt(player.position) : ""
-        color: "white"
-        font.pixelSize: Math.max(20, page.height / 24)
-        style: Text.Outline
-        styleColor: "black"
-        visible: text !== ""
-        Behavior on anchors.bottomMargin { NumberAnimation { duration: 150 } }
+    // Keys: Right is here, not a Shortcut, because holding it plays at 2x until it is let go.
+    Item {
+        id: keyCatcher
+        focus: true
+        Component.onCompleted: forceActiveFocus()
+        Keys.onPressed: (event) => {
+            if (event.key !== Qt.Key_Right || event.modifiers !== Qt.NoModifier || !page.active) return
+            event.accepted = true
+            if (event.isAutoRepeat && !page.holdFast) {
+                page.holdFast = true
+                player.speed = 2.0
+            }
+        }
+        Keys.onReleased: (event) => {
+            if (event.key !== Qt.Key_Right || event.modifiers !== Qt.NoModifier || !page.active) return
+            event.accepted = true
+            if (event.isAutoRepeat) return
+            if (page.holdFast) { page.holdFast = false; player.speed = 1.0 }
+            else page.seekBy(10000)
+        }
     }
 
-    // Buffering and errors.
+    // Waiting for data, for the file to open, or for a seek.
     BusyIndicator {
         anchors.centerIn: parent
-        running: errorBox.message === "" && (player.mediaStatus === MediaPlayer.LoadingMedia
-                 || player.mediaStatus === MediaPlayer.BufferingMedia
-                 || player.mediaStatus === MediaPlayer.StalledMedia)
+        running: player.errorString === "" && player.buffering
         visible: running
     }
     Label {
         anchors { horizontalCenter: parent.horizontalCenter; top: parent.verticalCenter; topMargin: 48 }
-        visible: errorBox.message === "" && (player.mediaStatus === MediaPlayer.LoadingMedia
-                 || player.mediaStatus === MediaPlayer.StalledMedia || player.mediaStatus === MediaPlayer.BufferingMedia)
-        text: qsTr("Buffering · %1 · %n peers", "", page.torrent.peers || 0).arg(fmt.speed(page.torrent.downloadSpeed || 0))
+        visible: player.errorString === "" && player.buffering && !playback.complete
+        text: qsTr("Buffering · %1 · %n peers", "", playback.peers).arg(fmt.speed(playback.downloadSpeed))
         color: "#cccccc"
     }
     Rectangle {
         id: errorBox
-        property string message: ""
         anchors.centerIn: parent
-        visible: message !== ""
+        visible: player.errorString !== ""
         width: Math.min(520, parent.width - 64)
         height: errorColumn.implicitHeight + 40
         radius: win.radius
@@ -192,7 +225,7 @@ Page {
             anchors { fill: parent; margins: 20 }
             spacing: 12
             Label { text: qsTr("The built-in player can't play this file"); color: win.textColor; font.pixelSize: 16; font.weight: Font.Medium }
-            Label { Layout.fillWidth: true; text: errorBox.message; color: win.muted; wrapMode: Text.Wrap }
+            Label { Layout.fillWidth: true; text: player.errorString; color: win.muted; wrapMode: Text.Wrap }
             RowLayout {
                 Button { text: qsTr("Open in mpv"); highlighted: true; onClicked: library.openInMpv(page.media.url, player.position, page.pageTitle) }
                 Button { text: qsTr("Back"); flat: true; onClicked: page.StackView.view.pop() }
@@ -216,23 +249,33 @@ Page {
         Timer { id: osdTimer; interval: 1200; onTriggered: osd.opacity = 0 }
     }
 
+    // Holding Right: 2x, as long as it is held.
+    Rectangle {
+        anchors { top: parent.top; horizontalCenter: parent.horizontalCenter; topMargin: 24 }
+        visible: page.holdFast
+        width: fastLabel.implicitWidth + 24
+        height: fastLabel.implicitHeight + 10
+        radius: height / 2
+        color: Qt.rgba(0, 0, 0, 0.6)
+        Label { id: fastLabel; anchors.centerIn: parent; text: qsTr("2x ▸▸"); color: "white"; font.pixelSize: 14 }
+    }
+
     MouseArea {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: controlsVisible ? Qt.ArrowCursor : Qt.BlankCursor
         acceptedButtons: Qt.LeftButton
         onPositionChanged: page.showControls()
+        onPressed: keyCatcher.forceActiveFocus()
         onClicked: page.togglePlay()
         onDoubleClicked: { page.togglePlay(); page.toggleFullScreen() }
-        onWheel: (wheel) => {
-            audio.volume = Math.max(0, Math.min(1, audio.volume + (wheel.angleDelta.y > 0 ? 0.05 : -0.05)))
-            osd.show(qsTr("Volume %1").arg(fmt.percent(audio.volume)))
-        }
+        onWheel: (wheel) => page.changeVolume(wheel.angleDelta.y > 0 ? 0.05 : -0.05)
     }
     Timer {
         id: hideTimer
-        interval: 2500
-        onTriggered: if (player.playbackState === MediaPlayer.PlayingState && !subtitleMenu.visible && !audioMenu.visible && !seek.pressed) page.controlsVisible = false
+        interval: 3000
+        running: true
+        onTriggered: if (!subtitleMenu.visible && !audioMenu.visible && !seekBar.dragging && !controlsHover.hovered) page.controlsVisible = false
     }
 
     // Top bar.
@@ -248,7 +291,7 @@ Page {
         }
         RowLayout {
             anchors { fill: parent; leftMargin: 12; rightMargin: 16 }
-            ToolButton { text: "←"; font.pixelSize: 20; onClicked: page.StackView.view.pop() }
+            ToolButton { text: "←"; font.pixelSize: 20; focusPolicy: Qt.NoFocus; onClicked: page.StackView.view.pop() }
             Label { Layout.fillWidth: true; text: page.pageTitle; color: "white"; elide: Text.ElideMiddle; font.pixelSize: 16 }
             Label {
                 visible: (page.torrent.progress || 0) < 1
@@ -261,6 +304,7 @@ Page {
 
     // Bottom controls.
     Rectangle {
+        id: bottomBar
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
         height: 104
         opacity: controlsVisible ? 1 : 0
@@ -270,52 +314,143 @@ Page {
             GradientStop { position: 0; color: "transparent" }
             GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0.85) }
         }
+        HoverHandler { id: controlsHover }
         ColumnLayout {
             anchors { fill: parent; leftMargin: 20; rightMargin: 20; bottomMargin: 8; topMargin: 20 }
             spacing: 0
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 12
-                Label { text: fmt.clock(seek.pressed ? seek.value : player.position); color: "white"; font.pixelSize: 13 }
-                Slider {
-                    id: seek
+                Label { text: fmt.clock(seekBar.dragging ? seekBar.targetMs : player.position); color: "white"; font.pixelSize: 13 }
+
+                // Seek bar as Android's: downloaded parts, mpv's read-ahead, and a drag that
+                // seeks live over ready spots and only prefetches the others until release.
+                Item {
+                    id: seekBar
                     Layout.fillWidth: true
-                    from: 0
-                    to: Math.max(1, player.duration)
-                    enabled: player.seekable
-                    value: pressed ? value : player.position
-                    onPressedChanged: if (!pressed) player.position = value
-                    onMoved: page.showControls()
+                    Layout.preferredHeight: 28
+                    property bool dragging: false
+                    property real originMs: 0
+                    property real targetMs: 0
+                    property string bubble: ""
+                    property string note: ""
+                    readonly property real span: Math.max(1, player.duration)
+                    readonly property real shownMs: dragging ? targetMs : player.position
+                    function msAt(x) { return Math.max(0, Math.min(1, x / width)) * player.duration }
+                    function drag(x) {
+                        targetMs = msAt(x)
+                        const step = playback.scrub(targetMs, originMs, player.position, player.cacheEndMs, player.seeking)
+                        bubble = step.label
+                        note = step.note
+                        if (step.action === "seek") player.seek(targetMs, false)
+                        page.showControls()
+                    }
+
+                    Rectangle {
+                        id: track
+                        anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter }
+                        height: seekArea.containsMouse || seekBar.dragging ? 6 : 4
+                        radius: height / 2
+                        color: Qt.rgba(1, 1, 1, 0.18)
+                        Repeater {
+                            model: playback.readyRanges
+                            delegate: Rectangle {
+                                x: modelData.from * track.width
+                                width: Math.max(1, (modelData.to - modelData.from) * track.width)
+                                height: track.height
+                                radius: track.radius
+                                color: Qt.rgba(1, 1, 1, 0.32)
+                            }
+                        }
+                        Rectangle {
+                            // mpv's cache ahead of the playhead.
+                            x: player.position / seekBar.span * track.width
+                            width: Math.max(0, Math.min(track.width - x, (player.cacheEndMs - player.position) / seekBar.span * track.width))
+                            height: track.height
+                            radius: track.radius
+                            color: Qt.rgba(1, 1, 1, 0.55)
+                        }
+                        Rectangle {
+                            width: Math.min(1, seekBar.shownMs / seekBar.span) * track.width
+                            height: track.height
+                            radius: track.radius
+                            color: theme.accent
+                        }
+                    }
+                    Rectangle {
+                        width: 14; height: 14; radius: 7
+                        color: "white"
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: Math.min(1, seekBar.shownMs / seekBar.span) * seekBar.width - width / 2
+                        visible: player.duration > 0
+                    }
+                    Rectangle {
+                        id: bubbleBox
+                        visible: seekBar.dragging && seekBar.bubble !== ""
+                        y: -height - 10
+                        x: Math.max(-20, Math.min(seekBar.width - width + 20, seekBar.targetMs / seekBar.span * seekBar.width - width / 2))
+                        width: bubbleColumn.implicitWidth + 20
+                        height: bubbleColumn.implicitHeight + 10
+                        radius: win.smallRadius
+                        color: Qt.rgba(0, 0, 0, 0.8)
+                        Column {
+                            id: bubbleColumn
+                            anchors.centerIn: parent
+                            Label { anchors.horizontalCenter: parent.horizontalCenter; text: seekBar.bubble; color: "white"; font.pixelSize: 14 }
+                            Label { anchors.horizontalCenter: parent.horizontalCenter; visible: text !== ""; text: seekBar.note; color: "#ffcc66"; font.pixelSize: 12 }
+                        }
+                    }
+                    MouseArea {
+                        id: seekArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        enabled: player.duration > 0
+                        onPressed: (mouse) => {
+                            seekBar.dragging = true
+                            seekBar.originMs = player.position
+                            seekBar.drag(mouse.x)
+                        }
+                        onPositionChanged: (mouse) => { if (pressed) seekBar.drag(mouse.x) }
+                        onReleased: (mouse) => {
+                            seekBar.targetMs = seekBar.msAt(mouse.x)
+                            seekBar.dragging = false
+                            page.seekTo(seekBar.targetMs)
+                            keyCatcher.forceActiveFocus()
+                        }
+                        onCanceled: seekBar.dragging = false
+                    }
                 }
                 Label { text: fmt.clock(player.duration); color: "white"; font.pixelSize: 13 }
             }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                ToolButton { text: "⟲ 10"; font.pixelSize: 13; onClicked: page.seekBy(-10000) }
+                ToolButton { text: "⟲ 10"; font.pixelSize: 13; focusPolicy: Qt.NoFocus; onClicked: page.seekBy(-10000) }
                 ToolButton {
-                    text: player.playbackState === MediaPlayer.PlayingState ? "❚❚" : "▶"
+                    text: player.paused ? "▶" : "❚❚"
                     font.pixelSize: 18
+                    focusPolicy: Qt.NoFocus
                     onClicked: page.togglePlay()
                 }
-                ToolButton { text: "10 ⟳"; font.pixelSize: 13; onClicked: page.seekBy(10000) }
+                ToolButton { text: "10 ⟳"; font.pixelSize: 13; focusPolicy: Qt.NoFocus; onClicked: page.seekBy(10000) }
                 ToolButton {
-                    text: audio.muted || audio.volume === 0 ? qsTr("Muted") : qsTr("Volume")
+                    text: player.muted || player.volume === 0 ? qsTr("Muted") : qsTr("Volume")
                     font.pixelSize: 13
-                    onClicked: audio.muted = !audio.muted
+                    focusPolicy: Qt.NoFocus
+                    onClicked: page.toggleMute()
                 }
                 Slider {
                     Layout.preferredWidth: 110
                     from: 0; to: 1
-                    value: audio.volume
-                    onMoved: { audio.volume = value; audio.muted = false }
+                    focusPolicy: Qt.NoFocus
+                    value: player.volume
+                    onMoved: { player.volume = value; player.muted = false }
                 }
                 Item { Layout.fillWidth: true }
                 ToolButton {
-                    text: page.subtitleLabel !== "" ? qsTr("Subtitles: %1").arg(page.subtitleLabel)
-                          : player.activeSubtitleTrack >= 0 ? qsTr("Subtitles: %1").arg(page.trackName(player.subtitleTracks[player.activeSubtitleTrack], player.activeSubtitleTrack))
-                          : qsTr("Subtitles")
+                    text: page.currentSubtitleName() !== "" ? qsTr("Subtitles: %1").arg(page.currentSubtitleName()) : qsTr("Subtitles")
                     font.pixelSize: 13
+                    focusPolicy: Qt.NoFocus
                     onClicked: subtitleMenu.popup()
                     Layout.maximumWidth: 280
                 }
@@ -323,16 +458,19 @@ Page {
                     visible: player.audioTracks.length > 1
                     text: qsTr("Audio")
                     font.pixelSize: 13
+                    focusPolicy: Qt.NoFocus
                     onClicked: audioMenu.popup()
                 }
                 ToolButton {
                     text: qsTr("Open in mpv")
                     font.pixelSize: 13
-                    onClicked: { if (library.openInMpv(page.media.url, player.position, page.pageTitle)) player.pause() }
+                    focusPolicy: Qt.NoFocus
+                    onClicked: page.openInMpv()
                 }
                 ToolButton {
                     text: win.visibility === Window.FullScreen ? qsTr("Exit full screen") : qsTr("Full screen")
                     font.pixelSize: 13
+                    focusPolicy: Qt.NoFocus
                     onClicked: page.toggleFullScreen()
                 }
             }
@@ -342,7 +480,8 @@ Page {
     Menu {
         id: subtitleMenu
         Material.roundedScale: theme.radius
-        MenuItem { text: qsTr("Off"); checkable: true; checked: page.subtitleChoice === -1 && player.activeSubtitleTrack < 0; onTriggered: page.subtitlesOff() }
+        onClosed: keyCatcher.forceActiveFocus()
+        MenuItem { text: qsTr("Off"); checkable: true; checked: page.subtitleChoice === -1 && player.subtitleId < 0; onTriggered: page.subtitlesOff() }
         Repeater {
             model: page.media.subtitles || []
             delegate: MenuItem {
@@ -353,12 +492,12 @@ Page {
             }
         }
         Repeater {
-            model: player.subtitleTracks.length
+            model: page.embeddedSubtitles
             delegate: MenuItem {
-                text: qsTr("Embedded: %1").arg(page.trackName(player.subtitleTracks[index], index))
+                text: qsTr("Embedded: %1").arg(modelData.label)
                 checkable: true
-                checked: page.subtitleChoice === -1 && player.activeSubtitleTrack === index
-                onTriggered: { page.subtitlesOff(); player.activeSubtitleTrack = index }
+                checked: page.subtitleChoice === -1 && player.subtitleId === modelData.id
+                onTriggered: page.chooseEmbedded(modelData)
             }
         }
         MenuSeparator {}
@@ -367,30 +506,33 @@ Page {
     Menu {
         id: audioMenu
         Material.roundedScale: theme.radius
+        onClosed: keyCatcher.forceActiveFocus()
         Repeater {
-            model: player.audioTracks.length
+            model: player.audioTracks
             delegate: MenuItem {
-                text: page.trackName(player.audioTracks[index], index)
+                text: modelData.label
                 checkable: true
-                checked: player.activeAudioTrack === index
-                onTriggered: player.activeAudioTrack = index
+                checked: player.audioId === modelData.id
+                onTriggered: player.audioId = modelData.id
             }
         }
     }
 
     Shortcut { sequences: ["Space", "K"]; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.togglePlay() }
     Shortcut { sequence: "Left"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekBy(-10000) }
-    Shortcut { sequence: "Right"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekBy(10000) }
+    // Right normally goes to keyCatcher (tap skips, hold plays 2x); this covers it losing focus.
+    Shortcut { sequence: "Right"; context: Qt.ApplicationShortcut; enabled: page.active && !keyCatcher.activeFocus; onActivated: page.seekBy(10000) }
     Shortcut { sequence: "J"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekBy(-10000) }
     Shortcut { sequence: "L"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekBy(10000) }
     Shortcut { sequence: "Shift+Left"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekBy(-60000) }
     Shortcut { sequence: "Shift+Right"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekBy(60000) }
-    Shortcut { sequence: "Up"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: { audio.volume = Math.min(1, audio.volume + 0.05); osd.show(qsTr("Volume %1").arg(fmt.percent(audio.volume))) } }
-    Shortcut { sequence: "Down"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: { audio.volume = Math.max(0, audio.volume - 0.05); osd.show(qsTr("Volume %1").arg(fmt.percent(audio.volume))) } }
-    Shortcut { sequence: "M"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: { audio.muted = !audio.muted; osd.show(audio.muted ? qsTr("Muted") : qsTr("Sound on")) } }
+    Shortcut { sequence: "Up"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.changeVolume(0.05) }
+    Shortcut { sequence: "Down"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.changeVolume(-0.05) }
+    Shortcut { sequence: "M"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.toggleMute() }
     Shortcut { sequence: "F"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.toggleFullScreen() }
     Shortcut { sequence: "C"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.cycleSubtitles() }
     Shortcut { sequence: "S"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.cycleSubtitles() }
-    Shortcut { sequence: "V"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: { if (library.openInMpv(page.media.url, player.position, page.pageTitle)) player.pause() } }
-    Shortcut { sequence: "Home"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: player.position = 0 }
+    Shortcut { sequence: "V"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.openInMpv() }
+    Shortcut { sequence: "."; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: player.frameStep() }
+    Shortcut { sequence: "Home"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekTo(0) }
 }
