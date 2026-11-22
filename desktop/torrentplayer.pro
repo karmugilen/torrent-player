@@ -14,7 +14,9 @@ HEADERS += \
     src/filepicker.h \
     src/portalfilepicker.h \
     src/theme.h \
-    src/translator.h
+    src/translator.h \
+    src/policy.h \
+    src/settings.h
 
 SOURCES += \
     src/main.cpp \
@@ -26,6 +28,8 @@ SOURCES += \
     src/links.cpp \
     src/portalfilepicker.cpp \
     src/theme.cpp \
-    src/translator.cpp
+    src/translator.cpp \
+    src/policy.cpp \
+    src/settings.cpp
 
 RESOURCES += src/resources.qrc

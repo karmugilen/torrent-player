@@ -6,7 +6,10 @@ TEMPLATE = app
 INCLUDEPATH += ../src
 
 HEADERS += ../src/engine.h ../src/library.h ../src/addsession.h ../src/subtitles.h ../src/format.h \
-           ../src/links.h ../src/theme.h ../src/translator.h
+           ../src/links.h ../src/theme.h ../src/translator.h \
+           ../src/policy.h ../src/settings.h
 SOURCES += torrentplayer_tests.cpp ../src/engine.cpp ../src/library.cpp ../src/addsession.cpp \
-           ../src/subtitles.cpp ../src/format.cpp ../src/links.cpp ../src/theme.cpp ../src/translator.cpp
+           ../src/subtitles.cpp ../src/format.cpp ../src/links.cpp ../src/theme.cpp ../src/translator.cpp \
+           ../src/policy.cpp ../src/settings.cpp
+RESOURCES += ../src/resources.qrc
 DEFINES += SRCDIR=\\\"$$PWD\\\"

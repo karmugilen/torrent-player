@@ -11,6 +11,8 @@
 #include "format.h"
 #include "library.h"
 #include "links.h"
+#include "policy.h"
+#include "settings.h"
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
@@ -196,6 +198,224 @@ private slots:
         QVERIFY(catalog.open(QIODevice::ReadOnly));
         const auto object = QJsonDocument::fromJson(catalog.readAll()).object();
         QCOMPARE(object.value("%n peers").toObject().value("one").toString(), QString("%n peer"));
+    }
+
+    // --- shared/policy.json and settings ---
+
+    void policyLoads() {
+        const Policy &compiled = Policy::instance();
+        QVERIFY2(compiled.isValid(), qPrintable(compiled.error()));
+        const Policy file = Policy::load(SRCDIR "/../../shared/policy.json");
+        QVERIFY2(file.isValid(), qPrintable(file.error()));
+        QCOMPARE(compiled.root(), file.root());
+        QVERIFY(!Policy::load("/nonexistent/policy.json").isValid());
+        QCOMPARE(compiled.ramCacheStepsMiB(),
+                 QList<int>({16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024}));
+        // Android-only settings stay out of the desktop.
+        QVERIFY(!compiled.settingKeys().contains("playbackMethod"));
+        QVERIFY(compiled.settingKeys("android").contains("playbackMethod"));
+        // Every setting says whether Android shows it and has a default.
+        for (const QString &key : compiled.settingKeys("android")) {
+            QVERIFY2(compiled.setting(key).value("visible").isBool(), qPrintable(key));
+            QVERIFY2(compiled.defaultValue(key).isValid(), qPrintable(key));
+        }
+        // The fixed playback mode and hidden engine switches Android uses.
+        const QJsonObject play = compiled.play(), engine = compiled.engine();
+        QVERIFY(play.value("boost").toBool() && play.value("fileOnly").toBool() && play.value("adaptiveBuffer").toBool());
+        QVERIFY(!play.value("burstAwareBuffer").toBool() && !play.value("preloadStart").toBool());
+        QVERIFY(play.value("playNext").toBool());
+        QVERIFY(engine.value("ghostProMode").toBool() && !engine.value("ghostMode").toBool());
+        QVERIFY(engine.value("claudeSeekMode").toBool() && !engine.value("deadlineSeek").toBool());
+        QCOMPARE(engine.value("dialRatePerSec").toInt(), 30);
+    }
+
+    void settingsDefaultsMatchPolicy() {
+        QTemporaryDir dir;
+        Settings settings(dir.filePath("settings.json"));
+        const Policy &policy = Policy::instance();
+        QVERIFY(!settings.keys().isEmpty());
+        for (const QString &key : settings.keys())
+            QCOMPARE(settings.value(key), policy.defaultValue(key));
+        // Android's UiState / LibrarySession defaults.
+        QCOMPARE(settings.directPlayDefault(), false);
+        QCOMPARE(settings.idleDropMinutes(), 15);
+        QCOMPARE(settings.networkPolicy(), QString("ANY"));
+        QCOMPARE(settings.downloadRateKiB(), 0);
+        QCOMPARE(settings.maxPeers(), 55);
+        QCOMPARE(settings.antiDpiEnabled(), false);
+        QCOMPARE(settings.seedingEnabled(), true);
+        QCOMPARE(settings.seedRatioMilli(), 1000);
+        QCOMPARE(settings.seedTimeMinutes(), 60);
+        QCOMPARE(settings.seedUploadKiB(), 256);
+        QCOMPARE(settings.seedWiFiOnly(), true);
+        QCOMPARE(settings.seedChargingOnly(), false);
+        QCOMPARE(settings.pauseOnLowBattery(), false);
+        QCOMPARE(settings.ramCacheAuto(), true);
+        QCOMPARE(settings.value("ramCacheMiB").toInt(), 64);
+        QVERIFY(settings.ramCacheMiB() == 64 || settings.ramCacheMiB() == 128);
+        QCOMPARE(settings.ramCacheBytes(), qint64(settings.ramCacheMiB()) * 1024 * 1024);
+    }
+
+    void autoRamCacheMatchesAndroid() {
+        // RamCachePolicyTest.kt cases with a low-memory threshold below a tenth of RAM,
+        // so Android reserves the same; results follow RamCachePolicy.kt's 128 MiB cap.
+        const qint64 gib = 1024LL * 1024 * 1024;
+        QCOMPARE(autoRamCacheMiB(8 * gib, 4 * gib, 1), 128);
+        QCOMPARE(autoRamCacheMiB(8 * gib, 4 * gib, 2), 128);
+        QCOMPARE(autoRamCacheMiB(8 * gib, 4 * gib, 4), 128);
+        QCOMPARE(autoRamCacheMiB(8 * gib, 4 * gib, 5), 64);
+        QCOMPARE(autoRamCacheMiB(8 * gib, gib + gib / 2, 1), 128);
+        QCOMPARE(autoRamCacheMiB(8 * gib, gib / 2, 1), 64);
+        QCOMPARE(autoRamCacheMiB(16 * gib, 10 * gib, 0), 128);
+        QCOMPARE(autoRamCacheMiB(0, 0, -1), 64);
+        QCOMPARE(autoRamCacheMiB(8 * gib, -1, 1), 64);
+        const Policy::RamRule rule = Policy::instance().ramRule();
+        QCOMPARE(rule.reserveTotalDivisor, 10);
+        QCOMPARE(rule.budgetTotalDivisor, 16);
+        QCOMPARE(rule.budgetAvailableDivisor, 4);
+        QCOMPARE(rule.autoStepsMiB, QList<int>({128, 64}));
+        QCOMPARE(rule.minMiB, 64);
+    }
+
+    void readsMemInfo() {
+        QTemporaryDir dir;
+        QFile f(dir.filePath("meminfo"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("MemTotal:       16000000 kB\nMemFree:  100 kB\nMemAvailable:    8000000 kB\n");
+        f.close();
+        qint64 total = 0, available = 0;
+        QVERIFY(readMemInfo(total, available, f.fileName()));
+        QCOMPARE(total, 16000000LL * 1024);
+        QCOMPARE(available, 8000000LL * 1024);
+        QVERIFY(!readMemInfo(total, available, dir.filePath("missing")));
+    }
+
+    void settingsSaveAndReload() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("sub/settings.json");
+        {
+            Settings settings(path);
+            QSignalSpy spy(&settings, &Settings::settingChanged);
+            settings.setMaxPeers(120);
+            settings.setSeedingEnabled(false);
+            settings.setNetworkPolicy("WIFI_ONLY");
+            settings.setDownloadRateKiB(4096);
+            settings.setRamCacheMiB(256);
+            QCOMPARE(spy.count(), 5);
+            settings.setMaxPeers(120);
+            QCOMPARE(spy.count(), 5);
+            QVERIFY(!settings.ramCacheAuto());
+            QCOMPARE(settings.ramCacheMiB(), 256);
+            QVERIFY(settings.save());
+        }
+        {
+            Settings settings(path);
+            QCOMPARE(settings.maxPeers(), 120);
+            QCOMPARE(settings.seedingEnabled(), false);
+            QCOMPARE(settings.networkPolicy(), QString("WIFI_ONLY"));
+            QCOMPARE(settings.downloadRateKiB(), 4096);
+            QCOMPARE(settings.ramCacheAuto(), false);
+            QCOMPARE(settings.ramCacheBytes(), 256LL * 1024 * 1024);
+            // Out-of-range values are clamped or fall back, as Android's coerceIn does.
+            settings.setMaxPeers(9999);
+            QCOMPARE(settings.maxPeers(), 500);
+            settings.setDownloadRateKiB(3000);
+            QCOMPARE(settings.downloadRateKiB(), 0);
+            settings.setNetworkPolicy("BOGUS");
+            QCOMPARE(settings.networkPolicy(), QString("ANY"));
+            settings.reset();
+            QCOMPARE(settings.maxPeers(), 55);
+            QCOMPARE(settings.ramCacheAuto(), true);
+        }
+        {
+            Settings settings(path);  // reset() saved
+            QCOMPARE(settings.maxPeers(), 55);
+            QCOMPARE(settings.seedingEnabled(), true);
+        }
+        // A broken or hand-edited file still loads.
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(R"({"maxPeers": 2, "seedWiFiOnly": "yes", "ramCacheMiB": 96})");
+        f.close();
+        Settings settings(path);
+        QCOMPARE(settings.maxPeers(), 8);
+        QCOMPARE(settings.seedWiFiOnly(), true);
+        QCOMPARE(settings.ramCacheAuto(), false);  // a chosen size without the Auto flag
+        QCOMPARE(settings.ramCacheMiB(), 96);
+    }
+
+    void engineGetsAndroidStartRequests() {
+        QTemporaryDir dir;
+        Settings settings(dir.filePath("settings.json"));
+        settings.setRamCacheMiB(128);
+        DeviceConditions device;
+        const QList<EngineRequest> r = EngineSettings::startRequests(settings, device);
+        auto at = [&](int i) { return r.value(i).body; };
+        QCOMPARE(r.size(), 16);
+        QCOMPARE(at(0), QJsonObject({{"maxPeers", 55}}));
+        QCOMPARE(at(1), QJsonObject({{"downloadRateBytesSec", 0}}));
+        QCOMPARE(at(2), QJsonObject({{"dialRatePerSec", 30}}));
+        QCOMPARE(at(3), QJsonObject({{"peerExploration", false}}));
+        QCOMPARE(at(4), QJsonObject({{"ghostMode", false}}));
+        QCOMPARE(at(5), QJsonObject({{"ghostProMode", true}}));
+        QCOMPARE(at(6), QJsonObject({{"claudeSeekMode", true}}));
+        QCOMPARE(at(7), QJsonObject({{"hedgeRequests", true}}));
+        QCOMPARE(at(8), QJsonObject({{"slowPeerYield", true}}));
+        QCOMPARE(at(9), QJsonObject({{"dropChokers", true}}));
+        QCOMPARE(at(10), QJsonObject({{"deadlineSeek", false}}));
+        QCOMPARE(at(11), QJsonObject({{"idleDropMinutes", 15}}));
+        QCOMPARE(at(12), QJsonObject({{"ramCacheBytes", 128LL * 1024 * 1024}}));
+        QCOMPARE(at(13), QJsonObject({{"seedingEnabled", true}, {"seedingAllowed", true}, {"seedRatioMilli", 1000},
+                                      {"seedTimeMinutes", 60}, {"uploadRateBytesSec", 256 * 1024}}));
+        QCOMPARE(at(14), QJsonObject({{"payloadTransfersAllowed", true}}));
+        QCOMPARE(r[15].path, QString("/bypass"));
+        QCOMPARE(at(15), QJsonObject({{"enabled", false}}));
+        for (int i = 0; i < 15; ++i)
+            QCOMPARE(r[i].path, QString("/settings"));
+
+        // Seeding pauses while playing, off Wi-Fi when asked, and sends no upload rate when off.
+        device.playing = true;
+        QVERIFY(!EngineSettings::seedingAllowed(settings, device));
+        device.playing = false;
+        device.wifi = false;
+        QVERIFY(!EngineSettings::seedingAllowed(settings, device));
+        settings.setNetworkPolicy("WIFI_ONLY");
+        QVERIFY(!EngineSettings::networkAllowed(settings, device));
+        settings.setPauseOnLowBattery(true);
+        device = {};
+        device.charging = false;
+        device.batteryPercent = 10;
+        QVERIFY(EngineSettings::batteryPaused(settings, device));
+        settings.setSeedingEnabled(false);
+        const QList<EngineRequest> seeding = EngineSettings::requestsFor("seedingEnabled", settings, device);
+        QCOMPARE(seeding.size(), 1);
+        QCOMPARE(seeding[0].body.value("uploadRateBytesSec").toInteger(), 0);
+    }
+
+    void engineHearsSettingChanges() {
+        QTemporaryDir dir;
+        Settings settings(dir.filePath("settings.json"));
+        QList<EngineRequest> sent;
+        EngineSettings engineSettings(&settings, [&](const QString &path, const QJsonObject &body, Engine::Reply reply) {
+            sent << EngineRequest{path, body};
+            if (reply)
+                reply(QJsonObject{{"ramCacheBytes", 192LL * 1024 * 1024}}, 200);
+        });
+        engineSettings.applyAll();
+        QCOMPARE(sent.size(), 16);
+        QCOMPARE(settings.ramCacheMiB(), 192);  // what the engine applied
+        sent.clear();
+        // A dragged slider: only the last value goes out.
+        for (int n = 60; n <= 80; ++n)
+            settings.setMaxPeers(n);
+        settings.setAntiDpiEnabled(true);
+        QTRY_COMPARE(sent.size(), 2);
+        QVERIFY(sent.contains(EngineRequest{"/settings", {{"maxPeers", 80}}}));
+        QVERIFY(sent.contains(EngineRequest{"/bypass", {{"enabled", true}}}));
+        sent.clear();
+        settings.setDirectPlayDefault(true);  // app-only setting
+        QTest::qWait(400);
+        QVERIFY(sent.isEmpty());
     }
 };
 
