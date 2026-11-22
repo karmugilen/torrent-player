@@ -77,11 +77,22 @@ in screenshots and videos.
 
 ## Each later release
 
-1. Bump `versionCode`/`versionName`, add the changelog, commit and push.
-2. F-Droid and GitHub: `scripts/fdroid-release.sh`, then `gh release create`
-   (see [FDROID_SUBMISSION.md](FDROID_SUBMISSION.md)).
-3. Play: `scripts/play-bundle.sh`, upload the `.aab` to the Play track, paste the
-   changelog as release notes.
+One command: write `fastlane/metadata/android/en-US/changelogs/<code>.txt`
+(500 characters max; optional long GitHub notes in `<code>.md`), then
+`scripts/ship.sh <x.y.z>` (try `--dry-run` first). It bumps the version, runs the
+tests (only those in `scripts/known-test-failures.txt` may fail), builds and checks
+the Play bundle, pushes, runs `scripts/release.sh --publish` (F-Droid build, GitHub
+release) and uploads to the Play closed test with `scripts/play-upload.py`.
+
+**One-time setup for the Play upload** (without it `ship.sh` prints the manual steps):
+1. Google Cloud console: create a project (or reuse one), enable
+   **Google Play Android Developer API**, create a **service account**, and add a
+   **JSON key**. Save it as `~/.config/webtor/play-service-account.json`
+   (`chmod 600`; never commit or print it).
+2. Play Console, **Users and permissions**: invite the service account's email,
+   give it access to Torrent Player with **Release to testing tracks** (and
+   production later), and accept.
+3. Check: `scripts/ship.sh <next> --dry-run` passes, then the real run uploads.
 
 ## Full description (plain text for Play)
 
