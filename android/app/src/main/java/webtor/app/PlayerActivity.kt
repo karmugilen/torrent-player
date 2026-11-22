@@ -115,6 +115,12 @@ import kotlinx.coroutines.withContext
 import kotlin.concurrent.read
 import kotlin.concurrent.write
 import kotlin.math.roundToInt
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.asCoroutineDispatcher
+import androidx.compose.foundation.border
 
 /** Picture size in the built-in player, remembered between videos. */
 enum class PlayerAspect(val label: String, val detail: String) {
@@ -1072,6 +1078,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (pageMode) runCatching { orientationListener.disable() }
         runCatching { unregisterReceiver(pipReceiver) }
         teardown()
+        lifecycleScope.launch(thumbThread) { scrubThumbs.release(); thumbThread.close() }
         super.onDestroy()
     }
 
@@ -1082,6 +1089,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private val spans = mutableStateOf<List<Span>>(emptyList())
     @Volatile private var currentFile: Triple<String, Int, Long>? = null
+    /** Engine id, file index and length of the playing torrent file (also when complete). */
+    @Volatile private var thumbFile: Triple<String, Int, Long>? = null
+    private val scrubThumbs by lazy { ScrubThumbs(applicationContext, (application as WebtorApp).engine) }
+    private val thumbThread by lazy { java.util.concurrent.Executors.newSingleThreadExecutor().asCoroutineDispatcher() }
+
+    /** What the seek-bar picture reads: saved torrent bytes, or the local file. */
+    private fun scrubSource(): ScrubThumbs.Source? {
+        val item = items.getOrNull(playlistPos.intValue) ?: return null
+        torrentOf(item.uri)?.let { (id, index) ->
+            val f = thumbFile?.takeIf { it.first == id && it.second == index } ?: return null
+            return ScrubThumbs.Source.Torrent(id, index, f.third)
+        }
+        return if (item.uri.scheme == "content" || item.uri.scheme == "file") ScrubThumbs.Source.Local(item.uri) else null
+    }
     private var prefetchJob: kotlinx.coroutines.Job? = null
 
     /**
@@ -1127,6 +1148,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val files = status.files.sortedBy { it.index }
         val file = files.find { it.index == fileIndex } ?: return
         if (file.length <= 0) return
+        thumbFile = Triple(id, fileIndex, file.length)
         fileDone.value = (file.progress * 100).toInt().coerceIn(0, 100)
         if (file.progress >= 1.0) { spans.value = listOf(Span(0f, 1f, 1f)); return }
         currentFile = Triple(id, fileIndex, file.length)
@@ -1229,6 +1251,22 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         var popup by remember { mutableStateOf<String?>(null) }
         var popupSub by remember { mutableStateOf<String?>(null) }
         var popupLevel by remember { mutableStateOf<Float?>(null) }
+        // Seek-bar picture: where the finger is, and the frame there (saved spots only).
+        var scrubAt by remember { mutableStateOf<Double?>(null) }
+        var scrubPic by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+        var barTop by remember { mutableFloatStateOf(0f) }
+        var boxLeft by remember { mutableFloatStateOf(0f) }
+        var boxTop by remember { mutableFloatStateOf(0f) }
+        var boxWidth by remember { mutableFloatStateOf(0f) }
+        LaunchedEffect(Unit) {
+            androidx.compose.runtime.snapshotFlow { scrubAt }.collectLatest { t ->
+                if (t == null) { scrubPic = null; return@collectLatest }
+                delay(40) // only the spot the finger rests on
+                val src = scrubSource() ?: run { scrubPic = null; return@collectLatest }
+                val bmp = withContext(thumbThread) { scrubThumbs.frame(src, (t * 1_000_000).toLong()) }
+                scrubPic = bmp?.asImageBitmap()
+            }
+        }
         var fast by remember { mutableStateOf(false) }
         // Hold speed as in mpvEx: starts at 2x, slide to change, swipe up while holding to keep it.
         var holdSpeed by remember { mutableStateOf(2.0) }
@@ -1282,16 +1320,19 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val inBuffer = target >= pos - 5 && target <= cached.doubleValue
             popupSub = if (ready == false && !inBuffer) "will buffer" else null
             popupLevel = null
+            scrubAt = target
             if (ready == true || inBuffer) {
                 val now = System.currentTimeMillis()
                 if (now - lastScrubAt > 250 && !seekWait) { lastScrubAt = now; seekTo(target) }
             } else prefetchFor(target, dur)
         }
-        fun endScrub() { scrubOrigin = null; popup = null; popupSub = null }
+        fun endScrub() { scrubOrigin = null; popup = null; popupSub = null; scrubAt = null; scrubPic = null }
 
         // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
         val spinning = (isBuffering && (!isPaused || lengthWait.value)) || (seekingNow && scrubOrigin == null && !sliderDragging)
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
+        Box(Modifier.fillMaxSize().background(Color.Black).onGloballyPositioned {
+            val p = it.positionInRoot(); boxLeft = p.x; boxTop = p.y; boxWidth = it.size.width.toFloat()
+        }) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
 
             if (inPip.value) return@Box
@@ -1575,6 +1616,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             }
                         }
                         SeekBar(
+                            modifier = Modifier.onGloballyPositioned { barTop = it.positionInRoot().y },
                             fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
                             cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
                             onDrag = { f ->
@@ -1652,7 +1694,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
             // Small player on the details page: one small line just above the
             // play button, clear of the title bar.
-            if (compact) popup?.let { text ->
+            if (compact && !(sliderDragging && scrubPic != null)) popup?.let { text ->
                 Text(
                     text + (popupSub?.let { "  ·  $it" } ?: ""),
                     color = Color.White,
@@ -1662,6 +1704,32 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         .clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f))
                         .padding(horizontal = 10.dp, vertical = 3.dp),
                 )
+            }
+            // Seek-bar picture, like YouTube: above the bar, under the finger.
+            val pic = scrubPic
+            if (sliderDragging && pic != null && dur > 0 && barTop > 0f) {
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val cardW = if (compact) 128.dp else 176.dp
+                val cardH = cardW * pic.height / pic.width.coerceAtLeast(1)
+                val f = (sliderValue / dur).toFloat().coerceIn(0f, 1f)
+                Column(
+                    Modifier.offset {
+                        val w = cardW.roundToPx(); val margin = 8.dp.roundToPx()
+                        val x = (f * boxWidth - w / 2f).roundToInt().coerceIn(margin, (boxWidth.roundToInt() - w - margin).coerceAtLeast(margin))
+                        val h = cardH.roundToPx() + with(density) { 22.dp.roundToPx() }
+                        androidx.compose.ui.unit.IntOffset(x, (barTop - boxTop).roundToInt() - h - 4.dp.roundToPx())
+                    }.width(cardW),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    androidx.compose.foundation.Image(pic, null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.width(cardW).height(cardH).clip(RoundedCornerShape(8.dp))
+                            .border(1.5.dp, Color.White, RoundedCornerShape(8.dp)))
+                    Text(clock(sliderValue.toDouble()), color = Color.White, maxLines = 1,
+                        style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 8.dp, vertical = 1.dp))
+                }
             }
             // Small pop-up for swipes and seeking.
             if (!compact) popup?.let { text ->
@@ -1744,12 +1812,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
      * what was played. Download progress is shown as a number below it.
      */
     @Composable
-    private fun SeekBar(fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
+    private fun SeekBar(modifier: Modifier = Modifier, fraction: Float, cachedFraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
         var active by remember { mutableStateOf(false) }
         val drag by rememberUpdatedState(onDrag)
         val dragEnd by rememberUpdatedState(onDragEnd)
         Canvas(
-            Modifier.fillMaxWidth().height(40.dp)
+            modifier.fillMaxWidth().height(40.dp)
                 .pointerInput(Unit) {
                     // One handler for tap and drag: the finger may leave the thin bar
                     // (up or down) and the seek still follows it and lands on release.

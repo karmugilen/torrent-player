@@ -100,6 +100,9 @@ class EngineHost(private val context: Context) : EngineTransport {
     external fun readPreview(handle: Long, offset: Long, size: Int, target: ByteArray): Int
     external fun closePreview(handle: Long)
 
+    /** Saved bytes only, never downloads; -1 when that spot is not saved. */
+    external fun readSaved(id: String, fileIndex: Int, offset: Long, size: Int, target: ByteArray): Int
+
     companion object {
         const val TAG = "webtor-engine"
 

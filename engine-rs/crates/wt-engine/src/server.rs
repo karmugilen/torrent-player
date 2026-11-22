@@ -2548,6 +2548,37 @@ impl EngineServer {
         for reader in readers { reader.refresh_window(); }
     }
 
+    /// Copy saved bytes of one file (verified pieces or the Direct Play cache).
+    /// Never asks peers for anything. `-1` when the spot is not saved.
+    pub fn read_saved(&self, id: &str, index: usize, offset: i64, buf: &mut [u8]) -> i32 {
+        let Some(rec_arc) = self.records.read().get(id).cloned() else {
+            return -1;
+        };
+        let (file_offset, length, info_hash) = {
+            let rec = rec_arc.read();
+            let Some(file) = rec.torrent.files().get(index).cloned() else {
+                return -1;
+            };
+            (file.offset(), file.length(), rec.info_hash.clone())
+        };
+        if offset >= length {
+            return 0;
+        }
+        let Some(storage) = self.storage.get_storage(&info_hash) else {
+            return -1;
+        };
+        let want = buf.len().min((length - offset) as usize);
+        let mut n = 0usize;
+        while n < want {
+            let (got, ok) = storage.read_verified_preview(&mut buf[n..want], file_offset + offset + n as i64);
+            if !ok || got == 0 {
+                break;
+            }
+            n += got;
+        }
+        if n == 0 { -1 } else { n as i32 }
+    }
+
     pub fn open_preview(&self, id: &str, index: usize) -> std::io::Result<Arc<PreviewReader>> {
         let reader = crate::preview::open_preview(self, id, index)?;
         *self.preview_active_id.lock() = Some(id.to_string());
