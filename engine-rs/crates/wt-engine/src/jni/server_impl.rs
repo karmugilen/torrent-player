@@ -250,16 +250,6 @@ impl EngineHostApi for AndroidEngineHost {
         }
     }
 
-    fn read_saved(&self, id: &str, file_index: i32, offset: i64, buf: &mut [u8]) -> i32 {
-        if buf.len() > 1024 * 1024 || file_index < 0 || offset < 0 {
-            return -1;
-        }
-        let Some(server) = self.current_server() else {
-            return -1;
-        };
-        server.read_saved(id, file_index as usize, offset, buf)
-    }
-
     fn close_preview(&self, handle: i64) {
         let reader = self.preview.lock().remove(&handle);
         if let Some(reader) = reader {

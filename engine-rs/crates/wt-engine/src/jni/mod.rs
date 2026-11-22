@@ -349,45 +349,6 @@ pub extern "system" fn Java_webtor_app_EngineHost_readPreview(
     }
 }
 
-/// `Java_webtor_app_EngineHost_readSaved`
-#[no_mangle]
-pub extern "system" fn Java_webtor_app_EngineHost_readSaved(
-    mut env: JNIEnv,
-    _host: JObject,
-    id: JString,
-    index: jint,
-    offset: jlong,
-    size: jint,
-    target: JByteArray,
-) -> jint {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let Ok(array_len) = env.get_array_length(&target) else {
-            return -1;
-        };
-        if !(0..=MAX_READ_SIZE).contains(&size) || size > array_len {
-            return -1;
-        }
-        let Some(engine) = current_engine() else {
-            return -1;
-        };
-        let id = java_string(&mut env, id);
-        let mut buf = vec![0u8; size as usize];
-        let n = engine.read_saved(&id, index, offset, &mut buf);
-        if n > 0 {
-            let signed =
-                unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<i8>(), n as usize) };
-            if env.set_byte_array_region(&target, 0, signed).is_err() {
-                return -1;
-            }
-        }
-        n
-    }));
-    result.unwrap_or_else(|_| {
-        log_error("readSaved panicked");
-        -1
-    })
-}
-
 /// `Java_webtor_app_EngineHost_closePreview`
 #[no_mangle]
 pub extern "system" fn Java_webtor_app_EngineHost_closePreview(

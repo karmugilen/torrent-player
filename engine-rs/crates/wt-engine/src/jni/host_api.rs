@@ -90,11 +90,4 @@ pub trait EngineHostApi: Send + Sync + 'static {
     /// Go: `Java_webtor_app_EngineHost_closePreview`.
     /// Missing handles are ignored; a present handle is deleted and `Close`d.
     fn close_preview(&self, handle: i64);
-
-    /// Read file bytes that are already saved (verified or cached), never
-    /// downloading. Returns bytes read, or `-1` when that spot is not saved.
-    /// Used for the player's seek-bar picture.
-    fn read_saved(&self, _id: &str, _file_index: i32, _offset: i64, _buf: &mut [u8]) -> i32 {
-        -1
-    }
 }

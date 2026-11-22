@@ -643,26 +643,6 @@ impl DocumentTorrentStorage {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Bytes the player could read right now without waiting: verified pieces,
-    /// plus blocks already received for a Direct Play piece still in flight
-    /// (most of the play buffer). Never asks the network. 0 when not here.
-    pub fn read_saved(&self, buf: &mut [u8], abs: i64) -> usize {
-        let mut inner = self.inner.lock();
-        if inner.closed || !inner.attached || inner.chunk_length <= 0 || buf.is_empty() {
-            return 0;
-        }
-        let index = (abs / inner.chunk_length) as usize;
-        let off = abs % inner.chunk_length;
-        if !inner.completed.get(&index).copied().unwrap_or(false) {
-            if !inner.stream {
-                return 0;
-            }
-            return self.read_received_locked(&mut inner, buf, index, off).unwrap_or(0);
-        }
-        let piece = inner.info.as_ref().unwrap().piece(index as u32);
-        self.read_piece_data_unlocked(inner, piece, buf, off).unwrap_or(0)
-    }
-
     pub fn read_verified_preview(&self, buf: &mut [u8], abs: i64) -> (usize, bool) {
         let inner = self.inner.lock();
         if inner.closed || !inner.attached || inner.chunk_length <= 0 || buf.is_empty() {
