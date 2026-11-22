@@ -120,6 +120,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import androidx.compose.foundation.border
 
 /** Picture size in the built-in player, remembered between videos. */
@@ -1096,6 +1097,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun currentFileId(): Pair<String, Int>? = items.getOrNull(playlistPos.intValue)?.let { torrentOf(it.uri) }
 
+    /**
+     * Run blocking work on [dispatcher] but stop waiting for it the moment the
+     * caller is cancelled (the finger moved), so the next spot starts at once.
+     * withContext would hold the new spot until the old call returned.
+     */
+    private suspend fun <T> detached(dispatcher: kotlin.coroutines.CoroutineContext, block: () -> T): T =
+        lifecycleScope.async(dispatcher) { block() }.await()
+
     /** What the seek-bar picture reads: saved torrent bytes, or the local file. */
     private fun scrubSource(): ScrubThumbs.Source? {
         val item = items.getOrNull(playlistPos.intValue) ?: return null
@@ -1258,7 +1267,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
                 val us = (t * 1_000_000).toLong()
                 scrubThumbs.note("ask ${us / 1000} ms")
-                var result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
+                var result = detached(thumbThread) { scrubThumbs.frame(src, us) }
                 if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); return@collectLatest }
                 scrubPic = null
                 if (src !is ScrubThumbs.Source.Torrent) return@collectLatest
@@ -1279,7 +1288,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     }
                     // Short slices so a moved finger stops the wait quickly.
                     val began = android.os.SystemClock.elapsedRealtime()
-                    val landed = withContext(Dispatchers.IO) {
+                    val landed = detached(Dispatchers.IO) {
                         runCatching { engine.waitSaved(src.id, src.index, missing, 500) }.getOrDefault(false)
                     }
                     if (!landed) {
@@ -1287,7 +1296,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         if (android.os.SystemClock.elapsedRealtime() - began < 400) delay(500)
                         continue
                     }
-                    result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
+                    result = detached(thumbThread) { scrubThumbs.frame(src, us) }
                     if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); break }
                 }
             }
