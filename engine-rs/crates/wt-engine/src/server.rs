@@ -2579,8 +2579,8 @@ impl EngineServer {
         let want = buf.len().min((length - offset) as usize);
         let mut n = 0usize;
         while n < want {
-            let (got, ok) = storage.read_verified_preview(&mut buf[n..want], file_offset + offset + n as i64);
-            if !ok || got == 0 {
+            let got = storage.read_saved(&mut buf[n..want], file_offset + offset + n as i64);
+            if got == 0 {
                 break;
             }
             n += got;

@@ -50,13 +50,13 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
         }.getOrNull()
         if (bmp == null) {
             val missing = bytes?.firstMissing
-            Log.i(TAG, "no frame at ${timeUs / 1000} ms, missing byte $missing")
+            note("no frame at ${timeUs / 1000} ms, missing byte $missing")
             // Reopening is slow; only start clean if it keeps failing.
             if (++failures >= 6) { dropRetriever(); failures = 0 }
             return Result.Missing(missing)
         }
         failures = 0
-        Log.i(TAG, "frame at ${timeUs / 1000} ms")
+        note("frame at ${timeUs / 1000} ms")
         cache.put(bucket, bmp)
         return Result.Picture(bmp)
     }
@@ -68,7 +68,7 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
                 is Source.Local -> r.setDataSource(context, src.uri)
                 is Source.Torrent -> r.setDataSource(SavedBytes(host, src).also { bytes = it })
             }
-        }.onFailure { Log.i(TAG, "open $src failed, missing byte ${bytes?.firstMissing}: ${it.message}") }.isSuccess
+        }.onFailure { note("open $src failed, missing byte ${bytes?.firstMissing}: ${it.message}") }.isSuccess
         if (!ok) { runCatching { r.release() }; return null }
         retriever = r
         return r
@@ -103,6 +103,16 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
             return n
         }
         override fun close() {}
+    }
+
+    /** Steps go to logcat and to a small file (adb pull .../files/scrub.log). */
+    fun note(msg: String) {
+        Log.i(TAG, msg)
+        runCatching {
+            val f = java.io.File(context.getExternalFilesDir(null), "scrub.log")
+            if (f.length() > 256 * 1024) f.delete()
+            f.appendText("${System.currentTimeMillis() % 1_000_000} $msg\n")
+        }
     }
 
     private companion object {

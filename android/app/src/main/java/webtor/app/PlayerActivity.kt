@@ -1254,10 +1254,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 if (t == null) { scrubPic = null; return@collectLatest }
                 delay(30) // only the spot the finger is on, not every pixel it crosses
                 val src = scrubSource() ?: run {
-                    android.util.Log.i("webtor-scrub", "no source: ${items.getOrNull(playlistPos.intValue)?.uri} file=$thumbFile")
+                    scrubThumbs.note("no source: ${items.getOrNull(playlistPos.intValue)?.uri} file=$thumbFile")
                     scrubPic = null; return@collectLatest
                 }
                 val us = (t * 1_000_000).toLong()
+                scrubThumbs.note("ask ${us / 1000} ms")
                 var result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
                 if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); return@collectLatest }
                 scrubPic = null
