@@ -1,5 +1,6 @@
 package webtor.app
 
+import webtor.app.PlayerGestures.Drag
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -321,31 +322,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private val duration = mutableDoubleStateOf(0.0)
     private val cached = mutableDoubleStateOf(0.0)
     private val paused = mutableStateOf(false)
-    private val buffering = mutableStateOf(true)
-    @Volatile private var loading = true
-    @Volatile private var cacheWait = false
-    @Volatile private var seekWait = false
-    /** Held paused until the total length is known, so playback never starts with no end time. */
-    private val lengthWait = mutableStateOf(false)
-    /** The file is open and mpv has no length for it at all: only then may play skip the wait. */
-    @Volatile private var openedWithoutLength = false
-    /** A seek the app asked for and mpv has not finished yet; shows the spinner even while paused. */
-    private val seekPending = mutableStateOf(false)
-    private fun markSeek() { seekPending.value = true }
-    private fun updateBuffering() { buffering.value = loading || cacheWait || seekWait || lengthWait.value }
-
-    /**
-     * Start of each file: pause until mpv reports the duration. No time limit: a torrent
-     * may need a while to fetch the header or the index at the end of the file, and
-     * starting before that leaves the player with no end time. Play does not skip the wait,
-     * unless the file opened with no length at all (it would never come).
-     * Runs on the UI thread, like every duration update, so a late reset can never wipe
-     * a length that already arrived.
-     */
-    private fun holdForLength() {
-        duration.doubleValue = 0.0
-        lengthWait.value = true; updateBuffering()
-        mpvSend { MPVLib.setPropertyBoolean("pause", true) }
+    /** Opening, data, seek and length waits: the rules live in [PlaybackGate]. */
+    private val waits = mutableStateOf(PlaybackGate.View())
+    private val gate = PlaybackGate { waits.value = it }
+    private fun obey(commands: List<PlaybackGate.Command>?) = commands?.forEach { c ->
+        mpvSend { MPVLib.setPropertyBoolean("pause", c == PlaybackGate.Command.PAUSE) }
     }
     private var lengthReported: Uri? = null
     /** Tell the engine once per file that the length is known, so it stops fetching the index first. */
@@ -355,11 +336,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         lengthReported = uri
         val (id, index) = torrentOf(uri) ?: return
         lifecycleScope.launch(Dispatchers.IO) { runCatching { (application as WebtorApp).engineClient.lengthKnown(id, index) } }
-    }
-    private fun releaseLength(play: Boolean) {
-        if (!lengthWait.value) return
-        lengthWait.value = false; updateBuffering()
-        if (play) mpvSend { MPVLib.setPropertyBoolean("pause", false) }
     }
     private val playlistPos = mutableIntStateOf(0)
 
@@ -628,7 +604,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             "screenshot-jpeg-quality" to "80",
         ).forEach { (k, v) -> MPVLib.setOptionString(k, v) }
         MPVLib.setOptionString("pause", "yes") // until the length is known
-        lengthWait.value = true
+        gate.engineStarting()
         MPVLib.init()
         applyAspect(aspect.value)
         MPVLib.addObserver(this)
@@ -731,7 +707,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 if (!alive) return@runOnUiThread
                 duration.doubleValue = value
                 if (value > 0) android.util.Log.i("webtor-player", "length on screen: $value s")
-                if (value > 0) { reportLength(); releaseLength(play = true) }
+                if (value > 0) { reportLength(); obey(gate.lengthKnown(value)) }
             }
             "demuxer-cache-time" -> cached.doubleValue = value
         }
@@ -740,8 +716,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         if (!alive) return
         when (property) {
             "pause" -> { paused.value = value; runOnUiThread { updatePip() } }
-            "paused-for-cache" -> { cacheWait = value; updateBuffering() }
-            "seeking" -> { seekWait = value; updateBuffering() }
+            "paused-for-cache" -> gate.cacheWait(value)
+            "seeking" -> gate.mpvSeeking(value)
             "idle-active" -> if (value && firstFileLoaded) runOnUiThread { if (alive) close() }
             "eof-reached" -> runOnUiThread {
                 if (!alive) return@runOnUiThread
@@ -757,17 +733,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 // Nothing here may wait on mpv: this thread also delivers the duration,
                 // and mpv can be busy for many seconds fetching the first frame. Calls
                 // made here used to hold the end time back until playback had begun.
-                loading = false; updateBuffering()
+                gate.fileLoaded()
                 mpvSend {
                     // mpv only reports duration when it changes, so an episode with the same
                     // length as the last one may send nothing: read it once here as well.
                     val known = MPVLib.getPropertyDouble("duration")
-                    openedWithoutLength = known == null || known <= 0
+                    obey(gate.lengthAtOpen(known))
                     if (known != null && known > 0) runOnUiThread {
                         if (!alive) return@runOnUiThread
                         duration.doubleValue = known
                         reportLength()
-                        releaseLength(play = true)
                     }
                 }
                 firstFileLoaded = true
@@ -779,12 +754,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             MPVLib.MPV_EVENT_START_FILE -> {
                 // Paused before mpv gets far with the file: the next episode must not
                 // play a moment before its length is known. Queued, never waited on here.
-                mpvSend { MPVLib.setPropertyBoolean("pause", true) }
-                openedWithoutLength = false
-                loading = true; seekPending.value = false; updateBuffering()
-                runOnUiThread { holdForLength() }
+                obey(gate.fileStarting())
+                // On the UI thread, like every duration update, so this reset never wipes
+                // a length that already arrived.
+                runOnUiThread { duration.doubleValue = 0.0 }
             }
-            MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { loading = false; seekWait = false; seekPending.value = false; updateBuffering() }
+            MPVLib.MPV_EVENT_PLAYBACK_RESTART -> gate.playbackRestarted()
             MPVLib.MPV_EVENT_VIDEO_RECONFIG -> runOnUiThread { updatePip(); if (inPip.value) pipBuffer(true) }
         }
     }
@@ -868,15 +843,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 
     fun togglePause() {
-        if (lengthWait.value) {
-            // No playing before the end time is known.
-            if (openedWithoutLength) releaseLength(play = true)
-            return
-        }
+        // No playing before the end time is known.
+        gate.playPressed()?.let { obey(it); return }
         mpvSend { MPVLib.command(arrayOf("cycle", "pause")) }
     }
-    fun seekBy(seconds: Int) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
-    fun seekTo(seconds: Double) { markSeek(); mpvSend { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
+    fun seekBy(seconds: Int) { gate.seekRequested(); mpvSend { MPVLib.command(arrayOf("seek", seconds.toString(), "relative+keyframes")) } }
+    fun seekTo(seconds: Double) { gate.seekRequested(); mpvSend { MPVLib.command(arrayOf("seek", "%.3f".format(java.util.Locale.ROOT, seconds), "absolute+keyframes")) } }
     fun cycle(what: String) { mpvSend { MPVLib.command(arrayOf("osd-msg", "cycle", what)) } }
     fun next() = switchTo(playlistPos.intValue + 1)
     fun previous() = switchTo(playlistPos.intValue - 1)
@@ -926,7 +898,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val target = fileOf(item)
         val start = target?.second?.takeIf { it.playbackPositionMs > 1000 }?.playbackPositionMs?.div(1000.0)
         target?.let { (entry, file) -> (application as WebtorApp).session.playerSwitched(entry.key, file.index) }
-        loading = true; updateBuffering()
+        gate.switching()
         mpvSend {
             MPVLib.setPropertyString("start", start?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "none")
             MPVLib.command(arrayOf("loadfile", mpvPath(item.uri), "replace"))
@@ -1070,7 +1042,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     override fun onStop() {
         super.onStop()
-        releaseLength(play = false)
+        gate.stopped()
         if (!isFinishing) mpvSend { MPVLib.setPropertyBoolean("pause", true) }
     }
 
@@ -1253,7 +1225,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         return lock
     }
 
-    private enum class Drag { NONE, VOLUME, BRIGHTNESS, SEEK, SPEED, IGNORE }
 
     @Composable
     private fun PlayerScreen(surface: (Context) -> SurfaceView, onBack: () -> Unit, compact: Boolean = false) {
@@ -1281,10 +1252,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         val pos by position
         val dur by duration
         val isPaused by paused
-        val isBuffering by buffering
-        val seekingNow by seekPending
+        val wait by waits
+        val isBuffering = wait.buffering
+        val seekingNow = wait.seekPending
         // Never spin forever if mpv drops a seek.
-        LaunchedEffect(seekingNow) { if (seekingNow) { delay(20_000); seekPending.value = false } }
+        LaunchedEffect(seekingNow) { if (seekingNow) { delay(20_000); gate.seekGaveUp() } }
 
         BackHandler(onBack = onBack)
         LaunchedEffect(controls, touchTick, isPaused, sliderDragging, trackSheet) {
@@ -1292,10 +1264,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         LaunchedEffect(pendingSeek) { if (pendingSeek != null) { delay(4000); pendingSeek = null } }
         LaunchedEffect(pos, isBuffering) {
-            pendingSeek?.let { t -> if (kotlin.math.abs(pos - t) < 3 && !seekWait) pendingSeek = null }
+            pendingSeek?.let { t -> if (kotlin.math.abs(pos - t) < 3 && !gate.view.mpvSeeking) pendingSeek = null }
         }
         LaunchedEffect(skipTick) {
-            if (skipSide != 0) { delay(800); skipSide = 0; skipTotal = 0 }
+            if (skipSide != 0) { delay(PlayerGestures.STREAK_MS); skipSide = 0; skipTotal = 0 }
         }
         LaunchedEffect(Unit) {
             while (true) {
@@ -1311,21 +1283,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
          */
         fun seekPopup(target: Double) {
             val origin = scrubOrigin ?: pos.also { scrubOrigin = it }
-            val delta = target - origin
-            popup = clock(target) + "  [" + (if (delta >= 0) "+" else "-") + clock(kotlin.math.abs(delta)) + "]"
-            val ready = if (dur > 0) readyAt((target / dur).toFloat()) else null
-            val inBuffer = target >= pos - 5 && target <= cached.doubleValue
-            popupSub = if (ready == false && !inBuffer) "will buffer" else null
-            popupLevel = null
-            if (ready == true || inBuffer) {
-                val now = System.currentTimeMillis()
-                if (now - lastScrubAt > 250 && !seekWait) { lastScrubAt = now; seekTo(target) }
-            } else prefetchFor(target, dur)
+            val now = System.currentTimeMillis()
+            val scrub = PlayerGestures.scrub(
+                target = target, origin = origin, position = pos, bufferedUntil = cached.doubleValue,
+                ready = if (dur > 0) readyAt((target / dur).toFloat()) else null,
+                sinceLastSeekMs = now - lastScrubAt, mpvSeeking = gate.view.mpvSeeking,
+            )
+            popup = scrub.label; popupSub = scrub.note; popupLevel = null
+            when (scrub.action) {
+                PlayerGestures.ScrubAction.SEEK_NOW -> { lastScrubAt = now; seekTo(target) }
+                PlayerGestures.ScrubAction.PREFETCH -> prefetchFor(target, dur)
+                PlayerGestures.ScrubAction.WAIT -> {}
+            }
         }
         fun endScrub() { scrubOrigin = null; popup = null; popupSub = null }
 
         // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
-        val spinning = (isBuffering && (!isPaused || lengthWait.value)) || (seekingNow && scrubOrigin == null && !sliderDragging)
+        val spinning = wait.spinning(paused = isPaused, scrubbing = scrubOrigin != null || sliderDragging)
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
 
@@ -1337,7 +1311,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         var held = false
                         var streakPress = false
                         var edgePress = false
-                        fun sideOf(x: Float) = when { x < size.width / 3f -> -1; x > size.width * 2f / 3f -> 1; else -> 0 }
+                        fun sideOf(x: Float) = PlayerGestures.side(x, size.width.toFloat())
+                        val skip = PlayerGestures.SKIP_SECONDS
                         detectTapGestures(
                             onPress = press@{ o ->
                                 held = false
@@ -1346,10 +1321,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 // During a skip streak every tap on the same side adds 10 s at once.
                                 val side = sideOf(o.x)
                                 streakPress = side != 0 && side == skipSide
-                                if (streakPress) { seekBy(10 * side); skipTotal += 10; skipTick++ }
+                                if (streakPress) { seekBy(skip * side); skipTotal += skip; skipTick++ }
                                 coroutineScope {
                                     val hold = launch {
-                                        delay(450)
+                                        delay(PlayerGestures.HOLD_MS)
                                         held = true; speedLocked = false; holdSpeed = 2.0; fast = true; setSpeed(2.0)
                                     }
                                     tryAwaitRelease()
@@ -1362,7 +1337,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 if (!streakPress && !edgePress) {
                                     val side = sideOf(o.x)
                                     if (side == 0) togglePause()
-                                    else { seekBy(10 * side); skipSide = side; skipTotal = 10; skipTick++ }
+                                    else { seekBy(skip * side); skipSide = side; skipTotal = skip; skipTick++ }
                                 }
                             },
                         )
@@ -1400,20 +1375,18 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 if (!change.pressed) { finish(true); break }
                                 val dx = change.position.x - start.x
                                 val dy = change.position.y - start.y
-                                val ax = kotlin.math.abs(dx); val ay = kotlin.math.abs(dy)
                                 if (mode == Drag.NONE) {
-                                    mode = when {
-                                        fast -> Drag.SPEED
-                                        trackSheet != null -> if (ax > 30f || ay > 30f) Drag.IGNORE else Drag.NONE
-                                        compact -> if (ax > 30f || ay > 30f) {
-                                            if (dy < -30f && ay > ax) setFullscreen(true)
-                                            // Swipe down: keep playing in the small window, the library behind it.
-                                            else if (dy > 30f && ay > ax) { controls = false; enterPip() }
-                                            Drag.IGNORE
-                                        } else Drag.NONE
-                                        ax > 30f && ax > ay * 2f && System.currentTimeMillis() - startAt > 100 -> Drag.SEEK
-                                        ay > 30f && ay > ax -> if (start.x < size.width / 2f) Drag.BRIGHTNESS else Drag.VOLUME
-                                        else -> Drag.NONE
+                                    val decided = PlayerGestures.dragStart(
+                                        dx = dx, dy = dy, elapsedMs = System.currentTimeMillis() - startAt,
+                                        startX = start.x, width = size.width.toFloat(),
+                                        holding = fast, sheetOpen = trackSheet != null, compact = compact,
+                                    )
+                                    mode = decided.mode
+                                    when (decided.swipe) {
+                                        PlayerGestures.Swipe.FULLSCREEN -> setFullscreen(true)
+                                        // Swipe down: keep playing in the small window, the library behind it.
+                                        PlayerGestures.Swipe.PIP -> { controls = false; enterPip() }
+                                        PlayerGestures.Swipe.NONE -> {}
                                     }
                                     if (mode == Drag.SPEED) { speedX = change.position.x; speedY = change.position.y }
                                     when (mode) {
@@ -1430,17 +1403,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                 }
                                 when (mode) {
                                     Drag.VOLUME -> {
-                                        val v = (level - dy / (size.height * 0.8f)).coerceIn(0f, 1f)
+                                        val v = PlayerGestures.level(level, dy, size.height.toFloat())
                                         setVolume(v)
                                         popup = "Volume ${(v * 100).roundToInt()}%"; popupSub = null; popupLevel = v
                                     }
                                     Drag.BRIGHTNESS -> {
-                                        val v = (level - dy / (size.height * 0.8f)).coerceIn(0f, 1f)
+                                        val v = PlayerGestures.level(level, dy, size.height.toFloat())
                                         setBrightness(v)
                                         popup = "Brightness ${(v * 100).roundToInt()}%"; popupSub = null; popupLevel = v
                                     }
                                     Drag.SEEK -> {
-                                        val next = (origin + dx * 0.05).coerceIn(0.0, if (dur > 0) dur else Double.MAX_VALUE)
+                                        val next = PlayerGestures.seekTarget(origin, dx, dur)
                                         if (next.toInt() != target.toInt()) {
                                             target = next
                                             seekPopup(target)
@@ -1449,9 +1422,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                                         touchTick++
                                     }
                                     Drag.SPEED -> if (fast) {
-                                        // Right is faster, left is slower: about a third of the screen spans all steps.
-                                        val step = ((change.position.x - speedX) / size.width * (speeds.size - 1) * 3.5f).toInt()
-                                        val next = speeds[(speeds.indexOf(2.0) + step).coerceIn(0, speeds.size - 1)]
+                                        // Right is faster, left is slower.
+                                        val next = PlayerGestures.holdSpeed(change.position.x - speedX, size.width.toFloat())
                                         if (next != holdSpeed) {
                                             holdSpeed = next; setSpeed(next)
                                             view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
@@ -1881,14 +1853,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     }
 }
 
-private val speeds = listOf(0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 
 private fun speedLabel(x: Double) = (if (x % 1.0 == 0.0) x.toInt().toString() else x.toString()) + "×"
 
-private fun clock(seconds: Double): String {
-    val s = seconds.toLong().coerceAtLeast(0)
-    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
-}
+private fun clock(seconds: Double): String = PlayerGestures.clock(seconds)
 
 /** The few settings the player's theme needs, so it skips every other state change. */
 private data class Look(val dark: Boolean, val theme: AppTheme, val reduced: Boolean, val dynamic: Boolean)
