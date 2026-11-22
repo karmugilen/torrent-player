@@ -14,7 +14,7 @@ fi
 mapfile -t matches < <(find "$ARTIFACTS" -maxdepth 1 -name "*$1*.apk" | sort)
 if [ "${#matches[@]}" -ne 1 ]; then
     # An exact build name wins over longer names containing it.
-    mapfile -t exact < <(find "$ARTIFACTS" -maxdepth 1 \( -name "$1" -o -name "webtor-2.3.0-$1-release.apk" \))
+    mapfile -t exact < <(find "$ARTIFACTS" -maxdepth 1 \( -name "$1" -o -name "torrent-player-*-$1-releasekey.apk" \))
     if [ "${#exact[@]}" -ne 1 ]; then
         echo "Expected one build matching '$1', found ${#matches[@]}:" >&2
         printf '  %s\n' "${matches[@]##*/}" >&2

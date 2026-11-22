@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Compile check for the side you staged: Kotlin (android/) and/or Rust (engine-rs/).
+# Tests are not run yet: 4 tests already fail (see AGENTS.md). Skip once with: git commit --no-verify
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+
+if grep -qE '^android/.*\.(kt|kts|java|xml)$' <<<"$staged"; then
+    echo "pre-commit: compiling Kotlin..."
+    (cd "$ROOT/android" && ./gradlew :app:compileDebugKotlin -x :app:buildRustEngine --no-configuration-cache -q)
+fi
+if grep -qE '^engine-rs/.*\.(rs|toml)$' <<<"$staged"; then
+    echo "pre-commit: checking Rust..."
+    (cd "$ROOT/engine-rs" && PATH="$HOME/.cargo/bin:$PATH" RUSTC_WRAPPER= cargo check --workspace --all-targets -q)
+fi

@@ -1,5 +1,7 @@
 # Direct Play and external playback
 
+> **Engine note (2026-11):** the app now runs the Rust engine in `engine-rs/`; `engine-go/` is gone. Go names below (`engine-go/patches/...`, `SetRequestFocus`, Go heap limits) are history. The behaviour still holds: Direct Play keeps the video in RAM, and the player reads received blocks before their piece is verified, so most of the play buffer is unverified pieces.
+
 Choose the preferred add action in **Settings → Prefer Direct Play**. The add sheet always offers both Download and Direct Play after the torrent file list is ready. Download continues to save selected files to Downloads/Webtor. Direct Play creates no full-sized video backing files.
 
 Settings offers Auto RAM or a manual video cache of 64, 128, 256, 512 or 1,024 MiB per transfer. The same limit controls the download write-back cache. The saved choice applies to active and future transfers; lowering the limit lets normal piece replacement release excess buffers safely. Preview tasks retain their separate memory budget. Starting another Direct Play session releases the previous torrent's RAM session, while keeping its library entry, resume position and startup cache. Native readers are limited to four per Direct Play torrent. Settings also allows 8–500 peer connections per transfer, with 55 as the default.

@@ -169,6 +169,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     companion object {
         /** The libmpv instance is process-wide; only its current owner may tear it down. */
         @Volatile private var owner: PlayerActivity? = null
+        /** mpv's warnings and errors in logcat (tag webtor-mpv); without it player failures are silent. */
+        private val mpvLog = MPVLib.LogObserver { prefix, level, text ->
+            when {
+                level <= MPVLib.MPV_LOG_LEVEL_ERROR -> android.util.Log.e("webtor-mpv", "[$prefix] ${text.trimEnd()}")
+                level <= MPVLib.MPV_LOG_LEVEL_WARN -> android.util.Log.w("webtor-mpv", "[$prefix] ${text.trimEnd()}")
+            }
+        }
         /** Calls share it; only create and destroy take it alone, so one slow call never blocks another. */
         private val lock = java.util.concurrent.locks.ReentrantReadWriteLock()
         private val commands = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "mpv-commands") }
@@ -579,6 +586,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         // libass on Android has no system font lookup: with no font, picked subtitles
         // draw nothing. mpv falls back to ~~/subfont.ttf, so give it one (as mpv-android).
+        MPVLib.removeLogObserver(mpvLog) // the observer list is process-wide: add once
+        MPVLib.addLogObserver(mpvLog)
         val mpvDir = subtitleFontDir()
         MPVLib.setOptionString("config", "yes")
         MPVLib.setOptionString("config-dir", mpvDir.path)
