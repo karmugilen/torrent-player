@@ -110,6 +110,7 @@ signals:
 
 private slots:
     void onMpvEvents();
+    void onRenderReady();
     void loadSource();
 
 private:
@@ -141,6 +142,9 @@ private:
     int m_audioId = -1;
     int m_subtitleId = -1;
     QString m_error;
+    bool m_renderReady = false;
+    bool m_loadPending = false;
+    bool m_renderWaitOver = false;
     QHash<quint64, QString> m_screenshots;
     quint64 m_nextReply = 1;
 };

@@ -1,10 +1,12 @@
 #include "mpvitem.h"
 
+#include <QGuiApplication>
 #include <QMetaObject>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
 #include <QQuickWindow>
 #include <QTimer>
+#include <QtGui/qguiapplication_platform.h>
 #include <clocale>
 #include <mutex>
 #include <mpv/client.h>
@@ -74,17 +76,27 @@ public:
         if (!m_render) {
             mpv_opengl_init_params gl{procAddress, nullptr};
             int advanced = 1;
-            mpv_render_param params[] = {
+            QList<mpv_render_param> params{
                 {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
                 {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl},
                 {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced},
-                {MPV_RENDER_PARAM_INVALID, nullptr},
             };
-            if (mpv_render_context_create(&m_render, m_mpv.get(), params) < 0) {
+            // The display connection lets hardware decoding hand frames to OpenGL without a copy.
+#if QT_CONFIG(wayland)
+            if (auto *wayland = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>())
+                params.append({MPV_RENDER_PARAM_WL_DISPLAY, wayland->display()});
+#endif
+#if QT_CONFIG(xcb)
+            if (auto *x11 = qGuiApp->nativeInterface<QNativeInterface::QX11Application>())
+                params.append({MPV_RENDER_PARAM_X11_DISPLAY, x11->display()});
+#endif
+            params.append({MPV_RENDER_PARAM_INVALID, nullptr});
+            if (mpv_render_context_create(&m_render, m_mpv.get(), params.data()) < 0) {
                 qWarning("mpv: could not create the OpenGL render context");
                 m_render = nullptr;
             } else {
                 mpv_render_context_set_update_callback(m_render, renderUpdate, m_shared.get());
+                m_shared->post("onRenderReady");
             }
         }
         return QQuickFramebufferObject::Renderer::createFramebufferObject(size);
@@ -101,13 +113,21 @@ public:
             {MPV_RENDER_PARAM_FLIP_Y, &flip},
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
+        // Qt's own GL state is saved around mpv's drawing.
+        if (m_window)
+            m_window->beginExternalCommands();
         mpv_render_context_render(m_render, params);
+        if (m_window)
+            m_window->endExternalCommands();
     }
+
+    void synchronize(QQuickFramebufferObject *item) override { m_window = item->window(); }
 
 private:
     std::shared_ptr<mpv_handle> m_mpv;
     std::shared_ptr<MpvShared> m_shared;
     mpv_render_context *m_render = nullptr;
+    QQuickWindow *m_window = nullptr;
 };
 
 MpvPlayer::MpvPlayer(QQuickItem *parent) : QQuickFramebufferObject(parent), m_shared(std::make_shared<MpvShared>()) {
@@ -158,6 +178,13 @@ MpvPlayer::MpvPlayer(QQuickItem *parent) : QQuickFramebufferObject(parent), m_sh
     };
     for (const auto &option : options)
         mpv_set_option_string(mpv, option.first, option.second);
+    // For trying the player without a display or sound: "vo=null,ao=null".
+    for (const QString &pair : qEnvironmentVariable("TORRENTPLAYER_MPV_OPTIONS").split(',', Qt::SkipEmptyParts)) {
+        const QString name = pair.section('=', 0, 0).trimmed();
+        mpv_set_option_string(mpv, name.toUtf8().constData(), pair.section('=', 1).trimmed().toUtf8().constData());
+        if (name == "vo")
+            m_renderWaitOver = true;
+    }
     mpv_request_log_messages(mpv, "info");
     if (mpv_initialize(mpv) < 0) {
         m_error = tr("Could not start mpv");
@@ -227,9 +254,32 @@ void MpvPlayer::setStartMs(qint64 ms) {
     emit startMsChanged();
 }
 
+void MpvPlayer::onRenderReady() {
+    qInfo("mpv: OpenGL render context ready");
+    m_renderReady = true;
+    if (m_loadPending)
+        loadSource();
+}
+
 void MpvPlayer::loadSource() {
     if (!m_mpv)
         return;
+    // mpv opens its video output with the file; without the render context by then the
+    // file plays with no picture. Wait for it, but not forever (no OpenGL, offscreen).
+    if (!m_renderReady && !m_source.isEmpty() && !m_renderWaitOver) {
+        if (!m_loadPending) {
+            m_loadPending = true;
+            QTimer::singleShot(3000, this, [this] {
+                m_renderWaitOver = true;
+                if (m_loadPending) {
+                    qWarning("mpv: no OpenGL render context after 3 s; playing without a picture");
+                    loadSource();
+                }
+            });
+        }
+        return;
+    }
+    m_loadPending = false;
     m_loaded = false;
     m_eof = false;
     m_error.clear();
