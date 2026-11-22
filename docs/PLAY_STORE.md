@@ -19,7 +19,7 @@ which `scripts/play-bundle.sh` sets; the content provider authority follows it.
 - App Bundle: `scripts/play-bundle.sh` builds `artifacts/torrent-player-<version>.aab`
   signed with the release key.
 - Privacy policy: [PRIVACY.md](../PRIVACY.md), linked in Settings, About (Play requires an in-app link), URL
-  `https://github.com/karmugilen/torrent-player/blob/go-engine/PRIVACY.md`.
+  `https://github.com/karmugilen/torrent-player/blob/v2.4.0/PRIVACY.md`.
 - Listing text and graphics: `fastlane/metadata/android/en-US/` (title, short
   description, icon 512 px, feature graphic 1024×500, phone screenshots). Play
   shows HTML lists poorly; paste the plain text below as the full description.
