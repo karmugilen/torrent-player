@@ -663,41 +663,6 @@ impl DocumentTorrentStorage {
         self.read_piece_data_unlocked(inner, piece, buf, off).unwrap_or(0)
     }
 
-    /// Sleep until the byte at `abs` can be read by [`Self::read_saved`], or
-    /// `timeout` passes. Woken by piece completion and, for Direct Play, by
-    /// received blocks; no polling. Never asks the network itself.
-    pub fn wait_saved(&self, abs: i64, timeout: std::time::Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        let mut probe = [0u8; 1];
-        loop {
-            let (ready, gen) = {
-                let mut inner = self.inner.lock();
-                if inner.closed || !inner.attached || inner.chunk_length <= 0 {
-                    return false;
-                }
-                let ready = inner.stream_ready.clone();
-                let gen = ready.generation();
-                let index = (abs / inner.chunk_length) as usize;
-                let off = abs % inner.chunk_length;
-                if inner.completed.get(&index).copied().unwrap_or(false) {
-                    return true;
-                }
-                if inner.stream {
-                    if self.read_received_locked(&mut inner, &mut probe, index, off).unwrap_or(0) > 0 {
-                        return true;
-                    }
-                    inner.stream_watch.insert(index, true);
-                }
-                (ready, gen)
-            };
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            ready.wait_timeout(gen, deadline - now);
-        }
-    }
-
     pub fn read_verified_preview(&self, buf: &mut [u8], abs: i64) -> (usize, bool) {
         let inner = self.inner.lock();
         if inner.closed || !inner.attached || inner.chunk_length <= 0 || buf.is_empty() {

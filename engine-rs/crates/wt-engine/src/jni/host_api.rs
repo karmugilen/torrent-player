@@ -97,9 +97,4 @@ pub trait EngineHostApi: Send + Sync + 'static {
     fn read_saved(&self, _id: &str, _file_index: i32, _offset: i64, _buf: &mut [u8]) -> i32 {
         -1
     }
-
-    /// Block until byte `offset` is saved or `timeout_ms` passes.
-    fn wait_saved(&self, _id: &str, _file_index: i32, _offset: i64, _timeout_ms: i64) -> bool {
-        false
-    }
 }

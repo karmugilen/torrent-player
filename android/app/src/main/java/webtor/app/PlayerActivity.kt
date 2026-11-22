@@ -1262,31 +1262,19 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); return@collectLatest }
                 scrubPic = null
                 if (src !is ScrubThumbs.Source.Torrent) return@collectLatest
-                // Not saved: fetch exactly the missing piece right away, then sleep until
-                // the engine says it landed (no timer checks) and show it that moment.
-                val engine = (application as WebtorApp).engine
+                // Not saved: fetch exactly the missing piece right away, show it the moment it lands.
                 var asked = -1L
                 while (true) {
                     val missing = (result as ScrubThumbs.Result.Missing).offset
                         ?: duration.value.takeIf { it > 0 }?.let { (src.length * (t / it)).toLong() }
-                        ?: break
-                    if (missing / (1L shl 20) != asked) {
+                    if (missing != null && missing / (1L shl 20) != asked) {
                         asked = missing / (1L shl 20)
                         scrubFetched = t
                         withContext(Dispatchers.IO) {
                             runCatching { client.prefetch(src.id, src.index, missing - (256L shl 10), 4L shl 20) }
                         }
                     }
-                    // Short slices so a moved finger stops the wait quickly.
-                    val began = android.os.SystemClock.elapsedRealtime()
-                    val landed = withContext(Dispatchers.IO) {
-                        runCatching { engine.waitSaved(src.id, src.index, missing, 500) }.getOrDefault(false)
-                    }
-                    if (!landed) {
-                        // The engine said no at once (torrent gone, file closed): don't spin.
-                        if (android.os.SystemClock.elapsedRealtime() - began < 400) delay(500)
-                        continue
-                    }
+                    delay(150)
                     result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
                     if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); break }
                 }

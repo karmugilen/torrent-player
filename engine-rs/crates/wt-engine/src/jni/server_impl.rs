@@ -260,16 +260,6 @@ impl EngineHostApi for AndroidEngineHost {
         server.read_saved(id, file_index as usize, offset, buf)
     }
 
-    fn wait_saved(&self, id: &str, file_index: i32, offset: i64, timeout_ms: i64) -> bool {
-        if file_index < 0 || timeout_ms <= 0 {
-            return false;
-        }
-        let Some(server) = self.current_server() else {
-            return false;
-        };
-        server.wait_saved(id, file_index as usize, offset, timeout_ms as u64)
-    }
-
     fn close_preview(&self, handle: i64) {
         let reader = self.preview.lock().remove(&handle);
         if let Some(reader) = reader {
