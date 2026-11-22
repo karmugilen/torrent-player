@@ -19,7 +19,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
@@ -215,7 +214,6 @@ fun TorrentFilesScreen(
                     playingIndex = playingIndex,
                     magnetAvailable = magnetUri != null,
                     copiedMagnet = copiedMagnet,
-                    onConvert = { app.session.convertToDownload(entry) },
                     onShareMagnet = { magnetUri?.let { shareMagnetUri(context, it) } },
                     onCopyMagnet = {
                         magnetUri?.let {
@@ -327,7 +325,6 @@ private fun DownloadSummary(
     onPlay: (Int) -> Unit,
     magnetAvailable: Boolean,
     copiedMagnet: Boolean,
-    onConvert: () -> Unit,
     onShareMagnet: () -> Unit,
     onCopyMagnet: () -> Unit,
     embedded: Boolean = false,
@@ -426,18 +423,6 @@ private fun DownloadSummary(
                         },
                         maxLines = 1,
                     )
-                }
-            }
-            // Direct Play keeps nothing on the phone; this saves the files for offline.
-            if (entry.directPlay && !entry.isDeleting) {
-                FilledTonalButton(
-                    onClick = onConvert,
-                    enabled = entry.metadataReady && entry.engineId != null && !entry.controlsBusy(),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Download to phone")
                 }
             }
             Row(
