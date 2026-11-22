@@ -32,11 +32,12 @@
 </p>
 
 <p align="center">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" width="19%" alt="Library with video previews" />
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2.png" width="19%" alt="Add a magnet and choose files" />
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3.png" width="19%" alt="Live swarm world map and pieces" />
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4.png" width="19%" alt="Connected peers by protocol" />
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="19%" alt="Settings" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" width="16%" alt="Home: video cards with 3 pictures each" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2.png" width="16%" alt="Add a magnet: preview and choose files" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3.png" width="16%" alt="Built-in player: Direct Play from RAM" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4.png" width="16%" alt="Live swarm world map" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="16%" alt="Connected peers by protocol" />
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/6.png" width="16%" alt="Settings" />
 </p>
 <p align="center">
   <sub>Library · Add a torrent · Swarm map and pieces · Peers · Settings<br>
