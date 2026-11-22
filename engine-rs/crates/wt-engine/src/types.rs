@@ -472,6 +472,13 @@ pub struct PreviewStateResponse {
     /// The container has no keyframe index (e.g. AVI): no keyframe will come.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_keyframe_index: bool,
+    /// How many keyframes the planner will fetch for this file (0: not known yet).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub keyframes_planned: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

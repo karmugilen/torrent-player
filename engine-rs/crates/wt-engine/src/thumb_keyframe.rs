@@ -271,6 +271,9 @@ fn plan_once(weak: &std::sync::Weak<EngineServer>, id: &str, plans: &mut HashMap
                         .map(|p| p as usize).collect();
                     progressed = true;
                     let set = thumb_keyframe_set(&found, offset, length, piece_length);
+                    if !set.is_empty() {
+                        record.write().thumb_planned.insert(index, set.len());
+                    }
                     if set.is_empty() { plan.unindexed = true } else { plan.found = Some(set) }
                 }
                 None => {

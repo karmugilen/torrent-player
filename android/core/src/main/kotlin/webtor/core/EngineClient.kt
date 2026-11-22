@@ -122,6 +122,8 @@ data class LivePreviewState(
     val noKeyframeIndex: Boolean = false,
     /** Up to 3 thumbnail keyframe times, in time order, whose bytes are here. */
     val keyframesUs: List<Long> = emptyList(),
+    /** How many keyframes the engine will fetch (0: not known yet). */
+    val keyframesPlanned: Int = 0,
 )
 
 data class PlayInfo(
@@ -344,6 +346,7 @@ class EngineClient(
             json.optLong("keyframeUs", -1L).takeIf { it >= 0L },
             json.optBoolean("noKeyframeIndex"),
             json.optJSONArray("keyframesUs")?.let { a -> (0 until a.length()).map { a.getLong(it) } }.orEmpty(),
+            json.optInt("keyframesPlanned", 0),
         )
     }
 

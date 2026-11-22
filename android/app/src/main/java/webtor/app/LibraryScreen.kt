@@ -557,9 +557,17 @@ private fun TorrentRow(
                             modifier = Modifier.weight(1f),
                         )
                         StatusMark(entry)
-                        if (!inSelectionMode) IconButton(onClick = onDelete, enabled = !busy, modifier = Modifier.size(32.dp)) {
+                        if (!inSelectionMode) Box(
+                            modifier = Modifier
+                                .size(width = 56.dp, height = 36.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable(enabled = !busy, onClick = onDelete),
+                            contentAlignment = Alignment.Center,
+                        ) {
                             Icon(Icons.Default.Delete, contentDescription = "Remove download",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (busy) 0.38f else 1f),
+                                modifier = Modifier.size(24.dp))
                         }
                     }
                     Text(

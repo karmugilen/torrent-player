@@ -1364,7 +1364,7 @@ class LibrarySession(
     /**
      * No player left on this torrent: Direct Play stops downloading until played
      * again. But first the home card gets its picture: keep going until the
-     * engine has at least 1 thumbnail frame of the first video (10 min at most).
+     * engine has every planned thumbnail frame of the first video (10 min at most).
      */
     fun pauseDirectPlayAfterPlayer(key: String) {
         scope.launch {
@@ -1375,7 +1375,9 @@ class LibrarySession(
                 if (!stillDirect(entry) || PlayerActivity.playing(key)) return@launch
                 val video = firstPreviewVideo(entry!!) ?: break
                 val state = runCatching { withContext(io) { client.previewState(entry.engineId!!, video.index) } }.getOrNull()
-                if (state == null || state.keyframesUs.isNotEmpty() || state.keyframeUs != null || state.noKeyframeIndex) break
+                // Wait for every planned frame, so the card can swipe all 3.
+                val allFrames = state != null && state.keyframesPlanned > 0 && state.keyframesUs.size >= state.keyframesPlanned
+                if (state == null || allFrames || state.noKeyframeIndex) break
                 delay(3_000)
             }
             scope.launchCommand {

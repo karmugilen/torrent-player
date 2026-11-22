@@ -18,6 +18,8 @@ pub struct PreviewStateInput {
     /// Thumbnail keyframe times, microseconds, in time order.
     pub keyframes_us: Vec<i64>,
     pub no_keyframe_index: bool,
+    /// How many keyframes the planner will fetch (0: not known yet).
+    pub keyframes_planned: usize,
 }
 
 /// XOR-fold completed piece indices the way Go does
@@ -68,6 +70,7 @@ pub fn build_preview_state(input: PreviewStateInput) -> PreviewStateResponse {
         keyframe_us: input.keyframes_us.get(input.keyframes_us.len() / 2).copied(),
         keyframes_us: input.keyframes_us,
         no_keyframe_index: input.no_keyframe_index,
+        keyframes_planned: input.keyframes_planned,
     }
 }
 
@@ -107,6 +110,7 @@ mod tests {
             completed_piece_indices: vec![1],
             keyframes_us: Vec::new(),
             no_keyframe_index: false,
+            keyframes_planned: 0,
         });
         assert!(resp.active);
         assert_eq!(resp.byte_offset, 42);

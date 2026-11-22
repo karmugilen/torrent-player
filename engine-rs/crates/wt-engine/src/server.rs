@@ -98,6 +98,8 @@ pub struct TorrentRecord {
     /// Per video file: seconds of the keyframe kept for its thumbnail.
     /// Thumbnail keyframe times per file, seconds, in time order (those whose bytes are here).
     pub(crate) thumb_keyframes: HashMap<usize, Vec<f64>>,
+    /// Per video file: how many thumbnail keyframes the planner will fetch.
+    pub(crate) thumb_planned: HashMap<usize, usize>,
     /// Video files whose container has no keyframe index (thumbnail falls back to a time guess).
     pub(crate) thumb_unindexed: HashSet<usize>,
     /// Set while the thumbnail planner thread runs for this torrent.
@@ -1221,6 +1223,7 @@ impl EngineServer {
             reconnect_peers: Vec::new(),
             index_spans: HashMap::new(),
             thumb_keyframes: HashMap::new(),
+            thumb_planned: HashMap::new(),
             thumb_unindexed: HashSet::new(),
             thumb_planner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             length_known: HashSet::new(),
@@ -2015,6 +2018,7 @@ impl EngineServer {
                 keyframes_us: rec.thumb_keyframes.get(&file.index())
                     .map(|v| v.iter().map(|s| (s * 1e6).round() as i64).collect()).unwrap_or_default(),
                 no_keyframe_index: rec.thumb_unindexed.contains(&file.index()),
+                keyframes_planned: rec.thumb_planned.get(&file.index()).copied().unwrap_or(0),
             });
         (200, serde_json::to_vec(&response).unwrap())
     }

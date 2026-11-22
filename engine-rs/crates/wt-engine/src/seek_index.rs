@@ -106,6 +106,20 @@ pub fn thumb_keyframe_set(index: &VideoIndex, file_offset: i64, file_length: i64
     if out.is_empty() {
         out.push(first);
     }
+    // Fewer than 3 (big pieces with few keyframes inside, or keyframes too
+    // close): top up from the spread spots, one extra fetch each, so every
+    // card can swipe 3 pictures.
+    for f in [0.5, 0.73, 0.27] {
+        if out.len() >= 3 {
+            break;
+        }
+        if let Some(k) = thumb_keyframe(index, f) {
+            if out.iter().all(|o| (o.1 - k.1).abs() >= THUMB_MIN_GAP_SECS) {
+                out.push(k);
+                out.sort_by(|a, b| a.1.total_cmp(&b.1));
+            }
+        }
+    }
     out.into_iter().map(|(at, secs)| (index.read_start(at), at, secs)).collect()
 }
 
@@ -645,6 +659,15 @@ mod tests {
             assert_eq!((at + KEYFRAME_FETCH_BYTES - 1) / piece, first_piece);
         }
         assert!(set[2].2 - set[0].2 >= 8.0);
+    }
+
+    #[test]
+    fn big_pieces_with_few_keyframes_top_up_to_three() {
+        // One keyframe a minute, 20 MB apart: a 16 MB piece holds just one.
+        let keyframes: Vec<(i64, f64)> = (0..100).map(|i| (i as i64 * 20_000_000, i as f64 * 60.0)).collect();
+        let index = VideoIndex { offsets: keyframes.iter().map(|k| k.0).collect(), duration: Some(6000.0), keyframes, clusters: Vec::new() };
+        let secs: Vec<f64> = thumb_keyframe_set(&index, 0, 2_000_000_000, 16 << 20).iter().map(|k| k.2).collect();
+        assert_eq!(secs, vec![1620.0, 3000.0, 4380.0]);
     }
 
     #[test]
