@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Torrent Player desktop sync from Android
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Torrent Player desktop sync from Android
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/scripts/desktop-sync.sh
+# Claude and git need a normal user environment.
+Environment=PATH=%h/.local/share/mise/command-wrappers/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin

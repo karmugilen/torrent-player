@@ -1,5 +1,6 @@
 pkgname=torrentplayer
-pkgver=0.1.0
+# Same versionName as the Android app (android/app/build.gradle.kts).
+pkgver=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' ../../android/app/build.gradle.kts)
 pkgrel=1
 pkgdesc='Stream and download torrents, with the Torrent Player engine'
 arch=('x86_64' 'aarch64')

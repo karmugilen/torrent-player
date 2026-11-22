@@ -24,6 +24,14 @@
 #include "theme.h"
 #include "translator.h"
 
+// Written by desktop/bin/build from Android versionName into build/app_version.h.
+#if __has_include("app_version.h")
+#include "app_version.h"
+#endif
+#ifndef APP_VERSION
+#define APP_VERSION "0.0.0"
+#endif
+
 static QString serverName() {
     return QString("torrentplayer-%1").arg(qEnvironmentVariable("USER", "user"));
 }
@@ -45,7 +53,7 @@ static bool forwardToRunningApp(const QString &link) {
 int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("torrentplayer");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion(QLatin1String(APP_VERSION));
     app.setDesktopFileName("torrentplayer");
     app.setWindowIcon(QIcon::fromTheme("torrentplayer"));
 
@@ -56,7 +64,7 @@ int main(int argc, char *argv[]) {
             return 0;
         }
         if (argument == "--version") {
-            std::printf("torrentplayer %s\n", qPrintable(app.applicationVersion()));
+            std::printf("torrentplayer %s\n", APP_VERSION);
             return 0;
         }
         if (!argument.startsWith("-"))
