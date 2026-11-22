@@ -103,6 +103,9 @@ class EngineHost(private val context: Context) : EngineTransport {
     /** Saved bytes only, never downloads; -1 when that spot is not saved. */
     external fun readSaved(id: String, fileIndex: Int, offset: Long, size: Int, target: ByteArray): Int
 
+    /** Sleeps until byte [offset] is saved (woken by the engine) or [timeoutMs] passes. */
+    external fun waitSaved(id: String, fileIndex: Int, offset: Long, timeoutMs: Long): Boolean
+
     companion object {
         const val TAG = "webtor-engine"
 

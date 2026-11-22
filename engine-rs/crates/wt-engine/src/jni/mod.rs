@@ -388,6 +388,26 @@ pub extern "system" fn Java_webtor_app_EngineHost_readSaved(
     })
 }
 
+/// `Java_webtor_app_EngineHost_waitSaved`
+#[no_mangle]
+pub extern "system" fn Java_webtor_app_EngineHost_waitSaved(
+    mut env: JNIEnv,
+    _host: JObject,
+    id: JString,
+    index: jint,
+    offset: jlong,
+    timeout_ms: jlong,
+) -> jni::sys::jboolean {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Some(engine) = current_engine() else {
+            return false;
+        };
+        let id = java_string(&mut env, id);
+        engine.wait_saved(&id, index, offset, timeout_ms)
+    }));
+    u8::from(result.unwrap_or(false))
+}
+
 /// `Java_webtor_app_EngineHost_closePreview`
 #[no_mangle]
 pub extern "system" fn Java_webtor_app_EngineHost_closePreview(

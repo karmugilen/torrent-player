@@ -2557,6 +2557,27 @@ impl EngineServer {
         for reader in readers { reader.refresh_window(); }
     }
 
+    /// Sleep until byte `offset` of the file is saved, or `timeout_ms` passes.
+    pub fn wait_saved(&self, id: &str, index: usize, offset: i64, timeout_ms: u64) -> bool {
+        let Some(rec_arc) = self.records.read().get(id).cloned() else {
+            return false;
+        };
+        let (file_offset, length, info_hash) = {
+            let rec = rec_arc.read();
+            let Some(file) = rec.torrent.files().get(index).cloned() else {
+                return false;
+            };
+            (file.offset(), file.length(), rec.info_hash.clone())
+        };
+        if offset < 0 || offset >= length {
+            return false;
+        }
+        let Some(storage) = self.storage.get_storage(&info_hash) else {
+            return false;
+        };
+        storage.wait_saved(file_offset + offset, Duration::from_millis(timeout_ms.min(5_000)))
+    }
+
     /// Copy saved bytes of one file (verified pieces or the Direct Play cache).
     /// Never asks peers for anything. `-1` when the spot is not saved.
     pub fn read_saved(&self, id: &str, index: usize, offset: i64, buf: &mut [u8]) -> i32 {

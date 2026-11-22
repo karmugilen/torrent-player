@@ -375,6 +375,8 @@ impl PieceStorage for DocumentPiece {
         flushed?;
         inner.completed.insert(index, true);
         inner.saved_partial.remove(&index);
+        // Wake anyone waiting for this piece (the player's seek-bar picture).
+        inner.stream_ready.notify();
         self.storage
             .note_piece_files_need_sync_locked(&mut inner, index);
         inner.checkpoint_dirty = true;
