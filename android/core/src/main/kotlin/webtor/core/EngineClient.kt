@@ -383,6 +383,11 @@ class EngineClient(
             .put("offset", offset.coerceAtLeast(0L)).put("length", length))
     }
 
+    /** Drop a seek-bar picture fetch: the finger let go somewhere else. */
+    fun cancelPrefetch(id: String, fileIndex: Int) {
+        post("/prefetch", JSONObject().put("id", id).put("fileIndex", fileIndex).put("offset", 0L).put("cancel", true))
+    }
+
     /** Built-in player has the video's length: the engine stops fetching the container index first. */
     fun lengthKnown(id: String, fileIndex: Int) {
         post("/length-known", JSONObject().put("id", id).put("fileIndex", fileIndex))

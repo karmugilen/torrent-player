@@ -6,15 +6,16 @@ import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
-import android.os.SystemClock
+import android.util.Log
 import android.util.LruCache
 
 /**
- * Seek-bar pictures, like YouTube: a small frame at the spot the finger is on.
+ * Seek-bar pictures: a small frame at the spot the finger is on.
  *
  * Torrent files are read through [EngineHost.readSaved], which only copies bytes
  * already saved (downloaded pieces or the Direct Play cache) and never downloads.
- * A spot that is not saved yet simply has no picture. Call from one thread only.
+ * When a spot is not saved, [frame] says which byte was missing, so the player
+ * can fetch exactly that piece and ask again. Call from one thread only.
  */
 class ScrubThumbs(private val context: Context, private val host: EngineHost) {
     sealed interface Source {
@@ -22,49 +23,66 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
         data class Local(val uri: Uri) : Source
     }
 
+    sealed interface Result {
+        class Picture(val bitmap: Bitmap) : Result
+        /** Not saved yet. [offset] is the first file byte that was missing, if known. */
+        class Missing(val offset: Long?) : Result
+    }
+
     private var source: Source? = null
     private var retriever: MediaMetadataRetriever? = null
-    private var failedAt = 0L
-    private val cache = LruCache<Long, Bitmap>(48)
+    private var bytes: SavedBytes? = null
+    private val cache = LruCache<Long, Bitmap>(64)
 
-    /** Nearest keyframe picture at [timeUs], or null when that spot is not saved. */
-    fun frame(src: Source, timeUs: Long): Bitmap? {
+    fun frame(src: Source, timeUs: Long): Result {
         if (src != source) { release(); source = src }
         val bucket = timeUs / BUCKET_US
-        cache.get(bucket)?.let { return it }
-        val r = retriever ?: open(src) ?: return null
+        cache.get(bucket)?.let { return Result.Picture(it) }
+        bytes?.firstMissing = null
+        val r = retriever ?: open(src) ?: return Result.Missing(bytes?.firstMissing)
         val bmp = runCatching {
             if (Build.VERSION.SDK_INT >= 27)
                 r.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, WIDTH, WIDTH * 9 / 16)
             else r.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        }.getOrNull() ?: return null
+        }.getOrNull()
+        if (bmp == null) {
+            val missing = bytes?.firstMissing
+            Log.i(TAG, "no frame at ${timeUs / 1000} ms, missing byte $missing")
+            // A failed read can leave the parser stuck: start clean next time.
+            dropRetriever()
+            return Result.Missing(missing)
+        }
+        Log.i(TAG, "frame at ${timeUs / 1000} ms")
         cache.put(bucket, bmp)
-        return bmp
+        return Result.Picture(bmp)
     }
 
     private fun open(src: Source): MediaMetadataRetriever? {
-        // The header or index may not be saved yet: try again a bit later, not on every move.
-        if (SystemClock.elapsedRealtime() - failedAt < RETRY_MS) return null
         val r = MediaMetadataRetriever()
         val ok = runCatching {
             when (src) {
                 is Source.Local -> r.setDataSource(context, src.uri)
-                is Source.Torrent -> r.setDataSource(SavedBytes(host, src))
+                is Source.Torrent -> r.setDataSource(SavedBytes(host, src).also { bytes = it })
             }
-        }.isSuccess
-        if (!ok) { runCatching { r.release() }; failedAt = SystemClock.elapsedRealtime(); return null }
+        }.onFailure { Log.i(TAG, "open $src failed, missing byte ${bytes?.firstMissing}: ${it.message}") }.isSuccess
+        if (!ok) { runCatching { r.release() }; return null }
         retriever = r
         return r
     }
 
-    fun release() {
+    private fun dropRetriever() {
         runCatching { retriever?.release() }
         retriever = null
-        failedAt = 0L
+    }
+
+    fun release() {
+        dropRetriever()
+        bytes = null
         cache.evictAll()
     }
 
     private class SavedBytes(private val host: EngineHost, private val src: Source.Torrent) : MediaDataSource() {
+        @Volatile var firstMissing: Long? = null
         private var temp = ByteArray(0)
         override fun getSize(): Long = src.length
         override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
@@ -73,7 +91,10 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
             val want = minOf(size, 1 shl 20)
             if (temp.size < want) temp = ByteArray(want)
             val n = runCatching { host.readSaved(src.id, src.index, position, want, temp) }.getOrDefault(-1)
-            if (n <= 0) return -1
+            if (n <= 0) {
+                if (firstMissing == null) firstMissing = position
+                return -1
+            }
             System.arraycopy(temp, 0, buffer, offset, n)
             return n
         }
@@ -81,8 +102,8 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
     }
 
     private companion object {
+        const val TAG = "webtor-scrub"
         const val WIDTH = 320
         const val BUCKET_US = 2_000_000L
-        const val RETRY_MS = 5_000L
     }
 }

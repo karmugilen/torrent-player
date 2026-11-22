@@ -1094,6 +1094,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
     private val scrubThumbs by lazy { ScrubThumbs(applicationContext, (application as WebtorApp).engine) }
     private val thumbThread by lazy { java.util.concurrent.Executors.newSingleThreadExecutor().asCoroutineDispatcher() }
 
+    private fun currentFileId(): Pair<String, Int>? = items.getOrNull(playlistPos.intValue)?.let { torrentOf(it.uri) }
+
     /** What the seek-bar picture reads: saved torrent bytes, or the local file. */
     private fun scrubSource(): ScrubThumbs.Source? {
         val item = items.getOrNull(playlistPos.intValue) ?: return null
@@ -1103,24 +1105,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         }
         return if (item.uri.scheme == "content" || item.uri.scheme == "file") ScrubThumbs.Source.Local(item.uri) else null
     }
-    private var prefetchJob: kotlinx.coroutines.Job? = null
 
-    /**
-     * While the user is still dragging, ask the engine for the bytes around the
-     * spot they are aiming at, so the seek starts on data already arriving.
-     * Time maps to bytes by the file's average bitrate.
-     */
-    private fun prefetchFor(targetSeconds: Double, durationSeconds: Double) {
-        val (id, index, length) = currentFile ?: return
-        if (durationSeconds <= 0) return
-        if (readyAt((targetSeconds / durationSeconds).toFloat()) == true) return
-        prefetchJob?.cancel()
-        prefetchJob = lifecycleScope.launch(Dispatchers.IO) {
-            delay(150) // only the spot the finger rests on
-            val estimate = (length * (targetSeconds / durationSeconds)).toLong()
-            runCatching { (application as WebtorApp).engineClient.prefetch(id, index, estimate - (2L shl 20), 10L shl 20) }
-        }
-    }
     private val swarm = mutableStateOf<String?>(null)
     private val fileDone = mutableStateOf<Int?>(null)
 
@@ -1251,20 +1236,52 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         var popup by remember { mutableStateOf<String?>(null) }
         var popupSub by remember { mutableStateOf<String?>(null) }
         var popupLevel by remember { mutableStateOf<Float?>(null) }
-        // Seek-bar picture: where the finger is, and the frame there (saved spots only).
+        // Seek-bar picture: where the finger is, and the frame there. Saved spots show
+        // at once; resting the finger 0.5 s on a spot not saved fetches just that piece.
         var scrubAt by remember { mutableStateOf<Double?>(null) }
         var scrubPic by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+        var scrubLoading by remember { mutableStateOf(false) }
+        var scrubFetched by remember { mutableStateOf<Double?>(null) }
         var barTop by remember { mutableFloatStateOf(0f) }
+        var barLeft by remember { mutableFloatStateOf(0f) }
+        var barWidth by remember { mutableFloatStateOf(0f) }
         var boxLeft by remember { mutableFloatStateOf(0f) }
         var boxTop by remember { mutableFloatStateOf(0f) }
         var boxWidth by remember { mutableFloatStateOf(0f) }
+        var boxHeight by remember { mutableFloatStateOf(0f) }
         LaunchedEffect(Unit) {
+            val client = (application as WebtorApp).engineClient
             androidx.compose.runtime.snapshotFlow { scrubAt }.collectLatest { t ->
+                scrubLoading = false
                 if (t == null) { scrubPic = null; return@collectLatest }
-                delay(40) // only the spot the finger rests on
-                val src = scrubSource() ?: run { scrubPic = null; return@collectLatest }
-                val bmp = withContext(thumbThread) { scrubThumbs.frame(src, (t * 1_000_000).toLong()) }
-                scrubPic = bmp?.asImageBitmap()
+                delay(30) // only the spot the finger is on, not every pixel it crosses
+                val src = scrubSource() ?: run {
+                    android.util.Log.i("webtor-scrub", "no source: ${items.getOrNull(playlistPos.intValue)?.uri} file=$thumbFile")
+                    scrubPic = null; return@collectLatest
+                }
+                val us = (t * 1_000_000).toLong()
+                var result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
+                if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); return@collectLatest }
+                scrubPic = null // grey box
+                if (src !is ScrubThumbs.Source.Torrent) return@collectLatest
+                delay(470) // finger rested: fetch exactly the missing piece, then try again
+                scrubLoading = true
+                scrubFetched = t
+                val asked = HashSet<Long>()
+                val deadline = System.currentTimeMillis() + 30_000
+                while (System.currentTimeMillis() < deadline) {
+                    val missing = (result as ScrubThumbs.Result.Missing).offset
+                        ?: duration.value.takeIf { it > 0 }?.let { (src.length * (t / it)).toLong() }
+                    if (missing != null && asked.add(missing / (1L shl 20))) {
+                        withContext(Dispatchers.IO) {
+                            runCatching { client.prefetch(src.id, src.index, missing - (256L shl 10), 2L shl 20) }
+                        }
+                    }
+                    delay(400)
+                    result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
+                    if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); break }
+                }
+                scrubLoading = false
             }
         }
         var fast by remember { mutableStateOf(false) }
@@ -1280,7 +1297,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         var scrubOrigin by remember { mutableStateOf<Double?>(null) }
         // After release, hold the bar at the target until mpv gets there (no jump back).
         var pendingSeek by remember { mutableStateOf<Double?>(null) }
-        var lastScrubAt by remember { mutableStateOf(0L) }
         val pos by position
         val dur by duration
         val isPaused by paused
@@ -1320,18 +1336,26 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val inBuffer = target >= pos - 5 && target <= cached.doubleValue
             popupSub = if (ready == false && !inBuffer) "will buffer" else null
             popupLevel = null
+            // The video stays still while dragging; the picture shows the spot,
+            // and the seek happens once on release.
             scrubAt = target
-            if (ready == true || inBuffer) {
-                val now = System.currentTimeMillis()
-                if (now - lastScrubAt > 250 && !seekWait) { lastScrubAt = now; seekTo(target) }
-            } else prefetchFor(target, dur)
         }
-        fun endScrub() { scrubOrigin = null; popup = null; popupSub = null; scrubAt = null; scrubPic = null }
+        fun endScrub() {
+            // Let go far from the spot being fetched for a picture: drop that fetch.
+            val fetched = scrubFetched
+            val landed = pendingSeek
+            if (fetched != null && (landed == null || kotlin.math.abs(landed - fetched) > 10)) {
+                currentFileId()?.let { (id, index) ->
+                    lifecycleScope.launch(Dispatchers.IO) { runCatching { (application as WebtorApp).engineClient.cancelPrefetch(id, index) } }
+                }
+            }
+            scrubOrigin = null; popup = null; popupSub = null; scrubAt = null; scrubPic = null; scrubFetched = null; scrubLoading = false
+        }
 
         // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
         val spinning = (isBuffering && (!isPaused || lengthWait.value)) || (seekingNow && scrubOrigin == null && !sliderDragging)
         Box(Modifier.fillMaxSize().background(Color.Black).onGloballyPositioned {
-            val p = it.positionInRoot(); boxLeft = p.x; boxTop = p.y; boxWidth = it.size.width.toFloat()
+            val p = it.positionInRoot(); boxLeft = p.x; boxTop = p.y; boxWidth = it.size.width.toFloat(); boxHeight = it.size.height.toFloat()
         }) {
             AndroidView(factory = surface, modifier = Modifier.fillMaxSize())
 
@@ -1616,7 +1640,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             }
                         }
                         SeekBar(
-                            modifier = Modifier.onGloballyPositioned { barTop = it.positionInRoot().y },
+                            modifier = Modifier.onGloballyPositioned {
+                                val p = it.positionInRoot(); barTop = p.y; barLeft = p.x; barWidth = it.size.width.toFloat()
+                            },
                             fraction = if (dur > 0) (shown / dur).toFloat().coerceIn(0f, 1f) else 0f,
                             cachedFraction = if (dur > 0) (cached.doubleValue / dur).toFloat().coerceIn(0f, 1f) else 0f,
                             onDrag = { f ->
@@ -1694,7 +1720,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
             // Small player on the details page: one small line just above the
             // play button, clear of the title bar.
-            if (compact && !(sliderDragging && scrubPic != null)) popup?.let { text ->
+            if (compact && scrubAt == null) popup?.let { text ->
                 Text(
                     text + (popupSub?.let { "  ·  $it" } ?: ""),
                     color = Color.White,
@@ -1705,27 +1731,37 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                         .padding(horizontal = 10.dp, vertical = 3.dp),
                 )
             }
-            // Seek-bar picture, like YouTube: above the bar, under the finger.
-            val pic = scrubPic
-            if (sliderDragging && pic != null && dur > 0 && barTop > 0f) {
-                val density = androidx.compose.ui.platform.LocalDensity.current
+            // Seek-bar picture: above the bar, under the finger. Grey box while the
+            // spot is not saved, a spinner while its piece is fetched.
+            val at = scrubAt
+            if (at != null && dur > 0 && scrubSource() != null) {
+                val pic = scrubPic
                 val cardW = if (compact) 128.dp else 176.dp
-                val cardH = cardW * pic.height / pic.width.coerceAtLeast(1)
-                val f = (sliderValue / dur).toFloat().coerceIn(0f, 1f)
+                val cardH = if (pic != null) cardW * pic.height / pic.width.coerceAtLeast(1) else cardW * 9 / 16
+                val f = (at / dur).toFloat().coerceIn(0f, 1f)
                 Column(
                     Modifier.offset {
                         val w = cardW.roundToPx(); val margin = 8.dp.roundToPx()
-                        val x = (f * boxWidth - w / 2f).roundToInt().coerceIn(margin, (boxWidth.roundToInt() - w - margin).coerceAtLeast(margin))
-                        val h = cardH.roundToPx() + with(density) { 22.dp.roundToPx() }
-                        androidx.compose.ui.unit.IntOffset(x, (barTop - boxTop).roundToInt() - h - 4.dp.roundToPx())
+                        val barX = if (barWidth > 0f) barLeft - boxLeft + f * barWidth else f * boxWidth
+                        val x = (barX - w / 2f).roundToInt().coerceIn(margin, (boxWidth.roundToInt() - w - margin).coerceAtLeast(margin))
+                        val h = cardH.roundToPx() + 22.dp.roundToPx()
+                        val bottom = if (barTop > 0f) (barTop - boxTop).roundToInt() - 4.dp.roundToPx()
+                                     else boxHeight.roundToInt() - 72.dp.roundToPx()
+                        androidx.compose.ui.unit.IntOffset(x, bottom - h)
                     }.width(cardW),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    androidx.compose.foundation.Image(pic, null,
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                        modifier = Modifier.width(cardW).height(cardH).clip(RoundedCornerShape(8.dp))
-                            .border(1.5.dp, Color.White, RoundedCornerShape(8.dp)))
-                    Text(clock(sliderValue.toDouble()), color = Color.White, maxLines = 1,
+                    Box(Modifier.width(cardW).height(cardH).clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF2A2A2A)).border(1.5.dp, Color.White, RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center) {
+                        if (pic != null) androidx.compose.foundation.Image(pic, null,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        else if (scrubLoading) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp,
+                            modifier = Modifier.size(if (compact) 18.dp else 24.dp))
+                        else Text("not downloaded", color = Color.White.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    }
+                    Text(clock(at), color = Color.White, maxLines = 1,
                         style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelLarge,
                         modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(50))
                             .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 8.dp, vertical = 1.dp))

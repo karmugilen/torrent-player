@@ -1514,6 +1514,15 @@ impl EngineServer {
             return (404, serde_json::to_vec(&json!({"error": "torrent not found"})).unwrap());
         };
         let rec = record.read();
+        // Seek-bar picture fetch dropped (finger let go elsewhere): playing comes first.
+        if v.get("cancel").and_then(|x| x.as_bool()) == Some(true) {
+            let coordinator = rec.playback_coordinator.clone();
+            let rec_id = rec.id.clone();
+            drop(rec);
+            coordinator.hold_resume(HashMap::new());
+            crate::playback::PlaybackHost::publish_demand(self, &rec_id, &coordinator.effective());
+            return (200, serde_json::to_vec(&json!({"ok": true})).unwrap());
+        }
         if rec.paused || !self.payload_transfers_allowed.load(Ordering::SeqCst) {
             return (200, serde_json::to_vec(&json!({"ok": false})).unwrap());
         }
