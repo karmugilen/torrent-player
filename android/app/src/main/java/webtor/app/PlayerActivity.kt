@@ -1240,7 +1240,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         // at once; resting the finger 0.5 s on a spot not saved fetches just that piece.
         var scrubAt by remember { mutableStateOf<Double?>(null) }
         var scrubPic by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-        var scrubLoading by remember { mutableStateOf(false) }
         var scrubFetched by remember { mutableStateOf<Double?>(null) }
         var barTop by remember { mutableFloatStateOf(0f) }
         var barLeft by remember { mutableFloatStateOf(0f) }
@@ -1252,7 +1251,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         LaunchedEffect(Unit) {
             val client = (application as WebtorApp).engineClient
             androidx.compose.runtime.snapshotFlow { scrubAt }.collectLatest { t ->
-                scrubLoading = false
                 if (t == null) { scrubPic = null; return@collectLatest }
                 delay(30) // only the spot the finger is on, not every pixel it crosses
                 val src = scrubSource() ?: run {
@@ -1262,26 +1260,24 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 val us = (t * 1_000_000).toLong()
                 var result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
                 if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); return@collectLatest }
-                scrubPic = null // grey box
+                scrubPic = null
                 if (src !is ScrubThumbs.Source.Torrent) return@collectLatest
-                delay(470) // finger rested: fetch exactly the missing piece, then try again
-                scrubLoading = true
-                scrubFetched = t
-                val asked = HashSet<Long>()
-                val deadline = System.currentTimeMillis() + 30_000
-                while (System.currentTimeMillis() < deadline) {
+                // Not saved: fetch exactly the missing piece right away, show it the moment it lands.
+                var asked = -1L
+                while (true) {
                     val missing = (result as ScrubThumbs.Result.Missing).offset
                         ?: duration.value.takeIf { it > 0 }?.let { (src.length * (t / it)).toLong() }
-                    if (missing != null && asked.add(missing / (1L shl 20))) {
+                    if (missing != null && missing / (1L shl 20) != asked) {
+                        asked = missing / (1L shl 20)
+                        scrubFetched = t
                         withContext(Dispatchers.IO) {
-                            runCatching { client.prefetch(src.id, src.index, missing - (256L shl 10), 2L shl 20) }
+                            runCatching { client.prefetch(src.id, src.index, missing - (256L shl 10), 4L shl 20) }
                         }
                     }
-                    delay(400)
+                    delay(250)
                     result = withContext(thumbThread) { scrubThumbs.frame(src, us) }
                     if (result is ScrubThumbs.Result.Picture) { scrubPic = result.bitmap.asImageBitmap(); break }
                 }
-                scrubLoading = false
             }
         }
         var fast by remember { mutableStateOf(false) }
@@ -1349,7 +1345,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     lifecycleScope.launch(Dispatchers.IO) { runCatching { (application as WebtorApp).engineClient.cancelPrefetch(id, index) } }
                 }
             }
-            scrubOrigin = null; popup = null; popupSub = null; scrubAt = null; scrubPic = null; scrubFetched = null; scrubLoading = false
+            scrubOrigin = null; popup = null; popupSub = null; scrubAt = null; scrubPic = null; scrubFetched = null
         }
 
         // Loading: waiting for data while playing, for the length, or for a seek (paused or not).
@@ -1720,7 +1716,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
             // Small player on the details page: one small line just above the
             // play button, clear of the title bar.
-            if (compact && scrubAt == null) popup?.let { text ->
+            if (compact && (scrubAt == null || scrubPic == null)) popup?.let { text ->
                 Text(
                     text + (popupSub?.let { "  ·  $it" } ?: ""),
                     color = Color.White,
@@ -1734,10 +1730,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             // Seek-bar picture: above the bar, under the finger. Grey box while the
             // spot is not saved, a spinner while its piece is fetched.
             val at = scrubAt
-            if (at != null && dur > 0 && scrubSource() != null) {
-                val pic = scrubPic
+            val pic = scrubPic
+            if (at != null && dur > 0 && pic != null) {
                 val cardW = if (compact) 128.dp else 176.dp
-                val cardH = if (pic != null) cardW * pic.height / pic.width.coerceAtLeast(1) else cardW * 9 / 16
+                val cardH = cardW * pic.height / pic.width.coerceAtLeast(1)
                 val f = (at / dur).toFloat().coerceIn(0f, 1f)
                 Column(
                     Modifier.offset {
@@ -1754,12 +1750,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                     Box(Modifier.width(cardW).height(cardH).clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFF2A2A2A)).border(1.5.dp, Color.White, RoundedCornerShape(8.dp)),
                         contentAlignment = Alignment.Center) {
-                        if (pic != null) androidx.compose.foundation.Image(pic, null,
+                        androidx.compose.foundation.Image(pic, null,
                             contentScale = androidx.compose.ui.layout.ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                        else if (scrubLoading) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp,
-                            modifier = Modifier.size(if (compact) 18.dp else 24.dp))
-                        else Text("not downloaded", color = Color.White.copy(alpha = 0.6f),
-                            style = MaterialTheme.typography.labelSmall, maxLines = 1)
                     }
                     Text(clock(at), color = Color.White, maxLines = 1,
                         style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelLarge,

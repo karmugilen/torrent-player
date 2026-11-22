@@ -33,6 +33,7 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
     private var retriever: MediaMetadataRetriever? = null
     private var bytes: SavedBytes? = null
     private val cache = LruCache<Long, Bitmap>(64)
+    private var failures = 0
 
     fun frame(src: Source, timeUs: Long): Result {
         if (src != source) { release(); source = src }
@@ -40,6 +41,8 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
         cache.get(bucket)?.let { return Result.Picture(it) }
         bytes?.firstMissing = null
         val r = retriever ?: open(src) ?: return Result.Missing(bytes?.firstMissing)
+        // Only bytes the frame itself needs count; opening may peek at others.
+        bytes?.firstMissing = null
         val bmp = runCatching {
             if (Build.VERSION.SDK_INT >= 27)
                 r.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, WIDTH, WIDTH * 9 / 16)
@@ -48,10 +51,11 @@ class ScrubThumbs(private val context: Context, private val host: EngineHost) {
         if (bmp == null) {
             val missing = bytes?.firstMissing
             Log.i(TAG, "no frame at ${timeUs / 1000} ms, missing byte $missing")
-            // A failed read can leave the parser stuck: start clean next time.
-            dropRetriever()
+            // Reopening is slow; only start clean if it keeps failing.
+            if (++failures >= 6) { dropRetriever(); failures = 0 }
             return Result.Missing(missing)
         }
+        failures = 0
         Log.i(TAG, "frame at ${timeUs / 1000} ms")
         cache.put(bucket, bmp)
         return Result.Picture(bmp)
