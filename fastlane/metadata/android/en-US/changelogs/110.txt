@@ -1,0 +1,1 @@
+Home cards show 3 pictures from each video: swipe to see them, tap to watch. Direct Play pauses after you close the player, once its card has a picture (no Pause button or notification). Subtitles you pick now show. The seek bar still seeks when your finger slides off it. The small player shows the buffered time. Aspect: Fit is now Best fit, with a big label when it changes.
