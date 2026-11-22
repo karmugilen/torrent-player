@@ -253,6 +253,7 @@ class LibrarySession(
                 _ui.update { it.copy(restoring = false, statusLine = if (it.engineReady) "Ready" else it.statusLine) }
                 persist()
                 syncService()
+                topUpDirectPlayThumbnails()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 _ui.update { it.copy(error = readableError(t), restoring = false) }
@@ -894,6 +895,61 @@ class LibrarySession(
         }
     }
 
+    /**
+     * Direct Play -> normal download: same torrent and files, now saved to the
+     * download folder. Watch positions stay; the small stream cache is fetched again.
+     */
+    fun convertToDownload(entry: DownloadEntry) {
+        scope.launchCommand {
+            if (!beginUserWork()) return@launchCommand
+            val current = _ui.value.library.find { it.key == entry.key } ?: return@launchCommand
+            val id = current.engineId
+            if (!current.directPlay || id == null || current.isDeleting || current.controlsBusy() || !current.metadataReady) return@launchCommand
+            val generation = current.generation + 1
+            patch(current.key) { it.copy(generation = generation, error = null) }
+            var created: List<SavedFile> = emptyList()
+            try {
+                val needed = current.files.filter { it.index in current.selected }.sumOf { it.length }
+                val free = withContext(io) { storage.freeBytes }
+                check(needed <= free) {
+                    "Not enough storage. This download needs ${formatBytes(needed)}; ${formatBytes(free)} is available."
+                }
+                val metadata = current.metadata.ifBlank { withContext(io) { client.metadata(id) } }
+                val result = withContext(io) { storage.createFiles(current.copy(metadata = metadata), storage.folder) }
+                created = result.files
+                val pfds = withContext(io) { storage.openFiles(created, current.selected) }
+                try {
+                    withContext(io) { client.configure(id, descriptorsFor(created, pfds, current.selected), current.selected, "download") }
+                } finally {
+                    pfds.forEach { runCatching { it?.close() } }
+                }
+                if (current.paused) withContext(io) { client.resume(id) }
+                patch(current.key) {
+                    if (it.generation != generation) it
+                    else it.copy(
+                        directPlay = false,
+                        metadata = metadata,
+                        files = created,
+                        downloadGroupUri = result.groupUri,
+                        paused = false,
+                        lifecycleState = EntryLifecycleState.DOWNLOADING,
+                        error = null,
+                    )
+                }
+                persist()
+                refreshStorageStats()
+                syncService(force = true)
+                reconcileTransferState()
+                _ui.update { it.copy(message = "Downloading to your phone") }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                val made = created.filter { f -> current.files.none { it.index == f.index && it.uri == f.uri } }
+                if (made.isNotEmpty()) runCatching { withContext(io) { storage.deleteFiles(made) } }
+                patch(current.key) { it.copy(error = readableError(t)) }
+            }
+        }
+    }
+
     fun setDirectPlayDefault(enabled: Boolean) {
         settings.edit().putBoolean("directPlayDefault", enabled).apply()
         _ui.update { it.copy(directPlayDefault = enabled) }
@@ -1366,6 +1422,29 @@ class LibrarySession(
      * again. But first the home card gets its picture: keep going until the
      * engine has every planned thumbnail frame of the first video (10 min at most).
      */
+    /**
+     * Paused Direct Play cards missing thumbnail frames (older builds paused
+     * after 1): resume briefly, then pause again once all frames are in.
+     */
+    private fun topUpDirectPlayThumbnails() {
+        scope.launch {
+            delay(15_000) // let the paused planner read what is saved
+            for (listed in _ui.value.library) {
+                val entry = _ui.value.library.find { it.key == listed.key } ?: continue
+                val id = entry.engineId ?: continue
+                if (!entry.directPlay || !entry.paused || entry.isDeleting) continue
+                val video = firstPreviewVideo(entry) ?: continue
+                val state = runCatching { withContext(io) { client.previewState(id, video.index) } }.getOrNull() ?: continue
+                if (state.keyframesPlanned == 0 || state.keyframesUs.size >= state.keyframesPlanned) continue
+                resume(entry)
+                // Wait for the resume to land, then reuse the "pause once all frames are in" wait.
+                var waited = 0
+                while (waited++ < 30 && _ui.value.library.find { it.key == entry.key }?.paused != false) delay(1_000)
+                pauseDirectPlayAfterPlayer(entry.key)
+            }
+        }
+    }
+
     fun pauseDirectPlayAfterPlayer(key: String) {
         scope.launch {
             val stillDirect = { e: DownloadEntry? -> e != null && e.directPlay && !e.paused && e.engineId != null && !e.isDeleting }

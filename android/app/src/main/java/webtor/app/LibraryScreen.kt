@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -557,17 +559,18 @@ private fun TorrentRow(
                             modifier = Modifier.weight(1f),
                         )
                         StatusMark(entry)
-                        if (!inSelectionMode) Box(
-                            modifier = Modifier
-                                .size(width = 56.dp, height = 36.dp)
-                                .clip(RoundedCornerShape(50))
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .clickable(enabled = !busy, onClick = onDelete),
-                            contentAlignment = Alignment.Center,
+                        // Material 3 tonal icon button, pill shaped: dark grey with a white icon.
+                        if (!inSelectionMode) FilledTonalIconButton(
+                            onClick = onDelete,
+                            enabled = !busy,
+                            shape = CircleShape,
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = Color.White.copy(alpha = 0.10f),
+                                contentColor = Color.White,
+                            ),
+                            modifier = Modifier.size(width = 52.dp, height = 40.dp),
                         ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Remove download",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (busy) 0.38f else 1f),
-                                modifier = Modifier.size(24.dp))
+                            Icon(Icons.Outlined.Delete, contentDescription = "Remove download", modifier = Modifier.size(22.dp))
                         }
                     }
                     Text(

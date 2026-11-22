@@ -1646,8 +1646,21 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
 
+            // Small player on the details page: one small line just above the
+            // play button, clear of the title bar.
+            if (compact) popup?.let { text ->
+                Text(
+                    text + (popupSub?.let { "  ·  $it" } ?: ""),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    modifier = Modifier.align(Alignment.Center).offset(y = (-48).dp)
+                        .clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 10.dp, vertical = 3.dp),
+                )
+            }
             // Small pop-up for swipes and seeking.
-            popup?.let { text ->
+            if (!compact) popup?.let { text ->
                 Column(
                     Modifier.align(Alignment.TopCenter).padding(top = if (compact) 12.dp else 72.dp)
                         .clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.6f))
