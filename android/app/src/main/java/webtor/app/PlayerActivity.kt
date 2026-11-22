@@ -577,6 +577,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             owner = this
             alive = true
         }
+        // libass on Android has no system font lookup: with no font, picked subtitles
+        // draw nothing. mpv falls back to ~~/subfont.ttf, so give it one (as mpv-android).
+        val mpvDir = subtitleFontDir()
+        MPVLib.setOptionString("config", "yes")
+        MPVLib.setOptionString("config-dir", mpvDir.path)
         listOf(
             // Same base as mpvEx: fast profile, hardware decode with software fallback.
             "profile" to "fast",
@@ -633,6 +638,27 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         ).forEach { (k, f) -> MPVLib.observeProperty(k, f) }
 
         if (startSeconds > 1) MPVLib.setPropertyString("start", "%.3f".format(java.util.Locale.ROOT, startSeconds))
+    }
+
+    /**
+     * mpv's config folder with subfont.ttf: a copy of the phone's own sans font
+     * (nothing bundled). Done once; later starts reuse the file.
+     */
+    private fun subtitleFontDir(): java.io.File {
+        val dir = java.io.File(filesDir, "mpv").apply { mkdirs() }
+        val font = java.io.File(dir, "subfont.ttf")
+        if (font.length() > 0L) return dir
+        val fonts = java.io.File("/system/fonts")
+        val pick = listOf("Roboto-Regular.ttf", "NotoSans-Regular.ttf", "DroidSans.ttf", "Roboto-Medium.ttf")
+            .map { java.io.File(fonts, it) }.firstOrNull { it.isFile && it.length() > 0L }
+            ?: fonts.listFiles { f -> f.name.endsWith(".ttf", true) && f.name.contains("Sans", true) }?.firstOrNull()
+            ?: fonts.listFiles { f -> f.name.endsWith(".ttf", true) }?.firstOrNull()
+        if (pick != null) runCatching {
+            val tmp = java.io.File(dir, "subfont.ttf.tmp")
+            pick.copyTo(tmp, overwrite = true)
+            tmp.renameTo(font)
+        }.onFailure { android.util.Log.w("webtor-player", "No subtitle font", it) }
+        return dir
     }
 
     private var filesLoaded = false
