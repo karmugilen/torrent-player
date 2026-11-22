@@ -1,0 +1,13 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="Main.qml">Main.qml</file>
+        <file alias="LibraryPage.qml">LibraryPage.qml</file>
+        <file alias="TorrentCard.qml">TorrentCard.qml</file>
+        <file alias="TorrentPage.qml">TorrentPage.qml</file>
+        <file alias="PlayerPage.qml">PlayerPage.qml</file>
+        <file alias="AddDialog.qml">AddDialog.qml</file>
+        <file alias="DeleteDialog.qml">DeleteDialog.qml</file>
+        <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="i18n/en.json">i18n/en.json</file>
+    </qresource>
+</RCC>

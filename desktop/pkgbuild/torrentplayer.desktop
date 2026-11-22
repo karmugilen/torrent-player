@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Torrent Player
+Comment=Stream and download torrents
+Exec=torrentplayer %U
+Icon=torrentplayer
+Terminal=false
+Categories=AudioVideo;Video;Player;Network;FileTransfer;P2P;
+MimeType=x-scheme-handler/magnet;application/x-bittorrent;
+StartupWMClass=torrentplayer
+Keywords=torrent;magnet;stream;video;
