@@ -894,7 +894,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
         title.value = item.name
         position.doubleValue = 0.0; cached.doubleValue = 0.0
         duration.doubleValue = 0.0 // the old episode's length must not show under the new title
-        spans.value = emptyList(); fileDone.value = null; currentFile = null
+        readiness.clear(); fileDone.value = null
         val target = fileOf(item)
         val start = target?.second?.takeIf { it.playbackPositionMs > 1000 }?.playbackPositionMs?.div(1000.0)
         target?.let { (entry, file) -> (application as WebtorApp).session.playerSwitched(entry.key, file.index) }
@@ -1084,40 +1084,22 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     // ---- Torrent info for the playing file (http stream only) ----
 
-    /** One stretch of the file with the share of verified pieces in it, positions 0..1. */
-    data class Span(val from: Float, val to: Float, val done: Float)
-
-    private val spans = mutableStateOf<List<Span>>(emptyList())
-    @Volatile private var currentFile: Triple<String, Int, Long>? = null
+    private val readiness = SeekReadiness()
     private var prefetchJob: kotlinx.coroutines.Job? = null
 
-    /**
-     * While the user is still dragging, ask the engine for the bytes around the
-     * spot they are aiming at, so the seek starts on data already arriving.
-     * Time maps to bytes by the file's average bitrate.
-     */
+    /** While the user is still dragging, ask the engine for the bytes around the spot they aim at. */
     private fun prefetchFor(targetSeconds: Double, durationSeconds: Double) {
-        val (id, index, length) = currentFile ?: return
-        if (durationSeconds <= 0) return
-        if (readyAt((targetSeconds / durationSeconds).toFloat()) == true) return
+        val aim = readiness.aimAt(targetSeconds, durationSeconds) ?: return
         prefetchJob?.cancel()
         prefetchJob = lifecycleScope.launch(Dispatchers.IO) {
-            delay(150) // only the spot the finger rests on
-            val estimate = (length * (targetSeconds / durationSeconds)).toLong()
-            runCatching { (application as WebtorApp).engineClient.prefetch(id, index, estimate - (2L shl 20), 10L shl 20) }
+            delay(SeekReadiness.PREFETCH_DELAY_MS)
+            runCatching { (application as WebtorApp).engineClient.prefetch(aim.id, aim.fileIndex, aim.offset, aim.length) }
         }
     }
     private val swarm = mutableStateOf<String?>(null)
     private val fileDone = mutableStateOf<Int?>(null)
 
-    /** Engine id and file index from http://127.0.0.1:port/torrent/<id>/file/<n>. */
-    private fun torrentOf(uri: Uri): Pair<String, Int>? {
-        if (uri.scheme != "http") return null
-        val seg = uri.pathSegments
-        val t = seg.indexOf("torrent")
-        if (t < 0 || seg.size < t + 4 || seg[t + 2] != "file") return null
-        return seg[t + 1] to (seg[t + 3].toIntOrNull() ?: return null)
-    }
+    private fun torrentOf(uri: Uri): Pair<String, Int>? = SeekReadiness.streamOf(uri.scheme, uri.pathSegments)
 
     private val directPlay = mutableStateOf(false)
 
@@ -1126,33 +1108,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
 
     private fun refreshTorrentInfo() {
         val item = items.getOrNull(playlistPos.intValue) ?: return
-        val (id, fileIndex) = torrentOf(item.uri) ?: run { spans.value = emptyList(); swarm.value = null; fileDone.value = null; return }
+        val (id, fileIndex) = torrentOf(item.uri) ?: run { readiness.clear(); swarm.value = null; fileDone.value = null; return }
         val client = (application as WebtorApp).engineClient
         val status = runCatching { client.torrent(id) }.getOrNull() ?: return
         directPlay.value = libraryEntry(id)?.directPlay == true
         swarm.value = "${status.numPeers} peers · ${formatSpeed(status.downloadSpeed)}"
-        val files = status.files.sortedBy { it.index }
-        val file = files.find { it.index == fileIndex } ?: return
-        if (file.length <= 0) return
-        fileDone.value = (file.progress * 100).toInt().coerceIn(0, 100)
-        if (file.progress >= 1.0) { spans.value = listOf(Span(0f, 1f, 1f)); return }
-        currentFile = Triple(id, fileIndex, file.length)
-        val offset = files.takeWhile { it.index != fileIndex }.sumOf { it.length }
-        val pieces = runCatching { client.pieces(id, 4096) }.getOrNull() ?: return
-        val pl = pieces.pieceLength.takeIf { it > 0 } ?: return
-        val end = offset + file.length
-        spans.value = pieces.buckets.mapNotNull { b ->
-            val a = maxOf(b.start * pl, offset); val z = minOf((b.end + 1L) * pl, end)
-            if (z <= a || b.total <= 0) null
-            else Span(((a - offset).toDouble() / file.length).toFloat(), ((z - offset).toDouble() / file.length).toFloat(),
-                b.verified.toFloat() / b.total)
+        status.files.find { it.index == fileIndex && it.length > 0 }?.let {
+            fileDone.value = (it.progress * 100).toInt().coerceIn(0, 100)
         }
-    }
-
-    /** True when the spot at [fraction] of the file is already downloaded. */
-    private fun readyAt(fraction: Float): Boolean? {
-        val list = spans.value.takeIf { it.isNotEmpty() } ?: return null
-        return list.firstOrNull { fraction >= it.from && fraction <= it.to }?.let { it.done >= 0.99f }
+        if (!readiness.file(id, fileIndex, status.files)) return
+        val pieces = runCatching { client.pieces(id, 4096) }.getOrNull() ?: return
+        readiness.pieces(pieces.pieceLength, pieces.buckets)
     }
 
     // ---- Volume, brightness, speed ----
@@ -1286,7 +1252,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
             val now = System.currentTimeMillis()
             val scrub = PlayerGestures.scrub(
                 target = target, origin = origin, position = pos, bufferedUntil = cached.doubleValue,
-                ready = if (dur > 0) readyAt((target / dur).toFloat()) else null,
+                ready = readiness.readyAt(target, dur),
                 sinceLastSeekMs = now - lastScrubAt, mpvSeeking = gate.view.mpvSeeking,
             )
             popup = scrub.label; popupSub = scrub.note; popupLevel = null
