@@ -1555,8 +1555,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                             Text(clock(shown), color = Color.White, style = MaterialTheme.typography.labelLarge)
                             Text(" / " + clock(dur), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelLarge)
                             val ahead = (cached.doubleValue - pos).coerceAtLeast(0.0)
-                            if (ahead >= 1 && !compact) Text("   ·   buffered ${clock(ahead)}", color = Color.White.copy(alpha = 0.55f),
-                                style = MaterialTheme.typography.labelMedium)
+                            if (ahead >= 1) Text(if (compact) "  ·  buffered ${clock(ahead)}" else "   ·   buffered ${clock(ahead)}",
+                                color = Color.White.copy(alpha = 0.55f),
+                                style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
+                                maxLines = 1)
                             Spacer(Modifier.weight(1f))
                             // Small window, then full screen in/out, side by side.
                             if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { controls = false; enterPip() },
