@@ -17,6 +17,9 @@
 #include "policy.h"
 #include "settings.h"
 #include "playback.h"
+#include "piecegrid.h"
+#include "playerstats.h"
+#include "series.h"
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
@@ -669,6 +672,338 @@ private slots:
         seeding.seeding = true;
         QCOMPARE(Library::activeTransfers({}), 1);
         QCOMPARE(Library::activeTransfers({running, paused, done, seeding}), 2);
+    }
+
+    // --- piece heat grid (PieceHeatGridModelTest.kt) ---
+
+    void playbackBandsPreserveMixedBucketPositionsAndHighestPriority() {
+        using namespace PieceHeat;
+        const Bucket bucket = normalize(0, 10, 19, 10, 10, 4, 2);
+        const auto bands = playbackBands(bucket, {{8, 11, "U"}, {10, 15, "R"}, {14, 17, "L"}, {30, 40, "U"}});
+        auto sum = [&](const QString &p) {
+            int n = 0;
+            for (const Band &b : bands)
+                if (p.isEmpty() || b.priority == p)
+                    n += b.pieces;
+            return n;
+        };
+        QCOMPARE(sum({}), 8);
+        QCOMPARE(sum("U"), 2);
+        QCOMPARE(sum("R"), 4);
+        QCOMPARE(sum("L"), 2);
+        QVERIFY(qAbs(bands.first().startFraction) < 0.001);
+        double fractions = 0;
+        for (const Band &b : bands)
+            fractions += b.fraction;
+        QVERIFY(qAbs(fractions - 0.8) < 0.001);
+        QCOMPARE(bucket.selectedVerified, 4); // priorities do not change completion
+    }
+
+    void playbackBandsDoNotFillGapsOrExcludedCells() {
+        using namespace PieceHeat;
+        const Bucket bucket = normalize(0, 0, 9, 10, 10, 0, 0);
+        const QList<Range> ranges{{1, 2, "U"}, {7, 8, "L"}};
+        const auto bands = playbackBands(bucket, ranges);
+        QCOMPARE(bands.size(), 2);
+        QCOMPARE(bands[0].pieces + bands[1].pieces, 4);
+        QVERIFY(qAbs(bands[0].startFraction - 0.1) < 0.001);
+        QVERIFY(qAbs(bands[1].startFraction - 0.7) < 0.001);
+        QVERIFY(playbackBands(normalize(0, 0, 9, 10, 0, 0, 0), ranges).isEmpty());
+        QVERIFY(playbackBands(bucket, {}).isEmpty());
+    }
+
+    void normalizeClampsSelectedAndDisjointCounts() {
+        const auto b = PieceHeat::normalize(0, 0, 7, 8, 20, 9, 5);
+        QCOMPARE(b.total, 8);
+        QCOMPARE(b.selected, 8);
+        QCOMPARE(b.selectedVerified, 8);
+        QCOMPARE(b.selectedReceiving, 0);
+        QCOMPARE(b.missing, 0);
+        QCOMPARE(b.excluded, 0);
+        QVERIFY(!b.mixedFill());
+        QVERIFY(!b.excludedOnly());
+    }
+
+    void normalizeMixedFractionsDivideByTotalNotSelected() {
+        const auto b = PieceHeat::normalize(2, 16, 23, 8, 6, 3, 2);
+        QCOMPARE(b.missing, 1);
+        QCOMPARE(b.excluded, 2);
+        QCOMPARE(b.verifiedFraction(), 0.375);
+        QCOMPARE(b.receivingFraction(), 0.25);
+        QCOMPARE(b.missingFraction(), 0.125);
+        QCOMPARE(b.excludedFraction(), 0.25);
+        QVERIFY(b.mixedFill());
+        QCOMPARE(b.verifiedFraction() + b.receivingFraction() + b.missingFraction() + b.excludedFraction(), 1.0);
+    }
+
+    void excludedOnlyStaysHollowAndReceivingClampsToRemaining() {
+        const auto excluded = PieceHeat::normalize(0, 0, 3, 4, 0, 2, 1);
+        QVERIFY(excluded.excludedOnly());
+        QCOMPARE(excluded.selectedVerified, 0);
+        QCOMPARE(excluded.selectedReceiving, 0);
+        QCOMPARE(excluded.excluded, 4);
+        QCOMPARE(excluded.excludedFraction(), 1.0);
+        const auto partial = PieceHeat::normalize(1, 4, 7, 4, 3, 2, 9);
+        QCOMPARE(partial.selectedVerified, 2);
+        QCOMPARE(partial.selectedReceiving, 1);
+        QCOMPARE(partial.missing, 0);
+        QCOMPARE(partial.excluded, 1);
+        QVERIFY(partial.mixedFill());
+    }
+
+    void summaryTitleUsesSelectedPercentAndZeroSelectedMessage() {
+        QLocale::setDefault(QLocale::c());
+        const PieceHeat::Summary with{100, 262144, 50, 33, 4, 13, 50};
+        QCOMPARE(with.verifiedPercent(), 66);
+        QCOMPARE(with.titlePrimary(), QString("66% verified · 4 receiving"));
+        QVERIFY(with.titleMeta().contains("100"));
+        QCOMPARE(with.titleMeta(), "100 · " + Format::bytes(262144));
+        const PieceHeat::Summary none{12, 4096, 0, 0, 0, 0, 12};
+        QCOMPARE(none.verifiedPercent(), -1);
+        QCOMPARE(none.titlePrimary(), QString("No selected pieces"));
+    }
+
+    void layoutBandsForSmallAndLargeBucketCounts() {
+        using namespace PieceHeat;
+        const Layout tiny = layoutFor(12);
+        QCOMPARE(tiny.columns, 16);
+        QCOMPARE(tiny.rows, 1);
+        QVERIFY(tiny.cellDp <= 8);
+        QVERIFY(tiny.heightDp() > 0);
+        const Layout mid = layoutFor(100);
+        QCOMPARE(mid.columns, 24);
+        QCOMPARE(mid.rows, 5);
+        const Layout large = layoutFor(256);
+        QCOMPARE(large.columns, 32);
+        QCOMPARE(large.rows, 8);
+        QCOMPARE(large.cellCount, 256);
+        QCOMPARE(large.cellDp, 5.0);
+        const Layout capped = layoutFor(999);
+        QCOMPARE(capped.columns, 32);
+        QCOMPARE(capped.cellCount, MaxCells);
+        QCOMPARE(layoutFor(0).cellCount, 0);
+    }
+
+    void heightFillsWidthWithSquares() {
+        using namespace PieceHeat;
+        const Layout layout = layoutFor(64);
+        const double narrow = heightFor(layout, 200, 2);
+        const double wide = heightFor(layout, 1200, 2);
+        QVERIFY(narrow > 0);
+        QVERIFY(wide > narrow);
+        const auto [cell, gap] = squareCell(400, narrow, layout);
+        QVERIFY(qAbs(layout.columns * cell + (layout.columns - 1) * gap - 400) < 0.5);
+        QVERIFY(wide >= layout.cellDp);
+    }
+
+    void hitTestMapsInclusiveCellsAndMissesGaps() {
+        using namespace PieceHeat;
+        QCOMPARE(layoutFor(8).columns, 16);
+        QCOMPARE(layoutFor(8).rows, 1);
+        const Layout custom{4, 2, 8, 10, 2};
+        const double w = 46, h = 22;
+        QCOMPARE(hitTest(1, 1, w, h, custom), 0);
+        QCOMPARE(hitTest(40, 1, w, h, custom), 3);
+        QCOMPARE(hitTest(1, 13, w, h, custom), 4);
+        QCOMPARE(hitTest(40, 13, w, h, custom), 7);
+        QCOMPARE(hitTest(11, 1, w, h, custom), -1);  // gap
+        QCOMPARE(hitTest(-1, 1, w, h, custom), -1);
+        QCOMPARE(hitTest(1, 100, w, h, custom), -1);
+        const Layout sparse{4, 2, 5, 10, 2};
+        QCOMPARE(hitTest(1, 13, w, h, sparse), 4);
+        QCOMPARE(hitTest(40, 13, w, h, sparse), -1);
+    }
+
+    void fileBoundariesMarkStartsSharedPieceAndLimitLabels() {
+        using namespace PieceHeat;
+        QList<Bucket> buckets;
+        for (int i = 0; i < 8; ++i)
+            buckets.append(normalize(i, i, i, 1, 1, 0, 0));
+        const QList<FileSpan> files{{0, "alpha.mkv", 150}, {1, "beta.mkv", 50}, {2, "gamma.mkv", 50},
+                                    {3, "delta.mkv", 1},   {4, "epsilon.mkv", 400}};
+        const auto limited = fileBoundaryMarkers(files, 100, buckets, 2);
+        QCOMPARE(limited.size(), 3);
+        QCOMPARE(limited[0].bucketIndex, 0);
+        QCOMPARE(limited[1].bucketIndex, 1);
+        QCOMPARE(limited[2].bucketIndex, 2);
+        QCOMPARE(limited[0].label, QString("alpha.mkv"));
+        QCOMPARE(limited[1].label, QString("beta.mkv"));
+        QVERIFY(limited[2].shared);
+        QVERIFY(limited[2].label.isNull());
+        const auto labeled = fileBoundaryMarkers(files, 100, buckets, 3);
+        QVERIFY(labeled[2].shared);
+        QVERIFY(labeled[2].label.contains("shared"));
+        QVERIFY(labeled[2].label.contains("gamma"));
+    }
+
+    void peekLineUsesInclusiveRange() {
+        QCOMPARE(PieceHeat::peekLine(PieceHeat::normalize(7, 56, 63, 8, 8, 3, 2)),
+                 QString("Bucket 7 · pieces 56–63 · 3 verified · 2 receiving · 3 missing"));
+    }
+
+    void accessibilityMentionsEmptySelection() {
+        const QString text = PieceHeat::accessibleSummary({10, 1024, 0, 0, 0, 0, 10});
+        QVERIFY(text.contains("No selected pieces"));
+        QVERIFY(text.contains("excluded"));
+    }
+
+    void playbackBufferCountsReadyAroundThePlayhead() {
+        using namespace PieceHeat;
+        // Pieces 100..107: v v s [v] v r m v, playhead at 103.
+        const BufferModel m = bufferModel(100, "vvsvvrmv", 103, {{100, 102, "B"}, {103, 104, "U"}, {105, 107, "R"}});
+        QCOMPARE(m.readyAhead, 2);
+        QCOMPARE(m.readyBehind, 3);
+        QCOMPARE(m.tiles.size(), 8);
+        QVERIFY(m.tiles[3].playhead);
+        QCOMPARE(m.tiles[3].tier, QString("U"));
+        QVERIFY(m.tiles[2].savedOnly());
+        QCOMPARE(m.tiers.size(), 3);
+        QCOMPARE(m.tiers[0].tier, QString("U"));
+        QCOMPARE(m.tiers[1].tier, QString("R"));
+        QCOMPARE(m.tiers[1].ready, 1);
+        QCOMPARE(m.tiers[1].total, 3);
+        // Long windows group pieces evenly.
+        QCOMPARE(bufferModel(0, QString(1000, 'v'), 0, {}).piecesPerTile, 2);
+    }
+
+    void parsesPiecesReply() {
+        const QJsonObject json = QJsonDocument::fromJson(R"({"id":"e","totalPieces":20,"pieceLength":1024,
+            "buckets":[{"start":0,"end":9,"total":10,"selected":10,"selectedVerified":4,"selectedReceiving":2},
+                       {"start":10,"end":19,"total":10,"selected":0}],
+            "playback":[{"start":2,"end":5,"priority":"U"},{"start":1,"end":1,"priority":"Z"}],
+            "playheads":[3],"playbackDetail":{"start":2,"states":"vvrm","playhead":3}})").object();
+        const PieceHeat::Map map = PieceHeat::parse(json);
+        QCOMPARE(map.buckets.size(), 2);
+        QCOMPARE(map.buckets[0].missing, 4);
+        QVERIFY(map.buckets[1].excludedOnly());
+        QCOMPARE(map.playback.size(), 1); // unknown tiers dropped
+        QCOMPARE(map.playheads, QList<int>{3});
+        QVERIFY(map.hasDetail);
+        const PieceHeat::Summary s = PieceHeat::summarize(map);
+        QCOMPARE(s.selectedVerified, 4);
+        QCOMPARE(s.excluded, 10);
+        PieceGrid grid;
+        grid.setPieces(json.toVariantMap());
+        QVERIFY(grid.hasMap());
+        QCOMPARE(grid.summary().value("verifiedPercent").toInt(), 40);
+        QVERIFY(grid.summary().value("bufferLine").toString().startsWith("Ready ahead"));
+    }
+
+    // --- player stats line (PlaybackStatsLineTest.kt, PlayerActivity info line) ---
+
+    void statsLineMatchesAndroid() {
+        QLocale::setDefault(QLocale::c());
+        QCOMPARE(PlayerStats::fileLine(0, 0, 0), QString()); // empty until there is something to show
+        QCOMPARE(PlayerStats::line(false, -1, -1, 0), QString());
+        QCOMPARE(PlayerStats::line(true, 0.5, 3, 0), QString("Direct Play · streaming from RAM  ·  3 peers · 0 B/s"));
+        QCOMPARE(PlayerStats::line(false, 0.426, -1, 0), QString("42% downloaded"));
+        QCOMPARE(PlayerStats::buffered(1000, 1500), QString());
+        QCOMPARE(PlayerStats::buffered(1000, 84000), QString("buffered 1:23"));
+        QVERIFY(PlayerStats::fileLine(0.5, 2048, 0).startsWith("File 50% · "));
+        QVERIFY(PlayerStats::fileLine(0.5, 2048, 100).contains("↑"));
+    }
+
+    // --- series (Series.kt, PlaybackLaunch.kt, NextEpisodeWarmTest.kt) ---
+
+    void episodeTitlesReadLikeAndroid() {
+        QCOMPARE(Series::episodeTitle("Show.Name.S01E03.1080p.WEB-DL.mkv"), QString("S01E03 · Show Name"));
+        QCOMPARE(Series::episodeTitle("Pack/Show.Name.S1E3E4.mkv"), QString("S01E03-E04 · Show Name"));
+        QCOMPARE(Series::episodeTitle("[Group] Show 2x05 720p.mp4"), QString("S02E05 · Show"));
+        QCOMPARE(Series::episodeTitle("Sintel.2010.1080p.mkv"), QString("Sintel 2010"));
+        QCOMPARE(Series::episodeTitle("S03E10.mkv"), QString("S03E10"));
+        QCOMPARE(Series::seasonOf("Show/Show.S02E01.mkv"), 2);
+        QCOMPARE(Series::seasonOf("Show/Season 3/Episode 1.mkv"), 3);
+        QCOMPARE(Series::seasonOf("Sintel.mkv"), -1);
+    }
+
+    void seriesResumePicksLikeAndroid() {
+        auto video = [](int index, const QString &path, qint64 pos = 0, qint64 dur = 0, qint64 at = 0) {
+            Series::File f;
+            f.index = index;
+            f.name = path.section('/', -1);
+            f.path = path;
+            f.length = 100;
+            f.video = true;
+            f.selected = true;
+            f.positionMs = pos;
+            f.durationMs = dur;
+            f.watchedAt = at;
+            return f;
+        };
+        // Nothing watched: the first episode in natural order, not the largest.
+        QList<Series::File> show{video(0, "S/Ep 10.mkv"), video(1, "S/Ep 2.mkv"), video(2, "S/Ep 1.mkv"),
+                                 video(3, "S/Sample/Ep 0 sample.mkv")};
+        QCOMPARE(Series::resumeIndex(show), 2);
+        // Last watched part way: that one.
+        show[1] = video(1, "S/Ep 2.mkv", 5000, 60000, 200);
+        QCOMPARE(Series::continueIndex(show), 1);
+        // Watched to the end: the next one.
+        show[1] = video(1, "S/Ep 2.mkv", 0, 60000, 200);
+        QCOMPARE(Series::continueIndex(show), 0);
+        QCOMPARE(Series::resumeIndex(show), 0);
+        // The last one finished: nothing to continue; an older bookmark is resumed.
+        show[0] = video(0, "S/Ep 10.mkv", 0, 60000, 300);
+        show[2] = video(2, "S/Ep 1.mkv", 7000, 60000, 100);
+        QCOMPARE(Series::continueIndex(show), -1);
+        QCOMPARE(Series::resumeFile(show), 2);
+        QCOMPARE(Series::resumeIndex(show), 2);
+        // A single movie: the largest file.
+        Series::File movie = video(0, "M/movie.mkv");
+        movie.length = 1000;
+        QCOMPARE(Series::pickPlayIndex({video(1, "M/Sample/sample.mkv"), movie}), 0);
+    }
+
+    void upNextLabelsOnlyTheUpcomingRow() {
+        const QJsonObject planned{{"fileIndex", 1}, {"active", false}, {"ready", false}};
+        QCOMPARE(Series::upNextLabel({}, 1), QString());
+        QCOMPARE(Series::upNextLabel(planned, 0), QString());
+        QCOMPARE(Series::upNextLabel(planned, 1), QString("Up next · loads near the end"));
+        QJsonObject active = planned;
+        active["active"] = true;
+        QCOMPARE(Series::upNextLabel(active, 1), QString("Up next · loading start"));
+        active["ready"] = true;
+        QCOMPARE(Series::upNextLabel(active, 1), QString("Up next · start loaded"));
+    }
+
+    void torrentPageGroupsBySeasonWithExtrasLast() {
+        auto f = [](int index, const QString &path, bool video = true) {
+            Series::File file;
+            file.index = index;
+            file.name = path.section('/', -1);
+            file.path = path;
+            file.video = video;
+            return file;
+        };
+        const QList<Series::File> files{f(0, "Show/Featurettes/Making Of.mkv"), f(1, "Show/Show.S02E01.mkv"),
+                                        f(2, "Show/Show.S01E10.mkv"), f(3, "Show/Show.S01E02.mkv"),
+                                        f(4, "Show/readme.txt", false), f(5, "Show/Show.S01E02.en.srt", false)};
+        QCOMPARE(Series::displayOrder(files), (QList<int>{5, 3, 2, 1, 4, 0}));
+        QCOMPARE(Series::groupOf(files[0]), QString("x"));
+        QCOMPARE(Series::groupOf(files[1]), QString("s2"));
+        QCOMPARE(Series::groupOf(files[4]), QString());
+    }
+
+    void playlistIsTheNaturalEpisodeRun() {
+        Library::Entry e;
+        e.files = QJsonArray{file(0, "S/Episode 2.mkv", 100), file(1, "S/Episode 10.mkv", 100),
+                             file(2, "S/Episode 1.mkv", 100), file(3, "S/notes.txt", 1),
+                             file(4, "S/Sample.mkv", 10), file(5, "S/Episode 3.mkv", 100)};
+        e.selected = {0, 1, 2, 3, 4};
+        QCOMPARE(Library::playlist(e, 0), (QList<int>{2, 0, 1}));
+        QCOMPARE(Library::playlist(e, 4), QList<int>{4}); // a sample plays alone
+        // NextEpisodeWarmTest: the natural next episode, only with Play next.
+        QCOMPARE(Library::nextEpisodeToWarm(e, 2, true), 0);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 0, true), 1);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 1, true), -1);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 2, false), -1);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 3, true), -1);
+        // Continue watching follows the saved watch times.
+        e.positions = {{"0", 0.0}};
+        e.durations = {{"0", 60000.0}};
+        e.watchedAt = {{"0", 5.0}};
+        QCOMPARE(Series::resumeIndex(Library::seriesFiles(e)), 1);
+        const Library::Entry back = Library::fromJson(Library::toJson(e));
+        QCOMPARE(back.watchedAt.value("0").toDouble(), 5.0);
     }
 
     void directPlayIsSavedAndStartsDropped() {

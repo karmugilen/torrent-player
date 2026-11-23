@@ -32,6 +32,9 @@ Rectangle {
             ["M", qsTr("Mute")],
             ["F", qsTr("Full screen (or double-click)")],
             ["C", qsTr("Next subtitles")],
+            ["N", qsTr("Next episode")],
+            ["Shift+N", qsTr("Previous episode")],
+            ["I", qsTr("Show or hide stats and pieces")],
             [".", qsTr("Next frame")],
             ["V", qsTr("Open in mpv")],
             ["Esc", qsTr("Back")]]]

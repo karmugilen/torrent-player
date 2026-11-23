@@ -24,7 +24,10 @@ HEADERS += \
     src/playback.h \
     src/battery.h \
     src/autostart.h \
-    src/tray.h
+    src/tray.h \
+    src/series.h \
+    src/piecegrid.h \
+    src/playerstats.h
 
 SOURCES += \
     src/main.cpp \
@@ -46,6 +49,9 @@ SOURCES += \
     src/playback.cpp \
     src/battery.cpp \
     src/autostart.cpp \
-    src/tray.cpp
+    src/tray.cpp \
+    src/series.cpp \
+    src/piecegrid.cpp \
+    src/playerstats.cpp
 
 RESOURCES += src/resources.qrc

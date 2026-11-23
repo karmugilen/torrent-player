@@ -9,6 +9,8 @@
 #include <QVariantMap>
 #include <functional>
 
+#include "series.h"
+
 class Engine;
 class QVideoSink;
 class Settings;
@@ -62,6 +64,7 @@ public:
         QJsonObject positions; // file index -> last position in ms
         QJsonObject durations; // file index -> length of the video in ms, when the player knew it
         int lastFile = -1;
+        QJsonObject watchedAt; // file index -> when its place was last saved, ms since epoch (bookmarkUpdatedAt)
         bool directPlay = false; // stream only (storageMode "stream"); nothing saved to Downloads
 
         // Live, from the engine.
@@ -81,6 +84,7 @@ public:
         bool seeding = false;
         bool idleDropReady = false;
         int playbackReaders = 0;
+        QJsonObject nextPreload; // engine's Play next warm-up: {fileIndex, active, ready}
         QString error;
         QSet<int> exporting;
         int thumbnailAttempts = 0;
@@ -140,9 +144,10 @@ public:
     Q_INVOKABLE void captureThumbnail(const QString &key, QObject *videoSink);
     // Where the home card's picture goes; a frame saved there is picked up on the next poll.
     Q_INVOKABLE QString thumbnailPath(const QString &key) const;
-    // First video to play: the one last watched, else the largest selected video.
     // Where a fully downloaded file is on disk, or empty while it isn't.
     Q_INVOKABLE QString finishedFilePath(const QString &key, int fileIndex) const;
+    // What Play opens, as Android's seriesResumeIndex: the episode to continue, else the
+    // best unfinished bookmark, else the first episode (or the largest file).
     Q_INVOKABLE int defaultVideo(const QString &key) const;
 
     // Saved state, exposed for tests.
@@ -159,6 +164,11 @@ public:
     static int nextVideoAfter(const Entry &entry, int endedIndex);
     // The episode to warm while endedIndex plays, or -1 (nextEpisodeToWarm).
     static int nextEpisodeToWarm(const Entry &entry, int playingIndex, bool playNext);
+    // The episode run playing fileIndex belongs to, in natural order (PlaybackLaunch.kt
+    // playbackFiles): selected (or finished downloads) videos without extras; an extra plays alone.
+    static QList<int> playlist(const Entry &entry, int fileIndex);
+    // The entry's files as the series rules see them.
+    static QList<Series::File> seriesFiles(const Entry &entry);
     // Should the engine's idle signal drop this Direct Play torrent (shouldDropIdleDirectPlay).
     static bool shouldDropIdle(const Entry &entry, int idleMinutes, bool playing);
     // Torrents running now: not paused, without error, unfinished or seeding (at least 1).
