@@ -23,7 +23,10 @@ gh run watch -R karmugilen/torrent-player "$(gh run list -R karmugilen/torrent-p
   it doesn't match the tag (`v2.6.0` needs `versionName = "2.6.0"`), or if no release
   has that tag.
 - Uploads use `--clobber`, so a rerun replaces the files. To redo one platform, rerun
-  that job from the Actions page. The checksums job runs again after it.
+  that job from the Actions page, or dispatch with `-f platforms=macos` (any of
+  `linux arch windows macos`); the others are skipped and keep their files. The
+  checksums job runs again after it. Rebuilding `arch` changes the package checksum,
+  so run `desktop/aur/update.sh` afterwards.
 - The workflow must be on the default branch (`karmugilen/rust-engine`) before
   `gh workflow run` can find it.
 

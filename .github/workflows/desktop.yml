@@ -12,6 +12,11 @@ on:
         description: Existing release tag to attach the desktop apps to (e.g. v2.6.0)
         required: true
         type: string
+      platforms:
+        description: Which apps to rebuild (space-separated linux arch windows macos); empty means all
+        required: false
+        default: ""
+        type: string
   release:
     types: [published]
 
@@ -61,6 +66,7 @@ jobs:
 
   linux:
     needs: prepare
+    if: ${{ !inputs.platforms || contains(inputs.platforms, 'linux') }}
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -108,6 +114,7 @@ jobs:
 
   arch:
     needs: prepare
+    if: ${{ !inputs.platforms || contains(inputs.platforms, 'arch') }}
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     env:
@@ -141,6 +148,7 @@ jobs:
 
   windows:
     needs: prepare
+    if: ${{ !inputs.platforms || contains(inputs.platforms, 'windows') }}
     runs-on: windows-2022
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -182,6 +190,7 @@ jobs:
 
   macos:
     needs: prepare
+    if: ${{ !inputs.platforms || contains(inputs.platforms, 'macos') }}
     strategy:
       fail-fast: false
       matrix:

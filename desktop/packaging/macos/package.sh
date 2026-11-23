@@ -91,6 +91,42 @@ if [ "${#todo[@]}" -gt 0 ]; then
   printf 'quit\n' | dylibbundler -of -cd -b "${args[@]}" -d "$C/Frameworks" \
     -p @executable_path/../Frameworks/ -s "$BREW/lib" -s "$MPV/lib"
 fi
+# Some Homebrew dylibs (brotli on arm64) load their siblings as @rpath/<name> with an
+# rpath of @loader_path/../lib, which brew_refs cannot see. Copy every such sibling
+# into Frameworks and give each bundled dylib an @loader_path rpath so it resolves there.
+fix_rpath_deps() {
+  local changed=1 f dep name src d
+  while [ "$changed" = 1 ]; do
+    changed=0
+    for f in "$C"/Frameworks/*.dylib "$C/MacOS/torrentplayer"; do
+      [ -f "$f" ] || continue
+      for dep in $(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep '^@rpath/' | grep -v '\.framework/' || true); do
+        name=${dep#@rpath/}
+        [ -e "$C/Frameworks/$name" ] && continue
+        src=""
+        for d in "$BREW/lib" "$BREW"/opt/*/lib "$MPV/lib"; do
+          if [ -e "$d/$name" ]; then src="$d/$name"; break; fi
+        done
+        if [ -z "$src" ]; then
+          echo "package.sh: $f needs $dep, not found in Homebrew" >&2
+          exit 1
+        fi
+        echo "package.sh: bundling $name for $(basename "$f")"
+        cp -L "$src" "$C/Frameworks/$name"
+        chmod u+w "$C/Frameworks/$name"
+        install_name_tool -id "@rpath/$name" "$C/Frameworks/$name"
+        changed=1
+      done
+    done
+  done
+  for f in "$C"/Frameworks/*.dylib; do
+    if ! otool -l "$f" | grep -A2 LC_RPATH | grep -q 'path @loader_path ('; then
+      install_name_tool -add_rpath @loader_path "$f"
+    fi
+  done
+}
+fix_rpath_deps
+
 left=()
 while IFS= read -r f; do left+=("$f"); done < <(brew_refs)
 if [ "${#left[@]}" -gt 0 ]; then
