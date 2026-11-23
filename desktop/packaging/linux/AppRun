@@ -1,0 +1,6 @@
+#!/bin/sh
+# Starts the app by its real path, so Qt's applicationDirPath() is usr/bin: qt.conf
+# (bundled Qt plugins and QML) and ../lib/torrentplayer/engine-host are found from
+# there. Through a plain AppRun symlink Qt sees the AppDir root instead and aborts.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/torrentplayer" "$@"

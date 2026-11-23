@@ -1,0 +1,262 @@
+# Builds the desktop app (Linux, Windows, macOS) and attaches it to an EXISTING
+# GitHub release. It never creates tags, releases or branches, and never touches
+# the APK. See docs/DESKTOP_RELEASE.md.
+#
+#   gh workflow run desktop.yml -R karmugilen/torrent-player --ref karmugilen/rust-engine -f tag=v2.6.0
+name: Desktop apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attach the desktop apps to (e.g. v2.6.0)
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  QT_VERSION: "6.8.3"
+  ENGINE_BUILD: cargo build --release --locked --manifest-path engine-rs/Cargo.toml -p wt-engine --bin engine-host
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Dispatch checks out the branch it was run on (the desktop code is newer
+      # than the tag); a published release checks out its tag.
+      - uses: actions/checkout@v4
+      - id: version
+        name: Read the version and check the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          version="$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' android/app/build.gradle.kts)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read versionName from android/app/build.gradle.kts"
+            exit 1
+          fi
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag '$TAG' does not match versionName $version (expected v$version)"
+            exit 1
+          fi
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json tagName >/dev/null; then
+            echo "::error::no GitHub release named $TAG; this workflow only attaches to existing releases"
+            exit 1
+          fi
+          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "Building Torrent Player $version from $GITHUB_REF ($GITHUB_SHA) for release $TAG"
+
+  linux:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv-dev pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libfontconfig1 libdbus-1-3 file patchelf librsvg2-bin
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-rs
+      - name: Engine
+        run: $ENGINE_BUILD
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtmultimedia
+          cache: true
+      - name: App
+        run: |
+          mkdir -p desktop/build
+          install -m755 engine-rs/target/release/engine-host desktop/build/engine-host
+          cd desktop/build
+          printf '#define APP_VERSION "%s"\n' "$VERSION" >app_version.h
+          qmake ../torrentplayer.pro
+          make -j"$(nproc)"
+      - name: AppImage
+        run: desktop/packaging/linux/appimage.sh "$VERSION" dist
+      - name: Smoke test
+        run: QT_QPA_PLATFORM=offscreen "dist/TorrentPlayer-$VERSION-linux-x86_64.AppImage" --appimage-extract-and-run --version
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "dist/TorrentPlayer-$VERSION-linux-x86_64.AppImage" -R "$GITHUB_REPOSITORY" --clobber
+
+  arch:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      # PKGBUILD depends plus rust (cargo) and gh; makepkg runs as a plain user.
+      - name: Packages
+        run: |
+          pacman -Syu --noconfirm --needed git github-cli rust \
+            qt6-base qt6-declarative qt6-multimedia qt6-multimedia-ffmpeg qt6-wayland qt6-svg \
+            xdg-desktop-portal ffmpeg mpv
+          useradd -m builder
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/builder/.cargo/registry
+            engine-rs/target
+          key: arch-cargo-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: arch-cargo-
+      - name: makepkg
+        run: |
+          chown -R builder "$GITHUB_WORKSPACE" /home/builder
+          su builder -c "cd '$GITHUB_WORKSPACE/desktop/pkgbuild' && makepkg -f --noconfirm"
+          ls -l "desktop/pkgbuild/torrentplayer-$VERSION-1-x86_64.pkg.tar.zst"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "desktop/pkgbuild/torrentplayer-$VERSION-1-x86_64.pkg.tar.zst" -R "$GITHUB_REPOSITORY" --clobber
+
+  windows:
+    needs: prepare
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-rs
+      - name: Engine
+        shell: bash
+        run: $ENGINE_BUILD
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtmultimedia
+          cache: true
+      - name: App, portable zip and installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: desktop/packaging/windows/build.ps1 -Version $env:VERSION -OutDir dist
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "dist/TorrentPlayer-$VERSION-windows-x64-setup.exe" \
+            "dist/TorrentPlayer-$VERSION-windows-x64-portable.zip" \
+            -R "$GITHUB_REPOSITORY" --clobber
+
+  macos:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          # macos-13 was GitHub's last x64 image until its retirement in
+          # December 2025; macos-15-intel replaces it.
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Homebrew packages
+        run: brew install mpv dylibbundler librsvg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-rs
+          key: ${{ matrix.arch }}
+      - name: Engine
+        run: $ENGINE_BUILD
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: mac
+          target: desktop
+          arch: clang_64
+          modules: qtmultimedia
+          cache: true
+      - name: App and dmg
+        run: desktop/packaging/macos/package.sh "$VERSION" "${{ matrix.arch }}" dist
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "dist/TorrentPlayer-$VERSION-macos-${{ matrix.arch }}.dmg" -R "$GITHUB_REPOSITORY" --clobber
+
+  checksums:
+    needs: [prepare, linux, arch, windows, macos]
+    # Runs even when a build failed, so the sums cover whatever is attached;
+    # it then fails to show that the set is incomplete.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the desktop assets and write SHA256SUMS-desktop.txt
+        run: |
+          mkdir sums && cd sums
+          missing=""
+          for f in \
+            "TorrentPlayer-$VERSION-linux-x86_64.AppImage" \
+            "torrentplayer-$VERSION-1-x86_64.pkg.tar.zst" \
+            "TorrentPlayer-$VERSION-windows-x64-setup.exe" \
+            "TorrentPlayer-$VERSION-windows-x64-portable.zip" \
+            "TorrentPlayer-$VERSION-macos-arm64.dmg" \
+            "TorrentPlayer-$VERSION-macos-x64.dmg"; do
+            if gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$f" --clobber && [ -f "$f" ]; then
+              sha256sum -- "$f" >>SHA256SUMS-desktop.txt
+            else
+              missing="$missing $f"
+            fi
+          done
+          if [ ! -s SHA256SUMS-desktop.txt ]; then
+            echo "::error::no desktop assets on $TAG"
+            exit 1
+          fi
+          cat SHA256SUMS-desktop.txt
+          gh release upload "$TAG" SHA256SUMS-desktop.txt -R "$GITHUB_REPOSITORY" --clobber
+          if [ -n "$missing" ]; then
+            echo "::error::missing on $TAG:$missing"
+            exit 1
+          fi

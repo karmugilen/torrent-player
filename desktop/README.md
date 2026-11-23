@@ -1,4 +1,4 @@
-# Torrent Player for Linux
+# Torrent Player for the desktop
 
 ![Torrent Player](screenshot.png)
 
@@ -36,6 +36,10 @@ Or download the assets from the [GitHub release](https://github.com/karmugilen/t
 | `TorrentPlayer-*-macos-arm64.dmg` / `*-macos-x64.dmg` | macOS |
 
 Arch users can also install the AUR package once it is published: `yay -S torrentplayer-bin` (see [`aur/README.md`](aur/README.md)).
+
+The apps are unsigned, so Windows and macOS warn on first launch. To open them anyway:
+Windows **More info > Run anyway**, macOS right-click the app > **Open**. See
+[docs/DESKTOP_RELEASE.md](../docs/DESKTOP_RELEASE.md) for how they are built.
 
 ### Build and install from this tree
 
