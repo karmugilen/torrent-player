@@ -208,6 +208,7 @@ Page {
     StackView.onRemoved: leave()
     Component.onDestruction: leave()
     onActiveChanged: if (active) keyCatcher.forceActiveFocus()
+    onMediaChanged: clearPendingSeek()
 
     readonly property var engineHandle: engine
     PlaybackControl {
