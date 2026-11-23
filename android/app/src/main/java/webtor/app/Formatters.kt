@@ -369,7 +369,7 @@ fun completedPlayFile(entry: DownloadEntry, fileIndex: Int? = pickPlayIndex(entr
     entry.files.find { !entry.directPlay && it.index == fileIndex && it.uri != null && it.isVerifiedComplete }
 
 /** RAM cache slider stops, 16 MiB to 1 GiB, finer at the small end. */
-val RAM_CACHE_STEPS_MIB = listOf(16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024)
+val RAM_CACHE_STEPS_MIB = Policy.ramCache.stepsMiB
 
 /** Slider stop nearest to [mib]. */
 fun ramCacheStepIndex(mib: Int): Int =

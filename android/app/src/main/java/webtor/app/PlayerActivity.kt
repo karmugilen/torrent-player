@@ -140,7 +140,7 @@ enum class PlayerAspect(val label: String, val detail: String) {
 object BuiltInPlayer {
     private const val KEY = "builtInPlayer"
     fun enabled(context: Context): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean(KEY, true)
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean(KEY, Policy.settings.builtInPlayer.default)
     /** False until the user picked built-in or external once (asked on first open). */
     fun chosen(context: Context): Boolean =
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).contains(KEY)
@@ -149,7 +149,7 @@ object BuiltInPlayer {
     }
     // Off by default, as in mpvEx.
     fun rememberBrightness(context: Context): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("rememberBrightness", false)
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("rememberBrightness", Policy.settings.rememberBrightness.default)
     fun setRememberBrightness(context: Context, value: Boolean) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean("rememberBrightness", value).apply()
     }
@@ -1597,10 +1597,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver {
                 }
             }
 
-            // Up next: the following episode starts in 5 s (Play next on); Cancel stays on this one.
+            // Up next: the following episode starts after a countdown (Play next on); Cancel stays on this one.
             nextCard.value?.let { upNext ->
                 val auto = remember(upNext) { (application as WebtorApp).session.ui.value.playNext }
-                var left by remember(upNext) { mutableIntStateOf(5) }
+                var left by remember(upNext) { mutableIntStateOf(Policy.play.playNextCountdownSeconds) }
                 // Counts in the small window too; only the card is hidden there.
                 LaunchedEffect(upNext) {
                     if (!auto) return@LaunchedEffect

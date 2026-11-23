@@ -149,7 +149,7 @@ class LibrarySession(
         serviceSuppressed = settings.getBoolean("serviceSuppressed", false)
         // Reset previous custom connection tuning once; subsequent user changes persist.
         if (!settings.getBoolean("peerDefaultsV2", false)) {
-            settings.edit().putInt("maxPeers", 55).putBoolean("peerDefaultsV2", true).apply()
+            settings.edit().putInt("maxPeers", Policy.settings.maxPeers.default).putBoolean("peerDefaultsV2", true).apply()
         }
         refreshStorageStats()
         scope.launch {
@@ -173,30 +173,30 @@ class LibrarySession(
                     it.copy(
                         library = loaded,
                         loadWarning = storage.loadWarning,
-                        maxPeers = settings.getInt("maxPeers", 55).coerceIn(8, 500),
-                        ramCacheMiB = settings.getInt("ramCacheMiB", 64).coerceIn(RAM_CACHE_STEPS_MIB.first(), RAM_CACHE_STEPS_MIB.last()),
+                        maxPeers = settings.getInt("maxPeers", defaults.maxPeers).coerceIn(Policy.settings.maxPeers.min, Policy.settings.maxPeers.max),
+                        ramCacheMiB = settings.getInt("ramCacheMiB", defaults.ramCacheMiB).coerceIn(RAM_CACHE_STEPS_MIB.first(), RAM_CACHE_STEPS_MIB.last()),
                         ramCacheAuto = settings.getBoolean("ramCacheAuto", !settings.contains("ramCacheMiB")),
-                        seedingEnabled = settings.getBoolean("seedingEnabled", true),
-                        seedRatioMilli = settings.getInt("seedRatioMilli", 1000).coerceIn(100, 10000),
-                        seedTimeMinutes = settings.getInt("seedTimeMinutes", 60).coerceIn(1, 1440),
-                        seedUploadKiB = settings.getInt("seedUploadKiB", 256).coerceIn(16, 4096),
-                        seedWiFiOnly = settings.getBoolean("seedWiFiOnly", true),
-                        seedChargingOnly = settings.getBoolean("seedChargingOnly", false),
+                        seedingEnabled = settings.getBoolean("seedingEnabled", defaults.seedingEnabled),
+                        seedRatioMilli = settings.getInt("seedRatioMilli", defaults.seedRatioMilli).coerceIn(Policy.settings.seedRatioMilli.min, Policy.settings.seedRatioMilli.max),
+                        seedTimeMinutes = settings.getInt("seedTimeMinutes", defaults.seedTimeMinutes).coerceIn(Policy.settings.seedTimeMinutes.min, Policy.settings.seedTimeMinutes.max),
+                        seedUploadKiB = settings.getInt("seedUploadKiB", defaults.seedUploadKiB).coerceIn(Policy.settings.seedUploadKiB.min, Policy.settings.seedUploadKiB.max),
+                        seedWiFiOnly = settings.getBoolean("seedWiFiOnly", defaults.seedWiFiOnly),
+                        seedChargingOnly = settings.getBoolean("seedChargingOnly", defaults.seedChargingOnly),
                         restoring = loaded.isNotEmpty(),
                         statusLine = if (loaded.isEmpty()) it.statusLine else "Restoring downloads…",
-                        darkTheme = settings.getBoolean("darkTheme", true),
-                        appTheme = parseSavedTheme(settings.getString("appTheme", "AMOLED")),
-                        dynamicColors = settings.getBoolean("dynamicColors", false),
-                        reducedEffects = settings.getBoolean("reducedEffects", false),
-                        directPlayDefault = settings.getBoolean("directPlayDefault", false),
+                        darkTheme = settings.getBoolean("darkTheme", defaults.darkTheme),
+                        appTheme = parseSavedTheme(settings.getString("appTheme", defaults.appTheme.name)),
+                        dynamicColors = settings.getBoolean("dynamicColors", defaults.dynamicColors),
+                        reducedEffects = settings.getBoolean("reducedEffects", defaults.reducedEffects),
+                        directPlayDefault = settings.getBoolean("directPlayDefault", defaults.directPlayDefault),
                         playbackMethod = PlaybackMethod.entries.firstOrNull {
-                            it.name == settings.getString("playbackMethod", PlaybackMethod.HTTP.name)
-                        } ?: PlaybackMethod.HTTP,
-                        antiDpiEnabled = settings.getBoolean("antiDpiEnabled", false),
+                            it.name == settings.getString("playbackMethod", defaults.playbackMethod.name)
+                        } ?: defaults.playbackMethod,
+                        antiDpiEnabled = settings.getBoolean("antiDpiEnabled", defaults.antiDpiEnabled),
                         networkPolicy = savedNetworkPolicy(),
-                        idleDropMinutes = settings.getInt("idleDropMinutes", defaults.idleDropMinutes).coerceIn(0, 240),
+                        idleDropMinutes = settings.getInt("idleDropMinutes", defaults.idleDropMinutes).coerceIn(Policy.settings.idleDropMinutes.min, Policy.settings.idleDropMinutes.max),
                         pauseOnLowBattery = pauseOnLowBattery,
-                        batteryPaused = pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging,
+                        batteryPaused = pauseOnLowBattery && batteryPercent in 0..Policy.settings.pauseOnLowBattery.batteryPercent && !batteryCharging,
                         downloadRateKiB = savedDownloadRateKiB(),
                     )
                 }
@@ -219,7 +219,7 @@ class LibrarySession(
                     runCatching { withContext(io) { client.setDownloadRateBytesSec(_ui.value.downloadRateKiB.toLong() * 1024L) } }
                     runCatching {
                         mutex.withLock {
-                            withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) 80 else 30) }
+                            withContext(io) { client.setDialRatePerSec(if (_ui.value.fastPeerSearch) Policy.engine.fastPeerSearchDialRatePerSec else Policy.engine.dialRatePerSec) }
                             withContext(io) { client.setPeerExploration(_ui.value.peerExploration) }
                             withContext(io) { client.setGhostMode(_ui.value.ghostMode) }
                             withContext(io) { client.setGhostProMode(_ui.value.ghostProMode) }
@@ -228,7 +228,7 @@ class LibrarySession(
                             withContext(io) { client.setSlowPeerYield(_ui.value.slowPeerYield) }
                             withContext(io) { client.setDropChokers(_ui.value.dropChokers) }
                             // Always the released seek method; the A/B toggle was removed.
-                            withContext(io) { client.setDeadlineSeek(false) }
+                            withContext(io) { client.setDeadlineSeek(Policy.engine.deadlineSeek) }
                             withContext(io) { client.setIdleDropMinutes(_ui.value.idleDropMinutes) }
                         }
                     }
@@ -423,7 +423,7 @@ class LibrarySession(
     }
 
     fun setDownloadRateKiB(value: Int) {
-        if (value != 0 && value != 1024 && value != 4096 && value != 8192) return
+        if (value !in Policy.settings.downloadRateKiB.options) return
         settings.edit().putInt("downloadRateKiB", value).apply()
         _ui.update { it.copy(downloadRateKiB = value) }
         if (_ui.value.engineReady) {
@@ -482,7 +482,7 @@ class LibrarySession(
     }
 
     private fun publishBatteryPaused(): Boolean {
-        val paused = _ui.value.pauseOnLowBattery && batteryPercent in 0..15 && !batteryCharging
+        val paused = _ui.value.pauseOnLowBattery && batteryPercent in 0..Policy.settings.pauseOnLowBattery.batteryPercent && !batteryCharging
         if (paused == _ui.value.batteryPaused) return false
         _ui.update { it.copy(batteryPaused = paused) }
         return true
@@ -2797,13 +2797,13 @@ class LibrarySession(
     }
 
     private fun savedNetworkPolicy(): TransferNetworkPolicy = settings
-        .getString("networkPolicy", TransferNetworkPolicy.ANY.name)
+        .getString("networkPolicy", Policy.settings.networkPolicy.default)
         ?.let { name -> TransferNetworkPolicy.entries.find { it.name == name } }
-        ?: TransferNetworkPolicy.ANY
+        ?: TransferNetworkPolicy.valueOf(Policy.settings.networkPolicy.default)
 
     private fun savedDownloadRateKiB(): Int {
-        val value = settings.getInt("downloadRateKiB", 0)
-        return if (value == 0 || value == 1024 || value == 4096 || value == 8192) value else 0
+        val value = settings.getInt("downloadRateKiB", Policy.settings.downloadRateKiB.default)
+        return if (value in Policy.settings.downloadRateKiB.options) value else Policy.settings.downloadRateKiB.default
     }
 
     /**

@@ -26,8 +26,8 @@ class EngineHost(private val context: Context) : EngineTransport {
     fun start() {
         if (!started.compareAndSet(false, true)) return
         val maxPeers = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getInt("maxPeers", 55)
-            .coerceIn(8, 500)
+            .getInt("maxPeers", Policy.settings.maxPeers.default)
+            .coerceIn(Policy.settings.maxPeers.min, Policy.settings.maxPeers.max)
         Thread({
             try {
                 check(downloadDir().mkdirs() || downloadDir().isDirectory) { "Could not create engine storage" }

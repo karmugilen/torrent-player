@@ -21,13 +21,17 @@ with `_` are notes; programs ignore them.
 - **Desktop** (`desktop/`): compiled into the binary through `desktop/src/resources.qrc`
   (alias `policy.json`) and read by `desktop/src/policy.cpp`. `Settings` takes its
   defaults and ranges from here and `EngineSettings` sends the `engine` values.
-- **Android** (`android/`): still has the same values in Kotlin, at the places each
-  `_source` names. Until it loads this file, a change here must be made there too.
+- **Android** (`android/`): the `generatePolicy` task in `android/app/build.gradle.kts`
+  turns this file into the Kotlin object `webtor.app.Policy` at build time (same names,
+  `_` keys left out), so the values are compile-time constants. The places each `_source`
+  names read `Policy` instead of their own literals.
 
 ## Changing a value
 
 1. Edit `policy.json` (keep it valid JSON: `python3 -m json.tool shared/policy.json`).
-2. Make the same change in the Kotlin file named in the section's `_source`.
+2. Update `android/app/src/test/java/webtor/app/PolicyTest.kt`, which pins the values
+   on purpose so a change is never accidental, and run
+   `cd android && ./gradlew :app:testDebugUnitTest`.
 3. Run the desktop checks, which compare the desktop defaults with this file:
    `cd desktop && TORRENTPLAYER_SKIP_ENGINE=1 bin/build && bin/test`.
 

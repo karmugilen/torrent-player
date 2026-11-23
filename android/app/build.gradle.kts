@@ -61,6 +61,78 @@ val cleanOtherEngineLibs by tasks.registering(Delete::class) {
     }
 }
 
+// shared/policy.json holds the settings defaults and tuning both apps use (see
+// shared/README.md). It is turned into the Kotlin object webtor.app.Policy at build
+// time, so the values are compile-time constants and the app reads no file at startup.
+// JSON objects become nested objects with the same names; keys starting with "_" are notes.
+abstract class GeneratePolicy : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val policyJson: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        @Suppress("UNCHECKED_CAST")
+        val root = groovy.json.JsonSlurper().parse(policyJson.get().asFile) as Map<String, Any?>
+        val out = StringBuilder()
+        out.append("// Generated from shared/policy.json by the generatePolicy task. Do not edit.\n")
+        out.append("@file:Suppress(\"ClassName\", \"ObjectPropertyName\")\n\n")
+        out.append("package webtor.app\n\n")
+        writeObject(out, "Policy", root, "")
+        val file = outputDir.get().asFile.resolve("webtor/app/Policy.kt")
+        file.parentFile.mkdirs()
+        file.writeText(out.toString())
+    }
+
+    private fun writeObject(out: StringBuilder, name: String, map: Map<String, Any?>, indent: String) {
+        out.append("${indent}object $name {\n")
+        for ((key, value) in map) {
+            if (key.startsWith("_")) continue
+            val inner = "$indent    "
+            if (value is Map<*, *>) {
+                @Suppress("UNCHECKED_CAST")
+                writeObject(out, key, value as Map<String, Any?>, inner)
+            } else if (value is List<*>) {
+                val type = value.map { kotlinType(key, it) }.distinct().singleOrNull()
+                    ?: error("policy.json: $key mixes types")
+                out.append("${inner}val $key: List<$type> = listOf(${value.joinToString { literal(key, it) }})\n")
+            } else {
+                out.append("${inner}const val $key: ${kotlinType(key, value)} = ${literal(key, value)}\n")
+            }
+        }
+        out.append("$indent}\n")
+    }
+
+    private fun kotlinType(key: String, value: Any?): String = when (value) {
+        is Boolean -> "Boolean"
+        is String -> "String"
+        is Int -> "Int"
+        is Long -> "Long"
+        else -> error("policy.json: $key has unsupported value $value")
+    }
+
+    private fun literal(key: String, value: Any?): String = when (value) {
+        is String -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$") + "\""
+        is Long -> "${value}L"
+        else -> { kotlinType(key, value); value.toString() }
+    }
+}
+
+val generatePolicy by tasks.registering(GeneratePolicy::class) {
+    group = "build"
+    description = "Generate webtor.app.Policy from shared/policy.json"
+    policyJson.set(repoRoot.resolve("shared/policy.json"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.java?.addGeneratedSourceDirectory(generatePolicy, GeneratePolicy::outputDir)
+    }
+}
+
 tasks.named("preBuild") {
     dependsOn(buildRustEngine, buildPlayerLibs, cleanOtherEngineLibs)
     if (emulatorAbi) dependsOn(buildRustEngineEmulator)

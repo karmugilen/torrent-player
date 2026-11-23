@@ -132,7 +132,7 @@ fun SettingsScreen(
                         title = "Video player",
                         supporting = if (builtIn) "Built-in: plays inside this app and fetches the spot you seek to first."
                             else "External: opens VLC, MX Player or another installed app.",
-                        options = listOf(true to "Built-in", false to "External app"),
+                        options = Policy.settings.builtInPlayer.options.zip(Policy.settings.builtInPlayer.optionLabels),
                         selected = builtIn,
                         onSelect = { builtIn = it; BuiltInPlayer.setEnabled(ctx, it) },
                     )
@@ -209,7 +209,7 @@ fun SettingsScreen(
                         } else {
                             "Download saves the selected files for offline play."
                         } + " Both stay available each time.",
-                        options = listOf(false to "Download", true to "Direct Play"),
+                        options = Policy.settings.directPlayDefault.options.zip(Policy.settings.directPlayDefault.optionLabels),
                         selected = state.directPlayDefault,
                         onSelect = onDirectPlayDefault,
                     )
@@ -220,7 +220,7 @@ fun SettingsScreen(
                     ChoiceSetting(
                         title = "Stop idle Direct Play",
                         supporting = "Frees memory when the player is closed and nothing has played for this long. Play starts it again.",
-                        options = listOf(0 to "Off", 5 to "5 min", 15 to "15 min", 30 to "30 min"),
+                        options = Policy.settings.idleDropMinutes.options.zip(Policy.settings.idleDropMinutes.optionLabels),
                         selected = state.idleDropMinutes,
                         onSelect = onIdleDropMinutes,
                     )
@@ -232,7 +232,7 @@ fun SettingsScreen(
                         } else {
                             "Stream: the player reads from the engine on this phone. Fastest seeking."
                         } + " Finished downloads always open from the saved file.",
-                        options = listOf(PlaybackMethod.HTTP to "Stream", PlaybackMethod.CONTENT_URI to "File proxy"),
+                        options = Policy.settings.playbackMethod.options.map(PlaybackMethod::valueOf).zip(Policy.settings.playbackMethod.optionLabels),
                         selected = state.playbackMethod,
                         onSelect = onPlaybackMethod,
                     )
@@ -244,11 +244,8 @@ fun SettingsScreen(
                         title = "Transfer on",
                         supporting = state.networkReason?.takeIf { !state.networkAllowed }
                             ?: "Torrent data waits until the network matches.",
-                        options = listOf(
-                            TransferNetworkPolicy.ANY to "Any network",
-                            TransferNetworkPolicy.WIFI_ONLY to "Wi-Fi",
-                            TransferNetworkPolicy.UNMETERED to "Unmetered",
-                        ),
+                        options = Policy.settings.networkPolicy.options.map(TransferNetworkPolicy::valueOf)
+                            .zip(Policy.settings.networkPolicy.optionLabels),
                         selected = state.networkPolicy,
                         onSelect = onNetworkPolicy,
                     )
@@ -256,7 +253,7 @@ fun SettingsScreen(
                     ChoiceSetting(
                         title = "Download speed limit",
                         supporting = null,
-                        options = listOf(0 to "None", 1024 to "1 MB/s", 4096 to "4 MB/s", 8192 to "8 MB/s"),
+                        options = Policy.settings.downloadRateKiB.options.zip(Policy.settings.downloadRateKiB.optionLabels),
                         selected = state.downloadRateKiB,
                         onSelect = onDownloadRateKiB,
                     )
@@ -317,7 +314,7 @@ fun SettingsScreen(
                         ChoiceSetting(
                             title = "Stop at share ratio",
                             supporting = null,
-                            options = listOf(500 to "0.5×", 1000 to "1×", 2000 to "2×"),
+                            options = Policy.settings.seedRatioMilli.options.zip(Policy.settings.seedRatioMilli.optionLabels),
                             selected = state.seedRatioMilli,
                             onSelect = onSeedRatio,
                         )
@@ -325,7 +322,7 @@ fun SettingsScreen(
                         ChoiceSetting(
                             title = "Or after seeding for",
                             supporting = null,
-                            options = listOf(15 to "15 min", 60 to "1 hour", 180 to "3 hours"),
+                            options = Policy.settings.seedTimeMinutes.options.zip(Policy.settings.seedTimeMinutes.optionLabels),
                             selected = state.seedTimeMinutes,
                             onSelect = onSeedTime,
                         )
@@ -333,7 +330,7 @@ fun SettingsScreen(
                         ChoiceSetting(
                             title = "Upload speed limit",
                             supporting = null,
-                            options = listOf(128 to "128 KiB/s", 256 to "256 KiB/s", 512 to "512 KiB/s"),
+                            options = Policy.settings.seedUploadKiB.options.zip(Policy.settings.seedUploadKiB.optionLabels),
                             selected = state.seedUploadKiB,
                             onSelect = onSeedUpload,
                         )
@@ -348,8 +345,8 @@ fun SettingsScreen(
                 SettingsGroup("Battery and memory") {
                     SwitchSetting(
                         title = "Pause on low battery",
-                        supporting = if (state.batteryPaused) "Paused now: battery is under 15% and the phone is not charging."
-                        else "Stops torrent data and playback under 15% battery unless the phone is charging.",
+                        supporting = if (state.batteryPaused) "Paused now: battery is under ${Policy.settings.pauseOnLowBattery.batteryPercent}% and the phone is not charging."
+                        else "Stops torrent data and playback under ${Policy.settings.pauseOnLowBattery.batteryPercent}% battery unless the phone is charging.",
                         checked = state.pauseOnLowBattery,
                         onCheckedChange = onPauseOnLowBattery,
                     )
@@ -406,13 +403,7 @@ fun SettingsScreen(
                                 "Grenadine Pink, Naples Yellow and Deep Slate Green, combination 166 in Sanzo Wada's A Dictionary of Color Combinations."
                             else -> null
                         },
-                        options = listOf(
-                            AppTheme.AMOLED to "AMOLED black",
-                            AppTheme.AERO to "Aero",
-                            AppTheme.ANTIQUITY to "Antiquity",
-                            AppTheme.RETRO to "Retro",
-                            AppTheme.WADA to "Wada",
-                        ),
+                        options = Policy.settings.appTheme.options.map(AppTheme::valueOf).zip(Policy.settings.appTheme.optionLabels),
                         selected = state.appTheme.takeIf { !state.dynamicColors },
                         enabled = !state.dynamicColors,
                         onSelect = onAppTheme,
