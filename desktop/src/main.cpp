@@ -25,6 +25,7 @@
 #include "format.h"
 #include "library.h"
 #include "mpvitem.h"
+#include "pipwindow.h"
 #include "playback.h"
 #include "portalfilepicker.h"
 #include "settings.h"
@@ -153,6 +154,8 @@ int main(int argc, char *argv[]) {
     qml.rootContext()->setContextProperty("deviceStatus", &deviceStatus);
     qml.rootContext()->setContextProperty("autostart", &autostart);
     qml.rootContext()->setContextProperty("tray", &tray);
+    PipWindow pipWindow;
+    qml.rootContext()->setContextProperty("pipWindow", &pipWindow);
     qml.load(QUrl("qrc:/Main.qml"));
     if (qml.rootObjects().isEmpty())
         return 1;

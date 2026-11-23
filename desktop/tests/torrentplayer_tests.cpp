@@ -18,6 +18,7 @@
 #include "settings.h"
 #include "playback.h"
 #include "piecegrid.h"
+#include "pipwindow.h"
 #include "playerstats.h"
 #include "series.h"
 #include "subtitles.h"
@@ -1080,6 +1081,87 @@ private slots:
         QVERIFY(orphanBoundaryKeys(onDisk, onDisk).isEmpty());
         QVERIFY(orphanBoundaryKeys({}, library).isEmpty());
         QCOMPARE(orphanBoundaryKeys({"xyz"}, {}), QStringList({"xyz"}));
+    }
+
+    // --- picture-in-picture ---
+
+    void pipSizeKeepsTheVideoShape() {
+        QCOMPARE(PipWindow::pipSize(16.0 / 9.0), QSize(480, 270));
+        QCOMPARE(PipWindow::pipSize(0), QSize(480, 270));
+        QCOMPARE(PipWindow::pipSize(-1), QSize(480, 270));
+        QCOMPARE(PipWindow::pipSize(4.0 / 3.0), QSize(360, 270));
+        QCOMPARE(PipWindow::pipSize(2.39), QSize(480, 201));
+        // Odd metadata is held to a sensible shape.
+        QCOMPARE(PipWindow::pipSize(100.0), QSize(480, 160));
+    }
+
+    void pipCornerIsBottomRightWithMargin() {
+        QCOMPARE(PipWindow::cornerPosition(QRect(0, 24, 1536, 840), QSize(480, 270)), QPoint(1032, 570));
+        QCOMPARE(PipWindow::cornerPosition(QRect(1920, 0, 2560, 1440), QSize(480, 270), 10), QPoint(3990, 1160));
+        // A monitor smaller than the window keeps it on the monitor.
+        QCOMPARE(PipWindow::cornerPosition(QRect(0, 0, 300, 200), QSize(480, 270)), QPoint(0, 0));
+    }
+
+    void pipFindsThisAppInHyprctlClients() {
+        const QByteArray clients = R"([
+            {"address":"0x1","mapped":true,"hidden":false,"at":[0,0],"size":[10,10],"pid":7,"floating":false},
+            {"address":"0x2","mapped":false,"hidden":false,"at":[0,0],"size":[10,10],"pid":42},
+            {"address":"0x3","mapped":true,"hidden":false,"at":[12,451],"size":[1512,401],"pid":42,
+             "floating":false,"pinned":false,"monitor":1,"fullscreen":0}])";
+        const PipWindow::HyprClient c = PipWindow::findClient(clients, 42);
+        QCOMPARE(c.address, QString("0x3"));
+        QCOMPARE(c.geometry, QRect(12, 451, 1512, 401));
+        QCOMPARE(c.monitor, 1);
+        QVERIFY(!c.floating);
+        QVERIFY(!PipWindow::findClient(clients, 99).isValid());
+        QVERIFY(!PipWindow::findClient("not json", 42).isValid());
+    }
+
+    void pipMonitorAreaIsLogicalMinusReserved() {
+        const QByteArray monitors = R"([
+            {"id":0,"x":0,"y":0,"width":1920,"height":1080,"scale":1.25,"transform":0,"reserved":[0,24,0,0],"focused":false},
+            {"id":1,"x":1536,"y":0,"width":1080,"height":1920,"scale":1,"transform":1,"reserved":[0,0,0,30],"focused":true}])";
+        QCOMPARE(PipWindow::monitorArea(monitors, 0), QRect(0, 24, 1536, 840));
+        // Rotated: width and height swap.
+        QCOMPARE(PipWindow::monitorArea(monitors, 1), QRect(1536, 0, 1920, 1050));
+        // Unknown id: the focused monitor.
+        QCOMPARE(PipWindow::monitorArea(monitors, 5), QRect(1536, 0, 1920, 1050));
+        QVERIFY(PipWindow::monitorArea("[]", 0).isNull());
+    }
+
+    void pipHyprctlCommands() {
+        PipWindow::HyprClient tiled;
+        tiled.address = "0xabc";
+        tiled.geometry = QRect(12, 451, 1512, 401);
+        const QStringList enter = PipWindow::enterCommands(tiled, QSize(480, 270), QPoint(1032, 570));
+        QCOMPARE(enter, QStringList({"setfloating address:0xabc",
+                                     "resizewindowpixel exact 480 270,address:0xabc",
+                                     "movewindowpixel exact 1032 570,address:0xabc",
+                                     "pin address:0xabc"}));
+        QCOMPARE(PipWindow::batch(enter.mid(0, 2)),
+                 QString("dispatch setfloating address:0xabc ; dispatch resizewindowpixel exact 480 270,address:0xabc"));
+
+        PipWindow::HyprClient now = tiled;
+        now.floating = true;
+        now.pinned = true;
+        QCOMPARE(PipWindow::leaveCommands(tiled, now), QStringList({"pin address:0xabc", "settiled address:0xabc"}));
+        // Unpinned already (by the user): pin is a toggle, so it is not sent again.
+        now.pinned = false;
+        QCOMPARE(PipWindow::leaveCommands(tiled, now), QStringList({"settiled address:0xabc"}));
+
+        // A window that was floating and full screen goes back to its own place.
+        PipWindow::HyprClient floating = tiled;
+        floating.floating = true;
+        floating.fullscreen = 1;
+        floating.geometry = QRect(100, 80, 900, 600);
+        QCOMPARE(PipWindow::enterCommands(floating, QSize(480, 270), QPoint(1, 2)).first(), QString("fullscreenstate 0 0"));
+        now = floating;
+        now.pinned = true;
+        QCOMPARE(PipWindow::leaveCommands(floating, now),
+                 QStringList({"pin address:0xabc", "resizewindowpixel exact 900 600,address:0xabc",
+                              "movewindowpixel exact 100 80,address:0xabc"}));
+        QVERIFY(PipWindow::enterCommands({}, QSize(480, 270), QPoint()).isEmpty());
+        QVERIFY(PipWindow::leaveCommands(tiled, {}).isEmpty());
     }
 };
 

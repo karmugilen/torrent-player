@@ -33,6 +33,8 @@ class MpvPlayer : public QQuickFramebufferObject {
     Q_PROPERTY(double volume READ volume WRITE setVolume NOTIFY volumeChanged)
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
     Q_PROPERTY(double speed READ speed WRITE setSpeed NOTIFY speedChanged)
+    // Display aspect of the video (width / height), 0 until a video is shown.
+    Q_PROPERTY(double videoAspect READ videoAspect NOTIFY videoAspectChanged)
     // Each track: {id, title, lang, codec, external, externalFilename, label}.
     Q_PROPERTY(QVariantList audioTracks READ audioTracks NOTIFY tracksChanged)
     Q_PROPERTY(QVariantList subtitleTracks READ subtitleTracks NOTIFY tracksChanged)
@@ -62,6 +64,7 @@ public:
     bool eof() const { return m_eof; }
     qint64 cacheEndMs() const { return m_cacheEnd; }
     double volume() const { return m_volume; }
+    double videoAspect() const { return m_videoAspect; }
     void setVolume(double volume);
     bool muted() const { return m_muted; }
     void setMuted(bool muted);
@@ -102,6 +105,7 @@ signals:
     void volumeChanged();
     void mutedChanged();
     void speedChanged();
+    void videoAspectChanged();
     void tracksChanged();
     void audioIdChanged();
     void subtitleIdChanged();
@@ -139,6 +143,7 @@ private:
     bool m_eof = false;
     qint64 m_cacheEnd = 0;
     double m_volume = 1.0;
+    double m_videoAspect = 0.0;
     bool m_muted = false;
     double m_speed = 1.0;
     QVariantList m_audioTracks;
