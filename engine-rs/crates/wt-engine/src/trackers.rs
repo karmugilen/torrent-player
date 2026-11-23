@@ -94,12 +94,8 @@ mod cache_time {
                 }
             }
         };
-        let seconds = seconds as libc::time_t;
-        // gmtime_r writes only the initialized tm and does not use process timezone.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        if unsafe { libc::gmtime_r(&seconds, &mut tm) }.is_null() {
-            return Err(serde::ser::Error::custom("invalid tracker cache time"));
-        }
+        let tm = crate::civil_date::civil_from_unix(seconds)
+            .ok_or_else(|| serde::ser::Error::custom("invalid tracker cache time"))?;
         let fraction = if nanos == 0 {
             String::new()
         } else {
@@ -107,12 +103,7 @@ mod cache_time {
         };
         serializer.serialize_str(&format!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}Z",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec
+            tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second
         ))
     }
 
@@ -175,17 +166,14 @@ mod cache_time {
             }
             sign * (h * 3600 + m * 60)
         };
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        tm.tm_year = year - 1900;
-        tm.tm_mon = month - 1;
-        tm.tm_mday = day;
-        tm.tm_hour = hour;
-        tm.tm_min = minute;
-        tm.tm_sec = second;
-        let seconds = unsafe { libc::timegm(&mut tm) } as i64;
-        if tm.tm_year != year - 1900 || tm.tm_mon != month - 1 || tm.tm_mday != day {
-            return None;
-        }
+        let seconds = crate::civil_date::unix_from_civil(crate::civil_date::CivilDateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        })?;
         let seconds = seconds.checked_sub(offset)?;
         let base = if seconds >= 0 {
             SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))?
@@ -282,17 +270,19 @@ impl TrackerPool {
 
     pub fn save(&self, cache: &TrackerCache) -> std::io::Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         fs::create_dir_all(self.path.parent().unwrap())?;
         let tmp_path = self
             .path
             .with_extension(format!("{:016x}.tmp", rand::random::<u64>()));
         let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(&tmp_path)?;
             file.write_all(&serde_json::to_vec(cache)?)?;
             file.sync_all()?;
             fs::rename(&tmp_path, &self.path)
@@ -398,14 +388,16 @@ impl TrackerPool {
         // Persist off the async executor. Unique temporary paths protect concurrent setters.
         let _ = tokio::task::spawn_blocking(move || {
             use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
             let temporary = path.with_extension(format!("{:016x}.tmp", rand::random::<u64>()));
             let save = (|| -> std::io::Result<()> {
-                let mut file = fs::OpenOptions::new()
-                    .create_new(true)
-                    .mode(0o600)
-                    .write(true)
-                    .open(&temporary)?;
+                let mut opts = fs::OpenOptions::new();
+                opts.create_new(true).write(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                let mut file = opts.open(&temporary)?;
                 file.write_all(&serde_json::to_vec(&cache)?)?;
                 file.sync_all()?;
                 fs::rename(&temporary, path)
@@ -819,11 +811,14 @@ mod refresh_tests {
         let expected = pool.snapshot();
         assert_eq!(expected.len(), 5);
         assert_eq!(TrackerPool::new(dir.path()).snapshot(), expected);
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&pool.path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&pool.path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         assert!(!pool
             .refresh_from(&client, &source, now + Duration::from_secs(3600))
             .await

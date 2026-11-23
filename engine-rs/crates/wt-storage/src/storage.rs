@@ -15,9 +15,8 @@ use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::FileExt;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use crate::sys::{self, RawFd, SyncKey};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -44,7 +43,7 @@ pub const PREVIEW_CACHE_BYTES: i64 = 64 << 20;
 pub const MEMORY_LIMIT_OVERHEAD: i64 = 256 * 1024 * 1024;
 
 /// Test/seam hook replacing `File::sync_all` during checkpoint drain.
-pub type FileSyncHook = Arc<dyn Fn(RawFd) -> std::io::Result<()> + Send + Sync>;
+pub type FileSyncHook = Arc<dyn Fn(SyncKey) -> std::io::Result<()> + Send + Sync>;
 /// Test/seam hook replacing checkpoint file persistence during drain.
 pub type WriteCheckpointHook =
     Arc<dyn Fn(&Path, &PieceCheckpoint) -> StorageResult<()> + Send + Sync>;
@@ -258,7 +257,7 @@ pub struct StorageInner {
     pub checkpoint_dirty: bool,
     pub checkpoint_last_err: Option<String>,
     pub flush_err: Option<String>,
-    pub pending_sync_fds: HashSet<RawFd>,
+    pub pending_sync_fds: HashSet<SyncKey>,
 
     // Direct play
     startup_pending: wt_types::IndexMap<usize, Vec<u8>>,
@@ -591,7 +590,7 @@ impl DocumentTorrentStorage {
     }
 
     /// Mark a file fd as needing sync (test helper for drain sync seams).
-    pub fn note_pending_sync_fd(&self, fd: RawFd) {
+    pub fn note_pending_sync_fd(&self, fd: SyncKey) {
         self.inner.lock().pending_sync_fds.insert(fd);
     }
 
@@ -896,14 +895,7 @@ impl TorrentStorage for DocumentTorrentStorage {
 
 /// Go `sameFile`: both handles name the same device/inode.
 fn same_file(a: Option<&File>, b: &File) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Some(a) = a else {
-        return false;
-    };
-    match (a.metadata(), b.metadata()) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-        _ => false,
-    }
+    sys::same_file(a, b)
 }
 
 /// Duplicated descriptors and positions for reading `[start, start + n)`
@@ -993,7 +985,7 @@ impl PieceFlush {
         for (file, at, data, lo, hi) in &self.writes {
             #[cfg(test)]
             writeback_tests::before_io(true);
-            file.write_all_at(&data[*lo..*hi], *at)?;
+            sys::write_all_at(file, &data[*lo..*hi], *at)?;
         }
         Ok(())
     }

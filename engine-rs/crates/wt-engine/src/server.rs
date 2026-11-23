@@ -293,7 +293,7 @@ impl EngineServer {
                             "network changed",
                         ));
                     }
-                    #[cfg(unix)]
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
                     {
                         use std::os::fd::AsRawFd;
                         dialer.track_fd(stream.as_raw_fd());

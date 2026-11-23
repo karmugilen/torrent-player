@@ -1,27 +1,35 @@
 use std::fs::File;
 use std::io::{Error, ErrorKind};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::io::RawFd;
+
+use crate::sys::RawFd;
 
 /// Finds the next data offset at or after `offset`.
 /// Returns `Ok(Some(pos))` if data found.
 /// Returns `Ok(None)` if no more data (only holes until EOF, i.e. ENXIO).
 /// Returns `Err(Unsupported)` if the filesystem doesn't support sparse extents (EINVAL/ENOTSUP).
 pub fn seek_data(fd: RawFd, offset: i64) -> Result<Option<i64>, Error> {
-    let pos = unsafe { libc::lseek(fd, offset, libc::SEEK_DATA) };
-    if pos >= 0 {
-        return Ok(Some(pos));
-    }
-    let err = Error::last_os_error();
-    if let Some(code) = err.raw_os_error() {
-        if code == libc::ENXIO {
-            return Ok(None);
+    #[cfg(unix)]
+    {
+        let pos = unsafe { libc::lseek(fd, offset, libc::SEEK_DATA) };
+        if pos >= 0 {
+            return Ok(Some(pos));
         }
-        if code == libc::EINVAL || code == libc::ENOTSUP || code == libc::EOPNOTSUPP {
-            return Err(Error::from(ErrorKind::Unsupported));
+        let err = Error::last_os_error();
+        if let Some(code) = err.raw_os_error() {
+            if code == libc::ENXIO {
+                return Ok(None);
+            }
+            if code == libc::EINVAL || code == libc::ENOTSUP || code == libc::EOPNOTSUPP {
+                return Err(Error::from(ErrorKind::Unsupported));
+            }
         }
+        Err(err)
     }
-    Err(err)
+    #[cfg(windows)]
+    {
+        let _ = (fd, offset);
+        Err(Error::from(ErrorKind::Unsupported))
+    }
 }
 
 /// Finds the next hole offset at or after `offset`.
@@ -29,20 +37,28 @@ pub fn seek_data(fd: RawFd, offset: i64) -> Result<Option<i64>, Error> {
 /// Returns `Ok(None)` if no more hole (ENXIO).
 /// Returns `Err(Unsupported)` if the filesystem doesn't support sparse extents.
 pub fn seek_hole(fd: RawFd, offset: i64) -> Result<Option<i64>, Error> {
-    let pos = unsafe { libc::lseek(fd, offset, libc::SEEK_HOLE) };
-    if pos >= 0 {
-        return Ok(Some(pos));
-    }
-    let err = Error::last_os_error();
-    if let Some(code) = err.raw_os_error() {
-        if code == libc::ENXIO {
-            return Ok(None);
+    #[cfg(unix)]
+    {
+        let pos = unsafe { libc::lseek(fd, offset, libc::SEEK_HOLE) };
+        if pos >= 0 {
+            return Ok(Some(pos));
         }
-        if code == libc::EINVAL || code == libc::ENOTSUP || code == libc::EOPNOTSUPP {
-            return Err(Error::from(ErrorKind::Unsupported));
+        let err = Error::last_os_error();
+        if let Some(code) = err.raw_os_error() {
+            if code == libc::ENXIO {
+                return Ok(None);
+            }
+            if code == libc::EINVAL || code == libc::ENOTSUP || code == libc::EOPNOTSUPP {
+                return Err(Error::from(ErrorKind::Unsupported));
+            }
         }
+        Err(err)
     }
-    Err(err)
+    #[cfg(windows)]
+    {
+        let _ = (fd, offset);
+        Err(Error::from(ErrorKind::Unsupported))
+    }
 }
 
 /// Discards file data in `[offset, offset + length)` while keeping the logical size.
@@ -52,34 +68,51 @@ pub fn punch_hole(fd: RawFd, offset: i64, length: i64) -> Result<bool, Error> {
     if length <= 0 {
         return Ok(true);
     }
-    let res = unsafe {
-        libc::fallocate(
-            fd,
-            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            offset,
-            length,
-        )
-    };
-    if res == 0 {
-        return Ok(true);
-    }
-    let err = Error::last_os_error();
-    if let Some(code) = err.raw_os_error() {
-        if code == libc::EOPNOTSUPP || code == libc::ENOTSUP || code == libc::EINVAL {
-            return Ok(false);
+    // fallocate(PUNCH_HOLE) is Linux/Android-only; macOS and Windows report unsupported.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let res = unsafe {
+            libc::fallocate(
+                fd,
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                offset,
+                length,
+            )
+        };
+        if res == 0 {
+            return Ok(true);
         }
+        let err = Error::last_os_error();
+        if let Some(code) = err.raw_os_error() {
+            if code == libc::EOPNOTSUPP || code == libc::ENOTSUP || code == libc::EINVAL {
+                return Ok(false);
+            }
+        }
+        Err(err)
     }
-    Err(err)
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = (fd, offset);
+        Ok(false)
+    }
 }
 
 /// Returns the allocated/occupied disk bytes of the file.
 pub fn file_occupied_bytes(file: &File) -> Result<i64, Error> {
-    let fd = file.as_raw_fd();
-    unsafe {
-        let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(fd, &mut st) != 0 {
-            return Err(Error::last_os_error());
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, &mut st) != 0 {
+                return Err(Error::last_os_error());
+            }
+            Ok((st.st_blocks as i64) * 512)
         }
-        Ok((st.st_blocks as i64) * 512)
+    }
+    #[cfg(windows)]
+    {
+        Ok(file.metadata()?.len() as i64)
     }
 }

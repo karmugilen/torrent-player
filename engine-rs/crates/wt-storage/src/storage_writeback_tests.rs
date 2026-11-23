@@ -1,5 +1,9 @@
 use super::*;
 use std::cell::RefCell;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use wt_types::FileInfo;
 
 // Per-thread hooks at the actual pread/pwrite boundary, including the old

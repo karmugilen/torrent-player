@@ -1,8 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use wt_types::{StorageError, StorageResult};
+
+use crate::sys;
 
 pub const CHECKPOINT_MAGIC: u32 = 0x57435031; // "WCP1"
 pub const CHECKPOINT_VERSION: u32 = 1;
@@ -64,15 +65,7 @@ pub fn identity_from_metadata(
     length: i64,
     path: String,
 ) -> (FileIdentity, bool) {
-    let dev = meta.dev();
-    let ino = meta.ino();
-    let mtime_sec = meta.mtime();
-    let mtime_nsec = meta.mtime_nsec();
-    let mod_nano = mtime_sec
-        .checked_mul(1_000_000_000)
-        .and_then(|ns| ns.checked_add(mtime_nsec))
-        .unwrap_or(0);
-
+    let (dev, ino, mod_nano) = sys::identity_fields(meta);
     let id = FileIdentity {
         external,
         dev,
@@ -81,6 +74,8 @@ pub fn identity_from_metadata(
         mod_nano,
         path,
     };
+    // Windows fills dev/ino with 0; file_stable treats that as unstable, so
+    // checkpoints simply re-verify rather than trusting identity.
     (id, true)
 }
 

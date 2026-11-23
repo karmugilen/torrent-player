@@ -1,8 +1,8 @@
 use crate::sparse::{seek_data, seek_hole};
+use crate::sys::RawFd;
 use sha1::{Digest, Sha1};
 use std::io::{Error, ErrorKind};
 use std::mem::size_of;
-use std::os::unix::io::RawFd;
 use std::slice;
 
 #[repr(C)]
@@ -23,31 +23,43 @@ fn write_zeros(hasher: &mut Sha1, mut remaining: u64) {
     }
 }
 
-pub fn pread_all(fd: RawFd, mut offset: i64, buf: &mut [u8]) -> Result<(), Error> {
-    let mut done = 0;
-    while done < buf.len() {
-        let n = unsafe {
-            libc::pread(
-                fd,
-                buf[done..].as_mut_ptr() as *mut libc::c_void,
-                buf.len() - done,
-                offset,
-            )
-        };
-        if n < 0 {
-            let err = Error::last_os_error();
-            if err.kind() == ErrorKind::Interrupted {
-                continue;
+pub fn pread_all(fd: RawFd, offset: i64, buf: &mut [u8]) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        let mut offset = offset;
+        let mut done = 0;
+        while done < buf.len() {
+            let n = unsafe {
+                libc::pread(
+                    fd,
+                    buf[done..].as_mut_ptr() as *mut libc::c_void,
+                    buf.len() - done,
+                    offset,
+                )
+            };
+            if n < 0 {
+                let err = Error::last_os_error();
+                if err.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
             }
-            return Err(err);
+            if n == 0 {
+                return Err(Error::new(ErrorKind::UnexpectedEof, "short pread"));
+            }
+            done += n as usize;
+            offset += n as i64;
         }
-        if n == 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "short pread"));
-        }
-        done += n as usize;
-        offset += n as i64;
+        Ok(())
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        let _ = (fd, offset, buf);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "pread_all requires a Unix file descriptor",
+        ))
+    }
 }
 
 fn hash_span_dense(hasher: &mut Sha1, span: FileSpan, saw_data: &mut bool) -> Result<(), Error> {

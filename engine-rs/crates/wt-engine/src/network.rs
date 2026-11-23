@@ -5,7 +5,9 @@
 //! generation state and the dialer that tears down stale HTTP/WebSocket
 //! tracker transports when the route changes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::collections::HashMap;
 use std::io;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -36,9 +38,10 @@ struct NetworkDialerInner {
     split: bool,
     connections: HashSet<usize>,
     next_id: usize,
-    #[cfg(unix)]
     /// Tracker sockets by fd, with the kernel's cookie for the socket. The fd
     /// number alone is reused once the tracker closes the socket.
+    /// SO_COOKIE is Linux/Android-only.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fds: HashMap<std::os::fd::RawFd, u64>,
 }
 
@@ -56,7 +59,7 @@ impl NetworkDialer {
                 split: false,
                 connections: HashSet::new(),
                 next_id: 1,
-                #[cfg(unix)]
+                #[cfg(any(target_os = "linux", target_os = "android"))]
                 fds: HashMap::new(),
             }),
         }
@@ -80,7 +83,7 @@ impl NetworkDialer {
     pub fn reset(&self) {
         let mut g = self.inner.lock();
         g.epoch = g.epoch.wrapping_add(1);
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         for (fd, cookie) in g.fds.drain() {
             if socket_cookie(fd) == Some(cookie) {
                 unsafe {
@@ -91,7 +94,7 @@ impl NetworkDialer {
         g.connections.clear();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn track_fd(&self, fd: std::os::fd::RawFd) {
         let mut g = self.inner.lock();
         g.fds.retain(|fd, cookie| socket_cookie(*fd) == Some(*cookie));
@@ -145,7 +148,8 @@ impl NetworkDialer {
 /// The kernel's id for the socket behind `fd`. Unlike the fd number it is never
 /// reused, so a closed tracker socket cannot be mistaken for whatever got its
 /// number next (a peer, or the player's stream). `None` if the kernel has none.
-#[cfg(unix)]
+/// `SO_COOKIE` is Linux/Android-only.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn socket_cookie(fd: std::os::fd::RawFd) -> Option<u64> {
     const SO_COOKIE: libc::c_int = 57;
     let mut cookie = 0u64;
@@ -289,7 +293,7 @@ mod tests {
         assert!(n.episode() >= 2);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn reset_cuts_live_tracker_sockets_but_not_a_reused_fd_number() {
         use std::io::Write;

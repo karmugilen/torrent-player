@@ -355,17 +355,23 @@ struct FileIdentity {
 }
 
 fn file_identity(part: &Path, ff: &FixtureFile, external: bool) -> Result<FileIdentity, String> {
-    use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(part).map_err(|e| e.to_string())?;
     let path = if ff.path.is_empty() {
         String::new()
     } else {
         ff.path.join("/")
     };
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (0u64, 0u64);
     Ok(FileIdentity {
         external,
-        dev: meta.dev(),
-        ino: meta.ino(),
+        dev,
+        ino,
         length: ff.length,
         mod_nano: meta
             .modified()

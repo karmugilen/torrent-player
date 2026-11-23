@@ -56,11 +56,7 @@ impl DocumentTorrentStorage {
                 if fd < 0 {
                     return Err(StorageError::Other(format!("invalid fd for file {}", i)));
                 }
-                let dup_fd = unsafe { libc::dup(fd) };
-                if dup_fd < 0 {
-                    return Err(StorageError::Io(std::io::Error::last_os_error()));
-                }
-                let f = unsafe { File::from_raw_fd(dup_fd) };
+                let f = sys::file_from_external_fd(fd).map_err(StorageError::Io)?;
                 let meta = f.metadata()?;
                 if meta.len() > 0 {
                     inner.needs_verify = true;
@@ -294,11 +290,7 @@ impl DocumentTorrentStorage {
                     )))
                 }
             };
-            let dup_fd = unsafe { libc::dup(fd) };
-            if dup_fd < 0 {
-                return Err(StorageError::Io(std::io::Error::last_os_error()));
-            }
-            let file = unsafe { File::from_raw_fd(dup_fd) };
+            let file = sys::file_from_external_fd(fd).map_err(StorageError::Io)?;
             // Android may resend descriptors for every selected file. The
             // already owned destination must keep its bytes: truncating it
             // would zero pieces that stay marked complete.
@@ -329,7 +321,7 @@ impl DocumentTorrentStorage {
                 }
                 let mut data = vec![0u8; (to - from) as usize];
                 Self::read_from_files_locked(&inner.files, from, &mut data)?;
-                file.write_all_at(&data, (from - offset) as u64)?;
+                sys::write_all_at(file, &data, (from - offset) as u64)?;
             }
         }
 
@@ -385,27 +377,37 @@ impl DocumentTorrentStorage {
         start: i64,
         end: i64,
     ) -> Option<Vec<FileSpan>> {
-        let mut spans = Vec::new();
-        for f in &inner.files {
-            if f.offset + f.length <= start || f.offset >= end {
-                continue;
-            }
-            let from = start.max(f.offset);
-            let to = end.min(f.offset + f.length);
-            if from >= to {
-                continue;
-            }
-            let file = f.file.as_ref()?;
-            spans.push(FileSpan {
-                fd: file.as_raw_fd(),
-                offset: from - f.offset,
-                length: to - from,
-            });
+        #[cfg(windows)]
+        {
+            let _ = (inner, start, end);
+            // FileSpan carries a C int fd for the Android JNI hasher; Windows
+            // HANDLEs do not fit. Callers fall back to dense hash_contents.
+            return None;
         }
-        if spans.is_empty() {
-            None
-        } else {
-            Some(spans)
+        #[cfg(unix)]
+        {
+            let mut spans = Vec::new();
+            for f in &inner.files {
+                if f.offset + f.length <= start || f.offset >= end {
+                    continue;
+                }
+                let from = start.max(f.offset);
+                let to = end.min(f.offset + f.length);
+                if from >= to {
+                    continue;
+                }
+                let file = f.file.as_ref()?;
+                spans.push(FileSpan {
+                    fd: sys::file_id(file) as i32,
+                    offset: from - f.offset,
+                    length: to - from,
+                });
+            }
+            if spans.is_empty() {
+                None
+            } else {
+                Some(spans)
+            }
         }
     }
 
@@ -438,7 +440,7 @@ impl DocumentTorrentStorage {
             let file_start = from - f.offset;
             let file_end = to - f.offset;
 
-            match seek_data(file.as_raw_fd(), file_start) {
+            match seek_data(sys::file_id(file) as RawFd, file_start) {
                 Ok(Some(pos)) => {
                     if pos < file_end {
                         return (false, true);
