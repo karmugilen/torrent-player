@@ -44,6 +44,8 @@ function Resolve-Version {
             $sumsUrl = Get-AssetUrl -Version $ver -Name 'SHA256SUMS-desktop.txt'
             try {
                 $sums = (Invoke-WebRequest -Uri $sumsUrl -Headers $headers -UseBasicParsing).Content
+                # GitHub serves release assets as application/octet-stream, which Windows PowerShell 5.1 returns as bytes.
+                if ($sums -is [byte[]]) { $sums = [System.Text.Encoding]::UTF8.GetString($sums) }
                 if (Test-DesktopSums -SumsText $sums) {
                     return $ver
                 }
