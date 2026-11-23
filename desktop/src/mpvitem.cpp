@@ -208,6 +208,7 @@ MpvPlayer::MpvPlayer(QQuickItem *parent) : QQuickFramebufferObject(parent), m_sh
     mpv_observe_property(mpv, 0, "volume", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "mute", MPV_FORMAT_FLAG);
     mpv_observe_property(mpv, 0, "speed", MPV_FORMAT_DOUBLE);
+    mpv_observe_property(mpv, 0, "video-params/aspect", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "track-list", MPV_FORMAT_NODE);
     mpv_observe_property(mpv, 0, "aid", MPV_FORMAT_STRING);
     mpv_observe_property(mpv, 0, "sid", MPV_FORMAT_STRING);
@@ -456,7 +457,10 @@ void MpvPlayer::handleProperty(const char *name, int format, void *data) {
     auto asFlag = [&] { return has && format == MPV_FORMAT_FLAG ? *static_cast<int *>(data) != 0 : false; };
     auto asString = [&] { return has && format == MPV_FORMAT_STRING ? QString::fromUtf8(*static_cast<char **>(data)) : QString(); };
 
-    if (key == "time-pos") {
+    if (key == "video-params/aspect") {
+        const double v = asDouble() > 0 ? asDouble() : 0.0;
+        if (v != m_videoAspect) { m_videoAspect = v; emit videoAspectChanged(); }
+    } else if (key == "time-pos") {
         const qint64 v = qint64(asDouble() * 1000);
         if (v != m_position) { m_position = v; emit positionChanged(); }
     } else if (key == "duration") {

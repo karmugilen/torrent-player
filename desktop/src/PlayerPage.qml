@@ -34,8 +34,23 @@ Page {
     background: Rectangle { color: "black" }
 
     function showControls() {
+        if (win.inPip) return
         controlsVisible = true
         hideTimer.restart()
+    }
+    function togglePip() {
+        if (!pipWindow) return
+        if (win.inPip) {
+            pipWindow.leave()
+            showControls()
+            return
+        }
+        if (win.visibility === Window.FullScreen)
+            win.showNormal()
+        subtitleMenu.close()
+        audioMenu.close()
+        controlsVisible = false
+        pipWindow.enter(win, player.videoAspect || (16 / 9))
     }
     function clampMs(ms) { return Math.max(0, player.duration > 0 ? Math.min(player.duration, ms) : ms) }
     // Arrow skips: ask the engine for the spot first, as a seek-bar release does.
@@ -168,6 +183,8 @@ Page {
                              player.duration > 0 ? player.duration : -1)
         player.speed = 1.0
         player.stop()
+        if (pipWindow && win.inPip)
+            pipWindow.leave()
         if (win.visibility === Window.FullScreen)
             win.showNormal()
     }
@@ -306,7 +323,7 @@ Page {
     Rectangle {
         id: infoPanel
         anchors { left: parent.left; top: parent.top; leftMargin: 16; topMargin: 72 }
-        visible: stats.shown
+        visible: stats.shown && !win.inPip
         z: 2
         width: 340
         height: infoColumn.implicitHeight + 20
@@ -374,7 +391,7 @@ Page {
     Rectangle {
         id: upNextCard
         anchors.centerIn: parent
-        visible: page.upNext >= 0
+        visible: page.upNext >= 0 && !win.inPip
         width: Math.max(280, upNextColumn.implicitWidth + 40)
         height: upNextColumn.implicitHeight + 28
         radius: 16
@@ -422,13 +439,20 @@ Page {
     MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        cursorShape: controlsVisible ? Qt.ArrowCursor : Qt.BlankCursor
+        cursorShape: win.inPip || controlsVisible ? Qt.ArrowCursor : Qt.BlankCursor
         acceptedButtons: Qt.LeftButton
         onPositionChanged: page.showControls()
         onPressed: keyCatcher.forceActiveFocus()
-        onClicked: page.togglePlay()
-        onDoubleClicked: { page.togglePlay(); page.toggleFullScreen() }
-        onWheel: (wheel) => page.changeVolume(wheel.angleDelta.y > 0 ? 0.05 : -0.05)
+        onClicked: {
+            if (win.inPip) page.togglePip()
+            else page.togglePlay()
+        }
+        onDoubleClicked: {
+            if (win.inPip) return
+            page.togglePlay()
+            page.toggleFullScreen()
+        }
+        onWheel: (wheel) => { if (!win.inPip) page.changeVolume(wheel.angleDelta.y > 0 ? 0.05 : -0.05) }
     }
     Timer {
         id: hideTimer
@@ -441,7 +465,7 @@ Page {
     Rectangle {
         anchors { left: parent.left; right: parent.right; top: parent.top }
         height: 64
-        opacity: controlsVisible ? 1 : 0
+        opacity: controlsVisible && !win.inPip ? 1 : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 200 } }
         gradient: Gradient {
@@ -466,7 +490,7 @@ Page {
         id: bottomBar
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
         height: 104
-        opacity: controlsVisible ? 1 : 0
+        opacity: controlsVisible && !win.inPip ? 1 : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 200 } }
         gradient: Gradient {
@@ -656,6 +680,15 @@ Page {
                     onClicked: page.openInMpv()
                 }
                 ToolButton {
+                    text: qsTr("PiP")
+                    font.pixelSize: 13
+                    focusPolicy: Qt.NoFocus
+                    ToolTip.text: qsTr("Picture-in-picture (P)")
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    onClicked: page.togglePip()
+                }
+                ToolButton {
                     text: win.visibility === Window.FullScreen ? qsTr("Exit full screen") : qsTr("Full screen")
                     font.pixelSize: 13
                     focusPolicy: Qt.NoFocus
@@ -717,8 +750,9 @@ Page {
     Shortcut { sequence: "Up"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.changeVolume(0.05) }
     Shortcut { sequence: "Down"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.changeVolume(-0.05) }
     Shortcut { sequence: "M"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.toggleMute() }
-    Shortcut { sequence: "F"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.toggleFullScreen() }
-    Shortcut { sequence: "C"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.cycleSubtitles() }
+    Shortcut { sequence: "F"; context: Qt.ApplicationShortcut; enabled: page.active && !win.inPip; onActivated: page.toggleFullScreen() }
+    Shortcut { sequence: "P"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.togglePip() }
+    Shortcut { sequence: "C"; context: Qt.ApplicationShortcut; enabled: page.active && !win.inPip; onActivated: page.cycleSubtitles() }
     Shortcut { sequence: "S"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.cycleSubtitles() }
     Shortcut { sequence: "V"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.openInMpv() }
     Shortcut { sequence: "."; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: player.frameStep() }

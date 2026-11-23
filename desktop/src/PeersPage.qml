@@ -13,6 +13,11 @@ Page {
     readonly property string engineId: (info && info.engineId) ? info.engineId : ""
     readonly property string pageTitle: info.name ? qsTr("Peers · %1").arg(info.name) : qsTr("Peers")
     readonly property color accentColor: theme.accent
+    // Narrow windows drop the less useful columns; a huge one keeps content readable.
+    readonly property int bodyWidth: Math.min(width - 32, 1400)
+    readonly property bool showFlags: bodyWidth >= 640
+    readonly property bool showAddress: bodyWidth >= 520
+    readonly property bool showHave: bodyWidth >= 400
     background: Rectangle { color: "#0e0e10" }
 
     TorrentConnections {
@@ -36,7 +41,7 @@ Page {
 
         RowLayout {
             Layout.fillWidth: true
-            Layout.margins: 16
+            Layout.margins: win.compact ? 8 : 16
             Layout.bottomMargin: 8
             spacing: 8
             ToolButton {
@@ -53,7 +58,7 @@ Page {
                     Layout.fillWidth: true
                     text: page.pageTitle
                     elide: Text.ElideMiddle
-                    font.pixelSize: 20
+                    font.pixelSize: win.compact ? 17 : 20
                     font.weight: Font.DemiBold
                     color: win.textColor
                 }
@@ -62,6 +67,7 @@ Page {
                     text: swarm.status
                     color: win.muted
                     font.pixelSize: 13
+                    elide: Text.ElideRight
                 }
             }
             Rectangle {
@@ -92,15 +98,17 @@ Page {
 
             ColumnLayout {
                 id: body
-                width: flick.width
+                x: Math.round((flick.width - width) / 2)
+                width: page.bodyWidth + 32
                 spacing: 12
 
                 WorldMap {
                     id: map
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.preferredHeight: Math.round(width / 2)
+                    // 2:1 like the projection, and no taller than most of the window.
+                    readonly property int mapWidth: Math.round(Math.min(page.bodyWidth, Math.max(280, flick.height * 0.7) * 2))
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: mapWidth
+                    Layout.preferredHeight: Math.round(mapWidth / 2)
                     countries: swarm.countries
                     accent: theme.accent
                     land: "#2a2a2f"
@@ -123,6 +131,7 @@ Page {
                     Layout.rightMargin: 16
                     text: qsTr("Country estimates · tap a marker")
                     color: win.muted
+                    wrapMode: Text.Wrap
                     font.pixelSize: 12
                 }
                 Label {
@@ -131,6 +140,7 @@ Page {
                     Layout.rightMargin: 16
                     text: qsTr("IP Geolocation by DB-IP · offline data, Oct 2026")
                     color: theme.accent
+                    wrapMode: Text.Wrap
                     font.pixelSize: 12
                 }
 
@@ -157,12 +167,13 @@ Page {
                                 model: [
                                     { role: "country", label: qsTr("CC"), width: 44 },
                                     { role: "client", label: qsTr("Client"), width: 0, fill: true },
-                                    { role: "flags", label: qsTr("Flags"), width: 110 },
+                                    { role: "flags", label: qsTr("Flags"), width: 110, shown: page.showFlags },
                                     { role: "downloadRate", label: qsTr("Down"), width: 88 },
-                                    { role: "progress", label: qsTr("Have"), width: 64 },
-                                    { role: "displayAddress", label: qsTr("Address"), width: 180 }
+                                    { role: "progress", label: qsTr("Have"), width: 64, shown: page.showHave },
+                                    { role: "displayAddress", label: qsTr("Address"), width: page.bodyWidth < 700 ? 130 : 180, shown: page.showAddress }
                                 ]
                                 delegate: AbstractButton {
+                                    visible: modelData.shown !== false
                                     Layout.preferredWidth: modelData.width || 0
                                     Layout.fillWidth: !!modelData.fill
                                     Layout.preferredHeight: 32
@@ -213,6 +224,7 @@ Page {
                                         elide: Text.ElideRight
                                     }
                                     Label {
+                                        visible: page.showFlags
                                         Layout.preferredWidth: 110
                                         text: model.flags
                                         color: win.muted
@@ -228,6 +240,7 @@ Page {
                                         elide: Text.ElideRight
                                     }
                                     Label {
+                                        visible: page.showHave
                                         Layout.preferredWidth: 64
                                         text: model.progress >= 0 ? fmt.percent(model.progress) : "—"
                                         color: win.muted
@@ -236,7 +249,8 @@ Page {
                                         elide: Text.ElideRight
                                     }
                                     Label {
-                                        Layout.preferredWidth: 180
+                                        visible: page.showAddress
+                                        Layout.preferredWidth: page.bodyWidth < 700 ? 130 : 180
                                         text: model.displayAddress
                                         color: win.muted
                                         font.pixelSize: 12

@@ -44,14 +44,16 @@ Page {
         }
         Label {
             text: qsTr("Settings")
-            font.pixelSize: 22
+            font.pixelSize: win.compact ? 19 : 22
             font.weight: Font.DemiBold
             color: win.textColor
+            elide: Text.ElideRight
             Layout.fillWidth: true
         }
     }
 
     Flickable {
+        id: settingsFlick
         anchors.fill: parent
         contentWidth: width
         contentHeight: column.height + 48
@@ -60,8 +62,8 @@ Page {
 
         ColumnLayout {
             id: column
-            width: Math.min(720, parent.width - 48)
-            x: (parent.width - width) / 2
+            width: Math.min(720, settingsFlick.width - 2 * win.pageMargin)
+            x: (settingsFlick.width - width) / 2
             y: 8
             spacing: 20
 
@@ -95,6 +97,7 @@ Page {
                         Layout.fillWidth: true
                         color: win.muted
                         font.pixelSize: 12
+                        wrapMode: Text.Wrap
                         text: library.freeBytes() >= 0
                               ? qsTr("%1 used by downloads · %2 free").arg(fmt.bytes(library.managedBytes())).arg(fmt.bytes(library.freeBytes()))
                               : qsTr("Free space unavailable")
@@ -179,6 +182,7 @@ Page {
                         Label {
                             text: qsTr("More peers can be faster and use more battery.")
                             color: win.muted
+                            wrapMode: Text.Wrap
                             font.pixelSize: 12
                             Layout.fillWidth: true
                         }
@@ -449,8 +453,9 @@ Page {
         anchors.centerIn: parent
         modal: true
         title: qsTr("Delete downloaded files?")
-        width: Math.min(480, page.width - 64)
-        padding: 24
+        width: win.dialogWidth(480)
+        height: Math.min(implicitHeight, page.height - 16)
+        padding: win.compact ? 16 : 24
         Material.roundedScale: theme.radius
         background: Rectangle { color: win.surface; radius: win.radius; border.color: win.line }
         Label {
@@ -492,8 +497,8 @@ Page {
             border.color: win.line
             ColumnLayout {
                 id: body
-                width: parent.width - 32
-                x: 16
+                width: parent.width - (win.compact ? 24 : 32)
+                x: win.compact ? 12 : 16
                 y: 12
                 spacing: 8
             }
@@ -511,7 +516,7 @@ Page {
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 2
-            Label { text: title; color: titleColor; font.pixelSize: 15 }
+            Label { Layout.fillWidth: true; text: title; color: titleColor; font.pixelSize: 15; wrapMode: Text.Wrap }
             Label {
                 visible: supporting.length > 0
                 text: supporting
@@ -544,7 +549,7 @@ Page {
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 2
-            Label { text: title; color: win.textColor; font.pixelSize: 15 }
+            Label { Layout.fillWidth: true; text: title; color: win.textColor; font.pixelSize: 15; wrapMode: Text.Wrap }
             Label {
                 visible: supporting && supporting.length > 0
                 text: supporting || ""
@@ -569,7 +574,7 @@ Page {
         signal select(var value)
         Layout.fillWidth: true
         spacing: 6
-        Label { text: title; color: win.textColor; font.pixelSize: 15 }
+        Label { Layout.fillWidth: true; text: title; color: win.textColor; font.pixelSize: 15; wrapMode: Text.Wrap }
         Label {
             visible: supporting && supporting.length > 0
             text: supporting || ""

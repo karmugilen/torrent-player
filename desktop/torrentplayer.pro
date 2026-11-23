@@ -62,7 +62,8 @@ HEADERS += \
     src/tray.h \
     src/series.h \
     src/piecegrid.h \
-    src/playerstats.h
+    src/playerstats.h \
+    src/pipwindow.h
 
 SOURCES += \
     src/main.cpp \
@@ -88,6 +89,7 @@ SOURCES += \
     src/tray.cpp \
     src/series.cpp \
     src/piecegrid.cpp \
-    src/playerstats.cpp
+    src/playerstats.cpp \
+    src/pipwindow.cpp
 
 RESOURCES += src/resources.qrc

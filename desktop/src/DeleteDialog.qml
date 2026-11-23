@@ -9,10 +9,11 @@ Dialog {
     property string name
     parent: Overlay.overlay
     anchors.centerIn: parent
-    width: Math.min(480, win.width - 64)
+    width: win.dialogWidth(480)
+    height: Math.min(implicitHeight, win.height - 32)
     modal: true
     title: qsTr("Remove this download?")
-    padding: 24
+    padding: win.compact ? 16 : 24
     Material.roundedScale: theme.radius
     background: Rectangle {
         color: win.surface
@@ -26,8 +27,18 @@ Dialog {
         open()
     }
 
+    // Scrolls when the window is too short for it.
+    contentItem: Flickable {
+        id: deleteFlick
+        implicitHeight: deleteText.implicitHeight
+        contentWidth: width
+        contentHeight: deleteText.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ScrollBar {}
     ColumnLayout {
-        width: parent.width
+        id: deleteText
+        width: deleteFlick.width
         spacing: 12
         Label {
             Layout.fillWidth: true
@@ -41,6 +52,7 @@ Dialog {
             color: win.muted
             text: qsTr("Permanently erase the downloaded files from your computer, or remove from the library while keeping files?")
         }
+    }
     }
 
     footer: DialogButtonBox {

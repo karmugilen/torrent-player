@@ -7,8 +7,9 @@ ApplicationWindow {
     id: win
     width: 1180
     height: 760
-    minimumWidth: 720
-    minimumHeight: 480
+    // Small enough for a tiled corner; PiP goes smaller still (a wide film is 480x201).
+    minimumWidth: win.inPip ? 200 : 360
+    minimumHeight: win.inPip ? 112 : 240
     visible: true
     title: stack.currentItem && stack.currentItem.pageTitle ? stack.currentItem.pageTitle + " — Torrent Player" : "Torrent Player"
     color: "#0e0e10"
@@ -27,6 +28,14 @@ ApplicationWindow {
     readonly property color danger: "#ff6b6b"
     readonly property int radius: theme.radius
     readonly property int smallRadius: Math.min(4, theme.radius)
+    // Picture-in-picture (PipWindow); null-safe, as the app tears down.
+    readonly property bool inPip: pipWindow ? pipWindow.active : false
+    // Below this the pages switch to their one-column, icon-button layouts.
+    readonly property bool compact: width < 600
+    // Side margin of page content: tight on a small window, roomier on a big one.
+    readonly property int pageMargin: width < 600 ? 12 : 24
+    // Dialog width: the preferred one, or the window less 16 px a side.
+    function dialogWidth(preferred) { return Math.min(preferred, win.width - 32) }
 
     property bool helpVisible: false
     property bool quitConfirmed: false
@@ -83,10 +92,14 @@ ApplicationWindow {
             quitDialog.open()
         else {
             quitConfirmed = true
+            if (pipWindow) pipWindow.leave()
             Qt.quit()
         }
     }
     function hideToTray() {
+        // A hidden PiP window would stay pinned and tiny; leave it first.
+        if (win.inPip)
+            pipWindow.leave()
         if (tray && tray.available)
             tray.hideToTray()
         else
@@ -121,7 +134,15 @@ ApplicationWindow {
         }
     }
     // Seeding pauses while the player page is open.
-    onOnPlayerChanged: deviceStatus.playing = win.onPlayer
+    onOnPlayerChanged: {
+        deviceStatus.playing = win.onPlayer
+        // PiP ends with the player; checked later, as the next episode swaps one player for another.
+        Qt.callLater(win.endPipWithoutPlayer)
+    }
+    function endPipWithoutPlayer() {
+        if (win.inPip && !win.onPlayer)
+            if (pipWindow) pipWindow.leave()
+    }
     Connections {
         target: adder
         function onStateChanged() {
@@ -151,7 +172,7 @@ ApplicationWindow {
         function onFailed(message) { win.toast(message) }
     }
 
-    Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: !addDialog.visible; onActivated: win.helpVisible = !win.helpVisible }
+    Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: !addDialog.visible && !win.inPip; onActivated: win.helpVisible = !win.helpVisible }
     Shortcut { sequence: "Q"; context: Qt.ApplicationShortcut; enabled: !dialogOpen; onActivated: win.requestQuit() }
     Shortcut { sequence: "Ctrl+Q"; context: Qt.ApplicationShortcut; onActivated: win.requestQuit() }
     Shortcut { sequences: [",", "Ctrl+,"]; context: Qt.ApplicationShortcut; enabled: !dialogOpen && !onPlayer; onActivated: win.openSettings() }
@@ -164,7 +185,9 @@ ApplicationWindow {
         context: Qt.ApplicationShortcut
         enabled: !dialogOpen && stack.depth > 1 && !(activeFocusItem instanceof TextInput)
         onActivated: {
-            if (onPlayer && win.visibility === Window.FullScreen)
+            if (win.inPip)
+                pipWindow.leave()
+            else if (onPlayer && win.visibility === Window.FullScreen)
                 win.showNormal()
             else
                 stack.pop()
@@ -215,11 +238,11 @@ ApplicationWindow {
         Rectangle {
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: engineBanner.implicitHeight + 24
-            visible: engine.error !== "" && !onPlayer
+            visible: engine.error !== "" && !onPlayer && !win.inPip
             color: "#2a1215"
             RowLayout {
                 id: engineBanner
-                anchors { fill: parent; margins: 12; leftMargin: 20; rightMargin: 20 }
+                anchors { fill: parent; margins: 12; leftMargin: win.pageMargin; rightMargin: win.pageMargin }
                 Label {
                     Layout.fillWidth: true
                     text: engine.error
@@ -232,14 +255,14 @@ ApplicationWindow {
 
         Rectangle {
             id: toastBox
-            anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 32 }
-            width: Math.min(toastLabel.implicitWidth + 40, parent.width - 64)
+            anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: win.height < 400 ? 12 : 32 }
+            visible: opacity > 0 && !win.inPip
+            width: Math.min(toastLabel.implicitWidth + 40, parent.width - 32)
             height: toastLabel.implicitHeight + 24
             radius: win.radius
             color: win.surfaceHigh
             border.color: win.line
             opacity: 0
-            visible: opacity > 0
             Behavior on opacity { NumberAnimation { duration: 180 } }
             Label {
                 id: toastLabel
@@ -271,21 +294,30 @@ ApplicationWindow {
         anchors.centerIn: parent
         modal: true
         title: qsTr("Quit Torrent Player?")
-        width: Math.min(480, win.width - 64)
-        padding: 24
+        width: win.dialogWidth(480)
+        height: Math.min(implicitHeight, win.height - 32)
+        padding: win.compact ? 16 : 24
         Material.roundedScale: theme.radius
         background: Rectangle { color: win.surface; radius: win.radius; border.color: win.line }
         // As the content item it takes the dialog's width, so its wrapped height
         // doesn't feed back into the dialog's size.
-        contentItem: Label {
-            wrapMode: Text.Wrap
-            color: win.muted
-            text: qsTr("%n downloads stop while Torrent Player is closed. They continue the next time you open it.", "", library.activeCount)
+        contentItem: Flickable {
+            implicitHeight: quitText.implicitHeight
+            contentHeight: quitText.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Label {
+                id: quitText
+                width: quitDialog.availableWidth
+                wrapMode: Text.Wrap
+                color: win.muted
+                text: qsTr("%n downloads stop while Torrent Player is closed. They continue the next time you open it.", "", library.activeCount)
+            }
         }
         footer: DialogButtonBox {
             Button { text: qsTr("Cancel"); flat: true; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             Button { text: qsTr("Quit"); flat: true; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
         }
-        onAccepted: { win.quitConfirmed = true; Qt.quit() }
+        onAccepted: { win.quitConfirmed = true; if (pipWindow) pipWindow.leave(); Qt.quit() }
     }
 }
