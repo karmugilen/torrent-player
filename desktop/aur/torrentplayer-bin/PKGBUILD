@@ -18,7 +18,7 @@ options=('!strip')
 _asset="torrentplayer-${pkgver}-1-${CARCH}.pkg.tar.zst"
 source=("${_asset}::${url}/releases/download/v${pkgver}/${_asset}")
 # Placeholder — run desktop/aur/update.sh <version> to replace with the real digest.
-sha256sums=('f1e420c1dccff56494e7c336029ab44cb330a3ba129b07907614966130bebb68')
+sha256sums=('fedc5c51a83bc83e9e3385e625a807c355b42fc65c4c281e4a5cdb56b2624720')
 
 package() {
   bsdtar -x \

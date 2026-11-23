@@ -14,6 +14,6 @@ pkgbase = torrentplayer-bin
 	conflicts = torrentplayer
 	options = !strip
 	source = torrentplayer-2.6.0-1-x86_64.pkg.tar.zst::https://github.com/karmugilen/torrent-player/releases/download/v2.6.0/torrentplayer-2.6.0-1-x86_64.pkg.tar.zst
-	sha256sums = f1e420c1dccff56494e7c336029ab44cb330a3ba129b07907614966130bebb68
+	sha256sums = fedc5c51a83bc83e9e3385e625a807c355b42fc65c4c281e4a5cdb56b2624720
 
 pkgname = torrentplayer-bin
