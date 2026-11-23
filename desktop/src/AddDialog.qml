@@ -213,7 +213,17 @@ Dialog {
                     visible: adder.selectedBytes > adder.freeBytes
                     color: win.danger
                     wrapMode: Text.Wrap
-                    text: qsTr("Not enough storage to download %1 (%2 free).").arg(fmt.bytes(adder.selectedBytes)).arg(fmt.bytes(adder.freeBytes))
+                    text: adder.selectedHasVideo
+                          ? qsTr("Not enough storage to download %1 (%2 free). Play now streams without saving.").arg(fmt.bytes(adder.selectedBytes)).arg(fmt.bytes(adder.freeBytes))
+                          : qsTr("Not enough storage to download %1 (%2 free).").arg(fmt.bytes(adder.selectedBytes)).arg(fmt.bytes(adder.freeBytes))
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: adder.selectedHasVideo
+                    color: win.muted
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 12
+                    text: qsTr("Download saves the files to your Downloads folder. Play now (Direct Play) streams the video from memory and saves nothing.")
                 }
                 Label {
                     Layout.fillWidth: true
@@ -231,18 +241,24 @@ Dialog {
                         text: qsTr("Saved to %1").arg(library.saveDirectory)
                     }
                     Button { text: qsTr("Cancel"); flat: true; onClicked: dialog.close() }
+                    // The default choice (Settings: When adding a torrent) is the highlighted one.
                     Button {
+                        readonly property bool preferred: !(settings.directPlayDefault && adder.selectedHasVideo)
                         text: qsTr("Download")
-                        flat: adder.selectedHasVideo
-                        highlighted: !adder.selectedHasVideo
-                        enabled: adder.selectedCount > 0
+                        flat: !preferred
+                        highlighted: preferred
+                        enabled: adder.selectedCount > 0 && adder.selectedBytes <= adder.freeBytes
                         onClicked: adder.confirm(false)
                     }
                     Button {
                         text: qsTr("Play now")
-                        highlighted: true
+                        flat: !settings.directPlayDefault
+                        highlighted: settings.directPlayDefault
                         visible: adder.selectedHasVideo
                         enabled: adder.selectedCount > 0
+                        ToolTip.text: qsTr("Direct Play: stream only, nothing saved to Downloads")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
                         onClicked: adder.confirm(true)
                     }
                 }

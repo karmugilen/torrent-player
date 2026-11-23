@@ -96,4 +96,31 @@ bool subtitleMatches(const QString &videoName, const QString &subtitleName) {
     return !base.isEmpty() && QFileInfo(subtitleName).fileName().toLower().startsWith(base);
 }
 
+QString naturalMediaKey(const QString &path) {
+    static const QRegularExpression digits("\\d+");
+    const QString lower = path.toLower();
+    QString out;
+    qsizetype last = 0;
+    for (auto it = digits.globalMatch(lower); it.hasNext();) {
+        const auto m = it.next();
+        out += lower.mid(last, m.capturedStart() - last);
+        QString number = m.captured();
+        while (number.startsWith('0'))
+            number.remove(0, 1);
+        if (number.isEmpty())
+            number = "0";
+        out += number.rightJustified(20, '0');
+        last = m.capturedEnd();
+    }
+    return out + lower.mid(last);
+}
+
+bool isExtraVideo(const QString &path) {
+    static const QRegularExpression extras(
+        "(?<![a-z])(sample|trailer|teaser|featurettes?|extras|bonus|behind[ ._-]the[ ._-]scenes|"
+        "deleted[ ._-]scenes?|making[ ._-]of|interviews?)(?![a-z])",
+        QRegularExpression::CaseInsensitiveOption);
+    return extras.match(path).hasMatch();
+}
+
 }

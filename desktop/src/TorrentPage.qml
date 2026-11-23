@@ -60,6 +60,16 @@ Page {
                 visible: info.state !== "done" && info.state !== "error"
                 onClicked: library.togglePause(torrentKey)
             }
+            // Direct Play streams only; this keeps the files instead (saved to Downloads).
+            Button {
+                text: qsTr("Download instead")
+                flat: true
+                visible: info.directPlay === true
+                ToolTip.text: qsTr("Save the files to %1").arg(library.saveDirectory)
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: library.downloadInstead(torrentKey)
+            }
             Button {
                 text: qsTr("Retry")
                 flat: true
@@ -130,6 +140,21 @@ Page {
                         color: info.state === "error" ? win.danger : theme.accent
                         font.pixelSize: 15
                         font.weight: Font.Medium
+                    }
+                    Rectangle {
+                        visible: info.directPlay === true
+                        implicitWidth: directPlayBadge.implicitWidth + 14
+                        implicitHeight: directPlayBadge.implicitHeight + 6
+                        radius: win.smallRadius
+                        color: "transparent"
+                        border.color: theme.accent
+                        Label {
+                            id: directPlayBadge
+                            anchors.centerIn: parent
+                            text: qsTr("Direct Play")
+                            font.pixelSize: 11
+                            color: theme.accent
+                        }
                     }
                     Label {
                         text: fmt.percent(info.progress || 0)

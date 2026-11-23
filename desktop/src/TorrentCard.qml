@@ -56,6 +56,23 @@ Item {
                 Material.foreground: theme.accentForeground
                 onClicked: win.play(model.key)
             }
+            // Direct Play streams only: nothing is saved to Downloads.
+            Rectangle {
+                anchors { left: parent.left; top: parent.top; margins: 8 }
+                visible: model.directPlay
+                width: directPlayText.implicitWidth + 14
+                height: directPlayText.implicitHeight + 6
+                radius: win.smallRadius
+                color: Qt.rgba(0, 0, 0, 0.7)
+                border.color: theme.accent
+                Label {
+                    id: directPlayText
+                    anchors.centerIn: parent
+                    text: qsTr("Direct Play")
+                    font.pixelSize: 11
+                    color: theme.accent
+                }
+            }
             Rectangle {
                 anchors { right: parent.right; top: parent.top; margins: 8 }
                 visible: model.state !== "downloading"

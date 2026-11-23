@@ -53,12 +53,14 @@ public:
     Q_INVOKABLE void selectAll();
     Q_INVOKABLE void selectNone();
     Q_INVOKABLE void selectVideos();
-    // Keeps the torrent in the library; playNow also opens the player.
-    Q_INVOKABLE void confirm(bool playNow);
+    // Keeps the torrent in the library. directPlay: Play now (Android startDirectPlay),
+    // streamed only and nothing saved to Downloads, and the player opens; else a download.
+    Q_INVOKABLE void confirm(bool directPlay);
     Q_INVOKABLE void cancel();
 
 signals:
     void changed();
+    // playNow is true for Direct Play, which opens the player at once.
     void added(const QString &key, bool playNow);
 
 private:

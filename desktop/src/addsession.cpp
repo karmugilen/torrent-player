@@ -278,7 +278,7 @@ void AddSession::selectVideos() {
     emit changed();
 }
 
-void AddSession::confirm(bool playNow) {
+void AddSession::confirm(bool directPlay) {
     if (m_state != "choose" || m_selected.isEmpty())
         return;
     const QString id = m_id, key = m_key, magnet = m_magnet, name = m_name;
@@ -288,11 +288,11 @@ void AddSession::confirm(bool playNow) {
     m_id.clear();
     m_state = "saving";
     emit changed();
-    auto finish = [this, id, key, magnet, name, files, selected, playNow](const QByteArray &torrentData) {
-        m_library->adopt(id, key, magnet, name, files, selected, torrentData);
+    auto finish = [this, id, key, magnet, name, files, selected, directPlay](const QByteArray &torrentData) {
+        m_library->adopt(id, key, magnet, name, files, selected, torrentData, directPlay);
         reset();
         emit changed();
-        emit added(key, playNow);
+        emit added(key, directPlay);
     };
     if (!m_torrentData.isEmpty()) {
         finish(m_torrentData);

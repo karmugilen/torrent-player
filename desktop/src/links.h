@@ -25,4 +25,12 @@ bool isImage(const QString &name);
 // name ("Movie.en.srt" for "Movie.mkv"), the way the Android app pre-selects.
 bool subtitleMatches(const QString &videoName, const QString &subtitleName);
 
+// Sort key that orders numbers by value ("Ep 2" before "Ep 10"), lowercase
+// (PlaybackLaunch.kt naturalMediaKey): each digit run is zero-padded to 20 places.
+QString naturalMediaKey(const QString &path);
+
+// Samples, trailers and featurettes: playable on their own, never part of an
+// episode run (Series.kt isExtraVideo).
+bool isExtraVideo(const QString &path);
+
 }
