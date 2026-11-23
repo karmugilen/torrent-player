@@ -5,6 +5,8 @@
 #include <QProcess>
 #include <QTimer>
 
+// Accent and corner radius. On Linux they follow Omarchy's theme and Hyprland's
+// rounding live; on Windows and macOS they are #FFD60A and 8.
 class Theme : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString accent READ accent NOTIFY changed)

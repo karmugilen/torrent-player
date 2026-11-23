@@ -2,12 +2,32 @@
 
 #include "engine.h"
 
+#include <QJsonObject>
+#include <QNetworkInformation>
+#include <QPointer>
+
+#if TORRENTPLAYER_FREEDESKTOP
 #include <QDBusConnection>
 #include <QDBusInterface>
 #include <QDBusReply>
 #include <QDBusVariant>
-#include <QJsonObject>
-#include <QPointer>
+#endif
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#ifdef Q_OS_MACOS
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/ps/IOPSKeys.h>
+#include <IOKit/ps/IOPowerSources.h>
+#endif
 
 DeviceStatus::DeviceStatus(Settings *settings, Engine *engine, QObject *parent)
     : QObject(parent), m_settings(settings), m_engine(engine) {
@@ -54,8 +74,8 @@ void DeviceStatus::refresh() {
     const DeviceConditions before = m_conditions;
     const bool beforeBattery = m_onBattery;
     const int beforePort = m_listenPort;
-    readUPower();
-    readNetworkManager();
+    readPower();
+    readNetwork();
     if (m_engine && m_engine->ready()) {
         QPointer<DeviceStatus> self(this);
         m_engine->get("/stats", [self](const QJsonObject &stats, int status) {
@@ -76,6 +96,102 @@ void DeviceStatus::refresh() {
     }
 }
 
+DeviceStatus::Power DeviceStatus::windowsPower(int acLineStatus, int batteryFlag, int lifePercent) {
+    Power power;
+    // BatteryFlag 128: no system battery; 255: unknown.
+    power.hasBattery = batteryFlag != 255 && !(batteryFlag & 128) && lifePercent >= 0 && lifePercent <= 100;
+    if (!power.hasBattery)
+        return power;
+    power.onBattery = acLineStatus == 0;
+    power.percent = lifePercent;
+    return power;
+}
+
+DeviceStatus::Power DeviceStatus::macPower(bool batteryPresent, bool onAC, int currentCapacity, int maxCapacity) {
+    Power power;
+    power.hasBattery = batteryPresent && maxCapacity > 0;
+    if (!power.hasBattery)
+        return power;
+    power.onBattery = !onAC;
+    power.percent = qBound(0, int(qint64(currentCapacity) * 100 / maxCapacity), 100);
+    return power;
+}
+
+DeviceStatus::Network DeviceStatus::networkFrom(int reachability, int transportMedium, bool metered) {
+    Network network;
+    if (reachability < 0)
+        return network; // No backend: assume online, unmetered, like Linux without NetworkManager.
+    network.connected = reachability != int(QNetworkInformation::Reachability::Disconnected);
+    const bool wifiLike = transportMedium != int(QNetworkInformation::TransportMedium::Cellular) &&
+                          transportMedium != int(QNetworkInformation::TransportMedium::Bluetooth);
+    network.wifi = !network.connected || wifiLike;
+    network.metered = metered;
+    return network;
+}
+
+void DeviceStatus::applyPower(const Power &power) {
+    m_hasBattery = power.hasBattery;
+    m_onBattery = power.hasBattery && power.onBattery;
+    m_conditions.charging = !m_onBattery;
+    m_conditions.batteryPercent = power.hasBattery ? power.percent : -1;
+}
+
+void DeviceStatus::readPower() {
+#if TORRENTPLAYER_FREEDESKTOP
+    readUPower();
+#elif defined(Q_OS_WIN)
+    SYSTEM_POWER_STATUS status;
+    if (GetSystemPowerStatus(&status))
+        applyPower(windowsPower(status.ACLineStatus, status.BatteryFlag, status.BatteryLifePercent));
+    else
+        applyPower({});
+#elif defined(Q_OS_MACOS)
+    Power power;
+    if (CFTypeRef info = IOPSCopyPowerSourcesInfo()) {
+        if (CFArrayRef sources = IOPSCopyPowerSourcesList(info)) {
+            for (CFIndex i = 0; i < CFArrayGetCount(sources); ++i) {
+                CFDictionaryRef source = IOPSGetPowerSourceDescription(info, CFArrayGetValueAtIndex(sources, i));
+                if (!source)
+                    continue;
+                auto type = static_cast<CFStringRef>(CFDictionaryGetValue(source, CFSTR(kIOPSTypeKey)));
+                if (!type || CFStringCompare(type, CFSTR(kIOPSInternalBatteryType), 0) != kCFCompareEqualTo)
+                    continue;
+                auto state = static_cast<CFStringRef>(CFDictionaryGetValue(source, CFSTR(kIOPSPowerSourceStateKey)));
+                auto present = static_cast<CFBooleanRef>(CFDictionaryGetValue(source, CFSTR(kIOPSIsPresentKey)));
+                int current = 0, max = 0;
+                if (auto n = static_cast<CFNumberRef>(CFDictionaryGetValue(source, CFSTR(kIOPSCurrentCapacityKey))))
+                    CFNumberGetValue(n, kCFNumberIntType, &current);
+                if (auto n = static_cast<CFNumberRef>(CFDictionaryGetValue(source, CFSTR(kIOPSMaxCapacityKey))))
+                    CFNumberGetValue(n, kCFNumberIntType, &max);
+                const bool onAC = !state || CFStringCompare(state, CFSTR(kIOPSACPowerValue), 0) == kCFCompareEqualTo;
+                power = macPower(!present || CFBooleanGetValue(present), onAC, current, max);
+                break;
+            }
+            CFRelease(sources);
+        }
+        CFRelease(info);
+    }
+    applyPower(power);
+#else
+    applyPower({});
+#endif
+}
+
+void DeviceStatus::readNetwork() {
+#if TORRENTPLAYER_FREEDESKTOP
+    readNetworkManager();
+#else
+    static const bool loaded = QNetworkInformation::loadDefaultBackend();
+    QNetworkInformation *info = loaded ? QNetworkInformation::instance() : nullptr;
+    const Network network = info ? networkFrom(int(info->reachability()), int(info->transportMedium()), info->isMetered())
+                                 : networkFrom(-1, 0, false);
+    m_conditions.connected = network.connected;
+    m_conditions.wifi = network.wifi;
+    m_conditions.metered = network.metered;
+#endif
+}
+
+#if TORRENTPLAYER_FREEDESKTOP
 static QVariant dbusProperty(const QString &service, const QString &path, const QString &interface,
                              const QString &name) {
     QDBusInterface iface(service, path, "org.freedesktop.DBus.Properties", QDBusConnection::systemBus());
@@ -145,3 +261,4 @@ void DeviceStatus::readNetworkManager() {
     const uint m = metered.isValid() ? metered.toUInt() : 0;
     m_conditions.metered = (m == 1 || m == 3);
 }
+#endif // TORRENTPLAYER_FREEDESKTOP

@@ -14,6 +14,8 @@
 #include "format.h"
 #include "library.h"
 #include "links.h"
+#include "nativefilepicker.h"
+#include "platform.h"
 #include "policy.h"
 #include "settings.h"
 #include "playback.h"
@@ -24,6 +26,7 @@
 #include "theme.h"
 #include "translator.h"
 
+#include <QNetworkInformation>
 #include <QSignalSpy>
 
 static QJsonObject file(int index, const QString &path, double length, const QString &type = {}) {
@@ -1044,12 +1047,118 @@ private slots:
         QFile file(autostart.desktopFilePath());
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString body = QString::fromUtf8(file.readAll());
+#ifdef Q_OS_MACOS
+        QVERIFY(body.contains("<string>--background</string>"));
+        QVERIFY(body.contains("<key>RunAtLoad</key>"));
+#else
         QVERIFY(body.contains("Exec=torrentplayer --background"));
         QVERIFY(body.contains("X-GNOME-Autostart-enabled=true"));
+#endif
         QCOMPARE(Autostart::desktopFileContents().contains("torrentplayer --background"), true);
         autostart.setEnabled(false);
         QVERIFY(!autostart.enabled());
         QVERIFY(!QFile::exists(autostart.desktopFilePath()));
+    }
+
+    void autostartMacAndWindowsEntries() {
+        const QString plist = Autostart::launchAgentContents("/Applications/Torrent Player.app/Contents/MacOS/a&b");
+        QVERIFY(plist.contains("<string>app.torrentplayer.desktop</string>"));
+        QVERIFY(plist.contains("<string>/Applications/Torrent Player.app/Contents/MacOS/a&amp;b</string>"));
+        QVERIFY(plist.contains("<string>--background</string>"));
+        QVERIFY(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
+        const QString run = Autostart::windowsRunCommand("C:/Users/A B/AppData/Local/Programs/Torrent Player/torrentplayer.exe");
+#ifdef Q_OS_WIN
+        QCOMPARE(run, QString("\"C:\\Users\\A B\\AppData\\Local\\Programs\\Torrent Player\\torrentplayer.exe\" --background"));
+#else
+        QVERIFY(run.startsWith('"'));
+        QVERIFY(run.endsWith("torrentplayer.exe\" --background"));
+#endif
+    }
+
+    void platformEngineCandidates() {
+        using Platform::Os;
+        QCOMPARE(Platform::engineBinaryName(Os::Windows), QString("engine-host.exe"));
+        QCOMPARE(Platform::engineBinaryName(Os::MacOS), QString("engine-host"));
+        QCOMPARE(Platform::engineCandidates(Os::Linux, "/usr/bin", ""),
+                 QStringList({"/usr/bin/engine-host", "/usr/bin/../lib/torrentplayer/engine-host",
+                              "/usr/lib/torrentplayer/engine-host"}));
+        QCOMPARE(Platform::engineCandidates(Os::Linux, "/app", "/x/engine-host").first(), QString("/x/engine-host"));
+        QCOMPARE(Platform::engineCandidates(Os::Windows, "C:/TP", ""),
+                 QStringList({"C:/TP/engine-host.exe", "C:/TP/../lib/torrentplayer/engine-host.exe"}));
+        QCOMPARE(Platform::engineCandidates(Os::MacOS, "/A.app/Contents/MacOS", "").first(),
+                 QString("/A.app/Contents/MacOS/engine-host"));
+    }
+
+    void platformGeoipDirectories() {
+        using Platform::Os;
+        QCOMPARE(Platform::geoipDirectories(Os::Linux, "/usr/bin", "/geo"),
+                 QStringList({"/geo", "/usr/bin", "/usr/bin/../share/torrentplayer", "/usr/share/torrentplayer",
+                              "/usr/bin/../../android/app/src/main/assets"}));
+        const QStringList mac = Platform::geoipDirectories(Os::MacOS, "/A.app/Contents/MacOS", "");
+        QCOMPARE(mac.value(0), QString("/A.app/Contents/MacOS"));
+        QVERIFY(mac.contains("/A.app/Contents/MacOS/../Resources"));
+        const QStringList windows = Platform::geoipDirectories(Os::Windows, "C:/TP", "");
+        QCOMPARE(windows.first(), QString("C:/TP"));
+        QVERIFY(!windows.contains("/usr/share/torrentplayer"));
+        QVERIFY(!windows.contains("C:/TP/../Resources"));
+        QVERIFY(Platform::geoipCopiesFile(Os::Windows));
+        QVERIFY(!Platform::geoipCopiesFile(Os::Linux));
+        QVERIFY(!Platform::geoipCopiesFile(Os::MacOS));
+    }
+
+    void platformExternalMpv() {
+        using Platform::Os;
+        QCOMPARE(Platform::externalMpvCandidates(Os::Linux, "/usr/bin/mpv"), QStringList({"mpv"}));
+        QCOMPARE(Platform::externalMpvCandidates(Os::Windows, ""), QStringList({"mpv.exe"}));
+        QCOMPARE(Platform::externalMpvCandidates(Os::Windows, "C:/mpv/mpv.exe").first(), QString("C:/mpv/mpv.exe"));
+        const QStringList mac = Platform::externalMpvCandidates(Os::MacOS, "");
+        QCOMPARE(mac.value(0), QString("/Applications/mpv.app/Contents/MacOS/mpv"));
+        QVERIFY(mac.contains("/opt/homebrew/bin/mpv"));
+        QCOMPARE(Platform::instanceServerName("kar"), QString("torrentplayer-kar"));
+        QCOMPARE(Platform::instanceServerName(""), QString("torrentplayer-user"));
+    }
+
+    void nativePickerFilters() {
+        QVERIFY(NativeFilePicker::nameFilters("directory").isEmpty());
+        QVERIFY(NativeFilePicker::nameFilters("torrent").first().contains("*.torrent"));
+        QVERIFY(NativeFilePicker::nameFilters("subtitle").first().contains("*.srt"));
+        QVERIFY(NativeFilePicker::nameFilters("subtitle").first().contains("*.vtt"));
+    }
+
+    void windowsAndMacPower() {
+        // Laptop on battery at 40%, then plugged in.
+        auto p = DeviceStatus::windowsPower(0, 0, 40);
+        QVERIFY(p.hasBattery && p.onBattery);
+        QCOMPARE(p.percent, 40);
+        p = DeviceStatus::windowsPower(1, 8, 40);
+        QVERIFY(p.hasBattery && !p.onBattery);
+        // Desktop: no system battery (128), or unknown (255).
+        QVERIFY(!DeviceStatus::windowsPower(1, 128, 255).hasBattery);
+        QCOMPARE(DeviceStatus::windowsPower(1, 128, 255).percent, -1);
+        QVERIFY(!DeviceStatus::windowsPower(255, 255, 255).hasBattery);
+        QVERIFY(!DeviceStatus::windowsPower(0, 1, 255).hasBattery);
+
+        auto m = DeviceStatus::macPower(true, false, 1500, 5000);
+        QVERIFY(m.hasBattery && m.onBattery);
+        QCOMPARE(m.percent, 30);
+        QCOMPARE(DeviceStatus::macPower(true, true, 100, 100).percent, 100);
+        QVERIFY(!DeviceStatus::macPower(true, true, 100, 100).onBattery);
+        QVERIFY(!DeviceStatus::macPower(false, false, 0, 0).hasBattery);
+    }
+
+    void networkInformationConditions() {
+        using R = QNetworkInformation::Reachability;
+        using T = QNetworkInformation::TransportMedium;
+        auto none = DeviceStatus::networkFrom(-1, 0, true);
+        QVERIFY(none.connected && none.wifi && !none.metered);
+        auto wifi = DeviceStatus::networkFrom(int(R::Online), int(T::WiFi), false);
+        QVERIFY(wifi.connected && wifi.wifi && !wifi.metered);
+        QVERIFY(DeviceStatus::networkFrom(int(R::Online), int(T::Ethernet), false).wifi);
+        QVERIFY(DeviceStatus::networkFrom(int(R::Unknown), int(T::Unknown), false).connected);
+        auto cell = DeviceStatus::networkFrom(int(R::Online), int(T::Cellular), true);
+        QVERIFY(cell.connected && !cell.wifi && cell.metered);
+        auto off = DeviceStatus::networkFrom(int(R::Disconnected), int(T::Cellular), false);
+        QVERIFY(!off.connected && off.wifi);
     }
 
     void batteryThresholdPausesWhenLow() {

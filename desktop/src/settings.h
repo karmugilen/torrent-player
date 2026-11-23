@@ -139,6 +139,9 @@ private:
 
 // Reads MemTotal and MemAvailable (bytes) from /proc/meminfo; false when unreadable.
 bool readMemInfo(qint64 &totalBytes, qint64 &availableBytes, const QString &path = "/proc/meminfo");
+// Total and available RAM from the OS: /proc/meminfo on Linux, GlobalMemoryStatusEx on
+// Windows, sysctl and Mach VM statistics on macOS.
+bool readSystemMemory(qint64 &totalBytes, qint64 &availableBytes);
 
 struct EngineRequest {
     QString path;

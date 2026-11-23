@@ -1,5 +1,7 @@
 #include "mpvitem.h"
 
+#include "platform.h"
+
 #include <QGuiApplication>
 #include <QMetaObject>
 #include <QOpenGLContext>
@@ -83,6 +85,8 @@ public:
                 {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl},
             };
             // The display connection lets hardware decoding hand frames to OpenGL without a copy.
+            // Windows (desktop OpenGL) and macOS (3.2 core, see main.cpp) need none.
+#if TORRENTPLAYER_FREEDESKTOP
 #if QT_CONFIG(wayland)
             if (auto *wayland = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>())
                 params.append({MPV_RENDER_PARAM_WL_DISPLAY, wayland->display()});
@@ -90,6 +94,7 @@ public:
 #if QT_CONFIG(xcb)
             if (auto *x11 = qGuiApp->nativeInterface<QNativeInterface::QX11Application>())
                 params.append({MPV_RENDER_PARAM_X11_DISPLAY, x11->display()});
+#endif
 #endif
             params.append({MPV_RENDER_PARAM_INVALID, nullptr});
             if (mpv_render_context_create(&m_render, m_mpv.get(), params.data()) < 0) {

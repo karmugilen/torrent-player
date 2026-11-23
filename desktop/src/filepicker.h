@@ -2,7 +2,8 @@
 
 #include <QObject>
 
-// Asks the user for a file. The app uses the desktop portal; tests can put a
+// Asks the user for a file. Linux uses the desktop portal (PortalFilePicker), Windows
+// and macOS the native dialog (NativeFilePicker); tests can put a
 // fake behind the same interface.
 class FilePicker : public QObject {
     Q_OBJECT

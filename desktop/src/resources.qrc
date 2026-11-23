@@ -13,6 +13,7 @@
         <file alias="world-map.json">world-map.json</file>
         <file alias="licenses/peer-map-data.txt">licenses/peer-map-data.txt</file>
         <file alias="i18n/en.json">i18n/en.json</file>
+        <file alias="icons/torrentplayer.png">icons/torrentplayer.png</file>
         <file alias="policy.json">../../shared/policy.json</file>
     </qresource>
 </RCC>

@@ -3,6 +3,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QFileOpenEvent>
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -14,8 +15,10 @@
 #include <QSGRendererInterface>
 #include <QSortFilterProxyModel>
 #include <QStandardPaths>
+#include <QSurfaceFormat>
 #include <QUrl>
 #include <cstdio>
+#include <functional>
 
 #include "addsession.h"
 #include "autostart.h"
@@ -26,7 +29,11 @@
 #include "library.h"
 #include "mpvitem.h"
 #include "playback.h"
+#include "nativefilepicker.h"
+#include "platform.h"
+#if TORRENTPLAYER_FREEDESKTOP
 #include "portalfilepicker.h"
+#endif
 #include "settings.h"
 #include "subtitles.h"
 #include "theme.h"
@@ -43,7 +50,45 @@
 #endif
 
 static QString serverName() {
-    return QString("torrentplayer-%1").arg(qEnvironmentVariable("USER", "user"));
+    return Platform::instanceServerName(qEnvironmentVariable("USER", qEnvironmentVariable("USERNAME")));
+}
+
+// macOS hands magnet links and .torrent files opened from Finder or the browser to
+// the running app as QFileOpenEvent, not as arguments.
+class FileOpenFilter : public QObject {
+public:
+    explicit FileOpenFilter(std::function<void(const QString &)> open, QObject *parent = nullptr)
+        : QObject(parent), m_open(std::move(open)) {}
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::FileOpen) {
+            auto *open = static_cast<QFileOpenEvent *>(event);
+            const QString link = open->url().isLocalFile() ? open->file() : open->url().toString();
+            if (!link.isEmpty())
+                m_open(link);
+            return true;
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    std::function<void(const QString &)> m_open;
+};
+
+// Graphics setup that must happen before the application object exists. mpv draws
+// through OpenGL: macOS only offers a modern context as a 3.2+ core profile, and
+// Windows must not fall back to ANGLE or software GL.
+static void prepareOpenGL() {
+#if defined(Q_OS_MACOS)
+    QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 2);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    QSurfaceFormat::setDefaultFormat(format);
+#elif defined(Q_OS_WIN)
+    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+#endif
 }
 
 // One window and one engine per user: a second launch (a magnet clicked in
@@ -61,11 +106,13 @@ static bool forwardToRunningApp(const QString &link) {
 }
 
 int main(int argc, char *argv[]) {
+    prepareOpenGL();
     QApplication app(argc, argv);
     app.setApplicationName("torrentplayer");
     app.setApplicationVersion(QLatin1String(APP_VERSION));
     app.setDesktopFileName("torrentplayer");
-    app.setWindowIcon(QIcon::fromTheme("torrentplayer"));
+    // The theme's icon on Linux; the built-in one where there is none (Windows, macOS).
+    app.setWindowIcon(QIcon::fromTheme("torrentplayer", QIcon(":/icons/torrentplayer.png")));
     app.setQuitOnLastWindowClosed(false);
 
     QString link;
@@ -106,7 +153,10 @@ int main(int argc, char *argv[]) {
     Translator translator;
     app.installTranslator(&translator);
 
-    const QString data = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    // ~/.local/share/torrentplayer on Linux, %LOCALAPPDATA%\torrentplayer on Windows (not
+    // the roaming profile: the engine keeps big part files here), and
+    // ~/Library/Application Support/torrentplayer on macOS.
+    const QString data = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     if (downloads.isEmpty())
         downloads = QDir::homePath() + "/Downloads";
@@ -135,7 +185,11 @@ int main(int argc, char *argv[]) {
     libraryView.setSourceModel(&library);
     libraryView.setFilterRole(Library::NameRole);
     libraryView.setFilterCaseSensitivity(Qt::CaseInsensitive);
+#if TORRENTPLAYER_FREEDESKTOP
     PortalFilePicker picker;
+#else
+    NativeFilePicker picker;
+#endif
 
     QQmlApplicationEngine qml;
     QObject::connect(&translator, &Translator::changed, &qml, &QQmlEngine::retranslate);
@@ -182,6 +236,14 @@ int main(int argc, char *argv[]) {
             });
         }
     });
+
+#ifdef Q_OS_MACOS
+    FileOpenFilter fileOpen([&](const QString &incoming) {
+        tray.showWindow();
+        adder.start(incoming);
+    });
+    app.installEventFilter(&fileOpen);
+#endif
 
     // Keep active-transfer count for Auto RAM sizing.
     QObject::connect(&library, &Library::revisionChanged, &settings, [&] {

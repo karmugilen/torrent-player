@@ -1,5 +1,7 @@
 #include "settings.h"
 
+#include "platform.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -9,6 +11,20 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTextStream>
+
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(Q_OS_MACOS)
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
 
 static constexpr qint64 MiB = 1024 * 1024;
 
@@ -30,7 +46,11 @@ Settings::~Settings() {
 }
 
 QString Settings::defaultPath() {
+#if TORRENTPLAYER_FREEDESKTOP
     return QDir::homePath() + "/.local/share/torrentplayer/settings.json";
+#else
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/settings.json";
+#endif
 }
 
 void Settings::load() {
@@ -130,7 +150,7 @@ void Settings::setActiveTransfers(int count) {
 
 void Settings::refreshAutoRamCache() {
     qint64 total = 0, available = 0;
-    if (!readMemInfo(total, available))
+    if (!readSystemMemory(total, available))
         total = available = 0;
     const int size = autoRamCacheMiB(total, available, m_activeTransfers, m_policy.ramRule());
     if (size == m_autoMiB)
@@ -178,6 +198,35 @@ bool readMemInfo(qint64 &totalBytes, qint64 &availableBytes, const QString &path
             availableBytes = kib * 1024;
     }
     return totalBytes > 0 && availableBytes >= 0;
+}
+
+bool readSystemMemory(qint64 &totalBytes, qint64 &availableBytes) {
+#if defined(Q_OS_WIN)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status))
+        return false;
+    totalBytes = qint64(status.ullTotalPhys);
+    availableBytes = qint64(status.ullAvailPhys);
+    return totalBytes > 0;
+#elif defined(Q_OS_MACOS)
+    uint64_t memsize = 0;
+    size_t length = sizeof(memsize);
+    if (sysctlbyname("hw.memsize", &memsize, &length, nullptr, 0) != 0 || memsize == 0)
+        return false;
+    totalBytes = qint64(memsize);
+    // Free plus reclaimable pages, roughly what Linux calls MemAvailable.
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    vm_size_t page = 0;
+    if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS ||
+        host_statistics64(mach_host_self(), HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm), &count) != KERN_SUCCESS)
+        return false;
+    availableBytes = qint64(vm.free_count + vm.inactive_count + vm.purgeable_count) * qint64(page);
+    return true;
+#else
+    return readMemInfo(totalBytes, availableBytes);
+#endif
 }
 
 // --- EngineSettings ---------------------------------------------------------

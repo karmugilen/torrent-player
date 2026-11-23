@@ -24,7 +24,29 @@
 #include <QVideoSink>
 #include <QtConcurrent>
 
+#include "platform.h"
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
+
+// A hard link: no space and no time. False when the OS or file system says no.
+static bool hardLink(const QString &source, const QString &target) {
+#ifdef Q_OS_WIN
+    return CreateHardLinkW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(target).utf16()),
+                           reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(source).utf16()), nullptr) != 0;
+#else
+    return ::link(QFile::encodeName(source).constData(), QFile::encodeName(target).constData()) == 0;
+#endif
+}
 
 Library::Library(Engine *engine, const QString &dataDirectory, const QString &saveDirectory, QObject *parent)
     : QAbstractListModel(parent), m_engine(engine), m_dataDirectory(dataDirectory), m_saveDirectory(saveDirectory) {
@@ -505,7 +527,7 @@ void Library::exportFinished(Entry &e) {
                 const QString temporary = destination + ".torrentplayer-tmp";
                 QFile::remove(temporary);
                 // A hard link costs no space and no time; across file systems, copy.
-                bool ok = ::link(QFile::encodeName(source).constData(), QFile::encodeName(temporary).constData()) == 0;
+                bool ok = hardLink(source, temporary);
                 if (!ok)
                     ok = QFile::copy(source, temporary);
                 if (ok)
@@ -1343,7 +1365,12 @@ bool Library::openInMpv(const QString &url, qint64 startMs, const QString &title
     if (startMs > 0)
         arguments << QString("--start=%1").arg(startMs / 1000.0, 0, 'f', 1);
     arguments << url;
-    return QProcess::startDetached("mpv", arguments);
+    const Platform::Os os = Platform::current();
+    for (const QString &program : Platform::externalMpvCandidates(os, QStandardPaths::findExecutable("mpv")))
+        if (os == Platform::Os::Linux || QFileInfo(program).isExecutable() || !program.contains('/'))
+            if (QProcess::startDetached(program, arguments))
+                return true;
+    return false;
 }
 
 QString Library::clipboardText() const {

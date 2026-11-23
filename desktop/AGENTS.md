@@ -1,4 +1,4 @@
-# Torrent Player desktop (Linux)
+# Torrent Player desktop (Linux, Windows, macOS)
 
 The Linux app mirrors the Android app in `../android`: same engine, same behaviour,
 same defaults. When in doubt about how something should behave, read the Android
@@ -33,6 +33,25 @@ run the app with `TORRENTPLAYER_ENGINE=<that path> build/torrentplayer`. To look
 UI without a display, load it with `QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1`
 and grab the window (see the omarchy-app skill, Loop step 4). A legal test torrent is
 Sintel: `magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.webtorrent.dev`.
+
+## Windows and macOS
+
+The same sources build on Windows 10+ (MSVC) and macOS 12+ with Qt 6.8+:
+`qmake6 MPV_PREFIX=<dir>` (headers in `<dir>/include/mpv`, library in `<dir>/lib`).
+On those, `torrentplayer.pro` reads the version itself through `version.pri`.
+Only CI compiles these platforms, so keep platform code in small guarded functions:
+
+- `src/platform.h`: `TORRENTPLAYER_FREEDESKTOP` (Linux/BSD: D-Bus, portal, UPower,
+  NetworkManager, Omarchy) and the pure search lists (engine-host, GeoIP folders,
+  external mpv), tested on Linux for every OS.
+- Engine lifetime: `ENGINE_EXIT_ON_STDIN_EOF=1` and an open stdin pipe on every OS,
+  plus `PR_SET_PDEATHSIG` on Linux. Windows copies the GeoIP file instead of linking it.
+- Linux keeps its own paths (portal picker, D-Bus battery and network, `.desktop`
+  autostart, Omarchy theme). Windows and macOS use `NativeFilePicker`, GetSystemPowerStatus or
+  IOKit with QNetworkInformation, HKCU `Run` or a LaunchAgent, and accent `#FFD60A`, radius 8.
+- macOS: OpenGL 3.2 core profile (set in `main.cpp` before the app exists), bundle
+  `src/macos/Info.plist` (magnet and .torrent handlers come in as QFileOpenEvent).
+  Icons: `src/icons/torrentplayer.{ico,icns,png}`, made from `pkgbuild/torrentplayer.svg`.
 
 ## Rules
 
