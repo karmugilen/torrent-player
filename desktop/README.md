@@ -1,4 +1,4 @@
-# Torrent Player for Linux
+# Torrent Player for the desktop
 
 ![Torrent Player](screenshot.png)
 
@@ -10,6 +10,15 @@ It runs the same Rust engine as the Torrent Player Android app (`engine-host`
 from `engine-rs`), started in the background and stopped when you quit.
 
 ## Install
+
+Downloads for Linux (AppImage, Arch package), Windows (installer or portable zip)
+and macOS (Apple silicon and Intel dmg) are attached to each
+[GitHub release](https://github.com/karmugilen/torrent-player/releases). The apps
+are unsigned, so Windows and macOS warn on first launch. To open them anyway:
+Windows **More info > Run anyway**, macOS right-click the app > **Open**. See
+[docs/DESKTOP_RELEASE.md](../docs/DESKTOP_RELEASE.md) for how they are built.
+
+To build and install from source on Arch:
 
 ```sh
 bin/install

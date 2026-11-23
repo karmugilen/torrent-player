@@ -141,22 +141,32 @@ else
     echo "short notes only (write $LONG next time for the detailed style)"
 fi
 
-# ---- 7b. Linux package (optional; never blocks the Android release) ------------
-step "7b/8 Linux package (optional)"
-LINUX_PKG=""
-if ! command -v qmake6 >/dev/null 2>&1; then
-    echo "note: qmake6 not found; skipping Linux package"
-elif (
-    cd "$ROOT/desktop/pkgbuild"
-    makepkg -f --noconfirm
-    PKG="torrentplayer-${NAME}-1-x86_64.pkg.tar.zst"
-    [ -f "$PKG" ] || exit 1
-    gh release upload "v$NAME" "$PKG" -R "$REPO" --clobber
-); then
-    LINUX_PKG="torrentplayer-${NAME}-1-x86_64.pkg.tar.zst"
-    echo "Linux package attached: $LINUX_PKG"
+# ---- 7b. Desktop apps (optional; never blocks the Android release) -----------
+# GitHub Actions builds Linux, Windows and macOS (.github/workflows/desktop.yml) and
+# attaches them to v$NAME. Publishing the release above already starts it when the
+# workflow is in the tagged commit; otherwise start it here. See docs/DESKTOP_RELEASE.md.
+step "7b/8 desktop apps (GitHub Actions, optional)"
+DESKTOP=""
+if ! gh workflow view desktop.yml -R "$REPO" >/dev/null 2>&1; then
+    echo "note: no desktop workflow on GitHub; skipping desktop apps"
 else
-    echo "note: Linux package step failed; Android release is unaffected"
+    for _ in 1 2 3 4 5 6; do
+        DESKTOP="$(gh run list -R "$REPO" --workflow desktop.yml --event release --branch "v$NAME" -L 1 \
+            --json url --jq '.[0].url // empty' 2>/dev/null || true)"
+        [ -n "$DESKTOP" ] && break
+        sleep 10
+    done
+    if [ -z "$DESKTOP" ] && gh workflow run desktop.yml -R "$REPO" --ref "$BRANCH" -f tag="v$NAME" >/dev/null 2>&1; then
+        sleep 5
+        DESKTOP="$(gh run list -R "$REPO" --workflow desktop.yml --event workflow_dispatch -L 1 \
+            --json url --jq '.[0].url // empty' 2>/dev/null || true)"
+        DESKTOP="${DESKTOP:-started (gh run list -R $REPO --workflow desktop.yml)}"
+    fi
+    if [ -n "$DESKTOP" ]; then
+        echo "desktop apps building (about 30 min): $DESKTOP"
+    else
+        echo "note: could not start the desktop workflow; Android release is unaffected"
+    fi
 fi
 
 # ---- 8. Google Play closed test ------------------------------------------------
@@ -182,5 +192,5 @@ cat <<EOF
   F-Droid  picks up v$NAME by itself (a few days)
   Play     $PLAY
   APK sha256 $APK_SHA
-  Linux    ${LINUX_PKG:-not attached}
+  Desktop  ${DESKTOP:-not started}
 EOF
