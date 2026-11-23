@@ -63,6 +63,12 @@ pb "Add :NSHighResolutionCapable bool true"
 # ---- Qt frameworks, QML, plugins, then libmpv and its Homebrew dependencies ---------
 macdeployqt "$APP" -qmldir="$ROOT/desktop/src" -verbose=1
 
+# macdeployqt always ships Qt SQL drivers. They link optional DB libs that are
+# not on the runner (libiodbc, libpq, libmimerapi). dylibbundler then prompts
+# for those paths; with no TTY it loops on "does not exist. Try again" until
+# the job is killed (~90 min). We do not use Qt SQL — drop the drivers.
+rm -rf "$C/PlugIns/sqldrivers"
+
 # macdeployqt copies most non-Qt dylibs; whatever still points into Homebrew is
 # bundled here with dylibbundler.
 brew_refs() {
@@ -80,7 +86,10 @@ while IFS= read -r f; do todo+=("$f"); done < <(brew_refs)
 if [ "${#todo[@]}" -gt 0 ]; then
   args=()
   for f in "${todo[@]}"; do args+=(-x "$f"); done
-  dylibbundler -of -cd -b "${args[@]}" -d "$C/Frameworks" -p @executable_path/../Frameworks/ -s "$BREW/lib" -s "$MPV/lib"
+  # Feed "quit" so a missing optional dylib fails the step instead of hanging
+  # on dylibbundler's interactive "where is this library?" prompt.
+  printf 'quit\n' | dylibbundler -of -cd -b "${args[@]}" -d "$C/Frameworks" \
+    -p @executable_path/../Frameworks/ -s "$BREW/lib" -s "$MPV/lib"
 fi
 left=()
 while IFS= read -r f; do left+=("$f"); done < <(brew_refs)
