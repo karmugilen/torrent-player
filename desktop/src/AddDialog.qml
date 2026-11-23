@@ -7,10 +7,12 @@ Dialog {
     id: dialog
     parent: Overlay.overlay
     anchors.centerIn: parent
-    width: Math.min(760, win.width - 64)
-    height: adder.state === "choose" ? Math.min(680, win.height - 64) : implicitHeight
+    width: win.dialogWidth(760)
+    height: adder.state === "choose" ? Math.min(680, win.height - 32) : Math.min(implicitHeight, win.height - 32)
     modal: true
-    padding: 24
+    padding: narrow ? 16 : 24
+    // Narrow: button rows wrap and the rarer buttons go under the main ones.
+    readonly property bool narrow: width < 560
     Material.roundedScale: theme.radius
     background: Rectangle {
         color: win.surface
@@ -38,19 +40,28 @@ Dialog {
     readonly property var shownFiles: adder.files
 
     header: Label {
-        padding: 24
+        padding: dialog.narrow ? 16 : 24
         bottomPadding: 0
+        elide: Text.ElideRight
         text: adder.state === "choose" ? qsTr("Choose files") : qsTr("Add download")
         font.pixelSize: 20
         font.weight: Font.DemiBold
         color: win.textColor
     }
 
-    contentItem: Item {
+    // Scrolls when the window is too short for it.
+    contentItem: Flickable {
+        id: addFlick
         implicitHeight: content.implicitHeight
+        contentWidth: width
+        contentHeight: content.height
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ScrollBar {}
         ColumnLayout {
             id: content
-            anchors.fill: parent
+            width: addFlick.width
+            height: Math.max(addFlick.height, implicitHeight)
             spacing: 14
 
             // ------------------------------------------------ the link
@@ -77,23 +88,34 @@ Dialog {
                     color: win.danger
                     wrapMode: Text.Wrap
                 }
-                RowLayout {
+                GridLayout {
                     Layout.fillWidth: true
-                    Button { text: qsTr("Paste link"); flat: true; onClicked: { input.text = library.clipboardText(); if (input.text !== "") adder.start(input.text) } }
-                    Button { text: qsTr("Open torrent file"); flat: true; onClicked: picker.open("torrent") }
-                    Item { Layout.fillWidth: true }
-                    Button {
-                        visible: adder.existingKey !== ""
-                        text: qsTr("Open existing torrent")
-                        flat: true
-                        onClicked: { const key = adder.existingKey; dialog.close(); win.openTorrent(key) }
+                    columns: dialog.narrow ? 1 : 2
+                    rowSpacing: 0
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        Button { text: qsTr("Paste link"); flat: true; onClicked: { input.text = library.clipboardText(); if (input.text !== "") adder.start(input.text) } }
+                        Button { text: qsTr("Open torrent file"); flat: true; onClicked: picker.open("torrent") }
                     }
-                    Button { text: qsTr("Cancel"); flat: true; onClicked: dialog.close() }
-                    Button {
-                        text: qsTr("Continue")
-                        highlighted: true
-                        enabled: input.text.trim() !== ""
-                        onClicked: adder.start(input.text)
+                    // Right-aligned, wrapping from the right: Continue stays in the corner.
+                    Flow {
+                        Layout.fillWidth: true
+                        layoutDirection: Qt.RightToLeft
+                        spacing: 4
+                        Button {
+                            text: qsTr("Continue")
+                            highlighted: true
+                            enabled: input.text.trim() !== ""
+                            onClicked: adder.start(input.text)
+                        }
+                        Button { text: qsTr("Cancel"); flat: true; onClicked: dialog.close() }
+                        Button {
+                            visible: adder.existingKey !== ""
+                            text: qsTr("Open existing torrent")
+                            flat: true
+                            onClicked: { const key = adder.existingKey; dialog.close(); win.openTorrent(key) }
+                        }
                     }
                 }
             }
@@ -104,11 +126,15 @@ Dialog {
                 visible: adder.state === "starting" || adder.state === "loading" || adder.state === "fetching" || adder.state === "saving"
                 spacing: 12
                 RowLayout {
+                    Layout.fillWidth: true
                     spacing: 16
                     BusyIndicator { running: parent.visible }
                     ColumnLayout {
+                        Layout.fillWidth: true
                         spacing: 4
                         Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
                             color: win.textColor
                             font.pixelSize: 15
                             text: adder.state === "starting" ? qsTr("Starting download engine…")
@@ -117,6 +143,8 @@ Dialog {
                                   : qsTr("Finding files")
                         }
                         Label {
+                            Layout.fillWidth: true
+                            elide: Text.ElideMiddle
                             visible: adder.state === "fetching"
                             color: win.muted
                             text: adder.name !== "" ? adder.name : qsTr("Asking peers for the file list · %n peers", "", adder.peers)
@@ -151,18 +179,30 @@ Dialog {
                     font.weight: Font.Medium
                     elide: Text.ElideMiddle
                 }
-                RowLayout {
-                    spacing: 4
-                    Button { text: qsTr("Select all"); flat: true; onClicked: adder.selectAll() }
-                    Button { text: qsTr("Select none"); flat: true; onClicked: adder.selectNone() }
-                    Button { text: qsTr("Videos only"); flat: true; onClicked: adder.selectVideos() }
-                    Item { Layout.fillWidth: true }
-                    Label { text: qsTr("Videos and matching subtitles start selected."); color: win.muted; font.pixelSize: 12 }
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: dialog.narrow ? 1 : 2
+                    rowSpacing: 0
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        Button { text: qsTr("Select all"); flat: true; onClicked: adder.selectAll() }
+                        Button { text: qsTr("Select none"); flat: true; onClicked: adder.selectNone() }
+                        Button { text: qsTr("Videos only"); flat: true; onClicked: adder.selectVideos() }
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        horizontalAlignment: dialog.narrow ? Text.AlignLeft : Text.AlignRight
+                        wrapMode: Text.Wrap
+                        text: qsTr("Videos and matching subtitles start selected.")
+                        color: win.muted
+                        font.pixelSize: 12
+                    }
                 }
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumHeight: 160
+                    Layout.minimumHeight: Math.min(160, Math.max(96, win.height * 0.4))
                     radius: win.radius
                     color: win.surface
                     border.color: win.line
@@ -206,6 +246,7 @@ Dialog {
                 Label {
                     Layout.fillWidth: true
                     color: win.muted
+                    wrapMode: Text.Wrap
                     text: qsTr("%1 of %2 files selected · %3").arg(adder.selectedCount).arg(dialog.shownFiles.length).arg(fmt.bytes(adder.selectedBytes))
                 }
                 Label {
@@ -228,11 +269,14 @@ Dialog {
                 Label {
                     Layout.fillWidth: true
                     visible: adder.selectedCount === 0
+                    wrapMode: Text.Wrap
                     color: win.danger
                     text: qsTr("Select at least one file to continue.")
                 }
-                RowLayout {
+                GridLayout {
                     Layout.fillWidth: true
+                    columns: dialog.narrow ? 1 : 2
+                    rowSpacing: 0
                     Label {
                         Layout.fillWidth: true
                         elide: Text.ElideMiddle
@@ -240,26 +284,33 @@ Dialog {
                         font.pixelSize: 12
                         text: qsTr("Saved to %1").arg(library.saveDirectory)
                     }
-                    Button { text: qsTr("Cancel"); flat: true; onClicked: dialog.close() }
-                    // The default choice (Settings: When adding a torrent) is the highlighted one.
-                    Button {
-                        readonly property bool preferred: !(settings.directPlayDefault && adder.selectedHasVideo)
-                        text: qsTr("Download")
-                        flat: !preferred
-                        highlighted: preferred
-                        enabled: adder.selectedCount > 0 && adder.selectedBytes <= adder.freeBytes
-                        onClicked: adder.confirm(false)
-                    }
-                    Button {
-                        text: qsTr("Play now")
-                        flat: !settings.directPlayDefault
-                        highlighted: settings.directPlayDefault
-                        visible: adder.selectedHasVideo
-                        enabled: adder.selectedCount > 0
-                        ToolTip.text: qsTr("Direct Play: stream only, nothing saved to Downloads")
-                        ToolTip.visible: hovered
-                        ToolTip.delay: 600
-                        onClicked: adder.confirm(true)
+                    // Right-aligned, wrapping from the right: the main choices stay in the corner.
+                    Flow {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: dialog.narrow ? 0 : 320
+                        layoutDirection: Qt.RightToLeft
+                        spacing: 4
+                        Button {
+                            text: qsTr("Play now")
+                            flat: !settings.directPlayDefault
+                            highlighted: settings.directPlayDefault
+                            visible: adder.selectedHasVideo
+                            enabled: adder.selectedCount > 0
+                            ToolTip.text: qsTr("Direct Play: stream only, nothing saved to Downloads")
+                            ToolTip.visible: hovered
+                            ToolTip.delay: 600
+                            onClicked: adder.confirm(true)
+                        }
+                        // The default choice (Settings: When adding a torrent) is the highlighted one.
+                        Button {
+                            readonly property bool preferred: !(settings.directPlayDefault && adder.selectedHasVideo)
+                            text: qsTr("Download")
+                            flat: !preferred
+                            highlighted: preferred
+                            enabled: adder.selectedCount > 0 && adder.selectedBytes <= adder.freeBytes
+                            onClicked: adder.confirm(false)
+                        }
+                        Button { text: qsTr("Cancel"); flat: true; onClicked: dialog.close() }
                     }
                 }
             }

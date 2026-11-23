@@ -6,6 +6,8 @@ import QtQuick.Layouts
 Item {
     id: card
     property bool current: false
+    // The 16:9 picture's height; the library trims it on a short window.
+    property int pictureHeight: Math.round((width - 18) * 9 / 16)
     readonly property string cardKey: model.key
     signal clicked()
 
@@ -23,7 +25,7 @@ Item {
         Rectangle {
             id: picture
             anchors { left: parent.left; right: parent.right; top: parent.top; margins: 1 }
-            height: (parent.width - 2) * 9 / 16
+            height: card.pictureHeight
             color: "#111114"
             radius: Math.max(0, win.radius - 1)
             clip: true
@@ -40,7 +42,7 @@ Item {
                 anchors.centerIn: parent
                 visible: model.thumbnail === ""
                 text: (model.name || "?").charAt(0).toUpperCase()
-                font.pixelSize: picture.height * 0.36
+                font.pixelSize: Math.max(12, picture.height * 0.36)
                 font.weight: Font.Bold
                 color: "#2c2c33"
             }
@@ -48,8 +50,8 @@ Item {
             RoundButton {
                 anchors.centerIn: parent
                 visible: model.hasVideo && (hover.hovered || card.current)
-                width: 64
-                height: 64
+                width: Math.min(64, picture.height - 8)
+                height: width
                 text: "▶"
                 font.pixelSize: 24
                 Material.background: theme.accent
