@@ -5,8 +5,8 @@
 // screen, and goes back to its old size and place when PiP ends.
 //
 // On Hyprland a client can't move, resize or pin itself, so the window is
-// floated, pinned and placed through hyprctl and put back the same way.
-// Elsewhere Qt::WindowStaysOnTopHint keeps it on top.
+// floated, pinned and placed through hyprctl (0.55+ Lua dispatchers) and put
+// back the same way. Elsewhere Qt::WindowStaysOnTopHint keeps it on top.
 
 #include <QObject>
 #include <QPointer>
@@ -54,11 +54,11 @@ public:
     static HyprClient findClient(const QByteArray &clientsJson, qint64 pid);
     // A monitor's usable area in logical pixels (reserved bars taken off).
     static QRect monitorArea(const QByteArray &monitorsJson, int monitorId);
-    // hyprctl dispatch commands (without the leading "dispatch") to enter PiP.
+    // hl.dsp.* expressions (for hl.dispatch) to enter PiP on Hyprland 0.55+.
     static QStringList enterCommands(const HyprClient &client, const QSize &size, const QPoint &position);
     // ... and to undo it: `before` is the window before PiP, `now` as it is now.
     static QStringList leaveCommands(const HyprClient &before, const HyprClient &now);
-    // hyprctl --batch argument for a list of dispatch commands.
+    // hyprctl eval script: successive hl.dispatch(...) calls.
     static QString batch(const QStringList &commands);
 
 signals:

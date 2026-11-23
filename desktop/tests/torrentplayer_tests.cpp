@@ -1243,32 +1243,39 @@ private slots:
         tiled.address = "0xabc";
         tiled.geometry = QRect(12, 451, 1512, 401);
         const QStringList enter = PipWindow::enterCommands(tiled, QSize(480, 270), QPoint(1032, 570));
-        QCOMPARE(enter, QStringList({"setfloating address:0xabc",
-                                     "resizewindowpixel exact 480 270,address:0xabc",
-                                     "movewindowpixel exact 1032 570,address:0xabc",
-                                     "pin address:0xabc"}));
+        QCOMPARE(enter, QStringList({
+            "hl.dsp.window.float({ action = \"set\", window = \"address:0xabc\" })",
+            "hl.dsp.window.resize({ x = 480, y = 270, relative = false, window = \"address:0xabc\" })",
+            "hl.dsp.window.move({ x = 1032, y = 570, relative = false, window = \"address:0xabc\" })",
+            "hl.dsp.window.pin({ action = \"set\", window = \"address:0xabc\" })"}));
         QCOMPARE(PipWindow::batch(enter.mid(0, 2)),
-                 QString("dispatch setfloating address:0xabc ; dispatch resizewindowpixel exact 480 270,address:0xabc"));
+                 QString("hl.dispatch(hl.dsp.window.float({ action = \"set\", window = \"address:0xabc\" }))\n"
+                         "hl.dispatch(hl.dsp.window.resize({ x = 480, y = 270, relative = false, window = \"address:0xabc\" }))"));
 
         PipWindow::HyprClient now = tiled;
         now.floating = true;
         now.pinned = true;
-        QCOMPARE(PipWindow::leaveCommands(tiled, now), QStringList({"pin address:0xabc", "settiled address:0xabc"}));
-        // Unpinned already (by the user): pin is a toggle, so it is not sent again.
+        QCOMPARE(PipWindow::leaveCommands(tiled, now),
+                 QStringList({"hl.dsp.window.pin({ action = \"unset\", window = \"address:0xabc\" })",
+                              "hl.dsp.window.float({ action = \"unset\", window = \"address:0xabc\" })"}));
+        // Unpinned already (by the user): do not send pin again.
         now.pinned = false;
-        QCOMPARE(PipWindow::leaveCommands(tiled, now), QStringList({"settiled address:0xabc"}));
+        QCOMPARE(PipWindow::leaveCommands(tiled, now),
+                 QStringList({"hl.dsp.window.float({ action = \"unset\", window = \"address:0xabc\" })"}));
 
         // A window that was floating and full screen goes back to its own place.
         PipWindow::HyprClient floating = tiled;
         floating.floating = true;
         floating.fullscreen = 1;
         floating.geometry = QRect(100, 80, 900, 600);
-        QCOMPARE(PipWindow::enterCommands(floating, QSize(480, 270), QPoint(1, 2)).first(), QString("fullscreenstate 0 0"));
+        QCOMPARE(PipWindow::enterCommands(floating, QSize(480, 270), QPoint(1, 2)).first(),
+                 QString("hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = \"address:0xabc\" })"));
         now = floating;
         now.pinned = true;
         QCOMPARE(PipWindow::leaveCommands(floating, now),
-                 QStringList({"pin address:0xabc", "resizewindowpixel exact 900 600,address:0xabc",
-                              "movewindowpixel exact 100 80,address:0xabc"}));
+                 QStringList({"hl.dsp.window.pin({ action = \"unset\", window = \"address:0xabc\" })",
+                              "hl.dsp.window.resize({ x = 900, y = 600, relative = false, window = \"address:0xabc\" })",
+                              "hl.dsp.window.move({ x = 100, y = 80, relative = false, window = \"address:0xabc\" })"}));
         QVERIFY(PipWindow::enterCommands({}, QSize(480, 270), QPoint()).isEmpty());
         QVERIFY(PipWindow::leaveCommands(tiled, {}).isEmpty());
     }

@@ -96,16 +96,24 @@ QRect PipWindow::monitorArea(const QByteArray &monitorsJson, int monitorId) {
 QStringList PipWindow::enterCommands(const HyprClient &client, const QSize &size, const QPoint &position) {
     if (!client.isValid())
         return {};
-    const QString target = "address:" + client.address;
+    // Hyprland 0.55+ only accepts Lua dispatchers (hl.dsp.*); the old
+    // setfloating / resizewindowpixel names parse as a syntax error.
+    const QString win = QStringLiteral("\"address:%1\"").arg(client.address);
     QStringList commands;
     if (client.fullscreen != 0)
-        commands << "fullscreenstate 0 0";
+        commands << QStringLiteral("hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = %1 })").arg(win);
     if (!client.floating)
-        commands << "setfloating " + target;
-    commands << QString("resizewindowpixel exact %1 %2,%3").arg(size.width()).arg(size.height()).arg(target);
-    commands << QString("movewindowpixel exact %1 %2,%3").arg(position.x()).arg(position.y()).arg(target);
+        commands << QStringLiteral("hl.dsp.window.float({ action = \"set\", window = %1 })").arg(win);
+    commands << QStringLiteral("hl.dsp.window.resize({ x = %1, y = %2, relative = false, window = %3 })")
+                    .arg(size.width())
+                    .arg(size.height())
+                    .arg(win);
+    commands << QStringLiteral("hl.dsp.window.move({ x = %1, y = %2, relative = false, window = %3 })")
+                    .arg(position.x())
+                    .arg(position.y())
+                    .arg(win);
     if (!client.pinned)
-        commands << "pin " + target;
+        commands << QStringLiteral("hl.dsp.window.pin({ action = \"set\", window = %1 })").arg(win);
     return commands;
 }
 
@@ -113,18 +121,23 @@ QStringList PipWindow::leaveCommands(const HyprClient &before, const HyprClient 
     // The window is gone (or was never found): nothing to put back.
     if (!now.isValid())
         return {};
-    const QString target = "address:" + now.address;
+    const QString win = QStringLiteral("\"address:%1\"").arg(now.address);
     QStringList commands;
-    // pin toggles, so it is only sent when the pinned state differs.
-    if (now.pinned != before.pinned)
-        commands << "pin " + target;
+    if (now.pinned != before.pinned) {
+        const char *action = before.pinned ? "set" : "unset";
+        commands << QStringLiteral("hl.dsp.window.pin({ action = \"%1\", window = %2 })").arg(action).arg(win);
+    }
     if (!before.floating) {
-        commands << "settiled " + target;
+        commands << QStringLiteral("hl.dsp.window.float({ action = \"unset\", window = %1 })").arg(win);
     } else if (before.geometry.isValid()) {
-        commands << QString("resizewindowpixel exact %1 %2,%3")
-                        .arg(before.geometry.width()).arg(before.geometry.height()).arg(target);
-        commands << QString("movewindowpixel exact %1 %2,%3")
-                        .arg(before.geometry.x()).arg(before.geometry.y()).arg(target);
+        commands << QStringLiteral("hl.dsp.window.resize({ x = %1, y = %2, relative = false, window = %3 })")
+                        .arg(before.geometry.width())
+                        .arg(before.geometry.height())
+                        .arg(win);
+        commands << QStringLiteral("hl.dsp.window.move({ x = %1, y = %2, relative = false, window = %3 })")
+                        .arg(before.geometry.x())
+                        .arg(before.geometry.y())
+                        .arg(win);
     }
     return commands;
 }
@@ -132,8 +145,8 @@ QStringList PipWindow::leaveCommands(const HyprClient &before, const HyprClient 
 QString PipWindow::batch(const QStringList &commands) {
     QStringList parts;
     for (const QString &command : commands)
-        parts << "dispatch " + command;
-    return parts.join(" ; ");
+        parts << "hl.dispatch(" + command + ")";
+    return parts.join('\n');
 }
 
 bool PipWindow::onHyprland() {
@@ -176,7 +189,7 @@ void PipWindow::enter(QWindow *window, double aspect) {
         if (m_before.isValid()) {
             const QRect area = monitorArea(hyprctl({"-j", "monitors"}), m_before.monitor);
             const QPoint position = area.isValid() ? cornerPosition(area, size) : QPoint(kMargin, kMargin);
-            hyprctl({"--batch", batch(enterCommands(m_before, size, position))});
+            hyprctl({"eval", batch(enterCommands(m_before, size, position))});
             return;
         }
         qWarning() << "pip: this window is not in hyprctl clients; using Qt instead";
@@ -200,7 +213,7 @@ void PipWindow::leave() {
         const HyprClient now = findClient(hyprctl({"-j", "clients"}), QCoreApplication::applicationPid());
         const QStringList commands = leaveCommands(m_before, now);
         if (!commands.isEmpty())
-            hyprctl({"--batch", batch(commands)});
+            hyprctl({"eval", batch(commands)});
     } else if (window) {
         window->setFlag(Qt::WindowStaysOnTopHint, m_stayedOnTop);
         window->setGeometry(m_geometry);
