@@ -1,0 +1,19 @@
+pkgbase = torrentplayer-bin
+	pkgdesc = Stream and download torrents (prebuilt binary from GitHub releases)
+	pkgver = 2.6.0
+	pkgrel = 1
+	url = https://github.com/karmugilen/torrent-player
+	arch = x86_64
+	license = MIT
+	depends = qt6-base
+	depends = qt6-declarative
+	depends = qt6-multimedia
+	depends = qt6-svg
+	depends = mpv
+	provides = torrentplayer
+	conflicts = torrentplayer
+	options = !strip
+	source = torrentplayer-2.6.0-1-x86_64.pkg.tar.zst::https://github.com/karmugilen/torrent-player/releases/download/v2.6.0/torrentplayer-2.6.0-1-x86_64.pkg.tar.zst
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = torrentplayer-bin

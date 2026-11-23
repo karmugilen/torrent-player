@@ -125,6 +125,28 @@ adb install -r torrent-player-2.4.5.apk
 - Package: `webtor.app` (arm64-v8a)
 - Requires Android 8.0 (API 26) or newer; targets Android 16 (API 36) with 16 KB page support.
 
+### Install on your computer
+
+Desktop builds (Linux, Windows, macOS) ship as assets on the same GitHub release as the Android APK ([releases](https://github.com/karmugilen/torrent-player/releases)). One-line installers:
+
+**Linux / macOS**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/karmugilen/torrent-player/karmugilen/rust-engine/scripts/install/install.sh | sh
+```
+
+On Arch Linux the script installs the `.pkg.tar.zst` with `pacman -U` (or you can use `yay -S torrentplayer-bin` once the AUR package is published). Elsewhere it installs the AppImage under `~/.local/bin/torrentplayer` and a desktop entry. Uninstall with the same script and `--uninstall`.
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/karmugilen/torrent-player/karmugilen/rust-engine/scripts/install/install.ps1 | iex
+```
+
+That downloads the per-user Inno Setup installer (`TorrentPlayer-*-windows-x64-setup.exe`) and runs it silently (`/VERYSILENT /SUPPRESSMSGBOXES`). A portable zip is also attached to the release.
+
+Manual downloads and checksums: `SHA256SUMS-desktop.txt` on the release. See [`desktop/README.md`](desktop/README.md) and [`desktop/aur/README.md`](desktop/aur/README.md) for building from source and the AUR package.
+
 ---
 
 ## Quick start

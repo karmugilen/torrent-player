@@ -11,6 +11,34 @@ from `engine-rs`), started in the background and stopped when you quit.
 
 ## Install
 
+### From a GitHub release (recommended)
+
+One-liner (Linux / macOS):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/karmugilen/torrent-player/karmugilen/rust-engine/scripts/install/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/karmugilen/torrent-player/karmugilen/rust-engine/scripts/install/install.ps1 | iex
+```
+
+Or download the assets from the [GitHub release](https://github.com/karmugilen/torrent-player/releases) and check them against `SHA256SUMS-desktop.txt`:
+
+| Asset | Platform |
+| --- | --- |
+| `TorrentPlayer-*-linux-x86_64.AppImage` | Linux (most distros) |
+| `torrentplayer-*-1-x86_64.pkg.tar.zst` | Arch Linux (`sudo pacman -U …`) |
+| `TorrentPlayer-*-windows-x64-setup.exe` | Windows installer (per-user, silent flags supported) |
+| `TorrentPlayer-*-windows-x64-portable.zip` | Windows portable |
+| `TorrentPlayer-*-macos-arm64.dmg` / `*-macos-x64.dmg` | macOS |
+
+Arch users can also install the AUR package once it is published: `yay -S torrentplayer-bin` (see [`aur/README.md`](aur/README.md)).
+
+### Build and install from this tree
+
 ```sh
 bin/install
 ```
