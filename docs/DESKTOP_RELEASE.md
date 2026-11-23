@@ -40,10 +40,12 @@ gh run watch -R karmugilen/torrent-player "$(gh run list -R karmugilen/torrent-p
 | `SHA256SUMS-desktop.txt` | | `sha256sum -c SHA256SUMS-desktop.txt --ignore-missing` |
 
 libmpv comes from Ubuntu (AppImage), Arch (package), shinchiro/mpv-winbuild-cmake
-(Windows, the newest `mpv-dev-x86_64-*.7z`) and Homebrew (macOS). The macOS builds
-need at least the macOS version of the runner that built them (Homebrew bottles
-target it): macOS 14 on Apple silicon, macOS 15 on Intel. GitHub retired its
-macos-13 image in December 2025, so macos-15-intel is the oldest Intel runner left.
+(Windows, the newest non-v3 `mpv-dev-x86_64-*.7z`, plus companion DLLs from the
+matching `mpv-x86_64-*.7z` and a built `vulkan-1.dll` — recent libmpv hard-imports
+the Vulkan loader) and Homebrew (macOS). The macOS builds need at least the macOS
+version of the runner that built them (Homebrew bottles target it): macOS 14 on
+Apple silicon, macOS 15 on Intel. GitHub retired its macos-13 image in December
+2025, so macos-15-intel is the oldest Intel runner left.
 
 The packaging scripts the workflow runs are in `desktop/packaging/`:
 `linux/appimage.sh` (also works locally: `desktop/packaging/linux/appimage.sh 2.6.0 dist`
