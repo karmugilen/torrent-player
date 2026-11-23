@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
+import TorrentPlayer
 
 Page {
     id: page
@@ -12,7 +13,9 @@ Page {
     property string filter: "all"
     property string query: ""
     readonly property var shown: visibleFiles()
+    readonly property bool showing: StackView.status === StackView.Active
     background: Rectangle { color: "#0e0e10" }
+    readonly property var engineHandle: engine
 
     // The library dropped it (removed from another place): go back.
     onInfoChanged: if (info.key === undefined && StackView.status === StackView.Active) StackView.view.pop()
@@ -22,6 +25,11 @@ Page {
     Shortcut { sequence: "Delete"; context: Qt.ApplicationShortcut; enabled: page.StackView.status === StackView.Active && !win.dialogOpen && !searchField.activeFocus; onActivated: win.confirmRemove(torrentKey) }
     Shortcut { sequences: ["/", "Ctrl+F"]; context: Qt.ApplicationShortcut; enabled: page.StackView.status === StackView.Active && !win.dialogOpen; onActivated: searchField.forceActiveFocus() }
 
+    function groupLabel(group) {
+        if (group === "x") return qsTr("Extras")
+        if (group.charAt(0) === "s") return qsTr("Season %1").arg(group.substring(1))
+        return qsTr("Other files")
+    }
     function visibleFiles() {
         const files = info.files || []
         const q = query.toLowerCase()
@@ -224,6 +232,109 @@ Page {
                         onClicked: { library.copyMagnet(torrentKey); win.toast(qsTr("Magnet link copied")) }
                     }
                 }
+
+                // Pieces map (Android PieceHeatGridSection), under the numbers.
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 560
+                    Layout.topMargin: 4
+                    spacing: 8
+                    Label {
+                        Layout.fillWidth: true
+                        text: info.directPlay ? qsTr("RAM pieces") : qsTr("Pieces")
+                        color: win.textColor
+                        font.pixelSize: 14
+                        font.weight: Font.DemiBold
+                    }
+                    Label {
+                        visible: pieceGrid.hasMap
+                        text: pieceGrid.summary.titleMeta || ""
+                        color: win.muted
+                        font.pixelSize: 11
+                    }
+                    Rectangle {
+                        visible: pieceGrid.hasMap
+                        implicitWidth: percentPill.implicitWidth + 16
+                        implicitHeight: percentPill.implicitHeight + 4
+                        radius: height / 2
+                        color: Qt.alpha(theme.accent, 0.22)
+                        Label {
+                            id: percentPill
+                            anchors.centerIn: parent
+                            text: pieceGrid.summary.verifiedPercent >= 0 ? pieceGrid.summary.verifiedPercent + "%" : "—"
+                            color: win.textColor
+                            font.pixelSize: 12
+                            font.weight: Font.Bold
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 560
+                    implicitHeight: pieceGrid.hasMap ? pieceGrid.implicitHeight + 16 : unavailable.implicitHeight + 20
+                    radius: win.radius
+                    color: Qt.rgba(0.16, 0.16, 0.18, 0.55)
+                    PieceGrid {
+                        id: pieceGrid
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 8 }
+                        height: implicitHeight
+                        engine: page.engineHandle
+                        torrentId: info.engineId || ""
+                        active: page.showing
+                        frozen: info.paused === true || (info.progress || 0) >= 1
+                        memoryBuffer: info.directPlay === true
+                        files: info.files || []
+                        doneColor: theme.accent
+                        outlineColor: win.muted
+                        onSurfaceColor: win.textColor
+                        Accessible.name: summary.accessible || ""
+                    }
+                    Column {
+                        id: unavailable
+                        visible: !pieceGrid.hasMap
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 10 }
+                        Label { text: qsTr("Map unavailable"); color: win.textColor; font.pixelSize: 13 }
+                        Label { text: qsTr("Engine offline or telemetry not ready yet"); color: win.muted; font.pixelSize: 11 }
+                    }
+                }
+                RowLayout {
+                    visible: pieceGrid.hasMap
+                    spacing: 14
+                    Repeater {
+                        model: [
+                            [theme.accent, false, info.directPlay ? qsTr("Buffered") : qsTr("Done"), pieceGrid.summary.done],
+                            [pieceGrid.gettingColor, false, qsTr("Getting"), pieceGrid.summary.getting],
+                            [win.muted, true, info.directPlay ? qsTr("Empty") : qsTr("Waiting"), pieceGrid.summary.waiting],
+                            [win.muted, true, qsTr("Off"), pieceGrid.summary.off]
+                        ]
+                        delegate: RowLayout {
+                            visible: index < 3 || modelData[3] > 0
+                            spacing: 5
+                            Rectangle {
+                                implicitWidth: 8; implicitHeight: 8; radius: 4
+                                color: modelData[1] ? "transparent" : modelData[0]
+                                border.color: modelData[0]
+                                border.width: modelData[1] ? 1.25 : 0
+                            }
+                            Label { text: modelData[2] + " " + (modelData[3] || 0); color: win.muted; font.pixelSize: 11 }
+                        }
+                    }
+                    Label {
+                        visible: text !== ""
+                        text: pieceGrid.summary.bufferLine || ""
+                        color: win.muted
+                        font.pixelSize: 11
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 560
+                    visible: pieceGrid.hasMap
+                    text: pieceGrid.peekText !== "" ? pieceGrid.peekText : pieceGrid.summary.titlePrimary || ""
+                    color: win.muted
+                    font.pixelSize: 11
+                    elide: Text.ElideRight
+                }
             }
         }
 
@@ -271,11 +382,30 @@ Page {
                 model: page.shown.length
                 clip: true
                 ScrollBar.vertical: ScrollBar {}
-                delegate: ItemDelegate {
-                    id: row
+                delegate: Column {
+                    id: rowBox
                     required property int index
                     readonly property var file: page.shown[index] || ({})
+                    // Season headers, as Android's natural order groups episodes; extras last.
+                    readonly property bool header: info.grouped === true && file.group !== undefined &&
+                                                   (index === 0 || (page.shown[index - 1] || {}).group !== file.group)
                     width: ListView.view.width
+                    Label {
+                        visible: rowBox.header
+                        height: visible ? 34 : 0
+                        leftPadding: 16
+                        verticalAlignment: Text.AlignBottom
+                        bottomPadding: 4
+                        text: page.groupLabel(rowBox.file.group || "")
+                        color: theme.accent
+                        font.pixelSize: 13
+                        font.weight: Font.DemiBold
+                    }
+                    ItemDelegate {
+                    id: row
+                    readonly property int index: rowBox.index
+                    readonly property var file: rowBox.file
+                    width: rowBox.width
                     height: 56
                     onDoubleClicked: if (row.file.video) win.play(torrentKey, row.file.index)
                     contentItem: RowLayout {
@@ -292,7 +422,7 @@ Page {
                             spacing: 3
                             Label {
                                 Layout.fillWidth: true
-                                text: row.file.path
+                                text: info.grouped && row.file.video ? row.file.episode + "  —  " + row.file.path : row.file.path
                                 elide: Text.ElideMiddle
                                 color: row.file.selected ? win.textColor : win.muted
                             }
@@ -309,6 +439,8 @@ Page {
                                     font.pixelSize: 12
                                     text: {
                                         const parts = [fmt.bytes(row.file.length)]
+                                        if (row.file.upNext)
+                                            parts.push(row.file.upNext)
                                         if (row.file.selected && row.file.progress < 1)
                                             parts.push(fmt.percent(row.file.progress))
                                         if (row.file.saved)
@@ -330,6 +462,7 @@ Page {
                             onClicked: win.play(torrentKey, row.file.index)
                         }
                     }
+                }
                 }
                 Label {
                     anchors.centerIn: parent

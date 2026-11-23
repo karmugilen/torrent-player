@@ -8,9 +8,19 @@
 // PlayerStats; the functions are pure and tested.
 class PlayerStats : public QObject {
     Q_OBJECT
+    // The info panel is open (I). Shared by every player page, so it stays open across episodes.
+    Q_PROPERTY(bool shown READ shown WRITE setShown NOTIFY shownChanged)
 
 public:
     using QObject::QObject;
+
+    bool shown() const { return s_shown; }
+    void setShown(bool shown) {
+        if (shown == s_shown)
+            return;
+        s_shown = shown;
+        emit shownChanged();
+    }
 
     // "Direct Play · streaming from RAM  ·  3 peers · 1.2 MB/s" or "42% downloaded  ·  …".
     // fileProgress < 0 is unknown; peers < 0 leaves the swarm part out.
@@ -19,4 +29,10 @@ public:
     Q_INVOKABLE static QString buffered(qint64 positionMs, qint64 cacheEndMs);
     // "File 42% · 120 MB of 1.2 GB · ↑ 50 KB/s"; "" until there is something to show.
     Q_INVOKABLE static QString fileLine(double fileProgress, double fileLength, double uploadSpeed);
+
+signals:
+    void shownChanged();
+
+private:
+    static inline bool s_shown = false;
 };

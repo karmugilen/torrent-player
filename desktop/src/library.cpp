@@ -1323,6 +1323,7 @@ QVariantMap Library::details(const QString &key) const {
             {"files", files},
             {"defaultVideo", defaultVideo(key)},
             {"grouped", grouped},
+            {"engineId", e->id},
             {"addedAt", QDateTime::fromMSecsSinceEpoch(e->addedAt)}};
 }
 

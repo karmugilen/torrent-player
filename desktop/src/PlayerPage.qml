@@ -20,6 +20,17 @@ Page {
     property bool holdFast: false        // Right held: 2x until released
     readonly property var torrent: library.revision >= 0 ? library.details(torrentKey) : ({})
     readonly property var embeddedSubtitles: player.subtitleTracks.filter(t => !t.external)
+    // The episode run (natural order, extras left out) and where this file is in it.
+    readonly property var playlist: media.playlist || []
+    readonly property int playlistPos: playlist.findIndex(item => item.index === media.fileIndex)
+    readonly property bool hasPrevious: playlistPos > 0
+    readonly property bool hasNext: playlistPos >= 0 && playlistPos < playlist.length - 1
+    readonly property bool playNext: media.playNext !== false
+    property int upNext: -1              // playlist place of the "Up next" card, -1 hidden
+    property int upNextLeft: 0
+    property bool endHandled: false
+    property bool switching: false
+    readonly property var playingFile: (torrent.files || []).find(f => f.index === media.fileIndex) || ({})
     background: Rectangle { color: "black" }
 
     function showControls() {
@@ -125,12 +136,36 @@ Page {
         else if (next.kind === "file") { chooseTorrentSubtitle(next.sub); osd.show(next.sub.label) }
         else { chooseEmbedded(next.track); osd.show(next.track.label) }
     }
+    // Another episode in this player (Android switchTo): this one is saved as the page closes.
+    function switchEpisode(pos) {
+        if (pos < 0 || pos >= playlist.length || switching) return
+        upNext = -1
+        switching = true
+        osd.show(playlist[pos].title)
+        library.play(torrentKey, playlist[pos].index)
+        switchReset.restart()
+    }
+    function nextEpisode() { if (hasNext) switchEpisode(playlistPos + 1) }
+    function previousEpisode() { if (hasPrevious) switchEpisode(playlistPos - 1) }
+    // End of an episode: kept as watched, then the Up next card, or close after the last one.
+    function onEpisodeEnd() {
+        if (endHandled || player.duration <= 0) return
+        endHandled = true
+        if (!hasNext) {
+            page.StackView.view.pop()
+            return
+        }
+        upNextLeft = Math.max(1, media.playNextCountdownSeconds || 5)
+        upNext = playlistPos + 1
+    }
     function leave() {
         if (left_) return
         left_ = true
-        // Near the end counts as watched, so the next play starts over.
-        const position = player.duration > 0 && player.position > player.duration * 0.95 ? 0 : player.position
-        library.savePosition(torrentKey, media.fileIndex, position)
+        // Near the end counts as watched: the full length is saved, which the library keeps
+        // as place 0 and marks watched, so Continue moves on to the next episode.
+        const nearEnd = player.duration > 0 && (player.eof || player.position > player.duration * 0.95)
+        library.savePosition(torrentKey, media.fileIndex, nearEnd ? player.duration : player.position,
+                             player.duration > 0 ? player.duration : -1)
         player.speed = 1.0
         player.stop()
         if (win.visibility === Window.FullScreen)
@@ -156,7 +191,24 @@ Page {
         source: page.media.url || ""
         onFileLoaded: if (startMs > 0) osd.show(qsTr("Resumed at %1").arg(fmt.clock(startMs)))
         onScreenshotSaved: (path, ok) => { if (!ok) page.thumbnailTaken = false }
+        onEofChanged: {
+            if (eof) page.onEpisodeEnd()
+            else { page.endHandled = false; page.upNext = -1 }
+        }
     }
+    PlayerStats { id: stats }
+    // Play next on: the card counts down, then the next episode plays.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: page.upNext >= 0 && page.playNext
+        onTriggered: {
+            page.upNextLeft -= 1
+            if (page.upNextLeft <= 0) page.switchEpisode(page.upNext)
+        }
+    }
+    // library.play gave nothing (an error message instead): allow another try.
+    Timer { id: switchReset; interval: 10000; onTriggered: page.switching = false }
 
     // A frame for the home card, once real picture is on screen.
     Timer {
@@ -249,6 +301,112 @@ Page {
         Timer { id: osdTimer; interval: 1200; onTriggered: osd.opacity = 0 }
     }
 
+    // Info panel (I): Android's stats line, the file's progress and a compact piece map.
+    Rectangle {
+        id: infoPanel
+        anchors { left: parent.left; top: parent.top; leftMargin: 16; topMargin: 72 }
+        visible: stats.shown
+        z: 2
+        width: 340
+        height: infoColumn.implicitHeight + 20
+        radius: win.radius
+        color: Qt.rgba(0, 0, 0, 0.72)
+        ColumnLayout {
+            id: infoColumn
+            anchors { left: parent.left; right: parent.right; top: parent.top; margins: 10 }
+            spacing: 4
+            Label {
+                Layout.fillWidth: true
+                text: stats.line(page.media.directPlay === true,
+                                 page.playingFile.progress !== undefined ? page.playingFile.progress : -1,
+                                 playback.peers, playback.downloadSpeed)
+                color: "white"
+                font.pixelSize: 12
+                wrapMode: Text.Wrap
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: stats.buffered(player.position, player.cacheEndMs)
+                color: "#cccccc"
+                font.pixelSize: 12
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: stats.fileLine(page.playingFile.progress !== undefined ? page.playingFile.progress : -1,
+                                     page.playingFile.length || 0, page.torrent.uploadSpeed || 0)
+                color: "#cccccc"
+                font.pixelSize: 12
+            }
+            Label {
+                Layout.topMargin: 4
+                visible: playerPieces.hasMap
+                text: (page.media.directPlay ? qsTr("RAM pieces") : qsTr("Pieces")) + " · " + (playerPieces.summary.titlePrimary || "")
+                color: "#cccccc"
+                font.pixelSize: 11
+            }
+            PieceGrid {
+                id: playerPieces
+                Layout.fillWidth: true
+                Layout.preferredHeight: implicitHeight
+                engine: page.engineHandle
+                torrentId: page.media.engineId || ""
+                active: stats.shown && page.active
+                frozen: page.torrent.paused === true
+                memoryBuffer: page.media.directPlay === true
+                doneColor: theme.accent
+                outlineColor: "#9d9da6"
+                onSurfaceColor: "white"
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: playerPieces.summary.bufferLine || ""
+                color: "#cccccc"
+                font.pixelSize: 11
+            }
+        }
+    }
+
+    // Up next: the following episode starts after the countdown (Play next on); Cancel stays here.
+    Rectangle {
+        id: upNextCard
+        anchors.centerIn: parent
+        visible: page.upNext >= 0
+        width: Math.max(280, upNextColumn.implicitWidth + 40)
+        height: upNextColumn.implicitHeight + 28
+        radius: 16
+        color: Qt.rgba(0, 0, 0, 0.75)
+        z: 2
+        ColumnLayout {
+            id: upNextColumn
+            anchors.centerIn: parent
+            spacing: 6
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                text: page.playNext ? qsTr("Up next in %1").arg(page.upNextLeft) : qsTr("Up next")
+                color: Qt.rgba(1, 1, 1, 0.7)
+                font.pixelSize: 13
+            }
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumWidth: 420
+                text: page.upNext >= 0 && page.playlist[page.upNext] ? page.playlist[page.upNext].title : ""
+                color: "white"
+                font.pixelSize: 17
+                elide: Text.ElideRight
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 6
+                spacing: 8
+                Button { text: qsTr("Cancel"); flat: true; focusPolicy: Qt.NoFocus; onClicked: { page.upNext = -1; page.showControls() } }
+                Button { text: qsTr("⏭ Play now"); highlighted: true; focusPolicy: Qt.NoFocus; onClicked: page.switchEpisode(page.upNext) }
+            }
+        }
+    }
+
     // Holding Right: 2x, as long as it is held.
     Rectangle {
         anchors { top: parent.top; horizontalCenter: parent.horizontalCenter; topMargin: 24 }
@@ -292,7 +450,7 @@ Page {
         RowLayout {
             anchors { fill: parent; leftMargin: 12; rightMargin: 16 }
             ToolButton { text: "←"; font.pixelSize: 20; focusPolicy: Qt.NoFocus; onClicked: page.StackView.view.pop() }
-            Label { Layout.fillWidth: true; text: page.pageTitle; color: "white"; elide: Text.ElideMiddle; font.pixelSize: 16 }
+            Label { Layout.fillWidth: true; text: page.playlist.length > 1 && page.media.episode ? page.media.episode : page.pageTitle; color: "white"; elide: Text.ElideMiddle; font.pixelSize: 16 }
             Label {
                 visible: (page.torrent.progress || 0) < 1
                 text: "↓ " + fmt.speed(page.torrent.downloadSpeed || 0) + " · " + fmt.percent(page.torrent.progress || 0)
@@ -421,10 +579,28 @@ Page {
                     }
                 }
                 Label { text: fmt.clock(player.duration); color: "white"; font.pixelSize: 13 }
+                Label {
+                    visible: text !== ""
+                    text: stats.buffered(player.position, player.cacheEndMs)
+                    color: Qt.rgba(1, 1, 1, 0.55)
+                    font.pixelSize: 12
+                }
             }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 4
+                // A series adds Previous and Next episode on both sides.
+                ToolButton {
+                    visible: page.playlist.length > 1
+                    enabled: page.hasPrevious
+                    text: "⏮"
+                    font.pixelSize: 16
+                    focusPolicy: Qt.NoFocus
+                    ToolTip.text: qsTr("Previous episode (Shift+N)")
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    onClicked: page.previousEpisode()
+                }
                 ToolButton { text: "⟲ 10"; font.pixelSize: 13; focusPolicy: Qt.NoFocus; onClicked: page.seekBy(-10000) }
                 ToolButton {
                     text: player.paused ? "▶" : "❚❚"
@@ -433,6 +609,17 @@ Page {
                     onClicked: page.togglePlay()
                 }
                 ToolButton { text: "10 ⟳"; font.pixelSize: 13; focusPolicy: Qt.NoFocus; onClicked: page.seekBy(10000) }
+                ToolButton {
+                    visible: page.playlist.length > 1
+                    enabled: page.hasNext
+                    text: "⏭"
+                    font.pixelSize: 16
+                    focusPolicy: Qt.NoFocus
+                    ToolTip.text: qsTr("Next episode (N)")
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    onClicked: page.nextEpisode()
+                }
                 ToolButton {
                     text: player.muted || player.volume === 0 ? qsTr("Muted") : qsTr("Volume")
                     font.pixelSize: 13
@@ -534,5 +721,8 @@ Page {
     Shortcut { sequence: "S"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.cycleSubtitles() }
     Shortcut { sequence: "V"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.openInMpv() }
     Shortcut { sequence: "."; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: player.frameStep() }
+    Shortcut { sequence: "N"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.nextEpisode() }
+    Shortcut { sequence: "Shift+N"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.previousEpisode() }
+    Shortcut { sequence: "I"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: stats.shown = !stats.shown }
     Shortcut { sequence: "Home"; context: Qt.ApplicationShortcut; enabled: page.active; onActivated: page.seekTo(0) }
 }
