@@ -11,9 +11,15 @@
 #include <QTcpServer>
 #include <QTimer>
 
+#include <csignal>
+#include <sys/prctl.h>
+
 Engine::Engine(const QString &dataDirectory, QObject *parent)
     : QObject(parent), m_dataDirectory(dataDirectory) {
     m_process.setProcessChannelMode(QProcess::MergedChannels);
+    // If the app dies without its normal shutdown (killed, crashed, session ended), the
+    // engine goes too, instead of running on beside the next start on the same folder.
+    m_process.setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); });
     connect(&m_process, &QProcess::readyRead, this, [this] {
         const QByteArray chunk = m_process.readAll();
         if (m_port > 0)
