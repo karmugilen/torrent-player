@@ -186,7 +186,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          # macos-14 was retired 2026-11-02; macos-15 is the arm64 image.
+          - runner: macos-15
             arch: arm64
           # macos-13 was GitHub's last x64 image until its retirement in
           # December 2025; macos-15-intel replaces it.

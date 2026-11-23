@@ -35,7 +35,7 @@ gh run watch -R karmugilen/torrent-player "$(gh run list -R karmugilen/torrent-p
 | `torrentplayer-V-1-x86_64.pkg.tar.zst` | `archlinux:base-devel` container | `desktop/pkgbuild/PKGBUILD`, `pacman -U` it |
 | `TorrentPlayer-V-windows-x64-setup.exe` | windows-2022, MSVC, Qt 6.8 | Inno Setup, per-user, no admin; `/VERYSILENT /SUPPRESSMSGBOXES` |
 | `TorrentPlayer-V-windows-x64-portable.zip` | same | unzip and run `TorrentPlayer\torrentplayer.exe` |
-| `TorrentPlayer-V-macos-arm64.dmg` | macos-14 | Apple silicon |
+| `TorrentPlayer-V-macos-arm64.dmg` | macos-15 | Apple silicon |
 | `TorrentPlayer-V-macos-x64.dmg` | macos-15-intel | Intel Macs |
 | `SHA256SUMS-desktop.txt` | | `sha256sum -c SHA256SUMS-desktop.txt --ignore-missing` |
 
