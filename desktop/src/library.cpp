@@ -2,6 +2,8 @@
 
 #include "engine.h"
 #include "links.h"
+#include "policy.h"
+#include "settings.h"
 
 #include <QClipboard>
 #include <QDateTime>
@@ -39,11 +41,32 @@ Library::Library(Engine *engine, const QString &dataDirectory, const QString &sa
         for (Entry &entry : m_entries) {
             entry.id.clear();
             entry.configured = false;
+            entry.attaching = false;
             entry.downloadSpeed = entry.uploadSpeed = 0;
             entry.peers = 0;
         }
         touch({});
     });
+}
+
+void Library::setSettings(Settings *settings) {
+    m_settings = settings;
+    m_activeTransfers = -1;
+    touch({});
+}
+
+QJsonObject Library::playPolicy() const {
+    return m_settings ? m_settings->policy().play() : Policy::instance().play();
+}
+
+int Library::idleDropMinutes() const {
+    return m_settings ? m_settings->idleDropMinutes() : Policy::instance().defaultValue("idleDropMinutes").toInt();
+}
+
+qint64 Library::streamCacheBytes() const {
+    // Android directPlayMemoryBytes: the RAM cache size in use, sent for both modes.
+    return m_settings ? m_settings->ramCacheBytes()
+                      : qint64(Policy::instance().defaultValue("ramCacheMiB").toInt()) * 1024 * 1024;
 }
 
 // ---------------------------------------------------------------- model
@@ -57,7 +80,8 @@ QHash<int, QByteArray> Library::roleNames() const {
             {DownloadSpeedRole, "downloadSpeed"}, {UploadSpeedRole, "uploadSpeed"}, {PeersRole, "peers"},
             {SizeRole, "size"},         {DownloadedRole, "downloaded"}, {StateRole, "state"},
             {EtaRole, "eta"},           {ThumbnailRole, "thumbnail"}, {ErrorRole, "error"},
-            {HasVideoRole, "hasVideo"}, {AddedRole, "addedAt"}};
+            {HasVideoRole, "hasVideo"}, {AddedRole, "addedAt"},
+            {DirectPlayRole, "directPlay"}};
 }
 
 static qint64 selectedLength(const Library::Entry &entry) {
@@ -98,6 +122,7 @@ QVariant Library::data(const QModelIndex &index, int role) const {
     case ErrorRole: return e.error;
     case HasVideoRole: return hasVideo(e);
     case AddedRole: return double(e.addedAt);
+    case DirectPlayRole: return e.directPlay;
     }
     return {};
 }
@@ -174,6 +199,12 @@ void Library::touch(const QString &key) {
     }
     ++m_revision;
     emit revisionChanged();
+    // The Auto RAM cache shares memory among running torrents (Android applyAutoRamCache).
+    const int active = activeTransfers(m_entries);
+    if (m_settings && active != m_activeTransfers) {
+        m_activeTransfers = active;
+        m_settings->setActiveTransfers(active);
+    }
 }
 
 // ---------------------------------------------------------------- disk
@@ -222,7 +253,8 @@ QJsonObject Library::toJson(const Entry &e) {
     return {{"key", e.key},         {"magnet", e.magnet},     {"name", e.name},
             {"selected", selected}, {"files", e.files},       {"paused", e.paused},
             {"addedAt", double(e.addedAt)}, {"exported", exported}, {"thumbnail", e.thumbnail},
-            {"positions", e.positions}, {"lastFile", e.lastFile}, {"progress", e.progress}};
+            {"positions", e.positions}, {"durations", e.durations}, {"lastFile", e.lastFile},
+            {"progress", e.progress}, {"directPlay", e.directPlay}};
 }
 
 Library::Entry Library::fromJson(const QJsonObject &o) {
@@ -239,6 +271,8 @@ Library::Entry Library::fromJson(const QJsonObject &o) {
         e.exported.insert(v.toInt());
     e.thumbnail = o.value("thumbnail").toString();
     e.positions = o.value("positions").toObject();
+    e.durations = o.value("durations").toObject();
+    e.directPlay = o.value("directPlay").toBool();
     e.lastFile = o.value("lastFile").toInt(-1);
     e.progress = o.value("progress").toDouble();
     return e;
@@ -255,6 +289,9 @@ void Library::load() {
             continue;
         if (!e.thumbnail.isEmpty() && !QFileInfo::exists(e.thumbnail))
             e.thumbnail.clear();
+        // Direct Play stays dropped after a restart until played (Android start()).
+        if (e.directPlay)
+            e.paused = true;
         m_entries.append(e);
     }
 }
@@ -281,7 +318,8 @@ void Library::restoreAll() {
         m_streamPort = stats.value("streamPort").toInt();
     });
     for (Entry &entry : m_entries)
-        attach(entry);
+        if (!(entry.directPlay && entry.paused))
+            attach(entry);
     m_poll.start();
 }
 
@@ -289,6 +327,7 @@ void Library::attach(Entry &entry) {
     entry.id.clear();
     entry.configured = false;
     entry.error.clear();
+    entry.attaching = true;
     QJsonObject body{{"torrentId", entry.magnet}, {"prepare", true}};
     // The saved .torrent means no waiting for peers to send metadata again.
     QFile torrent(torrentFilePath(entry.key));
@@ -299,8 +338,10 @@ void Library::attach(Entry &entry) {
         Entry *e = find(key);
         if (!e)
             return;
+        e->attaching = false;
         if (status != 200 || reply.value("id").toString().isEmpty()) {
             e->error = reply.value("error").toString(tr("The engine refused this torrent."));
+            m_pendingPlay.remove(key);
             touch(key);
             return;
         }
@@ -325,23 +366,34 @@ void Library::configure(const QString &key) {
     QJsonArray selected;
     for (int i : e->selected)
         selected.append(i);
+    if (m_settings)
+        m_settings->refreshAutoRamCache();
     const QJsonObject body{{"id", e->id},
                            {"descriptors", nullDescriptors(e->files.size())},
                            {"selected", selected},
-                           {"storageMode", "download"}};
+                           {"storageMode", e->directPlay ? "stream" : "download"},
+                           {"streamCacheBytes", double(streamCacheBytes())}};
     m_engine->post("/configure", body, [this, key](const QJsonObject &reply, int status) {
         Entry *e = find(key);
         if (!e)
             return;
-        if (status != 200) {
+        // /add may hand back a record that is already set up (Android restoreEntry).
+        if (status != 200 && !reply.value("error").toString().contains("already configured", Qt::CaseInsensitive)) {
             e->error = reply.value("error").toString(tr("Could not start the download."));
+            m_pendingPlay.remove(key);
             touch(key);
             return;
         }
         e->configured = true;
         if (e->paused)
             m_engine->post("/pause", {{"id", e->id}});
+        else
+            m_engine->post("/resume", {{"id", e->id}});
         touch(key);
+        if (m_pendingPlay.contains(key)) {
+            const int file = m_pendingPlay.take(key);
+            QTimer::singleShot(0, this, [this, key, file] { play(key, file); });
+        }
     });
 }
 
@@ -356,9 +408,11 @@ void Library::poll() {
         if (entry.id.isEmpty())
             continue;
         const QString key = entry.key;
-        m_engine->get("/torrent/" + entry.id, [this, key](const QJsonObject &status, int code) {
+        const QString id = entry.id;
+        m_engine->get("/torrent/" + entry.id, [this, key, id](const QJsonObject &status, int code) {
             Entry *e = find(key);
-            if (!e)
+            // Dropped or re-added meanwhile: this answer is about an old engine record.
+            if (!e || e->id != id)
                 return;
             if (code == 200)
                 update(*e, status);
@@ -381,6 +435,9 @@ void Library::update(Entry &e, const QJsonObject &s) {
     e.peers = s.value("numPeers").toInt();
     e.downloaded = qint64(s.value("verifiedBytes").toDouble());
     e.etaMs = s.value("timeRemaining").toDouble();
+    e.seeding = s.value("seeding").toBool();
+    e.idleDropReady = s.value("idleDropReady").toBool();
+    e.playbackReaders = s.value("playbackReaders").toInt();
     const QString error = s.value("error").toString();
     if (!error.isEmpty())
         e.error = error;
@@ -402,12 +459,19 @@ void Library::update(Entry &e, const QJsonObject &s) {
     makeThumbnail(e);
     if (!wasDone && e.progress >= 1)
         save();
+    if (shouldDropIdle(e, idleDropMinutes(), m_playingKey == e.key)) {
+        dropEntry(e, true);
+        return;
+    }
     touch(e.key);
 }
 
 // ---------------------------------------------------------------- finished files
 
 void Library::exportFinished(Entry &e) {
+    // Direct Play streams only: nothing is saved to Downloads.
+    if (e.directPlay)
+        return;
     for (const auto &value : std::as_const(e.liveFiles)) {
         const QJsonObject file = value.toObject();
         const int index = file.value("index").toInt();
@@ -605,7 +669,8 @@ void Library::captureThumbnail(const QString &key, QObject *videoSink) {
 // ---------------------------------------------------------------- actions
 
 QString Library::adopt(const QString &id, const QString &key, const QString &magnet, const QString &name,
-                       const QJsonArray &files, const QList<int> &selected, const QByteArray &torrentData) {
+                       const QJsonArray &files, const QList<int> &selected, const QByteArray &torrentData,
+                       bool directPlay) {
     if (Entry *existing = find(key))
         return existing->key;
     if (!torrentData.isEmpty()) {
@@ -622,6 +687,7 @@ QString Library::adopt(const QString &id, const QString &key, const QString &mag
     e.name = name;
     e.files = files;
     e.selected = selected;
+    e.directPlay = directPlay;
     e.addedAt = QDateTime::currentMSecsSinceEpoch();
     beginInsertRows({}, 0, 0);
     m_entries.prepend(e);
@@ -703,72 +769,349 @@ void Library::play(const QString &key, int fileIndex) {
     Entry *e = find(key);
     if (!e)
         return;
-    if (e->id.isEmpty() || !e->configured) {
-        emit message(m_engine->ready() ? tr("Still starting this torrent. Try again in a moment.")
-                                       : tr("The torrent engine is not running."));
-        return;
-    }
     if (fileIndex < 0)
         fileIndex = defaultVideo(key);
     if (fileIndex < 0) {
         emit message(tr("There is no video in this torrent."));
         return;
     }
-    auto start = [this, key, fileIndex] {
-        Entry *e = find(key);
-        if (!e)
-            return;
+    if (!m_engine->ready()) {
+        emit message(tr("The torrent engine is not running."));
+        return;
+    }
+    if (e->id.isEmpty() || !e->configured) {
+        // Dropped (Direct Play) or still starting: play once it is set up again.
+        m_pendingPlay.insert(key, fileIndex);
         if (e->paused) {
             e->paused = false;
-            m_engine->post("/resume", {{"id", e->id}});
             save();
         }
-        m_engine->post("/play", {{"id", e->id}, {"fileIndex", fileIndex}}, [this, key, fileIndex](const QJsonObject &reply, int status) {
-            Entry *e = find(key);
-            if (!e)
-                return;
-            const QString url = reply.value("streamUrl").toString();
-            if (status != 200 || url.isEmpty()) {
-                emit message(tr("Could not play this file: %1").arg(reply.value("error").toString()));
-                return;
-            }
-            e->lastFile = fileIndex;
-            m_playingKey = key;
-            save();
-            const QJsonObject file = fileByIndex(e->files, fileIndex);
-            emit playReady({{"key", key},
-                            {"engineId", e->id},
-                            {"fileIndex", fileIndex},
-                            {"url", url},
-                            {"title", file.value("name").toString(reply.value("name").toString())},
-                            {"length", file.value("length").toDouble()},
-                            {"startMs", e->positions.value(QString::number(fileIndex)).toDouble()},
-                            {"subtitles", subtitlesFor(*e, fileIndex)}});
-        });
-    };
+        if (e->id.isEmpty() && !e->attaching)
+            attach(*e);
+        touch(key);
+        return;
+    }
     if (!e->selected.contains(fileIndex)) {
-        // Playing a file that wasn't picked adds it to the download.
+        // Playing a file that wasn't picked adds it to the torrent.
         setFileSelected(key, fileIndex, true);
-        QTimer::singleShot(300, this, start);
+        QTimer::singleShot(300, this, [this, key, fileIndex] { startPlay(key, fileIndex); });
     } else {
-        start();
+        startPlay(key, fileIndex);
     }
 }
 
-void Library::savePosition(const QString &key, int fileIndex, qint64 positionMs) {
+void Library::startPlay(const QString &key, int fileIndex) {
+    Entry *e = find(key);
+    if (!e || e->id.isEmpty())
+        return;
+    // Android play(): a previous file-only playback ends before the next starts.
+    if (!m_fileOnlyId.isEmpty()) {
+        m_engine->post("/file-only", {{"id", m_fileOnlyId}, {"enabled", false}});
+        m_fileOnlyId.clear();
+    }
+    if (e->paused) {
+        e->paused = false;
+        m_engine->post("/resume", {{"id", e->id}});
+        save();
+    }
+    const QJsonObject policy = playPolicy();
+    const QJsonObject body = playBody(*e, fileIndex, policy);
+    const bool preload = policy.value("preloadStart").toBool();
+    const QString id = e->id;
+    m_engine->post("/play", body, [this, key, id, fileIndex, body, preload](const QJsonObject &reply, int status) {
+        Entry *e = find(key);
+        if (!e || e->id != id)
+            return;
+        const QString url = reply.value("streamUrl").toString();
+        if (status != 200 || url.isEmpty()) {
+            emit message(tr("Could not play this file: %1").arg(reply.value("error").toString()));
+            return;
+        }
+        if (body.value("fileOnly").toBool())
+            m_fileOnlyId = id;
+        // The engine puts the playing file first.
+        m_engine->post("/focus", {{"id", id}, {"fileIndex", fileIndex}});
+        e->lastFile = fileIndex;
+        m_playingKey = key;
+        m_playingFile = fileIndex;
+        m_playingId = id;
+        save();
+        const QJsonObject file = fileByIndex(e->files, fileIndex);
+        const qint64 length = qint64(file.value("length").toDouble());
+        const QString name = file.value("name").toString(reply.value("name").toString());
+        auto open = [this, key, id, fileIndex, url, name, length] {
+            const Entry *e = entry(key);
+            if (!e || e->id != id)
+                return;
+            const QString index = QString::number(fileIndex);
+            emit playReady({{"key", key},
+                            {"engineId", id},
+                            {"fileIndex", fileIndex},
+                            {"url", url},
+                            {"title", name},
+                            {"length", double(length)},
+                            {"fileLength", double(length)},
+                            {"durationMs", e->durations.value(index).toDouble()},
+                            {"directPlay", e->directPlay},
+                            {"startMs", e->positions.value(index).toDouble()},
+                            {"nextFileIndex", nextVideoAfter(*e, fileIndex)},
+                            {"subtitles", subtitlesFor(*e, fileIndex)}});
+        };
+        if (preload)
+            awaitPreload(key, id, fileIndex, length, QDateTime::currentMSecsSinceEpoch() + 8000, open);
+        else
+            open();
+    });
+}
+
+// Android awaitPlaybackPreload: up to 8 s for the first 2 MiB of the file.
+void Library::awaitPreload(const QString &key, const QString &id, int fileIndex, qint64 length, qint64 deadline,
+                           std::function<void()> done) {
+    m_engine->get("/torrent/" + id, [this, key, id, fileIndex, length, deadline, done](const QJsonObject &status, int code) {
+        const Entry *e = entry(key);
+        if (!e || e->id != id)
+            return;
+        const qint64 needed = qMin<qint64>(2 * 1024 * 1024, qMax<qint64>(0, length));
+        const QJsonObject file = fileByIndex(status.value("files").toArray(), fileIndex);
+        const bool ready = code == 200 && !file.isEmpty() &&
+                           (qint64(file.value("verifiedBytes").toDouble()) >= needed || file.value("progress").toDouble() >= 1.0);
+        const qint64 remaining = deadline - QDateTime::currentMSecsSinceEpoch();
+        if (ready || remaining <= 0 || code == 404) {
+            done();
+            return;
+        }
+        QTimer::singleShot(qMin<qint64>(400, remaining), this, [this, key, id, fileIndex, length, deadline, done] {
+            awaitPreload(key, id, fileIndex, length, deadline, done);
+        });
+    });
+}
+
+void Library::endPlayback() {
+    // Android: the player is gone, so no file is focused and file-only playback ends.
+    const auto alive = [this](const QString &id) {
+        for (const Entry &e : std::as_const(m_entries))
+            if (e.id == id)
+                return true;
+        return false;
+    };
+    if (!m_playingId.isEmpty() && alive(m_playingId))
+        m_engine->post("/focus", {{"id", m_playingId}, {"fileIndex", QJsonValue::Null}});
+    if (!m_fileOnlyId.isEmpty() && alive(m_fileOnlyId))
+        m_engine->post("/file-only", {{"id", m_fileOnlyId}, {"enabled", false}});
+    m_fileOnlyId.clear();
+    m_playingKey.clear();
+    m_playingFile = -1;
+    m_playingId.clear();
+}
+
+void Library::savePosition(const QString &key, int fileIndex, qint64 positionMs, qint64 durationMs) {
     Entry *e = find(key);
     if (!e)
         return;
-    e->positions.insert(QString::number(fileIndex), double(positionMs));
-    if (m_playingKey == key)
-        m_playingKey.clear();
+    const QString index = QString::number(fileIndex);
+    if (durationMs < 0)
+        durationMs = qint64(e->durations.value(index).toDouble());
+    if (durationMs > 0)
+        e->durations.insert(index, double(durationMs));
+    e->positions.insert(index, double(savedPosition(positionMs, durationMs)));
+    // A new file may already be playing (the next episode): only its own close ends playback.
+    if (m_playingKey == key && m_playingFile == fileIndex)
+        endPlayback();
     save();
+}
+
+void Library::setPlaybackDuration(const QString &key, int fileIndex, qint64 durationMs) {
+    Entry *e = find(key);
+    if (!e || durationMs <= 0)
+        return;
+    const QString index = QString::number(fileIndex);
+    if (qint64(e->durations.value(index).toDouble()) == durationMs)
+        return;
+    e->durations.insert(index, double(durationMs));
+    save();
+}
+
+// ---------------------------------------------------------------- play rules
+
+qint64 Library::savedPosition(qint64 positionMs, qint64 durationMs) {
+    if (durationMs > 0 && positionMs >= durationMs - 3000)
+        return 0;
+    const qint64 position = qMax<qint64>(0, positionMs);
+    return durationMs > 0 ? qMin(position, durationMs) : position;
+}
+
+qint64 Library::resumeByteHint(qint64 length, qint64 positionMs, qint64 durationMs) {
+    if (length <= 0 || positionMs < 0 || durationMs <= 0)
+        return -1;
+    const double fraction = qBound(0.0, double(positionMs) / double(durationMs), 1.0);
+    return qBound<qint64>(0, qint64(double(length) * fraction), length - 1);
+}
+
+static bool verifiedComplete(const Library::Entry &e, int index) {
+    const QJsonObject file = fileByIndex(e.liveFiles, index);
+    const qint64 length = qint64(file.value("length").toDouble());
+    return length > 0 && qint64(file.value("verifiedBytes").toDouble()) >= length;
+}
+
+static bool isVideoFile(const QJsonObject &file) {
+    return Links::isVideo(file.value("name").toString(), file.value("type").toString()) ||
+           Links::isVideo(file.value("path").toString());
+}
+
+int Library::nextVideoAfter(const Entry &e, int endedIndex) {
+    const QJsonObject ended = fileByIndex(e.files, endedIndex);
+    if (ended.isEmpty())
+        return -1;
+    using Key = std::pair<QString, int>;
+    const Key endedKey{Links::naturalMediaKey(ended.value("path").toString()), endedIndex};
+    int best = -1;
+    Key bestKey;
+    for (const auto &value : e.files) {
+        const QJsonObject file = value.toObject();
+        const int index = file.value("index").toInt();
+        const QString path = file.value("path").toString();
+        if (index == endedIndex || !isVideoFile(file) || Links::isExtraVideo(path))
+            continue;
+        if (!e.selected.contains(index) && !verifiedComplete(e, index))
+            continue;
+        const Key key{Links::naturalMediaKey(path), index};
+        if (!(endedKey < key))
+            continue;
+        if (best < 0 || key < bestKey) {
+            best = index;
+            bestKey = key;
+        }
+    }
+    if (best < 0)
+        return -1;
+    // Already watched to the end: nothing to play next.
+    const QString index = QString::number(best);
+    const qint64 duration = qint64(e.durations.value(index).toDouble());
+    const qint64 position = qint64(e.positions.value(index).toDouble());
+    if (duration > 0 && position >= duration - 3000)
+        return -1;
+    return best;
+}
+
+int Library::nextEpisodeToWarm(const Entry &e, int playingIndex, bool playNext) {
+    if (!playNext || !isVideoFile(fileByIndex(e.files, playingIndex)))
+        return -1;
+    const int next = nextVideoAfter(e, playingIndex);
+    return next >= 0 && e.selected.contains(next) && !verifiedComplete(e, next) ? next : -1;
+}
+
+bool Library::shouldDropIdle(const Entry &e, int idleMinutes, bool playing) {
+    return idleMinutes > 0 && e.directPlay && e.idleDropReady && e.playbackReaders == 0 && !e.id.isEmpty() &&
+           !e.paused && !playing;
+}
+
+int Library::activeTransfers(const QList<Entry> &entries) {
+    int active = 0;
+    for (const Entry &e : entries)
+        if (!e.paused && e.error.isEmpty() && (e.progress < 1 || e.seeding))
+            ++active;
+    return qMax(1, active);
+}
+
+QJsonObject Library::playBody(const Entry &e, int fileIndex, const QJsonObject &policy) {
+    QJsonObject body{{"id", e.id}, {"fileIndex", fileIndex}};
+    const QString index = QString::number(fileIndex);
+    const qint64 hint = resumeByteHint(qint64(fileByIndex(e.files, fileIndex).value("length").toDouble()),
+                                       qint64(e.positions.value(index).toDouble()),
+                                       qint64(e.durations.value(index).toDouble()));
+    if (hint >= 0)
+        body.insert("offset", double(hint));
+    // Flags go only when on, as EngineClient.play sends them.
+    if (policy.value("boost").toBool())
+        body.insert("boost", true);
+    if (policy.value("fileOnly").toBool() && !e.directPlay)
+        body.insert("fileOnly", true);
+    if (policy.value("adaptiveBuffer").toBool())
+        body.insert("adaptiveBuffer", true);
+    if (policy.value("burstAwareBuffer").toBool())
+        body.insert("burstAwareBuffer", true);
+    const int next = nextEpisodeToWarm(e, fileIndex, policy.value("playNext").toBool());
+    if (next >= 0)
+        body.insert("nextFileIndex", next);
+    return body;
+}
+
+// ---------------------------------------------------------------- transfer control
+
+void Library::dropEntry(Entry &e, bool idle) {
+    if (!e.directPlay)
+        return;
+    const QString id = e.id;
+    if (idle) {
+        if (id.isEmpty() || m_idleDropped.contains(id))
+            return;
+        m_idleDropped.insert(id);
+    }
+    if (!id.isEmpty())
+        m_engine->post("/remove", {{"id", id}, {"destroyStore", false}});
+    if (m_fileOnlyId == id)
+        m_fileOnlyId.clear();
+    if (m_playingId == id) {
+        m_playingKey.clear();
+        m_playingFile = -1;
+        m_playingId.clear();
+    }
+    m_pendingPlay.remove(e.key);
+    e.id.clear();
+    e.configured = false;
+    e.paused = true;
+    e.downloadSpeed = e.uploadSpeed = 0;
+    e.peers = 0;
+    e.playbackReaders = 0;
+    e.idleDropReady = false;
+    const QString key = e.key, name = e.name.isEmpty() ? e.key : e.name;
+    save();
+    touch(key);
+    if (idle)
+        emit message(tr("Stopped idle Direct Play: %1").arg(name));
+}
+
+void Library::drop(const QString &key) {
+    if (Entry *e = find(key))
+        dropEntry(*e, false);
+}
+
+void Library::downloadInstead(const QString &key) {
+    Entry *e = find(key);
+    if (!e || !e->directPlay)
+        return;
+    e->directPlay = false;
+    e->paused = false;
+    m_pendingPlay.remove(key);
+    save();
+    const QString id = e->id;
+    if (!id.isEmpty()) {
+        // The engine record streams to RAM: add it again with files on disk.
+        e->id.clear();
+        e->configured = false;
+        e->attaching = true;
+        if (m_fileOnlyId == id)
+            m_fileOnlyId.clear();
+        m_engine->post("/remove", {{"id", id}, {"destroyStore", false}}, [this, key](const QJsonObject &, int) {
+            if (Entry *e = find(key))
+                attach(*e);
+        });
+    } else if (m_engine->ready() && !e->attaching) {
+        attach(*e);
+    }
+    emit message(tr("Downloading to %1").arg(m_saveDirectory));
+    touch(key);
 }
 
 void Library::pause(const QString &key) {
     Entry *e = find(key);
     if (!e || e->paused)
         return;
+    // Direct Play has no paused state on Android: it is dropped (RAM freed).
+    if (e->directPlay) {
+        dropEntry(*e, false);
+        return;
+    }
     e->paused = true;
     if (!e->id.isEmpty())
         m_engine->post("/pause", {{"id", e->id}});
@@ -784,6 +1127,8 @@ void Library::resume(const QString &key) {
     e->paused = false;
     if (!e->id.isEmpty())
         m_engine->post("/resume", {{"id", e->id}});
+    else if (m_engine->ready() && !e->attaching)
+        attach(*e); // dropped Direct Play
     save();
     touch(key);
 }
@@ -891,6 +1236,7 @@ QVariantMap Library::details(const QString &key) const {
             {"saved", e->exported.contains(index)},
             {"savedPath", e->exported.contains(index) ? exportPath(*e, index) : QString()},
             {"positionMs", e->positions.value(QString::number(index)).toDouble()},
+            {"durationMs", e->durations.value(QString::number(index)).toDouble()},
         });
     }
     return {{"key", e->key},
@@ -906,6 +1252,7 @@ QVariantMap Library::details(const QString &key) const {
             {"downloaded", double(e->downloaded)},
             {"eta", e->etaMs / 1000.0},
             {"paused", e->paused},
+            {"directPlay", e->directPlay},
             {"thumbnail", e->thumbnail.isEmpty() ? QString() : QUrl::fromLocalFile(e->thumbnail).toString()},
             {"files", files},
             {"defaultVideo", defaultVideo(key)},

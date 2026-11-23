@@ -549,6 +549,147 @@ private slots:
         QCOMPARE(step.value("action").toString(), QString("prefetch"));
         QCOMPARE(step.value("note").toString(), QString());
     }
+
+    // ---- Direct Play and play start, as Android's LibrarySession and PlaybackLaunch.kt.
+
+    void resumeByteHintFollowsTheTimeFraction() {
+        // Unknown length or duration: no hint.
+        QCOMPARE(Library::resumeByteHint(0, 1000, 10000), qint64(-1));
+        QCOMPARE(Library::resumeByteHint(1000, 1000, 0), qint64(-1));
+        QCOMPARE(Library::resumeByteHint(1000, -1, 10000), qint64(-1));
+        QCOMPARE(Library::resumeByteHint(1000, 0, 10000), qint64(0));
+        QCOMPARE(Library::resumeByteHint(1000, 2500, 10000), qint64(250));
+        // Past the end clamps to the last byte.
+        QCOMPARE(Library::resumeByteHint(1000, 20000, 10000), qint64(999));
+        QCOMPARE(Library::resumeByteHint(4000000000LL, 5000, 10000), qint64(2000000000LL));
+    }
+
+    void savedPositionResetsNearTheEnd() {
+        QCOMPARE(Library::savedPosition(97001, 100000), qint64(0));   // within 3 s of the end
+        QCOMPARE(Library::savedPosition(97000, 100000), qint64(0));
+        QCOMPARE(Library::savedPosition(96999, 100000), qint64(96999));
+        QCOMPARE(Library::savedPosition(-5, 100000), qint64(0));
+        QCOMPARE(Library::savedPosition(150000, 0), qint64(150000)); // unknown length: kept
+        QCOMPARE(Library::savedPosition(42000, -1), qint64(42000));
+    }
+
+    void naturalSortOrdersNumbersByValue() {
+        QCOMPARE(Links::naturalMediaKey("Ep 007"), QString("ep ") + QString(19, '0') + "7");
+        QCOMPARE(Links::naturalMediaKey("a0b"), QString("a") + QString(20, '0') + "b");
+        QStringList names{"Show E10.mkv", "show e2.mkv", "Show E1.mkv", "Show E02b.mkv"};
+        std::sort(names.begin(), names.end(), [](const QString &a, const QString &b) {
+            return Links::naturalMediaKey(a) < Links::naturalMediaKey(b);
+        });
+        QCOMPARE(names, (QStringList{"Show E1.mkv", "show e2.mkv", "Show E02b.mkv", "Show E10.mkv"}));
+        QVERIFY(Links::isExtraVideo("Show/Sample/show.sample.mkv"));
+        QVERIFY(Links::isExtraVideo("Behind the Scenes.mp4"));
+        QVERIFY(!Links::isExtraVideo("Show S01E01.mkv"));
+    }
+
+    void nextEpisodeFollowsNaturalOrder() {
+        Library::Entry e;
+        e.id = "t";
+        e.files = QJsonArray{file(0, "Show/Show S01E10.mkv", 100), file(1, "Show/Show S01E2.mkv", 100),
+                             file(2, "Show/Show S01E1.mkv", 100), file(3, "Show/sample.mkv", 10),
+                             file(4, "Show/Show S01E3.mkv", 100), file(5, "Show/Show S01E2.srt", 1)};
+        e.selected = {0, 1, 2, 3, 5};
+        QCOMPARE(Library::nextVideoAfter(e, 2), 1);  // E1 -> E2
+        QCOMPARE(Library::nextVideoAfter(e, 1), 0);  // E3 is not selected and not downloaded
+        QCOMPARE(Library::nextVideoAfter(e, 0), -1); // last
+        // A downloaded unselected file counts.
+        e.liveFiles = QJsonArray{QJsonObject{{"index", 4}, {"length", 100}, {"verifiedBytes", 100}}};
+        QCOMPARE(Library::nextVideoAfter(e, 1), 4);
+        // Warming skips a finished file: nothing left to fetch.
+        QCOMPARE(Library::nextEpisodeToWarm(e, 1, true), -1);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 2, true), 1);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 2, false), -1);
+        QCOMPARE(Library::nextEpisodeToWarm(e, 5, true), -1); // a subtitle is not playing
+        // Watched to the end already: no next.
+        e.durations.insert("1", 60000.0);
+        e.positions.insert("1", 58000.0);
+        QCOMPARE(Library::nextVideoAfter(e, 2), -1);
+    }
+
+    void playBodyCarriesAndroidFlags() {
+        Library::Entry e;
+        e.id = "t";
+        e.files = QJsonArray{file(0, "S01E01.mkv", 1000), file(1, "S01E02.mkv", 1000)};
+        e.selected = {0, 1};
+        e.positions.insert("0", 30000.0);
+        e.durations.insert("0", 60000.0);
+        const QJsonObject policy{{"boost", true}, {"fileOnly", true}, {"adaptiveBuffer", true},
+                                 {"burstAwareBuffer", false}, {"playNext", true}};
+        QJsonObject body = Library::playBody(e, 0, policy);
+        QCOMPARE(body.value("id").toString(), QString("t"));
+        QCOMPARE(body.value("fileIndex").toInt(), 0);
+        QCOMPARE(qint64(body.value("offset").toDouble()), qint64(500));
+        QVERIFY(body.value("boost").toBool());
+        QVERIFY(body.value("fileOnly").toBool());
+        QVERIFY(body.value("adaptiveBuffer").toBool());
+        QVERIFY(!body.contains("burstAwareBuffer"));
+        QCOMPARE(body.value("nextFileIndex").toInt(), 1);
+        // Direct Play never asks for file-only; no duration known, no offset.
+        e.directPlay = true;
+        body = Library::playBody(e, 1, policy);
+        QVERIFY(!body.contains("fileOnly"));
+        QVERIFY(!body.contains("offset"));
+        QVERIFY(!body.contains("nextFileIndex"));
+        // The shared policy's play flags are what the app sends.
+        const QJsonObject shared = Policy::instance().play();
+        QVERIFY(shared.contains("boost") && shared.contains("preloadStart") && shared.contains("playNext"));
+    }
+
+    void idleDropAndActiveTransfers() {
+        Library::Entry e;
+        e.id = "t";
+        e.directPlay = true;
+        e.idleDropReady = true;
+        QVERIFY(Library::shouldDropIdle(e, 15, false));
+        QVERIFY(!Library::shouldDropIdle(e, 0, false));  // off
+        QVERIFY(!Library::shouldDropIdle(e, 15, true));  // playing here
+        e.playbackReaders = 1;
+        QVERIFY(!Library::shouldDropIdle(e, 15, false));
+        e.playbackReaders = 0;
+        e.directPlay = false;
+        QVERIFY(!Library::shouldDropIdle(e, 15, false)); // downloads are never dropped
+
+        Library::Entry running, paused, done, seeding;
+        paused.paused = true;
+        done.progress = 1;
+        seeding.progress = 1;
+        seeding.seeding = true;
+        QCOMPARE(Library::activeTransfers({}), 1);
+        QCOMPARE(Library::activeTransfers({running, paused, done, seeding}), 2);
+    }
+
+    void directPlayIsSavedAndStartsDropped() {
+        Library::Entry e;
+        e.key = "dp";
+        e.directPlay = true;
+        e.durations = {{"0", 60000.0}};
+        const Library::Entry back = Library::fromJson(Library::toJson(e));
+        QVERIFY(back.directPlay);
+        QCOMPARE(back.durations.value("0").toDouble(), 60000.0);
+        QVERIFY(!Library::fromJson(QJsonObject{{"key", "old"}}).directPlay);
+
+        QTemporaryDir dir;
+        Engine engine(dir.filePath("engine"));
+        {
+            Library library(&engine, dir.filePath("data"), dir.filePath("save"));
+            library.adopt("id", "hash2", "magnet:?xt=urn:btih:hash2", "Movie", QJsonArray{file(0, "Movie.mkv", 10)},
+                          {0}, {}, true);
+            QVERIFY(library.entry("hash2")->directPlay);
+            QVERIFY(library.details("hash2").value("directPlay").toBool());
+            library.savePosition("hash2", 0, 59000, 60000); // within 3 s of the end
+            QCOMPARE(library.entry("hash2")->positions.value("0").toDouble(), 0.0);
+            library.savePosition("hash2", 0, 20000);       // keeps the known length
+            QCOMPARE(library.entry("hash2")->durations.value("0").toDouble(), 60000.0);
+            QCOMPARE(library.entry("hash2")->positions.value("0").toDouble(), 20000.0);
+        }
+        Library reloaded(&engine, dir.filePath("data"), dir.filePath("save"));
+        QVERIFY(reloaded.entry("hash2")->directPlay);
+        QVERIFY(reloaded.entry("hash2")->paused); // dropped until played, like Android
+    }
 };
 
 QTEST_MAIN(TorrentPlayerTests)

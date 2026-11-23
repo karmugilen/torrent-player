@@ -109,6 +109,7 @@ int main(int argc, char *argv[]) {
     Settings settings(Settings::defaultPath());
     EngineSettings engineSettings(&engine, &settings);
     Library library(&engine, data, downloads + "/Torrent Player");
+    library.setSettings(&settings);
     AddSession adder(&engine, &library);
     Subtitles subtitles;
     // The home screen's search filters the library by name.
