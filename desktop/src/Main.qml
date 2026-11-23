@@ -275,8 +275,9 @@ ApplicationWindow {
         padding: 24
         Material.roundedScale: theme.radius
         background: Rectangle { color: win.surface; radius: win.radius; border.color: win.line }
-        Label {
-            width: quitDialog.availableWidth
+        // As the content item it takes the dialog's width, so its wrapped height
+        // doesn't feed back into the dialog's size.
+        contentItem: Label {
             wrapMode: Text.Wrap
             color: win.muted
             text: qsTr("%n downloads stop while Torrent Player is closed. They continue the next time you open it.", "", library.activeCount)
