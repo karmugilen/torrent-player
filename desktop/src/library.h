@@ -22,7 +22,7 @@ class Library : public QAbstractListModel {
     Q_PROPERTY(double downloadSpeed READ downloadSpeed NOTIFY revisionChanged)
     Q_PROPERTY(double uploadSpeed READ uploadSpeed NOTIFY revisionChanged)
     Q_PROPERTY(int activeCount READ activeCount NOTIFY revisionChanged)
-    Q_PROPERTY(QString saveDirectory READ saveDirectory CONSTANT)
+    Q_PROPERTY(QString saveDirectory READ saveDirectory WRITE setSaveDirectory NOTIFY saveDirectoryChanged)
 
 public:
     enum Role {
@@ -127,9 +127,23 @@ public:
     QString partPath(const QString &key, int fileIndex) const;
     QString exportPath(const Entry &entry, int fileIndex) const;
 
+    // Settings page
+    Q_INVOKABLE void setSaveDirectory(const QString &path);
+    Q_INVOKABLE void pauseAll();
+    Q_INVOKABLE void resumeAll();
+    // Deletes exported files; library entries stay.
+    Q_INVOKABLE void deleteDownloadedFiles();
+    Q_INVOKABLE QStringList libraryKeys() const;
+    // Bytes used by exported downloads and free space on that volume.
+    Q_INVOKABLE double managedBytes() const;
+    Q_INVOKABLE double freeBytes() const;
+    // Removes engine/.boundary/<hash> for torrents no longer in the library.
+    Q_INVOKABLE qint64 clearOrphanBoundaryCache();
+
 signals:
     void countChanged();
     void revisionChanged();
+    void saveDirectoryChanged();
     // Everything the player needs to open a file.
     void playReady(const QVariantMap &media);
     void message(const QString &text);
@@ -160,3 +174,6 @@ private:
     int m_streamPort = 0;
     QString m_playingKey;
 };
+
+// Info hashes under engine/.boundary that are not in the library (for cache Clear).
+QStringList orphanBoundaryKeys(const QStringList &onDisk, const QStringList &inLibrary);

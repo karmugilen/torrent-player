@@ -19,6 +19,11 @@ class Settings : public QObject {
     Q_PROPERTY(bool directPlayDefault READ directPlayDefault WRITE setDirectPlayDefault NOTIFY changed)
     // Playback: minutes before an idle Direct Play session is dropped; 0 is off.
     Q_PROPERTY(int idleDropMinutes READ idleDropMinutes WRITE setIdleDropMinutes NOTIFY changed)
+    // true: built-in player; false: open mpv in its own window (desktop).
+    Q_PROPERTY(bool builtInPlayer READ builtInPlayer WRITE setBuiltInPlayer NOTIFY changed)
+    Q_PROPERTY(bool reducedEffects READ reducedEffects WRITE setReducedEffects NOTIFY changed)
+    // Desktop save folder for exports; empty means the default Downloads/Torrent Player.
+    Q_PROPERTY(QString downloadFolder READ downloadFolder WRITE setDownloadFolder NOTIFY changed)
     // Network: "ANY", "WIFI_ONLY" or "UNMETERED".
     Q_PROPERTY(QString networkPolicy READ networkPolicy WRITE setNetworkPolicy NOTIFY changed)
     // 0 (no limit), 1024, 4096 or 8192.
@@ -59,6 +64,12 @@ public:
     void setDirectPlayDefault(bool v) { setValue("directPlayDefault", v); }
     int idleDropMinutes() const { return value("idleDropMinutes").toInt(); }
     void setIdleDropMinutes(int v) { setValue("idleDropMinutes", v); }
+    bool builtInPlayer() const { return value("builtInPlayer").toBool(); }
+    void setBuiltInPlayer(bool v) { setValue("builtInPlayer", v); }
+    bool reducedEffects() const { return value("reducedEffects").toBool(); }
+    void setReducedEffects(bool v) { setValue("reducedEffects", v); }
+    QString downloadFolder() const { return m_downloadFolder; }
+    void setDownloadFolder(const QString &path);
     QString networkPolicy() const { return value("networkPolicy").toString(); }
     void setNetworkPolicy(const QString &v) { setValue("networkPolicy", v); }
     int downloadRateKiB() const { return value("downloadRateKiB").toInt(); }
@@ -119,6 +130,7 @@ private:
     const Policy m_policy;
     QString m_path;
     QVariantMap m_values;
+    QString m_downloadFolder;
     QTimer m_saveTimer;
     int m_autoMiB = 64;
     int m_appliedMiB = 0;

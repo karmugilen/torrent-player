@@ -9,7 +9,7 @@
 
     "idleDropMinutes": { "default": 15, "visible": true, "group": "playback", "label": "Stop idle Direct Play", "unit": "minutes", "min": 0, "max": 240, "options": [0, 5, 15, 30], "optionLabels": ["Off", "5 min", "15 min", "30 min"] },
     "playbackMethod": { "default": "HTTP", "visible": true, "group": "playback", "label": "How players get the video", "options": ["HTTP", "CONTENT_URI"], "optionLabels": ["Stream", "File proxy"], "platforms": ["android"] },
-    "builtInPlayer": { "default": true, "visible": true, "group": "player", "label": "Video player", "options": [true, false], "optionLabels": ["Built-in", "External app"], "platforms": ["android"] },
+    "builtInPlayer": { "default": true, "visible": true, "group": "player", "label": "Video player", "options": [true, false], "optionLabels": ["Built-in", "External app"], "platforms": ["android", "desktop"] },
     "rememberBrightness": { "default": false, "visible": true, "group": "player", "label": "Remember brightness", "platforms": ["android"] },
 
     "networkPolicy": { "default": "ANY", "visible": true, "group": "network", "label": "Transfer on", "options": ["ANY", "WIFI_ONLY", "UNMETERED"], "optionLabels": ["Any network", "Wi-Fi", "Unmetered"] },

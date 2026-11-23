@@ -38,8 +38,9 @@ TORRENTPLAYER_ENGINE_SRC=~/path/to/torrent-player/engine-rs bin/install
   subtitles from the torrent, the video, or a file, and pick up where you
   stopped next time. If a format won't play, **Open in mpv** hands the stream to mpv.
 - **Remove**: keep the files, or delete them.
-
-Downloads continue only while the app is open.
+- **Settings**: gear on the library header, or `,` / `Ctrl+,`. Closing the
+  window hides to the tray; downloads keep going. `Q` or the tray's Quit
+  exits fully. Start with `--background` to open in the tray only.
 
 ## Keyboard
 
@@ -49,6 +50,7 @@ Downloads continue only while the app is open.
 | `A` | Add a magnet link or torrent URL |
 | `Ctrl+V` | Add the link on the clipboard |
 | `O` | Open a `.torrent` file |
+| `,` / `Ctrl+,` | Settings |
 | Arrows, `Enter` | Move between downloads, open one |
 | `Space` | Play (library), play/pause (player) |
 | `P` | Pause or resume a download |
@@ -61,7 +63,7 @@ Downloads continue only while the app is open.
 | `C` | Next subtitles |
 | `V` | Open in mpv |
 | `Esc` | Back |
-| `Q` | Quit |
+| `Q` / `Ctrl+Q` | Quit |
 
 ## Develop
 

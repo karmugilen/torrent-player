@@ -44,6 +44,16 @@ void Settings::load() {
     // As on Android: an older file with a chosen size but no Auto flag keeps that size.
     if (!saved.contains("ramCacheAuto") && saved.contains("ramCacheMiB"))
         m_values.insert("ramCacheAuto", false);
+    m_downloadFolder = saved.value("downloadFolder").toString();
+}
+
+void Settings::setDownloadFolder(const QString &path) {
+    const QString cleaned = path.trimmed();
+    if (cleaned == m_downloadFolder)
+        return;
+    m_downloadFolder = cleaned;
+    scheduleSave();
+    emit changed();
 }
 
 bool Settings::save() {
@@ -52,6 +62,8 @@ bool Settings::save() {
     QJsonObject out;
     for (auto it = m_values.cbegin(); it != m_values.cend(); ++it)
         out.insert(it.key(), QJsonValue::fromVariant(it.value()));
+    if (!m_downloadFolder.isEmpty())
+        out.insert("downloadFolder", m_downloadFolder);
     QSaveFile file(m_path);
     if (!file.open(QIODevice::WriteOnly))
         return false;

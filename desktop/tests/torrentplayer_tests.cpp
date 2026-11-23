@@ -7,6 +7,8 @@
 #include <QtTest>
 
 #include "addsession.h"
+#include "autostart.h"
+#include "battery.h"
 #include "connections.h"
 #include "engine.h"
 #include "format.h"
@@ -18,6 +20,8 @@
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
+
+#include <QSignalSpy>
 
 static QJsonObject file(int index, const QString &path, double length, const QString &type = {}) {
     return {{"index", index}, {"name", path.section('/', -1)}, {"path", path}, {"length", length}, {"type", type}};
@@ -216,6 +220,10 @@ private slots:
         // Android-only settings stay out of the desktop.
         QVERIFY(!compiled.settingKeys().contains("playbackMethod"));
         QVERIFY(compiled.settingKeys("android").contains("playbackMethod"));
+        // builtInPlayer is shared; desktop uses it for built-in vs mpv window.
+        QVERIFY(compiled.settingKeys().contains("builtInPlayer"));
+        QVERIFY(compiled.settingKeys("android").contains("builtInPlayer"));
+        QCOMPARE(compiled.defaultValue("builtInPlayer").toBool(), true);
         // Every setting says whether Android shows it and has a default.
         for (const QString &key : compiled.settingKeys("android")) {
             QVERIFY2(compiled.setting(key).value("visible").isBool(), qPrintable(key));
@@ -241,6 +249,7 @@ private slots:
         // Android's UiState / LibrarySession defaults.
         QCOMPARE(settings.directPlayDefault(), false);
         QCOMPARE(settings.idleDropMinutes(), 15);
+        QCOMPARE(settings.builtInPlayer(), true);
         QCOMPARE(settings.networkPolicy(), QString("ANY"));
         QCOMPARE(settings.downloadRateKiB(), 0);
         QCOMPARE(settings.maxPeers(), 55);
@@ -548,6 +557,53 @@ private slots:
         step = PlaybackControl::scrubDecision(30000, 60000, 60000, 65000, QVariant(), 1000, false);
         QCOMPARE(step.value("action").toString(), QString("prefetch"));
         QCOMPARE(step.value("note").toString(), QString());
+    }
+
+    void autostartWritesDesktopFile() {
+        QTemporaryDir dir;
+        Autostart autostart(dir.path());
+        QVERIFY(!autostart.enabled());
+        autostart.setEnabled(true);
+        QVERIFY(autostart.enabled());
+        QFile file(autostart.desktopFilePath());
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QString body = QString::fromUtf8(file.readAll());
+        QVERIFY(body.contains("Exec=torrentplayer --background"));
+        QVERIFY(body.contains("X-GNOME-Autostart-enabled=true"));
+        QCOMPARE(Autostart::desktopFileContents().contains("torrentplayer --background"), true);
+        autostart.setEnabled(false);
+        QVERIFY(!autostart.enabled());
+        QVERIFY(!QFile::exists(autostart.desktopFilePath()));
+    }
+
+    void batteryThresholdPausesWhenLow() {
+        QVERIFY(DeviceStatus::shouldPauseTransfers(true, 10, false, 15));
+        QVERIFY(DeviceStatus::shouldPauseTransfers(true, 15, false, 15));
+        QVERIFY(!DeviceStatus::shouldPauseTransfers(true, 16, false, 15));
+        QVERIFY(!DeviceStatus::shouldPauseTransfers(true, 10, true, 15));
+        QVERIFY(!DeviceStatus::shouldPauseTransfers(false, 5, false, 15));
+        // No battery (percent < 0): never pause.
+        QVERIFY(!DeviceStatus::shouldPauseTransfers(true, -1, false, 15));
+        QVERIFY(!DeviceStatus::shouldPauseTransfers(true, -1, true, 15));
+
+        QTemporaryDir dir;
+        Settings settings(dir.filePath("settings.json"));
+        settings.setPauseOnLowBattery(true);
+        DeviceConditions low = DeviceStatus::conditionsFrom(true, true, false, false, 10, false);
+        QVERIFY(EngineSettings::batteryPaused(settings, low));
+        DeviceConditions charging = DeviceStatus::conditionsFrom(true, true, false, true, 10, false);
+        QVERIFY(!EngineSettings::batteryPaused(settings, charging));
+        DeviceConditions none = DeviceStatus::conditionsFrom(true, true, false, true, -1, false);
+        QVERIFY(!EngineSettings::batteryPaused(settings, none));
+    }
+
+    void orphanBoundaryKeysSkipLibraryTorrents() {
+        const QStringList onDisk{"aaa", "bbb", "ccc"};
+        const QStringList library{"bbb", "ddd"};
+        QCOMPARE(orphanBoundaryKeys(onDisk, library), QStringList({"aaa", "ccc"}));
+        QVERIFY(orphanBoundaryKeys(onDisk, onDisk).isEmpty());
+        QVERIFY(orphanBoundaryKeys({}, library).isEmpty());
+        QCOMPARE(orphanBoundaryKeys({"xyz"}, {}), QStringList({"xyz"}));
     }
 };
 
