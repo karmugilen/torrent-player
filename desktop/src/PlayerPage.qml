@@ -30,7 +30,12 @@ Page {
     property int upNextLeft: 0
     property bool endHandled: false
     property bool switching: false
+    // After release/arrow seek, hold the bar at the target until mpv gets there (Android pendingSeek).
+    property real pendingSeekMs: -1
     readonly property var playingFile: (torrent.files || []).find(f => f.index === media.fileIndex) || ({})
+    // Seek bar and clock: drag target, else pending seek, else mpv position.
+    readonly property real displayMs: playback.shownPlayheadMs(seekBar.dragging, seekBar.targetMs, pendingSeekMs, player.position)
+    readonly property bool seekSpinning: pendingSeekMs >= 0 && !seekBar.dragging
     background: Rectangle { color: "black" }
 
     function showControls() {
@@ -53,9 +58,19 @@ Page {
         pipWindow.enter(win, player.videoAspect || (16 / 9))
     }
     function clampMs(ms) { return Math.max(0, player.duration > 0 ? Math.min(player.duration, ms) : ms) }
+    function clearPendingSeek() { pendingSeekMs = -1; pendingSeekClear.stop() }
+    function maybeClearPendingSeek() {
+        if (playback.pendingSeekCaughtUp(pendingSeekMs, player.position, player.seeking))
+            clearPendingSeek()
+    }
+    function beginPendingSeek(target) {
+        pendingSeekMs = target
+        pendingSeekClear.restart()
+    }
     // Arrow skips: ask the engine for the spot first, as a seek-bar release does.
     function seekBy(ms) {
         const target = clampMs(player.position + ms)
+        beginPendingSeek(target)
         playback.prefetchNow(target)
         player.seek(target, false)
         showControls()
@@ -63,6 +78,7 @@ Page {
     }
     function seekTo(ms) {
         const target = clampMs(ms)
+        beginPendingSeek(target)
         playback.prefetchNow(target)
         player.seek(target, false)
         showControls()
@@ -227,6 +243,17 @@ Page {
     }
     // library.play gave nothing (an error message instead): allow another try.
     Timer { id: switchReset; interval: 10000; onTriggered: page.switching = false }
+    // Drop the held seek target if mpv never reaches it (same 4 s as Android).
+    Timer {
+        id: pendingSeekClear
+        interval: 4000
+        onTriggered: page.clearPendingSeek()
+    }
+    Connections {
+        target: player
+        function onPositionChanged() { page.maybeClearPendingSeek() }
+        function onBufferingChanged() { page.maybeClearPendingSeek() }
+    }
 
     // A frame for the home card, once real picture is on screen.
     Timer {
@@ -269,15 +296,15 @@ Page {
         }
     }
 
-    // Waiting for data, for the file to open, or for a seek.
+    // Waiting for data, for the file to open, or for a seek (including pending outside-buffer seeks).
     BusyIndicator {
         anchors.centerIn: parent
-        running: player.errorString === "" && player.buffering
+        running: player.errorString === "" && (player.buffering || page.seekSpinning)
         visible: running
     }
     Label {
         anchors { horizontalCenter: parent.horizontalCenter; top: parent.verticalCenter; topMargin: 48 }
-        visible: player.errorString === "" && player.buffering && !playback.complete
+        visible: player.errorString === "" && (player.buffering || page.seekSpinning) && !playback.complete
         text: qsTr("Buffering · %1 · %n peers", "", playback.peers).arg(fmt.speed(playback.downloadSpeed))
         color: "#cccccc"
     }
@@ -504,7 +531,7 @@ Page {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 12
-                Label { text: fmt.clock(seekBar.dragging ? seekBar.targetMs : player.position); color: "white"; font.pixelSize: 13 }
+                Label { text: fmt.clock(page.displayMs); color: "white"; font.pixelSize: 13 }
 
                 // Seek bar as Android's: downloaded parts, mpv's read-ahead, and a drag that
                 // seeks live over ready spots and only prefetches the others until release.
@@ -518,7 +545,6 @@ Page {
                     property string bubble: ""
                     property string note: ""
                     readonly property real span: Math.max(1, player.duration)
-                    readonly property real shownMs: dragging ? targetMs : player.position
                     function msAt(x) { return Math.max(0, Math.min(1, x / width)) * player.duration }
                     function drag(x) {
                         targetMs = msAt(x)
@@ -554,7 +580,7 @@ Page {
                             color: Qt.rgba(1, 1, 1, 0.55)
                         }
                         Rectangle {
-                            width: Math.min(1, seekBar.shownMs / seekBar.span) * track.width
+                            width: Math.min(1, page.displayMs / seekBar.span) * track.width
                             height: track.height
                             radius: track.radius
                             color: theme.accent
@@ -564,7 +590,7 @@ Page {
                         width: 14; height: 14; radius: 7
                         color: "white"
                         anchors.verticalCenter: parent.verticalCenter
-                        x: Math.min(1, seekBar.shownMs / seekBar.span) * seekBar.width - width / 2
+                        x: Math.min(1, page.displayMs / seekBar.span) * seekBar.width - width / 2
                         visible: player.duration > 0
                     }
                     Rectangle {
@@ -595,12 +621,21 @@ Page {
                         }
                         onPositionChanged: (mouse) => { if (pressed) seekBar.drag(mouse.x) }
                         onReleased: (mouse) => {
+                            // Recompute from release x (a click has no move). seekTo sets
+                            // pendingSeek before dragging clears so the bar does not snap
+                            // back to demuxer-cache-time when the spot is not ready yet.
                             seekBar.targetMs = seekBar.msAt(mouse.x)
-                            seekBar.dragging = false
+                            seekBar.bubble = ""
+                            seekBar.note = ""
                             page.seekTo(seekBar.targetMs)
+                            seekBar.dragging = false
                             keyCatcher.forceActiveFocus()
                         }
-                        onCanceled: seekBar.dragging = false
+                        onCanceled: {
+                            seekBar.dragging = false
+                            seekBar.bubble = ""
+                            seekBar.note = ""
+                        }
                     }
                 }
                 Label { text: fmt.clock(player.duration); color: "white"; font.pixelSize: 13 }

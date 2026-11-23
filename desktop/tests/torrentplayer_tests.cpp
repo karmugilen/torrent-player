@@ -566,6 +566,30 @@ private slots:
         QCOMPARE(step.value("note").toString(), QString());
     }
 
+    void scrubClickOutsideBufferPrefetchesThenPendingSeekHoldsPlayhead() {
+        // Click (press) far past mpv cache on missing data: live scrub must not seek into
+        // the buffer; only prefetch. Release then seekTo + pendingSeek (Android).
+        const qint64 pos = 60000, cacheEnd = 65000, click = 600000;
+        auto press = PlaybackControl::scrubDecision(click, pos, pos, cacheEnd, false, 1000, false);
+        QCOMPARE(press.value("action").toString(), QString("prefetch"));
+        QCOMPARE(press.value("note").toString(), QString("will buffer"));
+        // Same click inside the demuxer cache still seeks live even if not torrent-ready.
+        QCOMPARE(PlaybackControl::scrubDecision(62000, pos, pos, cacheEnd, false, 1000, false)
+                     .value("action")
+                     .toString(),
+                 QString("seek"));
+
+        // After release: bar stays on the click target while mpv is still at cache end.
+        QCOMPARE(PlaybackControl::shownPlayheadMs(false, click, click, cacheEnd), click);
+        QCOMPARE(PlaybackControl::shownPlayheadMs(true, click, -1, cacheEnd), click);
+        QCOMPARE(PlaybackControl::shownPlayheadMs(false, click, -1, cacheEnd), cacheEnd);
+        // Clear only once position is near the target and not seeking (3 s window).
+        QVERIFY(!PlaybackControl::pendingSeekCaughtUp(click, cacheEnd, false));
+        QVERIFY(!PlaybackControl::pendingSeekCaughtUp(click, click, true));
+        QVERIFY(PlaybackControl::pendingSeekCaughtUp(click, click + 1000, false));
+        QCOMPARE(PlaybackControl::PendingSeekTimeoutMs, qint64(4000));
+    }
+
     // ---- Direct Play and play start, as Android's LibrarySession and PlaybackLaunch.kt.
 
     void resumeByteHintFollowsTheTimeFraction() {

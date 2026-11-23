@@ -240,3 +240,15 @@ QVariantMap PlaybackControl::scrubDecision(qint64 targetMs, qint64 originMs, qin
         action = "wait";
     return {{"label", label}, {"note", notReady && !inBuffer ? tr("will buffer") : QString()}, {"action", action}};
 }
+
+qint64 PlaybackControl::shownPlayheadMs(bool dragging, qint64 dragTargetMs, qint64 pendingMs, qint64 positionMs) {
+    if (dragging)
+        return dragTargetMs;
+    if (pendingMs >= 0)
+        return pendingMs;
+    return positionMs;
+}
+
+bool PlaybackControl::pendingSeekCaughtUp(qint64 pendingMs, qint64 positionMs, bool seeking, qint64 catchupMs) {
+    return pendingMs >= 0 && !seeking && qAbs(positionMs - pendingMs) < catchupMs;
+}

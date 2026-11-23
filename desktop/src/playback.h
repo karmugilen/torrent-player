@@ -80,6 +80,12 @@ public:
     static QString clock(qint64 ms);
     static QVariantMap scrubDecision(qint64 targetMs, qint64 originMs, qint64 positionMs, qint64 cacheEndMs,
                                      QVariant ready, qint64 sinceLastSeekMs, bool mpvSeeking);
+    // Seek-bar playhead after release: drag target while dragging, else pending seek
+    // until mpv catches up (Android pendingSeek), else the real position. pendingMs < 0 = none.
+    Q_INVOKABLE static qint64 shownPlayheadMs(bool dragging, qint64 dragTargetMs, qint64 pendingMs, qint64 positionMs);
+    // True when pending seek can clear: within catchupMs of the target and not seeking.
+    Q_INVOKABLE static bool pendingSeekCaughtUp(qint64 pendingMs, qint64 positionMs, bool seeking, qint64 catchupMs = 3000);
+    static constexpr qint64 PendingSeekTimeoutMs = 4000;
 
 signals:
     void engineChanged();
