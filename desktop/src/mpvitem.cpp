@@ -113,7 +113,9 @@ public:
             return;
         QOpenGLFramebufferObject *target = framebufferObject();
         mpv_opengl_fbo fbo{int(target->handle()), target->width(), target->height(), 0};
-        int flip = 0;
+        // Qt Quick's FBO is top-left; OpenGL's default is bottom-left. Without
+        // this the picture is upside down.
+        int flip = 1;
         mpv_render_param params[] = {
             {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
             {MPV_RENDER_PARAM_FLIP_Y, &flip},
