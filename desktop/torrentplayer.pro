@@ -21,7 +21,10 @@ HEADERS += \
     src/connections.h \
     src/worldmap.h \
     src/mpvitem.h \
-    src/playback.h
+    src/playback.h \
+    src/series.h \
+    src/piecegrid.h \
+    src/playerstats.h
 
 SOURCES += \
     src/main.cpp \
@@ -39,6 +42,9 @@ SOURCES += \
     src/connections.cpp \
     src/worldmap.cpp \
     src/mpvitem.cpp \
-    src/playback.cpp
+    src/playback.cpp \
+    src/series.cpp \
+    src/piecegrid.cpp \
+    src/playerstats.cpp
 
 RESOURCES += src/resources.qrc

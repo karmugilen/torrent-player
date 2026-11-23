@@ -254,7 +254,7 @@ QJsonObject Library::toJson(const Entry &e) {
             {"selected", selected}, {"files", e.files},       {"paused", e.paused},
             {"addedAt", double(e.addedAt)}, {"exported", exported}, {"thumbnail", e.thumbnail},
             {"positions", e.positions}, {"durations", e.durations}, {"lastFile", e.lastFile},
-            {"progress", e.progress}, {"directPlay", e.directPlay}};
+            {"watchedAt", e.watchedAt}, {"progress", e.progress}, {"directPlay", e.directPlay}};
 }
 
 Library::Entry Library::fromJson(const QJsonObject &o) {
@@ -272,6 +272,7 @@ Library::Entry Library::fromJson(const QJsonObject &o) {
     e.thumbnail = o.value("thumbnail").toString();
     e.positions = o.value("positions").toObject();
     e.durations = o.value("durations").toObject();
+    e.watchedAt = o.value("watchedAt").toObject();
     e.directPlay = o.value("directPlay").toBool();
     e.lastFile = o.value("lastFile").toInt(-1);
     e.progress = o.value("progress").toDouble();
@@ -438,6 +439,7 @@ void Library::update(Entry &e, const QJsonObject &s) {
     e.seeding = s.value("seeding").toBool();
     e.idleDropReady = s.value("idleDropReady").toBool();
     e.playbackReaders = s.value("playbackReaders").toInt();
+    e.nextPreload = s.value("nextPreload").toObject();
     const QString error = s.value("error").toString();
     if (!error.isEmpty())
         e.error = error;
@@ -708,6 +710,8 @@ static QJsonObject fileByIndex(const QJsonArray &files, int index) {
     return {};
 }
 
+static QVariantList playlistItems(const Library::Entry &e, int fileIndex);
+
 QString Library::finishedFilePath(const QString &key, int fileIndex) const {
     const Entry *e = entry(key);
     if (!e)
@@ -723,28 +727,7 @@ QString Library::finishedFilePath(const QString &key, int fileIndex) const {
 
 int Library::defaultVideo(const QString &key) const {
     const Entry *e = entry(key);
-    if (!e)
-        return -1;
-    if (e->lastFile >= 0) {
-        const QJsonObject file = fileByIndex(e->files, e->lastFile);
-        if (Links::isVideo(file.value("name").toString(), file.value("type").toString()))
-            return e->lastFile;
-    }
-    int best = -1;
-    double bestLength = -1;
-    for (const auto &value : e->files) {
-        const QJsonObject file = value.toObject();
-        if (!Links::isVideo(file.value("name").toString(), file.value("type").toString()))
-            continue;
-        const int index = file.value("index").toInt();
-        // Prefer selected files: unselected ones are not downloading.
-        const double length = file.value("length").toDouble() + (e->selected.contains(index) ? 1e15 : 0);
-        if (length > bestLength) {
-            bestLength = length;
-            best = index;
-        }
-    }
-    return best;
+    return e ? Series::resumeIndex(seriesFiles(*e)) : -1;
 }
 
 QVariantList Library::subtitlesFor(const Entry &e, int videoIndex) const {
@@ -855,6 +838,10 @@ void Library::startPlay(const QString &key, int fileIndex) {
                             {"directPlay", e->directPlay},
                             {"startMs", e->positions.value(index).toDouble()},
                             {"nextFileIndex", nextVideoAfter(*e, fileIndex)},
+                            {"episode", Series::episodeTitle(name)},
+                            {"playlist", playlistItems(*e, fileIndex)},
+                            {"playNext", playPolicy().value("playNext").toBool()},
+                            {"playNextCountdownSeconds", playPolicy().value("playNextCountdownSeconds").toInt(5)},
                             {"subtitles", subtitlesFor(*e, fileIndex)}});
         };
         if (preload)
@@ -914,6 +901,9 @@ void Library::savePosition(const QString &key, int fileIndex, qint64 positionMs,
     if (durationMs > 0)
         e->durations.insert(index, double(durationMs));
     e->positions.insert(index, double(savedPosition(positionMs, durationMs)));
+    // Android bookmarkUpdatedAt: only a real place counts as watched.
+    if (positionMs > 0)
+        e->watchedAt.insert(index, double(QDateTime::currentMSecsSinceEpoch()));
     // A new file may already be playing (the next episode): only its own close ends playback.
     if (m_playingKey == key && m_playingFile == fileIndex)
         endPlayback();
@@ -998,6 +988,64 @@ int Library::nextEpisodeToWarm(const Entry &e, int playingIndex, bool playNext) 
         return -1;
     const int next = nextVideoAfter(e, playingIndex);
     return next >= 0 && e.selected.contains(next) && !verifiedComplete(e, next) ? next : -1;
+}
+
+QList<int> Library::playlist(const Entry &e, int fileIndex) {
+    const QJsonObject current = fileByIndex(e.files, fileIndex);
+    // Samples and trailers stay out of the episode run; one picked on its own plays alone.
+    if (current.isEmpty() || Links::isExtraVideo(current.value("path").toString()))
+        return {fileIndex};
+    using Key = std::pair<QString, int>;
+    QList<Key> videos;
+    for (const auto &value : e.files) {
+        const QJsonObject file = value.toObject();
+        const int index = file.value("index").toInt();
+        const QString path = file.value("path").toString();
+        if (!isVideoFile(file) || Links::isExtraVideo(path))
+            continue;
+        if (!e.selected.contains(index) && (e.directPlay || !verifiedComplete(e, index)) && index != fileIndex)
+            continue;
+        videos.append({Links::naturalMediaKey(path), index});
+    }
+    std::sort(videos.begin(), videos.end());
+    QList<int> list;
+    for (const Key &key : videos)
+        list.append(key.second);
+    return list;
+}
+
+static QVariantList playlistItems(const Library::Entry &e, int fileIndex) {
+    QVariantList items;
+    for (int index : Library::playlist(e, fileIndex)) {
+        const QString name = fileByIndex(e.files, index).value("name").toString();
+        items.append(QVariantMap{{"index", index}, {"name", name}, {"title", Series::episodeTitle(name)}});
+    }
+    return items;
+}
+
+QList<Series::File> Library::seriesFiles(const Entry &e) {
+    QList<Series::File> list;
+    // Saved before watch times were kept: the last played file counts as the last watched.
+    const bool legacy = e.watchedAt.isEmpty() && e.lastFile >= 0;
+    for (const auto &value : e.files) {
+        const QJsonObject file = value.toObject();
+        Series::File f;
+        f.index = file.value("index").toInt();
+        const QString key = QString::number(f.index);
+        f.name = file.value("name").toString();
+        f.path = file.value("path").toString(f.name);
+        f.length = qint64(file.value("length").toDouble());
+        f.video = isVideoFile(file);
+        f.selected = e.selected.contains(f.index);
+        f.verifiedComplete = verifiedComplete(e, f.index);
+        f.positionMs = qint64(e.positions.value(key).toDouble());
+        f.durationMs = qint64(e.durations.value(key).toDouble());
+        f.watchedAt = qint64(e.watchedAt.value(key).toDouble());
+        if (legacy && f.index == e.lastFile && (f.positionMs > 0 || f.durationMs > 0))
+            f.watchedAt = 1;
+        list.append(f);
+    }
+    return list;
 }
 
 bool Library::shouldDropIdle(const Entry &e, int idleMinutes, bool playing) {
@@ -1218,9 +1266,24 @@ QVariantMap Library::details(const QString &key) const {
         return {};
     QVariantList files;
     const QJsonArray &source = e->liveFiles.isEmpty() ? e->files : e->liveFiles;
-    for (const auto &value : source) {
-        const QJsonObject f = value.toObject();
-        const int index = f.value("index").toInt();
+    // Natural order grouped by season, extras last (Android lists episodes in natural order).
+    const QList<Series::File> series = seriesFiles(*e);
+    QHash<int, Series::File> byIndex;
+    for (const Series::File &f : series)
+        byIndex.insert(f.index, f);
+    QHash<int, QJsonObject> live;
+    for (const auto &value : source)
+        live.insert(value.toObject().value("index").toInt(), value.toObject());
+    QList<int> order = Series::displayOrder(series);
+    for (auto it = live.cbegin(); it != live.cend(); ++it)
+        if (!byIndex.contains(it.key()))
+            order.append(it.key());
+    bool grouped = false;
+    for (const Series::File &f : series)
+        grouped = grouped || (f.video && !Series::groupOf(f).isEmpty());
+    const bool paused = e->paused;
+    for (int index : std::as_const(order)) {
+        const QJsonObject f = live.value(index, fileByIndex(e->files, index));
         const QString name = f.value("name").toString();
         const qint64 length = qint64(f.value("length").toDouble());
         const qint64 verified = qint64(f.value("verifiedBytes").toDouble());
@@ -1237,6 +1300,9 @@ QVariantMap Library::details(const QString &key) const {
             {"savedPath", e->exported.contains(index) ? exportPath(*e, index) : QString()},
             {"positionMs", e->positions.value(QString::number(index)).toDouble()},
             {"durationMs", e->durations.value(QString::number(index)).toDouble()},
+            {"episode", Series::episodeTitle(name)},
+            {"group", grouped ? Series::groupOf(byIndex.value(index)) : QString()},
+            {"upNext", paused ? QString() : Series::upNextLabel(e->nextPreload, index)},
         });
     }
     return {{"key", e->key},
@@ -1256,6 +1322,7 @@ QVariantMap Library::details(const QString &key) const {
             {"thumbnail", e->thumbnail.isEmpty() ? QString() : QUrl::fromLocalFile(e->thumbnail).toString()},
             {"files", files},
             {"defaultVideo", defaultVideo(key)},
+            {"grouped", grouped},
             {"addedAt", QDateTime::fromMSecsSinceEpoch(e->addedAt)}};
 }
 
