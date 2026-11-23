@@ -75,11 +75,12 @@ public:
     QOpenGLFramebufferObject *createFramebufferObject(const QSize &size) override {
         if (!m_render) {
             mpv_opengl_init_params gl{procAddress, nullptr};
-            int advanced = 1;
+            // No MPV_RENDER_PARAM_ADVANCED_CONTROL: with it, mpv's core waits for the render
+            // thread, which Qt's threaded render loop blocks while the GUI thread waits on mpv,
+            // and the whole window froze a few seconds into playback.
             QList<mpv_render_param> params{
                 {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
                 {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl},
-                {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced},
             };
             // The display connection lets hardware decoding hand frames to OpenGL without a copy.
 #if QT_CONFIG(wayland)
@@ -206,6 +207,39 @@ MpvPlayer::MpvPlayer(QQuickItem *parent) : QQuickFramebufferObject(parent), m_sh
     mpv_observe_property(mpv, 0, "aid", MPV_FORMAT_STRING);
     mpv_observe_property(mpv, 0, "sid", MPV_FORMAT_STRING);
     mpv_set_wakeup_callback(mpv, wakeup, m_shared.get());
+
+    m_stallTimer = new QTimer(this);
+    m_stallTimer->setInterval(1000);
+    connect(m_stallTimer, &QTimer::timeout, this, &MpvPlayer::checkStall);
+    m_stallTimer->start();
+}
+
+// mpv's clock follows the sound card. When the audio output takes no data (PipeWire
+// left with only a silent "Dummy Output", a Bluetooth headset that dropped), playback
+// sits still forever without any error. After a few seconds of a clock that does not
+// move while nothing waits for data, play on without sound and say why.
+void MpvPlayer::checkStall() {
+    // Data must already be waiting ahead of the clock: a stall while the torrent is still
+    // fetching is buffering, not a dead sound card.
+    const bool dataAhead = m_cacheEnd > m_position + 2000;
+    if (!m_mpv || !m_loaded || m_paused || m_seeking || m_pausedForCache || m_eof || m_audioFallback || !dataAhead) {
+        m_stallPosition = -1;
+        m_stallSeconds = 0;
+        return;
+    }
+    if (m_position != m_stallPosition) {
+        m_stallPosition = m_position;
+        m_stallSeconds = 0;
+        return;
+    }
+    if (++m_stallSeconds < 4)
+        return;
+    m_audioFallback = true;
+    qWarning("mpv: playback clock stuck with audio on; switching to ao=null");
+    setProperty("ao", "null");
+    command({"ao-reload"});
+    emit notice(tr("Your sound output isn't playing anything, so the video continues without sound. "
+                   "Check your speakers or headphones, then open the video again."));
 }
 
 MpvPlayer::~MpvPlayer() {

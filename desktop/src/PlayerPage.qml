@@ -191,6 +191,7 @@ Page {
         source: page.media.url || ""
         onFileLoaded: if (startMs > 0) osd.show(qsTr("Resumed at %1").arg(fmt.clock(startMs)))
         onScreenshotSaved: (path, ok) => { if (!ok) page.thumbnailTaken = false }
+        onNotice: (text) => win.toast(text)
         onEofChanged: {
             if (eof) page.onEpisodeEnd()
             else { page.endHandled = false; page.upNext = -1 }

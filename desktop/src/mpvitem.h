@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QTimer>
 #include <QQuickFramebufferObject>
 #include <QVariantList>
 #include <memory>
@@ -107,6 +108,8 @@ signals:
     void errorStringChanged();
     void fileLoaded();
     void screenshotSaved(const QString &path, bool ok);
+    // Something the user should know about playback, shown as a toast.
+    void notice(const QString &text);
 
 private slots:
     void onMpvEvents();
@@ -120,6 +123,7 @@ private:
     void setProperty(const char *name, const QString &value);
     void command(const QStringList &args, quint64 userdata = 0);
     void readTracks(void *node);
+    void checkStall();
 
     std::shared_ptr<mpv_handle> m_mpv;
     std::shared_ptr<MpvShared> m_shared;
@@ -146,5 +150,9 @@ private:
     bool m_loadPending = false;
     bool m_renderWaitOver = false;
     QHash<quint64, QString> m_screenshots;
+    QTimer *m_stallTimer = nullptr;
+    qint64 m_stallPosition = -1;
+    int m_stallSeconds = 0;
+    bool m_audioFallback = false;
     quint64 m_nextReply = 1;
 };
