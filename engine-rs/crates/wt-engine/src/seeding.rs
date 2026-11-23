@@ -47,18 +47,19 @@ impl SeedingManager {
 
     pub fn save(&self) {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let _serial = self.save_lock.lock();
         let bytes = serde_json::to_vec(&*self.accounts.lock());
         if let Ok(bytes) = bytes {
             let tmp = self.path.with_extension("tmp");
             let result = (|| -> std::io::Result<()> {
-                let mut file = fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&tmp)?;
+                let mut opts = fs::OpenOptions::new();
+                opts.create(true).truncate(true).write(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                let mut file = opts.open(&tmp)?;
                 file.write_all(&bytes)?;
                 fs::rename(&tmp, &self.path)
             })();

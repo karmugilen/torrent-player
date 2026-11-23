@@ -3,8 +3,10 @@
 //! Flags match Go (`-port`, `-path`, `-max-peers`) and also accept the GNU
 //! long form (`--port`, `--path`, `--max-peers`). Starts `EngineServer`, the
 //! media stream listener, and a localhost control HTTP server
-//! ([`engine::ctl_http`]), then waits for SIGINT/SIGTERM or `POST /shutdown`.
+//! ([`engine::ctl_http`]), then waits for SIGINT/SIGTERM / Ctrl-C, stdin EOF
+//! (when `ENGINE_EXIT_ON_STDIN_EOF=1`), or `POST /shutdown`.
 
+use std::io::Read;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -116,32 +118,79 @@ fn parse_args(args: &[String]) -> Result<HostArgs, String> {
     })
 }
 
+fn env_flag_true(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"),
+        Err(_) => false,
+    }
+}
+
+/// Install stop flag watchers: Ctrl-C (all platforms), SIGTERM (Unix), and
+/// optional stdin-EOF when `ENGINE_EXIT_ON_STDIN_EOF=1`.
 fn install_stop_flag() -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
-    let flag_int = flag.clone();
-    let flag_term = flag.clone();
 
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => return,
-        };
-        rt.block_on(async move {
-            let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
-            let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
-            let (mut sigint, mut sigterm) = match (sigint, sigterm) {
-                (Ok(i), Ok(t)) => (i, t),
-                _ => return,
+    {
+        let flag_ctrl = flag.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
             };
-            tokio::select! {
-                _ = sigint.recv() => flag_int.store(true, Ordering::SeqCst),
-                _ = sigterm.recv() => flag_term.store(true, Ordering::SeqCst),
+            rt.block_on(async move {
+                #[cfg(unix)]
+                {
+                    let sigint =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+                    let sigterm =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+                    match (sigint, sigterm) {
+                        (Ok(mut sigint), Ok(mut sigterm)) => {
+                            tokio::select! {
+                                _ = sigint.recv() => flag_ctrl.store(true, Ordering::SeqCst),
+                                _ = sigterm.recv() => flag_ctrl.store(true, Ordering::SeqCst),
+                            }
+                        }
+                        _ => {
+                            let _ = tokio::signal::ctrl_c().await;
+                            flag_ctrl.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                    flag_ctrl.store(true, Ordering::SeqCst);
+                }
+            });
+        });
+    }
+
+    if env_flag_true("ENGINE_EXIT_ON_STDIN_EOF") {
+        let flag_stdin = flag.clone();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 256];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => {
+                        // EOF: same clean shutdown as SIGTERM.
+                        flag_stdin.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        flag_stdin.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
             }
         });
-    });
+    }
 
     flag
 }

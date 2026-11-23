@@ -237,7 +237,7 @@ fn test_drain_sync_failure_preserves_dirty_and_pending() {
             "checkpoint write must not run after failed data sync".into(),
         ))
     })));
-    st.note_pending_sync_fd(fd);
+    st.note_pending_sync_fd(fd as u64);
     st.set_checkpoint_dirty(true);
 
     let before_exists = checkpoint_path(dir.path(), &info_hash_zero().to_hex()).exists();

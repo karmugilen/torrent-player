@@ -69,7 +69,10 @@ pub fn cpu_seconds(pid: u32) -> Option<f64> {
     let utime: u64 = fields.get(11)?.parse().ok()?;
     let stime: u64 = fields.get(12)?.parse().ok()?;
     let ticks = utime + stime;
+    #[cfg(unix)]
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    #[cfg(not(unix))]
+    let hz = 100.0_f64;
     if hz <= 0.0 {
         return None;
     }

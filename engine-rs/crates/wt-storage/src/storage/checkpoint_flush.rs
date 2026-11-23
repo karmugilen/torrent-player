@@ -64,17 +64,17 @@ impl DocumentTorrentStorage {
             } else {
                 None
             };
-            let pending: Vec<RawFd> = inner.pending_sync_fds.drain().collect();
+            let pending: Vec<SyncKey> = inner.pending_sync_fds.drain().collect();
             // Duplicate the descriptors so fsync runs unlocked and stays
             // valid if storage closes or replaces a file meanwhile.
-            let syncs: Vec<(RawFd, std::io::Result<Option<File>>)> = pending
+            let syncs: Vec<(SyncKey, std::io::Result<Option<File>>)> = pending
                 .into_iter()
                 .map(|fd| {
                     let file = inner
                         .files
                         .iter()
                         .filter_map(|f| f.file.as_ref())
-                        .find(|f| f.as_raw_fd() == fd);
+                        .find(|f| sys::file_id(f) == fd);
                     (fd, file.map(|f| f.try_clone()).transpose())
                 })
                 .collect();
@@ -92,7 +92,7 @@ impl DocumentTorrentStorage {
 
         // Phase 2: sync without holding the storage lock.
         let mut sync_err: Option<String> = None;
-        let mut failed_fds: Vec<RawFd> = Vec::new();
+        let mut failed_fds: Vec<SyncKey> = Vec::new();
         for (fd, file) in syncs {
             let result = if let Some(hook) = &sync_hook {
                 hook(fd)

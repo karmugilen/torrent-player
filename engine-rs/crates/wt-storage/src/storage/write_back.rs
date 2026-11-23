@@ -435,7 +435,7 @@ impl DocumentTorrentStorage {
         for (file, at, lo, hi) in reads {
             #[cfg(test)]
             super::writeback_tests::before_io(false);
-            if let Err(e) = file.read_exact_at(&mut disk[lo..hi], at) {
+            if let Err(e) = sys::read_exact_at(&file, &mut disk[lo..hi], at) {
                 read = Err(e.into());
                 break;
             }
@@ -496,7 +496,7 @@ impl DocumentTorrentStorage {
                 .unwrap_or(0);
         for f in files_overlapping(&inner.files, start, end) {
             if let Some(file) = &f.file {
-                inner.pending_sync_fds.insert(file.as_raw_fd());
+                inner.pending_sync_fds.insert(sys::file_id(file));
             }
         }
     }
@@ -639,7 +639,7 @@ impl DocumentTorrentStorage {
             let file = File::open(path)?;
             #[cfg(test)]
             super::writeback_tests::before_io(false);
-            file.read_exact_at(&mut buf[..n], (32 + off) as u64)?;
+            sys::read_exact_at(&file, &mut buf[..n], (32 + off) as u64)?;
             return Ok(n);
         }
 
@@ -656,7 +656,7 @@ impl DocumentTorrentStorage {
         for (file, at, lo, hi) in reads {
             #[cfg(test)]
             super::writeback_tests::before_io(false);
-            file.read_exact_at(&mut buf[lo..hi], at)?;
+            sys::read_exact_at(&file, &mut buf[lo..hi], at)?;
         }
         Ok(n)
     }
@@ -681,7 +681,7 @@ impl DocumentTorrentStorage {
             let chunk = &data[(from - start) as usize..(to - start) as usize];
             #[cfg(test)]
             super::writeback_tests::before_io(true);
-            file.write_all_at(chunk, (from - f.offset) as u64)?;
+            sys::write_all_at(file, chunk, (from - f.offset) as u64)?;
             done += chunk.len();
         }
         if done != data.len() {
@@ -709,7 +709,7 @@ impl DocumentTorrentStorage {
             let chunk = &mut buf[(from - start) as usize..(to - start) as usize];
             #[cfg(test)]
             super::writeback_tests::before_io(false);
-            file.read_exact_at(chunk, (from - f.offset) as u64)?;
+            sys::read_exact_at(file, chunk, (from - f.offset) as u64)?;
             done += chunk.len();
         }
         if done != buf.len() {
