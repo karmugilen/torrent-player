@@ -1,0 +1,32 @@
+# Maintainer: karmugilen <karmugilen@users.noreply.github.com>
+# Binary package: repackages the GitHub release Arch archive for v$pkgver.
+#
+# Before publishing, run: ../update.sh 2.6.0
+# to fill real sha256sums and regenerate .SRCINFO.
+
+pkgname=torrentplayer-bin
+pkgver=2.6.0
+pkgrel=1
+pkgdesc='Stream and download torrents (prebuilt binary from GitHub releases)'
+arch=('x86_64')
+url='https://github.com/karmugilen/torrent-player'
+license=('MIT')
+depends=('qt6-base' 'qt6-declarative' 'qt6-multimedia' 'qt6-svg' 'mpv')
+provides=('torrentplayer')
+conflicts=('torrentplayer')
+options=('!strip')
+_asset="torrentplayer-${pkgver}-1-${CARCH}.pkg.tar.zst"
+source=("${_asset}::${url}/releases/download/v${pkgver}/${_asset}")
+# Placeholder — run desktop/aur/update.sh <version> to replace with the real digest.
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+package() {
+  bsdtar -x \
+    --exclude='.PKGINFO' \
+    --exclude='.MTREE' \
+    --exclude='.BUILDINFO' \
+    --exclude='.INSTALL' \
+    --exclude='.CHANGELOG' \
+    -f "${srcdir}/${_asset}" \
+    -C "${pkgdir}"
+}
