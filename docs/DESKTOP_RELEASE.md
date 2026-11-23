@@ -82,7 +82,7 @@ The apps are not signed with a paid certificate, so each OS warns once.
 ## Only CI can confirm
 
 These parts were checked with actionlint and shellcheck and dry-read, but only run
-on GitHub's runners: the Windows build (MSVC, mpv.lib from the `.def`, windeployqt,
+on GitHub's runners: the Windows build (MSVC, mpv.lib from the DLL exports via dumpbin, windeployqt,
 Inno Setup), the macOS bundle (macdeployqt, dylibbundler, ad-hoc signing, hdiutil),
 the aqt Qt 6.8 install on each OS, and the Arch container job. The AppImage script
 has been run locally on Arch.

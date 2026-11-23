@@ -30,9 +30,23 @@ $archive = Get-ChildItem "$Work\mpv-download\*.7z" | Select-Object -First 1
 Write-Host "libmpv: $($archive.Name)"
 7z x -y "-o$Mpv" $archive.FullName | Out-Null
 if (-not (Test-Path "$Mpv\include\mpv\client.h")) { throw "no include/mpv/client.h in $($archive.Name)" }
-$def = Get-ChildItem -Recurse "$Mpv\*.def" | Select-Object -First 1
 $dll = Get-ChildItem -Recurse "$Mpv\libmpv*.dll" | Select-Object -First 1
-if (-not $def -or -not $dll) { throw "no mpv .def or libmpv dll in $($archive.Name)" }
+if (-not $dll) { throw "no libmpv dll in $($archive.Name)" }
+$def = Get-ChildItem -Recurse "$Mpv\*.def" | Select-Object -First 1
+if (-not $def) {
+    # shinchiro mpv-dev no longer ships a .def; build one from the DLL for MSVC lib.exe.
+    $defPath = Join-Path $Mpv 'lib\mpv.def'
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in & dumpbin /nologo /exports $dll.FullName) {
+        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$') {
+            $names.Add($Matches[1])
+        }
+    }
+    if ($names.Count -eq 0) { throw "dumpbin found no exports in $($dll.Name)" }
+    (@("LIBRARY $($dll.Name)", 'EXPORTS') + $names) | Set-Content -Encoding ascii $defPath
+    $def = Get-Item $defPath
+    Write-Host "generated $($names.Count) exports -> $($def.Name)"
+}
 lib /nologo "/def:$($def.FullName)" "/name:$($dll.Name)" "/out:$Mpv\lib\mpv.lib" /machine:x64
 Get-ChildItem -Recurse "$Mpv\libmpv.dll.a" | Copy-Item -Destination "$Mpv\lib"
 
