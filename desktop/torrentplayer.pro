@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 dbus network multimedia concurrent opengl
+QT += core gui widgets qml quick quickcontrols2 dbus network multimedia concurrent opengl
 
 CONFIG += c++17 release link_pkgconfig
 PKGCONFIG += mpv
@@ -21,12 +21,16 @@ HEADERS += \
     src/connections.h \
     src/worldmap.h \
     src/mpvitem.h \
-    src/playback.h
+    src/playback.h \
+    src/battery.h \
+    src/autostart.h \
+    src/tray.h
 
 SOURCES += \
     src/main.cpp \
     src/engine.cpp \
     src/library.cpp \
+    src/librarysettings.cpp \
     src/addsession.cpp \
     src/subtitles.cpp \
     src/format.cpp \
@@ -39,6 +43,9 @@ SOURCES += \
     src/connections.cpp \
     src/worldmap.cpp \
     src/mpvitem.cpp \
-    src/playback.cpp
+    src/playback.cpp \
+    src/battery.cpp \
+    src/autostart.cpp \
+    src/tray.cpp
 
 RESOURCES += src/resources.qrc

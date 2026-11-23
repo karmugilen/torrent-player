@@ -12,7 +12,7 @@ public:
     using QObject::QObject;
     bool busy() const { return m_busy; }
 
-    // kind: "torrent" or "subtitle".
+    // kind: "torrent", "subtitle", or "directory".
     Q_INVOKABLE virtual void open(const QString &kind) = 0;
 
 signals:

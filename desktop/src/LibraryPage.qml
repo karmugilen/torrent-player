@@ -59,6 +59,13 @@ Page {
                 highlighted: true
                 onClicked: win.openAdd("")
             }
+            ToolButton {
+                text: "⚙"
+                font.pixelSize: 18
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Settings")
+                onClicked: win.openSettings()
+            }
         }
 
         GridView {

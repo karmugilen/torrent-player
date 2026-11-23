@@ -13,6 +13,7 @@ Rectangle {
             ["A", qsTr("Add a magnet link or torrent URL")],
             ["Ctrl+V", qsTr("Add the link on the clipboard")],
             ["O", qsTr("Open a .torrent file")],
+            [",", qsTr("Settings")],
             ["Esc", qsTr("Back")],
             ["Q", qsTr("Quit")]]],
         [qsTr("Library and torrent"), [

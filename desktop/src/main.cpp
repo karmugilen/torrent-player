@@ -1,8 +1,8 @@
 // torrentplayer — stream and download torrents on the desktop, with the
 // Torrent Player engine from the Android app.
 
+#include <QApplication>
 #include <QDir>
-#include <QGuiApplication>
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -18,6 +18,8 @@
 #include <cstdio>
 
 #include "addsession.h"
+#include "autostart.h"
+#include "battery.h"
 #include "connections.h"
 #include "engine.h"
 #include "format.h"
@@ -29,6 +31,7 @@
 #include "subtitles.h"
 #include "theme.h"
 #include "translator.h"
+#include "tray.h"
 #include "worldmap.h"
 
 // Written by desktop/bin/build from Android versionName into build/app_version.h.
@@ -58,21 +61,27 @@ static bool forwardToRunningApp(const QString &link) {
 }
 
 int main(int argc, char *argv[]) {
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
     app.setApplicationName("torrentplayer");
     app.setApplicationVersion(QLatin1String(APP_VERSION));
     app.setDesktopFileName("torrentplayer");
     app.setWindowIcon(QIcon::fromTheme("torrentplayer"));
+    app.setQuitOnLastWindowClosed(false);
 
     QString link;
+    bool startBackground = false;
     for (const QString &argument : app.arguments().mid(1)) {
         if (argument == "--help" || argument == "-h") {
-            std::printf("Usage: torrentplayer [magnet link | torrent URL | file.torrent]\n");
+            std::printf("Usage: torrentplayer [--background] [magnet link | torrent URL | file.torrent]\n");
             return 0;
         }
         if (argument == "--version") {
             std::printf("torrentplayer %s\n", APP_VERSION);
             return 0;
+        }
+        if (argument == "--background") {
+            startBackground = true;
+            continue;
         }
         if (!argument.startsWith("-"))
             link = argument.startsWith("file:") ? QUrl(argument).toLocalFile() : argument;
@@ -108,10 +117,19 @@ int main(int argc, char *argv[]) {
     // User settings from shared/policy.json defaults; the engine hears them on every start.
     Settings settings(Settings::defaultPath());
     EngineSettings engineSettings(&engine, &settings);
-    Library library(&engine, data, downloads + "/Torrent Player");
+    DeviceStatus deviceStatus(&settings, &engine);
+    QObject::connect(&deviceStatus, &DeviceStatus::changed, &engineSettings, [&] {
+        engineSettings.setConditions(deviceStatus.conditions());
+    });
+    engineSettings.setConditions(deviceStatus.conditions());
+
+    const QString saveFolder =
+        settings.downloadFolder().isEmpty() ? downloads + "/Torrent Player" : settings.downloadFolder();
+    Library library(&engine, data, saveFolder);
     library.setSettings(&settings);
     AddSession adder(&engine, &library);
     Subtitles subtitles;
+    Autostart autostart;
     // The home screen's search filters the library by name.
     QSortFilterProxyModel libraryView;
     libraryView.setSourceModel(&library);
@@ -131,17 +149,28 @@ int main(int argc, char *argv[]) {
     qml.rootContext()->setContextProperty("adder", &adder);
     qml.rootContext()->setContextProperty("subtitles", &subtitles);
     qml.rootContext()->setContextProperty("picker", &picker);
+    Tray tray(&library);
+    qml.rootContext()->setContextProperty("deviceStatus", &deviceStatus);
+    qml.rootContext()->setContextProperty("autostart", &autostart);
+    qml.rootContext()->setContextProperty("tray", &tray);
     qml.load(QUrl("qrc:/Main.qml"));
     if (qml.rootObjects().isEmpty())
         return 1;
     auto *window = qobject_cast<QQuickWindow *>(qml.rootObjects().first());
+    tray.setWindow(window);
+
+    if (startBackground && window) {
+        window->setVisible(false);
+        tray.setBackgroundHintShown(true);
+    }
 
     QObject::connect(&server, &QLocalServer::newConnection, &app, [&] {
         while (QLocalSocket *socket = server.nextPendingConnection()) {
             QObject::connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
-            QObject::connect(socket, &QLocalSocket::readyRead, socket, [socket, &adder, window] {
+            QObject::connect(socket, &QLocalSocket::readyRead, socket, [socket, &adder, &tray, window] {
                 while (socket->canReadLine()) {
                     const QString incoming = QString::fromUtf8(socket->readLine()).trimmed();
+                    tray.showWindow();
                     if (window) {
                         window->show();
                         window->raise();
@@ -153,6 +182,12 @@ int main(int argc, char *argv[]) {
             });
         }
     });
+
+    // Keep active-transfer count for Auto RAM sizing.
+    QObject::connect(&library, &Library::revisionChanged, &settings, [&] {
+        settings.setActiveTransfers(std::max(1, library.activeCount()));
+    });
+    settings.setActiveTransfers(std::max(1, library.activeCount()));
 
     // The engine stops with the app; quitting closes its files cleanly.
     QObject::connect(&app, &QGuiApplication::aboutToQuit, &engine, &Engine::stop);

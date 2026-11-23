@@ -73,6 +73,11 @@ ApplicationWindow {
         toastBox.opacity = 1
         toastTimer.restart()
     }
+    function openSettings() {
+        if (stack.currentItem && stack.currentItem.isSettings)
+            return
+        stack.push(settingsPage)
+    }
     function requestQuit() {
         if (library.activeCount > 0 && !quitConfirmed)
             quitDialog.open()
@@ -81,23 +86,42 @@ ApplicationWindow {
             Qt.quit()
         }
     }
+    function hideToTray() {
+        if (tray && tray.available)
+            tray.hideToTray()
+        else
+            win.requestQuit()
+    }
 
     onClosing: (close) => {
-        if (library.activeCount > 0 && !quitConfirmed) {
-            close.accepted = false
-            quitDialog.open()
-        }
+        if (quitConfirmed)
+            return
+        close.accepted = false
+        win.hideToTray()
     }
 
     Connections {
         target: library
         function onPlayReady(media) {
+            if (!settings.builtInPlayer) {
+                library.openInMpv(media.url, media.startMs || 0, media.title || "")
+                return
+            }
             if (onPlayer)
                 stack.pop()
             stack.push(playerPage, { media: media })
         }
         function onMessage(text) { win.toast(text) }
     }
+    Connections {
+        target: tray
+        function onQuitRequested() { win.requestQuit() }
+        function onFirstHideToTray() {
+            win.toast(qsTr("Torrent Player keeps downloading in the background"))
+        }
+    }
+    // Seeding pauses while the player page is open.
+    onOnPlayerChanged: deviceStatus.playing = win.onPlayer
     Connections {
         target: adder
         function onStateChanged() {
@@ -117,6 +141,10 @@ ApplicationWindow {
         function onPicked(kind, path) {
             if (kind === "torrent")
                 win.openAdd(path)
+            else if (kind === "directory") {
+                library.setSaveDirectory(path)
+                settings.downloadFolder = path
+            }
             else if (onPlayer)
                 stack.currentItem.loadSubtitleFile(path)
         }
@@ -126,6 +154,7 @@ ApplicationWindow {
     Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: !addDialog.visible; onActivated: win.helpVisible = !win.helpVisible }
     Shortcut { sequence: "Q"; context: Qt.ApplicationShortcut; enabled: !dialogOpen; onActivated: win.requestQuit() }
     Shortcut { sequence: "Ctrl+Q"; context: Qt.ApplicationShortcut; onActivated: win.requestQuit() }
+    Shortcut { sequences: [",", "Ctrl+,"]; context: Qt.ApplicationShortcut; enabled: !dialogOpen && !onPlayer; onActivated: win.openSettings() }
     Shortcut { sequence: "A"; context: Qt.ApplicationShortcut; enabled: !dialogOpen && !onPlayer; onActivated: win.openAdd("") }
     Shortcut { sequences: [StandardKey.Paste]; context: Qt.ApplicationShortcut; enabled: !dialogOpen && !onPlayer && !(activeFocusItem instanceof TextInput); onActivated: win.openAdd(library.clipboardText()) }
     Shortcut { sequence: "O"; context: Qt.ApplicationShortcut; enabled: !dialogOpen && !onPlayer; onActivated: picker.open("torrent") }
@@ -232,6 +261,7 @@ ApplicationWindow {
     Component { id: torrentPage; TorrentPage {} }
     Component { id: playerPage; PlayerPage {} }
     Component { id: peersPage; PeersPage {} }
+    Component { id: settingsPage; SettingsPage { readonly property bool isSettings: true } }
 
     AddDialog { id: addDialog }
     DeleteDialog { id: deleteDialog }

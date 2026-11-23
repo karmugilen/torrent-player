@@ -81,28 +81,61 @@ void PortalFilePicker::open(const QString &kind) {
     bus.connect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request", "Response",
                 this, SLOT(handleResponse(uint, QVariantMap)));
 
-    Filters filters;
+    const bool directory = kind == QLatin1String("directory");
     QString title;
-    if (kind == "subtitle") {
+    QVariantMap options{{"handle_token", token}, {"modal", true}, {"multiple", false}};
+    if (directory) {
+        title = tr("Choose save folder");
+        options.insert("directory", true); // some portals honour this on OpenFile too
+    } else if (kind == "subtitle") {
         title = tr("Open subtitles");
+        Filters filters;
         filters << Filter{tr("Subtitles"), {{0, "*.srt"}, {0, "*.vtt"}, {0, "*.SRT"}, {0, "*.VTT"}}};
+        options.insert("filters", QVariant::fromValue(filters));
     } else {
         title = tr("Open torrent file");
+        Filters filters;
         filters << Filter{tr("Torrent files"), {{0, "*.torrent"}, {1, "application/x-bittorrent"}}};
+        options.insert("filters", QVariant::fromValue(filters));
     }
-    QVariantMap options{{"handle_token", token},
-                        {"modal", true},
-                        {"multiple", false},
-                        {"filters", QVariant::fromValue(filters)}};
 
+    const char *method = directory ? "OpenDirectory" : "OpenFile";
     QDBusMessage call = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-                                                       "org.freedesktop.portal.FileChooser", "OpenFile");
+                                                       "org.freedesktop.portal.FileChooser", method);
     call << QString() << title << options;
     setBusy(true);
     auto *watcher = new QDBusPendingCallWatcher(bus.asyncCall(call), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher] {
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, directory, title, options] {
         watcher->deleteLater();
         QDBusPendingReply<QDBusObjectPath> reply = *watcher;
+        if (reply.isError() && directory) {
+            // Older portals may lack OpenDirectory; fall back to OpenFile with directory=true.
+            QDBusConnection bus = QDBusConnection::sessionBus();
+            QDBusMessage fallback = QDBusMessage::createMethodCall(
+                "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.FileChooser", "OpenFile");
+            fallback << QString() << title << options;
+            auto *retry = new QDBusPendingCallWatcher(bus.asyncCall(fallback), this);
+            connect(retry, &QDBusPendingCallWatcher::finished, this, [this, retry] {
+                retry->deleteLater();
+                QDBusPendingReply<QDBusObjectPath> again = *retry;
+                if (again.isError()) {
+                    setBusy(false);
+                    emit failed(tr("The folder picker didn't open: %1").arg(again.error().message()));
+                    return;
+                }
+                const QString path = again.value().path();
+                if (path != m_requestPath) {
+                    QDBusConnection bus = QDBusConnection::sessionBus();
+                    bus.disconnect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request",
+                                   "Response", this, SLOT(handleResponse(uint, QVariantMap)));
+                    m_requestPath = path;
+                    bus.connect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request",
+                                "Response", this, SLOT(handleResponse(uint, QVariantMap)));
+                }
+            });
+            return;
+        }
         if (reply.isError()) {
             setBusy(false);
             emit failed(tr("The file picker didn't open: %1").arg(reply.error().message()));
