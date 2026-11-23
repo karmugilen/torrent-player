@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QNetworkReply>
@@ -65,6 +66,36 @@ void Engine::fail(const QString &message) {
     emit stateChanged();
 }
 
+// The engine looks up peer countries in a geoip-country*.mmdb inside its data folder,
+// as on Android, where the app copies the database from its assets. Here the package
+// installs it once and the data folder gets a link, so updates replace it in one place.
+static void linkCountryDatabase(const QString &dataDirectory) {
+    QStringList dirs;
+    if (qEnvironmentVariableIsSet("TORRENTPLAYER_GEOIP_DIR"))
+        dirs << qEnvironmentVariable("TORRENTPLAYER_GEOIP_DIR");
+    dirs << QCoreApplication::applicationDirPath() + "/../../android/app/src/main/assets"
+         << "/usr/share/torrentplayer";
+    QString source;
+    for (const QString &dir : dirs) {
+        QStringList found = QDir(dir).entryList({"geoip-country*.mmdb"}, QDir::Files, QDir::Name);
+        if (!found.isEmpty()) {
+            source = QDir(dir).absoluteFilePath(found.last());  // the newest month sorts last
+            break;
+        }
+    }
+    if (source.isEmpty())
+        return;  // Optional: without it peers just have no country.
+    const QDir data(dataDirectory);
+    const QString target = data.filePath(QFileInfo(source).fileName());
+    for (const QString &name : data.entryList({"geoip-country*.mmdb"}, QDir::Files | QDir::System))
+        if (data.filePath(name) != target)
+            QFile::remove(data.filePath(name));
+    if (QFileInfo(target).symLinkTarget() != source) {
+        QFile::remove(target);
+        QFile::link(source, target);
+    }
+}
+
 void Engine::start() {
     if (m_process.state() != QProcess::NotRunning)
         return;
@@ -74,6 +105,7 @@ void Engine::start() {
         return;
     }
     QDir().mkpath(m_dataDirectory);
+    linkCountryDatabase(m_dataDirectory);
 
     // Ask the kernel for a free port; the engine also falls back to a random
     // port when this one is taken, and prints the port it really uses.
