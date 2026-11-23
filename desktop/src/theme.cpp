@@ -1,6 +1,8 @@
 // Theme watching follows Omacut (MIT, David Heinemeier Hansson).
 #include "theme.h"
 
+#include "platform.h"
+
 #include <QColor>
 #include <QDir>
 #include <QFile>
@@ -19,6 +21,13 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_debounce.start(); });
     connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { m_debounce.start(); });
     connect(&m_debounce, &QTimer::timeout, this, &Theme::reload);
+#if !TORRENTPLAYER_FREEDESKTOP
+    // No Omarchy or Hyprland on Windows and macOS: the default accent and soft corners.
+    if (directory.isEmpty() && hyprctl.isEmpty()) {
+        m_radius = 8;
+        return;
+    }
+#endif
 
     // Corners follow Hyprland's effective rounding, which themes and personal
     // overrides can both set, so ask hyprctl rather than reading its config.

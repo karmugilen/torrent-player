@@ -11,15 +11,29 @@
 #include <QTcpServer>
 #include <QTimer>
 
+#include "platform.h"
+
+#include <QProcessEnvironment>
+
+#ifdef Q_OS_LINUX
 #include <csignal>
 #include <sys/prctl.h>
+#endif
 
 Engine::Engine(const QString &dataDirectory, QObject *parent)
     : QObject(parent), m_dataDirectory(dataDirectory) {
     m_process.setProcessChannelMode(QProcess::MergedChannels);
     // If the app dies without its normal shutdown (killed, crashed, session ended), the
     // engine goes too, instead of running on beside the next start on the same folder.
+    // Everywhere: the engine quits when its stdin closes, which happens when this
+    // process dies, because only the app holds the pipe's write end. So stdin stays
+    // open (QProcess's default) until stop(). On Linux the kernel also signals it.
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("ENGINE_EXIT_ON_STDIN_EOF", "1");
+    m_process.setProcessEnvironment(environment);
+#ifdef Q_OS_LINUX
     m_process.setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); });
+#endif
     connect(&m_process, &QProcess::readyRead, this, [this] {
         const QByteArray chunk = m_process.readAll();
         if (m_port > 0)
@@ -56,13 +70,11 @@ Engine::~Engine() {
 }
 
 QString Engine::findBinary() {
-    const QString fromEnvironment = qEnvironmentVariable("TORRENTPLAYER_ENGINE");
-    const QStringList candidates{fromEnvironment,
-                                 QCoreApplication::applicationDirPath() + "/engine-host",
-                                 "/usr/lib/torrentplayer/engine-host"};
+    const QStringList candidates = Platform::engineCandidates(
+        Platform::current(), QCoreApplication::applicationDirPath(), qEnvironmentVariable("TORRENTPLAYER_ENGINE"));
     for (const QString &candidate : candidates)
-        if (!candidate.isEmpty() && QFileInfo(candidate).isExecutable())
-            return candidate;
+        if (QFileInfo(candidate).isExecutable())
+            return QFileInfo(candidate).absoluteFilePath();
     return {};
 }
 
@@ -75,17 +87,15 @@ void Engine::fail(const QString &message) {
 // The engine looks up peer countries in a geoip-country*.mmdb inside its data folder,
 // as on Android, where the app copies the database from its assets. Here the package
 // installs it once and the data folder gets a link, so updates replace it in one place.
+// Windows gets a copy (links there need admin rights), refreshed when the source changes.
 static void linkCountryDatabase(const QString &dataDirectory) {
-    QStringList dirs;
-    if (qEnvironmentVariableIsSet("TORRENTPLAYER_GEOIP_DIR"))
-        dirs << qEnvironmentVariable("TORRENTPLAYER_GEOIP_DIR");
-    dirs << QCoreApplication::applicationDirPath() + "/../../android/app/src/main/assets"
-         << "/usr/share/torrentplayer";
+    const QStringList dirs = Platform::geoipDirectories(
+        Platform::current(), QCoreApplication::applicationDirPath(), qEnvironmentVariable("TORRENTPLAYER_GEOIP_DIR"));
     QString source;
     for (const QString &dir : dirs) {
         QStringList found = QDir(dir).entryList({"geoip-country*.mmdb"}, QDir::Files, QDir::Name);
         if (!found.isEmpty()) {
-            source = QDir(dir).absoluteFilePath(found.last());  // the newest month sorts last
+            source = QDir::cleanPath(QDir(dir).absoluteFilePath(found.last()));  // the newest month sorts last
             break;
         }
     }
@@ -96,7 +106,13 @@ static void linkCountryDatabase(const QString &dataDirectory) {
     for (const QString &name : data.entryList({"geoip-country*.mmdb"}, QDir::Files | QDir::System))
         if (data.filePath(name) != target)
             QFile::remove(data.filePath(name));
-    if (QFileInfo(target).symLinkTarget() != source) {
+    if (Platform::geoipCopiesFile(Platform::current())) {
+        const QFileInfo from(source), to(target);
+        if (!to.exists() || to.size() != from.size() || to.lastModified() < from.lastModified()) {
+            QFile::remove(target);
+            QFile::copy(source, target);
+        }
+    } else if (QFileInfo(target).symLinkTarget() != source) {
         QFile::remove(target);
         QFile::link(source, target);
     }
@@ -107,7 +123,8 @@ void Engine::start() {
         return;
     const QString binary = findBinary();
     if (binary.isEmpty()) {
-        fail(tr("The torrent engine (engine-host) is missing. Reinstall Torrent Player."));
+        fail(tr("The torrent engine (%1) is missing. Reinstall Torrent Player.")
+                 .arg(Platform::engineBinaryName(Platform::current())));
         return;
     }
     QDir().mkpath(m_dataDirectory);
@@ -143,6 +160,8 @@ void Engine::stop() {
         loop.exec();
         reply->deleteLater();
     }
+    // Closing stdin is the engine's other cue to quit (ENGINE_EXIT_ON_STDIN_EOF).
+    m_process.closeWriteChannel();
     if (!m_process.waitForFinished(4000)) {
         m_process.terminate();
         if (!m_process.waitForFinished(2000))
